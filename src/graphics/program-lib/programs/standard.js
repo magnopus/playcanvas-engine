@@ -215,7 +215,7 @@ const standard = {
         const useUv = [];
         const useUnmodifiedUv = [];
         const mapTransforms = [];
-        const maxUvSets = 2;
+        const maxUvSets = 8;
 
         for (const p in _matTex2D) {
             const mname = p + "Map";
@@ -250,7 +250,13 @@ const standard = {
 
         if (options.forceUv1) {
             useUv[1] = true;
+            useUv[2] = true;
+            useUv[3] = true;
+            useUv[4] = true;
             useUnmodifiedUv[1] = (useUnmodifiedUv[1] !== undefined) ? useUnmodifiedUv[1] : true;
+            useUnmodifiedUv[2] = (useUnmodifiedUv[2] !== undefined) ? useUnmodifiedUv[2] : true;
+            useUnmodifiedUv[3] = (useUnmodifiedUv[3] !== undefined) ? useUnmodifiedUv[3] : true;
+            useUnmodifiedUv[4] = (useUnmodifiedUv[4] !== undefined) ? useUnmodifiedUv[4] : true;
         }
 
         litShader.generateVertexShader(useUv, useUnmodifiedUv, mapTransforms);
