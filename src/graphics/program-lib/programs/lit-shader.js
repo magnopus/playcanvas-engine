@@ -3,7 +3,13 @@ import {
     SEMANTIC_BLENDINDICES, SEMANTIC_BLENDWEIGHT, SEMANTIC_COLOR, SEMANTIC_NORMAL, SEMANTIC_POSITION, SEMANTIC_TANGENT,
     SEMANTIC_TEXCOORD0, SEMANTIC_TEXCOORD1,
     SHADERTAG_MATERIAL,
-    PIXELFORMAT_R8_G8_B8_A8
+    PIXELFORMAT_R8_G8_B8_A8,
+    SEMANTIC_TEXCOORD2,
+    SEMANTIC_TEXCOORD3,
+    SEMANTIC_TEXCOORD4,
+    SEMANTIC_TEXCOORD5,
+    SEMANTIC_TEXCOORD6,
+    SEMANTIC_TEXCOORD7
 } from '../../constants.js';
 import { shaderChunks } from '../chunks/chunks.js';
 import { ChunkUtils } from '../chunk-utils.js';
@@ -31,6 +37,9 @@ const builtinAttributes = {
     vertex_tangent: SEMANTIC_TANGENT,
     vertex_texCoord0: SEMANTIC_TEXCOORD0,
     vertex_texCoord1: SEMANTIC_TEXCOORD1,
+    vertex_texCoord2: SEMANTIC_TEXCOORD2,
+    vertex_texCoord3: SEMANTIC_TEXCOORD3,
+    vertex_texCoord4: SEMANTIC_TEXCOORD4,
     vertex_color: SEMANTIC_COLOR,
     vertex_boneWeights: SEMANTIC_BLENDWEIGHT,
     vertex_boneIndices: SEMANTIC_BLENDINDICES
@@ -45,7 +54,10 @@ const builtinVaryings = {
     vBinormalW: "vec3",
     vObjectSpaceUpW: "vec3",
     vUv0: "vec2",
-    vUv1: "vec2"
+    vUv1: "vec2",
+    vUv2: "vec2",
+    vUv3: "vec2",
+    vUv4: "vec2",
 };
 
 class LitShader {
@@ -269,7 +281,7 @@ class LitShader {
             }
         }
 
-        const maxUvSets = 2;
+        const maxUvSets = 8;
 
         for (let i = 0; i < maxUvSets; i++) {
             if (useUv[i]) {
