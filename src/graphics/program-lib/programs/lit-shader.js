@@ -597,6 +597,10 @@ class LitShader {
             if (options.sheen) {
                 this.defines.push("LIT_SHEEN");
             }
+
+            if (options.iridescence) {
+                this.defines.push("LIT_IRIDESCENCE");
+            }
         }
 
         // FRAGMENT SHADER INPUTS: UNIFORMS
@@ -755,6 +759,10 @@ class LitShader {
 
             if (options.fresnelModel === FRESNEL_SCHLICK) {
                 code += chunks.fresnelSchlickPS;
+            }
+
+            if (options.iridescence) {
+                code += chunks.iridescenceDiffractionPS;
             }
         }
 
@@ -1004,9 +1012,12 @@ class LitShader {
         }
 
         if ((this.lighting && options.useSpecular) || this.reflections) {
-
             if (options.useMetalness) {
                 code += "    getMetalnessModulate();\n";
+            }
+
+            if (options.iridescence) {
+                code += "    getIridescence(saturate(dot(dViewDirW, dNormalW)));\n";
             }
         }
 
