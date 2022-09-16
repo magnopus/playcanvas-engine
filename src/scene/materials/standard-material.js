@@ -779,7 +779,7 @@ class StandardMaterial extends Material {
         } else if (this.sphereMap) {
             this._setParameter('texture_sphereMap', this.sphereMap);
         }
-
+        
         this._setParameter('material_reflectivity', this.reflectivity);
 
         // remove unused params
@@ -795,11 +795,9 @@ class StandardMaterial extends Material {
         const hasLocalEnvOverride = (this.envAtlas && !isPhong) || this.cubeMap || this.sphereMap;
 
         if (!hasLocalEnvOverride && this.useSkybox) {
-            if (scene.envAtlas && !isPhong) {
+            if (scene.envAtlas && scene.skybox && !isPhong) {
                 this._setParameter('texture_envAtlas', scene.envAtlas);
-                if (scene.cubeMap || scene.skybox) {
-                    this._setParameter('texture_cubeMap', scene.cubeMap ?? scene.skybox);
-                }
+                this._setParameter('texture_cubeMap', scene.skybox);
             } else if (scene.envAtlas && !isPhong) {
                 this._setParameter('texture_envAtlas', scene.envAtlas);
             } else if (scene.skybox) {

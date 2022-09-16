@@ -204,14 +204,6 @@ class Scene extends EventHandler {
          * @private
          */
         this._envAtlas = null;
-        
-        /**
-         * Global cubeMap texture
-         *
-         * @type {Texture}
-         * @private
-         */
-        this._cubeMap = null;
 
         // internally generated envAtlas owned by the scene
         this._internalEnvAtlas = null;
@@ -393,22 +385,6 @@ class Scene extends EventHandler {
     get envAtlas() {
         return this._envAtlas;
     }
-
-        /**
-     * The environment lighting atlas.
-     *
-     * @type {Texture}
-     */
-         set cubeMap(value) {
-            if (value !== this._cubeMap) {
-                this._cubeMap = value;
-                this.updateShaders = true;
-            }
-        }
-    
-        get cubeMap() {
-            return this._cubeMap;
-        }
 
     /**
      * The type of fog used by the scene. Can be:

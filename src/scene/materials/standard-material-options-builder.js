@@ -221,6 +221,7 @@ class StandardMaterialOptionsBuilder {
         } else if (stdMat.envAtlas && !isPhong) {
             options.reflectionSource = 'envAtlas';
             options.reflectionEncoding = stdMat.envAtlas.encoding;
+            usingSceneEnv = true;
         } else if (stdMat.cubeMap) {
             options.reflectionSource = 'cubeMap';
             options.reflectionEncoding = stdMat.cubeMap.encoding;
