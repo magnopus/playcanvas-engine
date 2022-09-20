@@ -448,6 +448,35 @@ class LitShader {
         return code;
     }
 
+    _fsGetVirtualTexturingCode() {
+        return `${this._fsGetBeginCode()}
+        /*
+        * Page Determination fragment shader, based on code by
+        * Albert Julian Mayer presented in Virtual Texturing (2011), * which in turn is based upon Barretts SVT demo shader.
+        */
+        const float readback_reduction_shift = 2.0;
+        const float vt_dimension_pages = 128.0;
+        const float vt_dimension = 32768.0;
+        const float mip_bias = 0.0;
+
+        varying vec2 vUv0;
+
+        // analytically calculates the mipmap level similar to what OpenGL does
+        float mipmapLevel(vec2 uv, float textureSize) {
+            vec2 dx = dFdx(uv * textureSize);
+            vec2 dy = dFdy(uv * textureSize);
+            float d = max( dot(dx, dx), dot(dy, dy) );
+            return 0.5 * log2(d); // explanation: 0.5*log(x) = log(sqrt(x)) + mip_bias - readback_reduction_shift;
+        }
+
+        void main () {
+            gl_FragColor.gb = floor(vUv0.xy * 255.0) / 255.0;
+            float miplvl = clamp(8.0 - mipmapLevel(vUv0.xy, vt_dimension), 0.0, 8.0);
+            gl_FragColor.r = miplvl / 255.0;
+            gl_FragColor.a = 1.0;
+        }
+        `;
+    }
     _fsGetPickPassCode() {
         let code = this._fsGetBeginCode();
         code += "uniform vec4 uColor;\n";
@@ -1409,6 +1438,8 @@ class LitShader {
 
         if (options.pass === SHADER_PICK) {
             this.fshader = this._fsGetPickPassCode();
+        } else if (options.pass === 19) {
+            this.fshader = this._fsGetVirtualTexturingCode();
         } else if (options.pass === SHADER_DEPTH) {
             this.fshader = this._fsGetDepthPassCode();
         } else if (this.shadowPass) {

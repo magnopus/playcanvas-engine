@@ -234,6 +234,7 @@ const standard = {
                 options[cname] = this._correctChannel(p, options[cname], _matTex2D);
 
                 const uvSet = options[uname];
+                useUv[0] = true;
                 useUv[uvSet] = true;
                 useUnmodifiedUv[uvSet] = useUnmodifiedUv[uvSet] || (options[mname] && !options[tname]);
 
@@ -258,7 +259,8 @@ const standard = {
             useUnmodifiedUv[3] = (useUnmodifiedUv[3] !== undefined) ? useUnmodifiedUv[3] : true;
             useUnmodifiedUv[4] = (useUnmodifiedUv[4] !== undefined) ? useUnmodifiedUv[4] : true;
         }
-
+        useUv[0] = true;
+        useUnmodifiedUv[0] = true;
         litShader.generateVertexShader(useUv, useUnmodifiedUv, mapTransforms);
 
         // handle fragment shader
