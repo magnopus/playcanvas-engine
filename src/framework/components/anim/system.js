@@ -77,6 +77,7 @@ class AnimComponentSystem extends ComponentSystem {
         return createDelayedExecutionRunner(
             (entry, dt) => {
                 const componentData = entry.data;
+                // ensure this object is in view
                 if (
                     entry._mi.visible &&
                     (entry._mi.visibleThisFrame || entry._mi.visibleThisFrame === undefined) &&
@@ -103,9 +104,11 @@ class AnimComponentSystem extends ComponentSystem {
                 const entity = components[id].entity;
                 const animComponent = entity.anim;
                 const componentData = animComponent.data;
+                // Cache the meshinstance of this object so that we may check its visibility
                 if (!animComponent._mi) {
                     animComponent._mi = entity.findComponent('render').meshInstances[0];
                 }
+                // On the first run, check for a frame skip executor and create it if needed
                 if (!animComponent.setupDelayed) {
                     const divisor = Math.round(animComponent.animationFrameSkip ?? -1) + 1;
                     if (divisor > 1) {
@@ -117,18 +120,20 @@ class AnimComponentSystem extends ComponentSystem {
                         executor.add(animComponent);
                         animComponent.setupDelayed = true;
                     }
+                    // always make sure we draw the first frame of the animation
+                    // to ensure theres no weird flicker
                     animComponent.update(dt);
                 }
+                // If theres no frameskip and this object is visible then play the animation if needed
                 if (
+                    !animComponent.animationFrameSkip &&
                     animComponent._mi.visible &&
                     (animComponent._mi.visibleThisFrame || animComponent._mi.visibleThisFrame === undefined) &&
                     componentData.enabled &&
                     animComponent.entity.enabled &&
                     animComponent.playing
                 ) {
-                    if (!animComponent.animationFrameSkip) {
-                        animComponent.update(dt);
-                    }
+                    animComponent.update(dt);
                 }
             }
         }
