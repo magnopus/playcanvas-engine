@@ -1,10 +1,9 @@
+import { createDelayedExecutionRunner } from '../../../core/delayed-execution-runner.js';
 import { Component } from '../component.js';
 import { ComponentSystem } from '../system.js';
 
 import { AnimComponent } from './component.js';
 import { AnimComponentData } from './data.js';
-
-/** @typedef {import('../../app-base.js').AppBase} AppBase */
 
 const _schema = [
     'enabled'
@@ -19,7 +18,7 @@ class AnimComponentSystem extends ComponentSystem {
     /**
      * Create an AnimComponentSystem instance.
      *
-     * @param {AppBase} app - The application managing this system.
+     * @param {import('../../app-base.js').AppBase} app - The application managing this system.
      * @hideconstructor
      */
     constructor(app) {
@@ -74,19 +73,66 @@ class AnimComponentSystem extends ComponentSystem {
         }
     }
 
+    createExecutor(queueSize) {
+        return createDelayedExecutionRunner(
+            (entry, dt) => {
+                const componentData = entry.data;
+                if (
+                    entry._mi.visible &&
+                    (entry._mi.visibleThisFrame || entry._mi.visibleThisFrame === undefined) &&
+                    componentData.enabled &&
+                    entry.entity.enabled &&
+                    entry.playing
+                ) {
+                    entry.update(dt);
+                }
+            },
+            {
+                queueSize
+            }
+        );
+    }
+
     onAnimationUpdate(dt) {
         const components = this.store;
-
+        if (this.delayedExecutors === undefined) {
+            this.delayedExecutors = new Map();
+        }
         for (const id in components) {
             if (components.hasOwnProperty(id)) {
-                const component = components[id].entity.anim;
-                const componentData = component.data;
-
-                if (componentData.enabled && component.entity.enabled && component.playing) {
-                    component.update(dt);
+                const entity = components[id].entity;
+                const animComponent = entity.anim;
+                const componentData = animComponent.data;
+                if (!animComponent._mi) {
+                    animComponent._mi = entity.findComponent('render').meshInstances[0];
+                }
+                if (!animComponent.setupDelayed) {
+                    const divisor = Math.round(animComponent.animationFrameSkip ?? -1) + 1;
+                    if (divisor > 1) {
+                        let executor = this.delayedExecutors.get(divisor);
+                        if (!executor) {
+                            executor = this.createExecutor(divisor);
+                            this.delayedExecutors.set(divisor, executor);
+                        }
+                        executor.add(animComponent);
+                        animComponent.setupDelayed = true;
+                    }
+                    animComponent.update(dt);
+                }
+                if (
+                    animComponent._mi.visible &&
+                    (animComponent._mi.visibleThisFrame || animComponent._mi.visibleThisFrame === undefined) &&
+                    componentData.enabled &&
+                    animComponent.entity.enabled &&
+                    animComponent.playing
+                ) {
+                    if (!animComponent.animationFrameSkip) {
+                        animComponent.update(dt);
+                    }
                 }
             }
         }
+        this.delayedExecutors.forEach((e, divisor) => e.tick(dt * divisor));
     }
 
     cloneComponent(entity, clone) {
