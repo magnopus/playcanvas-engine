@@ -1,8 +1,7 @@
 import React from 'react';
 import * as pc from '../../../../';
 
-import { BindingTwoWay } from '@playcanvas/pcui';
-import { BooleanInput, LabelGroup, Panel, SelectInput, SliderInput } from '@playcanvas/pcui/react';
+import { BindingTwoWay, BooleanInput, LabelGroup, Panel, SelectInput, SliderInput } from '@playcanvas/pcui/react';
 import { Observer } from '@playcanvas/observer';
 
 class LayerMasksExample {
@@ -39,7 +38,7 @@ class LayerMasksExample {
     }
 
 
-    example(canvas: HTMLCanvasElement, data: any): void {
+    example(canvas: HTMLCanvasElement, deviceType: string, data: any): void {
         const app = new pc.Application(canvas, {
             mouse: new pc.Mouse(document.body),
             touch: new pc.TouchDevice(document.body)

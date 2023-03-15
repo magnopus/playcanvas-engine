@@ -4,14 +4,20 @@ class MaterialPhysicalExample {
     static CATEGORY = 'Graphics';
     static NAME = 'Material Physical';
 
-    example(canvas: HTMLCanvasElement): void {
+    example(canvas: HTMLCanvasElement, deviceType: string): void {
 
         const assets = {
-            'helipad': new pc.Asset('helipad-env-atlas', 'texture', { url: '/static/assets/cubemaps/helipad-env-atlas.png' }, { type: pc.TEXTURETYPE_RGBP }),
+            helipad: new pc.Asset('helipad-env-atlas', 'texture', { url: '/static/assets/cubemaps/helipad-env-atlas.png' }, { type: pc.TEXTURETYPE_RGBP }),
             'font': new pc.Asset('font', 'font', { url: '/static/assets/fonts/arial.json' })
         };
 
-        pc.createGraphicsDevice(canvas).then((device: pc.GraphicsDevice) => {
+        const gfxOptions = {
+            deviceTypes: [deviceType],
+            glslangUrl: '/static/lib/glslang/glslang.js',
+            twgslUrl: '/static/lib/twgsl/twgsl.js'
+        };
+
+        pc.createGraphicsDevice(canvas, gfxOptions).then((device: pc.GraphicsDevice) => {
 
             const createOptions = new pc.AppOptions();
             createOptions.graphicsDevice = device;
@@ -44,7 +50,6 @@ class MaterialPhysicalExample {
 
                 app.scene.envAtlas = assets.helipad.resource;
                 app.scene.toneMapping = pc.TONEMAP_ACES;
-                // Set the skybox to the 128x128 cubemap mipmap level
                 app.scene.skyboxMip = 1;
 
                 // Create an entity with a camera component

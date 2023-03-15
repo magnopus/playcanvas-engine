@@ -1,7 +1,6 @@
 import React from 'react';
 import * as pc from '../../../../';
-import { BindingTwoWay } from '@playcanvas/pcui';
-import { LabelGroup, Panel, SliderInput } from '@playcanvas/pcui/react';
+import { BindingTwoWay, LabelGroup, Panel, SliderInput } from '@playcanvas/pcui/react';
 import { Observer } from '@playcanvas/observer';
 
 class AreaLightsExample {
@@ -21,7 +20,7 @@ class AreaLightsExample {
         </>;
     }
 
-    example(canvas: HTMLCanvasElement, data:any): void {
+    example(canvas: HTMLCanvasElement, deviceType: string, data:any): void {
 
         data.set('settings', {
             material: {
@@ -39,7 +38,13 @@ class AreaLightsExample {
             'luts': new pc.Asset('luts', 'json', { url: '/static/assets/json/area-light-luts.json' })
         };
 
-        pc.createGraphicsDevice(canvas).then((device: pc.GraphicsDevice) => {
+        const gfxOptions = {
+            deviceTypes: [deviceType],
+            glslangUrl: '/static/lib/glslang/glslang.js',
+            twgslUrl: '/static/lib/twgsl/twgsl.js'
+        };
+
+        pc.createGraphicsDevice(canvas, gfxOptions).then((device: pc.GraphicsDevice) => {
 
             const createOptions = new pc.AppOptions();
             createOptions.graphicsDevice = device;

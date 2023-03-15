@@ -1,8 +1,7 @@
 import React from 'react';
 import * as pc from '../../../../';
 
-import { BindingTwoWay } from '@playcanvas/pcui';
-import { BooleanInput, Button, LabelGroup } from '@playcanvas/pcui/react';
+import { BindingTwoWay, BooleanInput, Button, LabelGroup } from '@playcanvas/pcui/react';
 import { Observer } from '@playcanvas/observer';
 
 class LocomotionExample {
@@ -19,7 +18,7 @@ class LocomotionExample {
         </>;
     }
 
-    example(canvas: HTMLCanvasElement, data: any): void {
+    example(canvas: HTMLCanvasElement, deviceType: string, data: any): void {
         // Create the application and start the update loop
         const app = new pc.Application(canvas, {});
 
