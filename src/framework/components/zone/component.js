@@ -294,9 +294,9 @@ class ZoneComponent extends Component {
 
             if (this._isPointInZone(entity.getPosition(), position, rotation, _matrix)) {
                 if (index === -1) {
+                    this.entities.push(entity);
                     entity.fire('zoneEnter', this);
                     this.fire('entityEnter', entity);
-                    this.entities.push(entity);
                 }
             } else if (this.useColliders && entity.collision && entity.collision.enabled && entity.collision.zoneCheck) {
                 if (!pendingCollider) {
@@ -305,9 +305,9 @@ class ZoneComponent extends Component {
 
                 pendingCollider.push(entity);
             } else if (index !== -1) {
+                this.entities.splice(index, 1);
                 entity.fire('zoneLeave', this);
                 this.fire('entityleave', entity);
-                this.entities.splice(index, 1);
             }
         }
 
@@ -339,10 +339,10 @@ class ZoneComponent extends Component {
                         this.fire('entityEnter', entity);
                         this.entities.push(entity);
                     } else if (inZoneIndex !== -1) {
+                        this.entities.splice(inZoneIndex, 1);
                         // Entity left zone.
                         entity.fire('zoneLeave', this);
                         this.fire('entityLeave', entity);
-                        this.entities.splice(inZoneIndex, 1);
                     }
                 }
             }
