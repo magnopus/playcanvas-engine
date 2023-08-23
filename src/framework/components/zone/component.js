@@ -4,7 +4,7 @@ import { Mat4 } from '../../../core/math/mat4.js';
 import { Component } from '../component.js';
 
 const _matrix = new Mat4();
-
+// Magnopus Patched
 /**
  * The ZoneComponent allows you to define an area in world space of certain size. This can be used
  * in various ways, such as affecting audio reverb when {@link AudioListenerComponent} is within

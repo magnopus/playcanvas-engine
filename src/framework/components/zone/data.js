@@ -1,5 +1,5 @@
 import { Vec3 } from '../../../core/math/vec3.js';
-
+// Magnopus Patched
 class ZoneComponentData {
     constructor() {
         this.enabled = true;

@@ -7,7 +7,7 @@ import { ZoneComponent } from './component.js';
 import { ZoneComponentData } from './data.js';
 
 const _schema = ['enabled', 'shape', 'halfExtents', 'radius', 'useColliders'];
-
+// Magnopus Patched
 /**
  * Creates and manages {@link ZoneComponent} instances.
  *
