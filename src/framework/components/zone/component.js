@@ -334,10 +334,10 @@ class ZoneComponent extends Component {
                         // Entity was already in zone.
                         continue;
                     } else if (collidingIndex !== -1) {
+                        this.entities.push(entity);
                         // Entity entered zone.
                         entity.fire('zoneEnter', this);
                         this.fire('entityEnter', entity);
-                        this.entities.push(entity);
                     } else if (inZoneIndex !== -1) {
                         this.entities.splice(inZoneIndex, 1);
                         // Entity left zone.
