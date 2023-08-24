@@ -4,7 +4,7 @@ import { Mat4 } from '../../../core/math/mat4.js';
 import { Component } from '../component.js';
 
 const _matrix = new Mat4();
-// Magnopus Patched
+
 /**
  * The ZoneComponent allows you to define an area in world space of certain size. This can be used
  * in various ways, such as affecting audio reverb when {@link AudioListenerComponent} is within
@@ -102,7 +102,7 @@ class ZoneComponent extends Component {
      */
 
     /**
-     * Fired when an entity enters the zone.
+     * Fired after an entity enters the zone.
      *
      * @event ZoneComponent#entityEnter
      * @param {import('../../entity').Entity} entity - The entity entering the zone.
@@ -113,7 +113,7 @@ class ZoneComponent extends Component {
      */
 
     /**
-     * Fired when an entity leaves the zone.
+     * Fired after an entity leaves the zone.
      *
      * @event ZoneComponent#entityLeave
      * @param {import('../../entity').Entity} entity - The entity leaving the zone.
@@ -334,13 +334,13 @@ class ZoneComponent extends Component {
                         // Entity was already in zone.
                         continue;
                     } else if (collidingIndex !== -1) {
-                        this.entities.push(entity);
                         // Entity entered zone.
+                        this.entities.push(entity);
                         entity.fire('zoneEnter', this);
                         this.fire('entityEnter', entity);
                     } else if (inZoneIndex !== -1) {
-                        this.entities.splice(inZoneIndex, 1);
                         // Entity left zone.
+                        this.entities.splice(inZoneIndex, 1);
                         entity.fire('zoneLeave', this);
                         this.fire('entityLeave', entity);
                     }
@@ -372,11 +372,12 @@ class ZoneComponent extends Component {
         this._destroyCollisionShape();
         this._toggleLifecycleListeners('off');
 
-        for (let i = 0, l = this.entities.length; i < l; i++) {
-            this.entities[i].fire('zoneLeave', this);
-        }
-
+        const entities = [...this.entities];
         this.entities.length = 0;
+
+        for (let i = 0, l = entities.length; i < l; i++) {
+            entities[i].fire('zoneLeave', this);
+        }
     }
 
     /**
