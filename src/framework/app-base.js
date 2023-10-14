@@ -41,7 +41,6 @@ import { Asset } from './asset/asset.js';
 import { AssetRegistry } from './asset/asset-registry.js';
 import { BundleRegistry } from './bundle/bundle-registry.js';
 import { ComponentSystemRegistry } from './components/registry.js';
-import { SceneGrab } from '../scene/graphics/scene-grab.js';
 import { BundleHandler } from './handlers/bundle.js';
 import { ResourceLoader } from './handlers/loader.js';
 import { I18n } from './i18n/i18n.js';
@@ -91,6 +90,12 @@ class Progress {
  * @callback PreloadAppCallback
  */
 
+/**
+ * Gets the current application, if any.
+ *
+ * @type {AppBase|null}
+ * @ignore
+ */
 let app = null;
 
 /**
@@ -366,35 +371,11 @@ class AppBase extends EventHandler {
          */
         this.scenes = new SceneRegistry(this);
 
-        const self = this;
-        this.defaultLayerWorld = new Layer({
-            name: "World",
-            id: LAYERID_WORLD
-        });
-
-        this.sceneGrab = new SceneGrab(this.graphicsDevice, this.scene);
-        this.defaultLayerDepth = this.sceneGrab.layer;
-
-        this.defaultLayerSkybox = new Layer({
-            enabled: true,
-            name: "Skybox",
-            id: LAYERID_SKYBOX,
-            opaqueSortMode: SORTMODE_NONE
-        });
-        this.defaultLayerUi = new Layer({
-            enabled: true,
-            name: "UI",
-            id: LAYERID_UI,
-            transparentSortMode: SORTMODE_MANUAL,
-            passThrough: false
-        });
-        this.defaultLayerImmediate = new Layer({
-            enabled: true,
-            name: "Immediate",
-            id: LAYERID_IMMEDIATE,
-            opaqueSortMode: SORTMODE_NONE,
-            passThrough: true
-        });
+        this.defaultLayerWorld = new Layer({ name: "World", id: LAYERID_WORLD });
+        this.defaultLayerDepth = new Layer({ name: "Depth", id: LAYERID_DEPTH, enabled: false, opaqueSortMode: SORTMODE_NONE });
+        this.defaultLayerSkybox = new Layer({ name: "Skybox", id: LAYERID_SKYBOX, opaqueSortMode: SORTMODE_NONE });
+        this.defaultLayerUi = new Layer({ name: "UI", id: LAYERID_UI, transparentSortMode: SORTMODE_MANUAL });
+        this.defaultLayerImmediate = new Layer({ name: "Immediate", id: LAYERID_IMMEDIATE, opaqueSortMode: SORTMODE_NONE });
 
         const defaultLayerComposition = new LayerComposition("default");
         defaultLayerComposition.pushOpaque(this.defaultLayerWorld);
@@ -405,26 +386,6 @@ class AppBase extends EventHandler {
         defaultLayerComposition.pushTransparent(this.defaultLayerImmediate);
         defaultLayerComposition.pushTransparent(this.defaultLayerUi);
         this.scene.layers = defaultLayerComposition;
-
-        // Default layers patch
-        this.scene.on('set:layers', function (oldComp, newComp) {
-            const list = newComp.layerList;
-            let layer;
-            for (let i = 0; i < list.length; i++) {
-                layer = list[i];
-                switch (layer.id) {
-                    case LAYERID_DEPTH:
-                        self.sceneGrab.patch(layer);
-                        break;
-                    case LAYERID_UI:
-                        layer.passThrough = self.defaultLayerUi.passThrough;
-                        break;
-                    case LAYERID_IMMEDIATE:
-                        layer.passThrough = self.defaultLayerImmediate.passThrough;
-                        break;
-                }
-            }
-        });
 
         // placeholder texture for area light LUTs
         AreaLightLuts.createPlaceholder(device);
@@ -614,14 +575,6 @@ class AppBase extends EventHandler {
         /* eslint-disable-next-line no-use-before-define */
         this.tick = makeTick(this); // Circular linting issue as makeTick and Application reference each other
     }
-
-    /**
-     * @private
-     * @static
-     * @name app
-     * @type {AppBase|undefined}
-     * @description Gets the current application, if any.
-     */
 
     static _applications = {};
 
@@ -1969,6 +1922,7 @@ class AppBase extends EventHandler {
 
         const canvasId = this.graphicsDevice.canvas.id;
 
+        this.fire('destroy', this); // fire destroy event
         this.off('librariesloaded');
 
         if (typeof document !== 'undefined') {
