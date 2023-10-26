@@ -21,13 +21,11 @@ import { BlendState } from '../../platform/graphics/blend-state.js';
 const _drawCallList = {
     drawCalls: [],
     shaderInstances: [],
-    shaderInstances: [],
     isNewMaterial: [],
     lightMaskChanged: [],
 
     clear: function () {
         this.drawCalls.length = 0;
-        this.shaderInstances.length = 0;
         this.shaderInstances.length = 0;
         this.isNewMaterial.length = 0;
         this.lightMaskChanged.length = 0;
@@ -460,12 +458,9 @@ class ForwardRenderer extends Renderer {
 
     // execute first pass over draw calls, in order to update materials / shaders
     renderForwardPrepareMaterials(camera, drawCalls, sortedLights, layer, pass) {
-    renderForwardPrepareMaterials(camera, drawCalls, drawCallsCount, sortedLights, cullingMask, layer, pass) {
 
         const addCall = (drawCall, shaderInstance, isNewMaterial, lightMaskChanged) => {
-        const addCall = (drawCall, shaderInstance, isNewMaterial, lightMaskChanged) => {
             _drawCallList.drawCalls.push(drawCall);
-            _drawCallList.shaderInstances.push(shaderInstance);
             _drawCallList.shaderInstances.push(shaderInstance);
             _drawCallList.isNewMaterial.push(isNewMaterial);
             _drawCallList.lightMaskChanged.push(lightMaskChanged);
@@ -488,15 +483,9 @@ class ForwardRenderer extends Renderer {
             // magnopus patched.  ensure empty drawcalls are skipped
             if (!drawCall.mesh) continue;
 
-            // apply visibility override
-            if (cullingMask && drawCall.mask && !(cullingMask & drawCall.mask))
+// apply visibility override
+            if (camera.cullingMask && drawCall.mask && !(camera.cullingMask & drawCall.mask))
                 continue;
-
-            if (drawCall.command) {
-
-                addCall(drawCall, null, false, false);
-
-            } else {
 
             // #if _PROFILER
             if (camera === ForwardRenderer.skipRenderCamera) {
@@ -530,30 +519,15 @@ class ForwardRenderer extends Renderer {
                     material.dirty = false;
                 }
             }
-                    if (material.dirty) {
-                        material.updateUniforms(device, scene);
-                        material.dirty = false;
-                    }
-
-                    // if material has dirtyBlend set, notify scene here
-                    if (material._dirtyBlend) {
-                        scene.layers._dirtyBlend = true;
-                    }
-                }
 
             // marker to allow us to see the source node for shader alloc
             DebugGraphics.pushGpuMarker(device, `Node: ${drawCall.node.name}`);
-                // marker to allow us to see the source node for shader alloc
-                DebugGraphics.pushGpuMarker(device, `Node: ${drawCall.node.name}`);
 
             const shaderInstance = drawCall.getShaderInstance(pass, lightHash, scene, this.viewUniformFormat, this.viewBindGroupFormat, sortedLights);
-                const shaderInstance = drawCall.getShaderInstance(pass, lightHash, scene, this.viewUniformFormat, this.viewBindGroupFormat, sortedLights);
 
             DebugGraphics.popGpuMarker(device);
-                DebugGraphics.popGpuMarker(device);
 
             addCall(drawCall, shaderInstance, material !== prevMaterial, !prevMaterial || lightMask !== prevLightMask);
-                addCall(drawCall, shaderInstance, material !== prevMaterial, !prevMaterial || lightMask !== prevLightMask);
 
             prevMaterial = material;
             prevObjDefs = objDefs;
@@ -587,13 +561,6 @@ class ForwardRenderer extends Renderer {
             const material = drawCall.material;
             const objDefs = drawCall._shaderDefs;
             const lightMask = drawCall.mask;
-                // We have a mesh instance
-                const newMaterial = preparedCalls.isNewMaterial[i];
-                const lightMaskChanged = preparedCalls.lightMaskChanged[i];
-                const shaderInstance = preparedCalls.shaderInstances[i];
-                const material = drawCall.material;
-                const objDefs = drawCall._shaderDefs;
-                const lightMask = drawCall.mask;
 
             if (newMaterial) {
 
@@ -601,10 +568,6 @@ class ForwardRenderer extends Renderer {
                 if (!shader.failed && !device.setShader(shader)) {
                     Debug.error(`Error compiling shader [${shader.label}] for material=${material.name} pass=${pass} objDefs=${objDefs}`, material);
                 }
-                    const shader = shaderInstance.shader;
-                    if (!shader.failed && !device.setShader(shader)) {
-                        Debug.error(`Error compiling shader [${shader.label}] for material=${material.name} pass=${pass} objDefs=${objDefs}`, material);
-                    }
 
                 // skip rendering with the material if shader failed
                 skipMaterial = shader.failed;
@@ -659,7 +622,6 @@ class ForwardRenderer extends Renderer {
             this.setSkinning(device, drawCall);
 
             this.setupMeshUniformBuffers(shaderInstance, drawCall);
-                this.setupMeshUniformBuffers(shaderInstance, drawCall);
 
             const style = drawCall.renderStyle;
             device.setIndexBuffer(mesh.indexBuffer[style]);
@@ -705,7 +667,6 @@ class ForwardRenderer extends Renderer {
     }
 
     renderForward(camera, allDrawCalls, sortedLights, pass, drawCallback, layer, flipFaces) {
-    renderForward(camera, allDrawCalls, allDrawCallsCount, sortedLights, pass, cullingMask, drawCallback, layer, flipFaces) {
 
         // #if _PROFILER
         const forwardStartTime = now();
@@ -713,7 +674,6 @@ class ForwardRenderer extends Renderer {
 
         // run first pass over draw calls and handle material / shader updates
         const preparedCalls = this.renderForwardPrepareMaterials(camera, allDrawCalls, sortedLights, layer, pass);
-        const preparedCalls = this.renderForwardPrepareMaterials(camera, allDrawCalls, allDrawCallsCount, sortedLights, cullingMask, layer, pass);
 
         // render mesh instances
         this.renderForwardInternal(camera, preparedCalls, sortedLights, pass, drawCallback, flipFaces);
@@ -1126,7 +1086,6 @@ class ForwardRenderer extends Renderer {
                                visible,
                                layer.splitLights,
                                shaderPass,
-                               layer.cullingMask,
                                layer.onDrawCall,
                                layer,
                                flipFaces);
