@@ -6,6 +6,7 @@ import { Ray } from '../../core/shape/ray.js';
 import { Mouse } from '../../platform/input/mouse.js';
 
 import { getApplication } from '../globals.js';
+import { AppBase } from '../app-base.js';
 
 let targetX, targetY;
 const vecA = new Vec3();
@@ -348,9 +349,11 @@ class ElementInput {
      * @param {boolean} [options.useMouse] - Whether to allow mouse input. Defaults to true.
      * @param {boolean} [options.useTouch] - Whether to allow touch input. Defaults to true.
      * @param {boolean} [options.useXr] - Whether to allow XR input sources. Defaults to true.
+     * @param {AppBase} [options.app] - Magnopus patched - The application instance to use.
      */
     constructor(domElement, options) {
-        this._app = null;
+        // Magnopus patched to use app reference
+        this._app = options?.app || null;
         this._attached = false;
         this._target = null;
 

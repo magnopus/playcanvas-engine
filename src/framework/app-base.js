@@ -308,7 +308,9 @@ class AppBase extends EventHandler {
          * // Return the first entity called 'Camera' in a depth-first search of the scene hierarchy
          * const camera = this.app.root.findByName('Camera');
          */
-        this.root = new Entity();
+
+        // Magnopus patched to pass app reference
+        this.root = new Entity(undefined, this);
         this.root._enabledInHierarchy = true;
 
         /**

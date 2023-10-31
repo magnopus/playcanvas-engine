@@ -67,13 +67,16 @@ class GlbContainerResource {
         return subAsset;
     }
 
-    instantiateModelEntity(options) {
-        const entity = new Entity();
+    // Magnopus patched to pass app reference
+    instantiateModelEntity(options, app) {
+        // Magnopus patched to use app reference
+        const entity = new Entity(undefined, app);
         entity.addComponent('model', Object.assign({ type: 'asset', asset: this.model }, options));
         return entity;
     }
 
-    instantiateRenderEntity(options) {
+    // Magnopus patched to pass app reference
+    instantiateRenderEntity(options, app) {
 
         const defaultMaterial = this._defaultMaterial;
         const skinnedMeshInstances = [];
@@ -105,7 +108,8 @@ class GlbContainerResource {
         // helper function to recursively clone a hierarchy of GraphNodes to Entities
         const cloneHierarchy = (root, node, glb) => {
 
-            const entity = new Entity();
+            // Magnopus patched to use app reference
+            const entity = new Entity(undefined, app);
             node._cloneInternal(entity);
 
             // first entity becomes the root
