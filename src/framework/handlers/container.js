@@ -1,4 +1,5 @@
 import { path } from '../../core/path.js';
+import { AppBase } from '../app-base.js';
 
 import { GlbContainerParser } from '../parsers/glb-container-parser.js';
 
@@ -19,6 +20,7 @@ class ContainerResource {
      * Instantiates an entity with a model component.
      *
      * @param {object} [options] - The initialization data for the model component type
+     * @param {AppBase} [app] - Magnopus patched - The app to which the model entity should be instantiated
      * {@link ModelComponent}.
      * @returns {import('../entity.js').Entity} A single entity with a model component. Model
      * component internally contains a hierarchy based on {@link GraphNode}.
@@ -31,7 +33,8 @@ class ContainerResource {
      *     app.root.addChild(entity);
      * });
      */
-    instantiateModelEntity(options) {
+    // Magnopus patched - add app parameter
+    instantiateModelEntity(options, app) {
         return null;
     }
 
@@ -39,6 +42,7 @@ class ContainerResource {
      * Instantiates an entity with a render component.
      *
      * @param {object} [options] - The initialization data for the render component type
+     * @param {AppBase} [app] - Magnopus patched - The app to which the render entity should be instantiated
      * {@link RenderComponent}.
      * @returns {import('../entity.js').Entity} A hierarchy of entities with render components on
      * entities containing renderable geometry.
@@ -60,7 +64,8 @@ class ContainerResource {
      *     });
      * });
      */
-    instantiateRenderEntity(options) {
+    // Magnopus patched - add app parameter
+    instantiateRenderEntity(options, app) {
         return null;
     }
 

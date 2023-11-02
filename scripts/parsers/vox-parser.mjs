@@ -330,11 +330,13 @@ class VoxContainerResource {
         this.voxModel = voxModel;
     }
 
-    instantiateModelEntity(options) {
+    // Magnopus patched - add app parameter
+    instantiateModelEntity(options, app) {
         return null;
     }
 
-    instantiateRenderEntity(options) {
+    // Magnopus patched - add app parameter
+    instantiateRenderEntity(options, app) {
         const material = new pc.StandardMaterial();
         material.diffuseVertexColor = true;
 
@@ -344,7 +346,7 @@ class VoxContainerResource {
             return new pc.MeshInstance(mesh, material);
         });
 
-        const entity = new pc.Entity();
+        const entity = new pc.Entity(undefined, app);
         entity.addComponent('render', {
             material: material,
             meshInstances: meshInstances

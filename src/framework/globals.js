@@ -3,6 +3,7 @@ import { GraphicsDeviceAccess } from "../platform/graphics/graphics-device-acces
 let currentApplication;
 
 function getApplication() {
+    console.log("***** getApplication() *****");
     return currentApplication;
 }
 
