@@ -346,6 +346,7 @@ class VoxContainerResource {
             return new pc.MeshInstance(mesh, material);
         });
 
+        // Magnopus patched - add app parameter
         const entity = new pc.Entity(undefined, app);
         entity.addComponent('render', {
             material: material,
