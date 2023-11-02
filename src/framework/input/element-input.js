@@ -6,7 +6,6 @@ import { Ray } from '../../core/shape/ray.js';
 import { Mouse } from '../../platform/input/mouse.js';
 
 import { getApplication } from '../globals.js';
-import { AppBase } from '../app-base.js';
 
 let targetX, targetY;
 const vecA = new Vec3();
@@ -345,7 +344,7 @@ class ElementInput {
      * Create a new ElementInput instance.
      *
      * @param {Element} domElement - The DOM element.
-     * @param {AppBase} app - Magnopus patch - added app parameter.
+     * @param {import('../app-base.js').AppBase} app - Magnopus patch - added app parameter.
      * @param {object} [options] - Optional arguments.
      * @param {boolean} [options.useMouse] - Whether to allow mouse input. Defaults to true.
      * @param {boolean} [options.useTouch] - Whether to allow touch input. Defaults to true.
