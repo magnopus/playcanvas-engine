@@ -107,6 +107,7 @@ class GlbContainerResource {
         // helper function to recursively clone a hierarchy of GraphNodes to Entities
         const cloneHierarchy = (root, node, glb) => {
 
+            // Magnopus patched - add app parameter
             const entity = new Entity(undefined, app);
             node._cloneInternal(entity);
 

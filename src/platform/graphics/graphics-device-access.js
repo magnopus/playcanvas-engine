@@ -14,7 +14,6 @@ class GraphicsDeviceAccess {
     }
 
     static get() {
-        console.log("##### GraphicsDeviceAccess.get() #####");
         return GraphicsDeviceAccess._graphicsDevice;
     }
 }
