@@ -348,9 +348,10 @@ class ElementInput {
      * @param {boolean} [options.useMouse] - Whether to allow mouse input. Defaults to true.
      * @param {boolean} [options.useTouch] - Whether to allow touch input. Defaults to true.
      * @param {boolean} [options.useXr] - Whether to allow XR input sources. Defaults to true.
+     * @param {import('../app-base.js').AppBase} [app] - Magnopus patch - added app parameter.
      */
-    constructor(domElement, options) {
-        this._app = null;
+    constructor(domElement, options, app) {
+        this._app = app || getApplication();
         this._attached = false;
         this._target = null;
 
