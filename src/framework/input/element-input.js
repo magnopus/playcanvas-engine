@@ -344,14 +344,14 @@ class ElementInput {
      * Create a new ElementInput instance.
      *
      * @param {Element} domElement - The DOM element.
-     * @param {import('../app-base.js').AppBase} app - Magnopus patch - added app parameter.
      * @param {object} [options] - Optional arguments.
      * @param {boolean} [options.useMouse] - Whether to allow mouse input. Defaults to true.
      * @param {boolean} [options.useTouch] - Whether to allow touch input. Defaults to true.
      * @param {boolean} [options.useXr] - Whether to allow XR input sources. Defaults to true.
+     * @param {import('../app-base.js').AppBase} [app] - Magnopus patch - added app parameter.
      */
-    constructor(domElement, app, options) {
-        this._app = app;
+    constructor(domElement, options, app) {
+        this._app = app || getApplication();
         this._attached = false;
         this._target = null;
 
