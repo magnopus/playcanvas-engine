@@ -246,6 +246,7 @@ class AppBase extends EventHandler {
          * @ignore
          */
         this.context = this;
+        this._dirtyZoneEntities = [];
     }
 
     /**
