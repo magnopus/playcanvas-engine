@@ -551,7 +551,8 @@ class Renderer {
         for (let i = 0; i < drawCallsCount; i++) {
             const drawCall = drawCalls[i];
             const si = drawCall.skinInstance;
-            if (si && drawCall.visibleThisFrame) {
+            // Magnopus unpatched, remove optimisation for culling skinning
+            if (si) {
                 si.updateMatrices(drawCall.node, _skinUpdateIndex);
                 si._dirty = true;
             }
@@ -864,9 +865,9 @@ class Renderer {
 
                 const visible = !doCull || !drawCall.cull || drawCall._isVisible(camera);
                 if (visible) {
-                    drawCall.visibleThisFrame = true;
                     // if the object's mask AND the camera's cullingMask is zero then the game object will be invisible from the camera
                     if (drawCall.mask && (drawCall.mask & cullingMask) === 0) continue;
+                    drawCall.visibleThisFrame = true;
 
                     // sort mesh instance into the right bucket based on its transparency
                     const bucket = drawCall.transparent ? transparent : opaque;
