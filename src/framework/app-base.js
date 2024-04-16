@@ -2219,7 +2219,7 @@ const makeTick = function (_app) {
             application.graphicsDevice.defaultFramebuffer = null;
           }
 
-          // really rendering so calculate delta time and fire updates, then render
+          // really rendering the next frame? if so calculate delta time and fire updates, then render
           if (shouldRenderFrame) {
             const currentTime = application._processTimestamp(timestamp) || now();
             const ms = currentTime - (application._time || currentTime);
