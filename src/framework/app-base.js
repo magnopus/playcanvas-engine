@@ -2126,76 +2126,131 @@ const makeTick = function (_app) {
         // have current application pointer in pc
         app = application;
 
-        const currentTime = application._processTimestamp(timestamp) || now();
-        const ms = currentTime - (application._time || currentTime);
-        let dt = ms / 1000.0;
-        dt = math.clamp(dt, 0, application.maxDeltaTime);
-        dt *= application.timeScale;
+        // Magnopus patched
+        // update the tick function to update everything at the same rate when auto-render is off
 
-        application._time = currentTime;
+        // Magnopus - old code
+        // const currentTime = application._processTimestamp(timestamp) || now();
+        // const ms = currentTime - (application._time || currentTime);
+        // let dt = ms / 1000.0;
+        // dt = math.clamp(dt, 0, application.maxDeltaTime);
+        // dt *= application.timeScale;
 
-        // Submit a request to queue up a new animation frame immediately
-        if (application.xr?.session) {
-            application.frameRequestId = application.xr.session.requestAnimationFrame(application.tick);
+        // application._time = currentTime;
+
+        // // Submit a request to queue up a new animation frame immediately
+        // if (application.xr?.session) {
+        //     application.frameRequestId = application.xr.session.requestAnimationFrame(application.tick);
+        // } else {
+        //     application.frameRequestId = platform.browser ? window.requestAnimationFrame(application.tick) : null;
+        // }
+
+        // if (application.graphicsDevice.contextLost)
+        //     return;
+
+        // application._fillFrameStatsBasic(currentTime, dt, ms);
+
+        // // #if _PROFILER
+        // application._fillFrameStats();
+        // // #endif
+
+        // application.fire("frameupdate", ms);
+
+        // let shouldRenderFrame = true;
+
+        // if (frame) {
+        //     shouldRenderFrame = application.xr?.update(frame);
+        //     application.graphicsDevice.defaultFramebuffer = frame.session.renderState.baseLayer.framebuffer;
+        // } else {
+        //     application.graphicsDevice.defaultFramebuffer = null;
+        // }
+
+        // if (shouldRenderFrame) {
+
+        //     Debug.trace(TRACEID_RENDER_FRAME, `---- Frame ${application.frame}`);
+        //     Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- UpdateStart ${now().toFixed(2)}ms`);
+
+        //     application.update(dt);
+
+        //     application.fire("framerender");
+
+
+        //     if (application.autoRender || application.renderNextFrame) {
+
+        //         Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- RenderStart ${now().toFixed(2)}ms`);
+
+        //         application.updateCanvasSize();
+        //         application.frameStart();
+        //         application.render();
+        //         application.frameEnd();
+        //         application.renderNextFrame = false;
+
+        //         Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- RenderEnd ${now().toFixed(2)}ms`);
+        //     }
+
+        //     // set event data
+        //     _frameEndData.timestamp = now();
+        //     _frameEndData.target = application;
+
+        //     application.fire("frameend", _frameEndData);
+        // }
+
+        // application._inFrameUpdate = false;
+
+        // if (application._destroyRequested) {
+        //     application.destroy();
+        // }
+        // Magnopus - replaced by
+
+        // request next frame update
+        if ((_application$xr = application.xr) != null && _application$xr.session) {
+          application.frameRequestId = application.xr.session.requestAnimationFrame(application.tick);
         } else {
-            application.frameRequestId = platform.browser ? window.requestAnimationFrame(application.tick) : null;
+          application.frameRequestId = platform.browser ? window.requestAnimationFrame(application.tick) : null;
         }
-
-        if (application.graphicsDevice.contextLost)
-            return;
-
-        application._fillFrameStatsBasic(currentTime, dt, ms);
-
-        // #if _PROFILER
-        application._fillFrameStats();
-        // #endif
-
-        application.fire("frameupdate", ms);
-
-        let shouldRenderFrame = true;
-
-        if (frame) {
-            shouldRenderFrame = application.xr?.update(frame);
+        
+        // only update if rendering
+        if (application.autoRender || application.renderNextFrame) {
+          let shouldRenderFrame = true;
+          if (frame) {
+            var _application$xr2;
+            shouldRenderFrame = (_application$xr2 = application.xr) == null ? void 0 : _application$xr2.update(frame);
             application.graphicsDevice.defaultFramebuffer = frame.session.renderState.baseLayer.framebuffer;
-        } else {
+          } else {
             application.graphicsDevice.defaultFramebuffer = null;
-        }
+          }
 
-        if (shouldRenderFrame) {
-
-            Debug.trace(TRACEID_RENDER_FRAME, `---- Frame ${application.frame}`);
-            Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- UpdateStart ${now().toFixed(2)}ms`);
-
+          // really rendering so calculate delta time and fire updates, then render
+          if (shouldRenderFrame) {
+            const currentTime = application._processTimestamp(timestamp) || now();
+            const ms = currentTime - (application._time || currentTime);
+            let dt = ms / 1000.0;
+            dt = math.clamp(dt, 0, application.maxDeltaTime);
+            dt *= application.timeScale;
+            application._time = currentTime;
+    
+            if (application.graphicsDevice.contextLost) return;
+            application._fillFrameStatsBasic(currentTime, dt, ms);
+            application._fillFrameStats();
+            application.fire('frameupdate', ms);
+    
             application.update(dt);
-
-            application.fire("framerender");
-
-
-            if (application.autoRender || application.renderNextFrame) {
-
-                Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- RenderStart ${now().toFixed(2)}ms`);
-
-                application.updateCanvasSize();
-                application.frameStart();
-                application.render();
-                application.frameEnd();
-                application.renderNextFrame = false;
-
-                Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- RenderEnd ${now().toFixed(2)}ms`);
-            }
-
-            // set event data
+            application.fire('framerender');
+            application.updateCanvasSize();
+            application.frameStart();
+            application.render();
+            application.frameEnd();
+            application.renderNextFrame = false;
             _frameEndData.timestamp = now();
             _frameEndData.target = application;
-
-            application.fire("frameend", _frameEndData);
+            application.fire('frameend', _frameEndData);
+          }
         }
-
         application._inFrameUpdate = false;
-
         if (application._destroyRequested) {
-            application.destroy();
+          application.destroy();
         }
+        // Magnopus - change end
     };
 };
 
