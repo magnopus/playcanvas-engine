@@ -2203,18 +2203,17 @@ const makeTick = function (_app) {
         // Magnopus - replaced by
 
         // request next frame update
-        if ((_application$xr = application.xr) != null && _application$xr.session) {
-          application.frameRequestId = application.xr.session.requestAnimationFrame(application.tick);
+        if (application.xr?.session) {
+            application.frameRequestId = application.xr.session.requestAnimationFrame(application.tick);
         } else {
-          application.frameRequestId = platform.browser ? window.requestAnimationFrame(application.tick) : null;
+            application.frameRequestId = platform.browser ? window.requestAnimationFrame(application.tick) : null;
         }
         
         // only update if rendering
         if (application.autoRender || application.renderNextFrame) {
           let shouldRenderFrame = true;
           if (frame) {
-            var _application$xr2;
-            shouldRenderFrame = (_application$xr2 = application.xr) == null ? void 0 : _application$xr2.update(frame);
+            shouldRenderFrame = application.xr?.update(frame);
             application.graphicsDevice.defaultFramebuffer = frame.session.renderState.baseLayer.framebuffer;
           } else {
             application.graphicsDevice.defaultFramebuffer = null;
