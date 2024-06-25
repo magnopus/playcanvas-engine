@@ -193,7 +193,6 @@ export const BUFFERUSAGE_WRITE = 0x0002;
  * @category Graphics
  */
 export const BUFFERUSAGE_COPY_SRC = 0x0004;
-
 /**
  * A flag utilized during the construction of a {@link StorageBuffer} to ensure its compatibility
  * when used as a destination of a copy operation, or as a target of a write operation.

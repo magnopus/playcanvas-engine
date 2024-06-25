@@ -28,6 +28,7 @@ import { WebgpuGpuProfiler } from './webgpu-gpu-profiler.js';
 import { WebgpuResolver } from './webgpu-resolver.js';
 import { WebgpuCompute } from './webgpu-compute.js';
 import { WebgpuBuffer } from './webgpu-buffer.js';
+import { AdvancedWebGPUOcclusionCulling } from './webgpu-occlusion-culling.js';
 
 const _uniqueLocations = new Map();
 
@@ -96,13 +97,13 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
     constructor(canvas, options = {}) {
         super(canvas, options);
         options = this.initOptions;
-
         // alpha defaults to true
         options.alpha = options.alpha ?? true;
 
         this.backBufferAntialias = options.antialias ?? false;
         this.isWebGPU = true;
         this._deviceType = DEVICETYPE_WEBGPU;
+        this.occlusionCulling = new AdvancedWebGPUOcclusionCulling(this);
     }
 
     /**
@@ -507,6 +508,9 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
                                                      this.bindGroupFormats, this.blendState, this.depthState, this.cullMode,
                                                      this.stencilEnabled, this.stencilFront, this.stencilBack);
             Debug.assert(pipeline);
+            const commandEncoder = this.wgpu.createCommandEncoder();
+            this.occlusionCulling.render(commandEncoder, this.swapChainTexture.createView());
+
 
             if (this.pipeline !== pipeline) {
                 this.pipeline = pipeline;
@@ -522,7 +526,7 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
             } else {
                 passEncoder.draw(primitive.count, numInstances, primitive.base, 0);
             }
-
+            this.wgpu.queue.submit([commandEncoder.finish()]);
             WebgpuDebug.end(this, {
                 vb0,
                 vb1,
