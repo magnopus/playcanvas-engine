@@ -204,14 +204,24 @@ class Renderer {
 
         this.modelMatrixId = scope.resolve('matrix_model');
         this.normalMatrixId = scope.resolve('matrix_normal');
-        this.viewInvId = scope.resolve('matrix_viewInverse');
         this.viewPos = new Float32Array(3);
+        this.viewInvId = scope.resolve('matrix_viewInverse');
         this.viewPosId = scope.resolve('view_position');
         this.projId = scope.resolve('matrix_projection');
         this.projSkyboxId = scope.resolve('matrix_projectionSkybox');
         this.viewId = scope.resolve('matrix_view');
         this.viewId3 = scope.resolve('matrix_view3');
         this.viewProjId = scope.resolve('matrix_viewProjection');
+
+        // second view
+        // this.viewInvId2 = scope.resolve('matrix_viewInverse_2');
+        // this.viewPosId2 = scope.resolve('view_position_2');
+        // this.projId2 = scope.resolve('matrix_projection_2');
+        // this.projSkyboxId2 = scope.resolve('matrix_projectionSkybox_2');
+        // this.viewId2 = scope.resolve('matrix_view_2');
+        // this.viewId32 = scope.resolve('matrix_view3_2');
+        this.viewProjId2 = scope.resolve('matrix_viewProjection_2');
+
         this.flipYId = scope.resolve('projectionFlipY');
         this.tbnBasis = scope.resolve('tbnBasis');
         this.nearClipId = scope.resolve('camera_near');

@@ -67,7 +67,6 @@ class ForwardRenderer extends Renderer {
      */
     constructor(graphicsDevice) {
         super(graphicsDevice);
-
         const device = this.device;
 
         this._forwardDrawCalls = 0;
@@ -125,6 +124,7 @@ class ForwardRenderer extends Renderer {
 
         this.pcssDiskSamples = vogelDiskPrecalculationSamples(16);
         this.pcssSphereSamples = vogelSpherePrecalculationSamples(16);
+        this.depthStencilTex = undefined;
     }
 
     destroy() {
@@ -601,32 +601,79 @@ class ForwardRenderer extends Renderer {
             device.setIndexBuffer(mesh.indexBuffer[style]);
 
             drawCallback?.(drawCall, i);
-
+            const gl = device.gl;
+            let glLayer;
+            let _views = [];
             if (camera.xr && camera.xr.session && camera.xr.views.list.length) {
-                const views = camera.xr.views;
-
+                const xr = camera.xr;
+                const views = xr.views;
                 for (let v = 0; v < views.list.length; v++) {
                     const view = views.list[v];
+                    glLayer = xr.webglBinding.getViewSubImage(xr.session.renderState.layers[0], view._xrView);
+                    glLayer.framebuffer = xr.xrFramebuffer;
+                    
+                    
+                    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, xr.xrFramebuffer);
+                    let viewport = glLayer.viewport;
+                    const mv_ext = device.extMultiview;
+                    if (_views.length == 0) { // for multiview we need to set fbo only once, so only do this for the first view
+                       if (device.isMultiViewOculus) {
+                           mv_ext.framebufferTextureMultisampleMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, glLayer.colorTexture, 0, 0, 0, 2);
+                       } else {
+                            mv_ext.framebufferTextureMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, glLayer.colorTexture, 0, 0, 2);
+                        }
 
-                    device.setViewport(view.viewport.x, view.viewport.y, view.viewport.z, view.viewport.w);
-
-                    this.projId.setValue(view.projMat.data);
-                    this.projSkyboxId.setValue(view.projMat.data);
-                    this.viewId.setValue(view.viewOffMat.data);
-                    this.viewInvId.setValue(view.viewInvOffMat.data);
-                    this.viewId3.setValue(view.viewMat3.data);
-                    this.viewProjId.setValue(view.projViewOffMat.data);
-                    this.viewPosId.setValue(view.positionData);
-                    this.viewIndexId.setValue(v);
-
-                    if (v === 0) {
-                        this.drawInstance(device, drawCall, mesh, style, true);
-                    } else {
-                        this.drawInstance2(device, drawCall, mesh, style);
+                        if (glLayer.depthStencilTexture === null) {
+                            console.log('depth null')
+                            if (this.depthStencilTex === null) {
+                                console.log("MaxViews = " + gl.getParameter(mv_ext.MAX_VIEWS_OVR));
+                                this.depthStencilTex = gl.createTexture();
+                                gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.depthStencilTex);
+                                gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.DEPTH_COMPONENT24, viewport.width, viewport.height, 2);
+                            }
+                        }
+                       if (device.isMultiViewOculus) {
+                          mv_ext.framebufferTextureMultisampleMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.DEPTH_ATTACHMENT, glLayer.depthStencilTexure, 0, 0, 0, 2);
+                       } else {
+                            mv_ext.framebufferTextureMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.DEPTH_ATTACHMENT, glLayer.depthStencilTexure, 0, 0, 2);
+                       }
+                        gl.disable(gl.SCISSOR_TEST);
+                        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
                     }
 
-                    this._forwardDrawCalls++;
+                    _views.push({view, glLayer, viewport});
                 }
+
+                //device.setViewport(view.viewport.x, view.viewport.y, view.viewport.z, view.viewport.w);
+                let view = _views[0].view;
+                this.viewIndexId.setValue(0);
+
+
+                this.projSkyboxId.setValue(view.projMat.data);
+                this.projId.setValue(view.projMat.data);
+                this.viewId.setValue(view.viewOffMat.data);
+                this.viewInvId.setValue(view.viewInvOffMat.data);
+                this.viewId3.setValue(view.viewMat3.data);
+                this.viewProjId.setValue(view.projViewOffMat.data);
+                this.viewPosId.setValue(view.positionData);
+
+                view = view = _views[1].view;
+          //      this.projSkyboxId2.setValue(view.projMat.data);
+            //    this.projId2.setValue(view.projMat.data);
+            //    this.viewId2.setValue(view.viewOffMat.data);
+            //    this.viewInvId2.setValue(view.viewInvOffMat.data);
+            //    this.viewId32.setValue(view.viewMat3.data);
+                this.viewProjId2.setValue(view.projViewOffMat.data);
+           //     this.viewPosId2.setValue(view.positionData);
+                this.drawInstance(device, drawCall, mesh, style, true);
+
+                // if (v === 0) {
+                //     this.drawInstance(device, drawCall, mesh, style, true);
+                // } else {
+                //     this.drawInstance2(device, drawCall, mesh, style);
+                // }
+
+                this._forwardDrawCalls++;
             } else {
                 this.drawInstance(device, drawCall, mesh, style, true);
                 this._forwardDrawCalls++;
@@ -760,12 +807,12 @@ class ForwardRenderer extends Renderer {
 
         const forwardDrawCalls = this._forwardDrawCalls;
         this.renderForward(camera,
-                           visible,
-                           splitLights,
-                           shaderPass,
-                           layer?.onDrawCall,
-                           layer,
-                           flipFaces);
+            visible,
+            splitLights,
+            shaderPass,
+            layer?.onDrawCall,
+            layer,
+            flipFaces);
 
         if (layer)
             layer._forwardDrawCalls += this._forwardDrawCalls - forwardDrawCalls;
@@ -849,7 +896,7 @@ class ForwardRenderer extends Renderer {
             const renderAction = renderActions[i];
             const { layer, camera } = renderAction;
 
-            if (renderAction.useCameraPasses)  {
+            if (renderAction.useCameraPasses) {
 
                 // schedule render passes from the camera
                 camera.camera.renderPasses.forEach((renderPass) => {

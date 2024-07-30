@@ -1063,6 +1063,25 @@ class WebglGraphicsDevice extends GraphicsDevice {
             this.extUintElement = true;
             this.extVertexArrayObject = true;
             this.extColorBufferFloat = this.getExtension('EXT_color_buffer_float');
+            this.isMultiView = false;
+            this.isMultiViewOculus = false;
+            this.extMultiview = gl.getExtension('OCULUS_multiview');
+            if (this.extMultiview) {
+                console.info("OCULUS_multiview extension is supported");
+                this.isMultiView = true;
+                this.isMultiViewOculus = true;
+            }
+            else {
+                console.info("OCULUS_multiview extension is NOT supported");
+                this.extMultiview = gl.getExtension('OVR_multiview2');
+                if (this.extMultiview) {
+                    console.info("OVR_multiview2 extension is supported");
+                    this.isMultiView = true;
+                }
+                else {
+                    console.info("Neither OCULUS_multiview nor OVR_multiview2 extensions are supported");
+                }
+            }
             this.extDepthTexture = true;
             this.textureRG11B10Renderable = true;
         } else {

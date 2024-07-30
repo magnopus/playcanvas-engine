@@ -808,16 +808,8 @@ class XrManager extends EventHandler {
 
     _createBaseLayer() {
         const device = this.app.graphicsDevice;
+        this.xrFramebuffer = device.gl.createFramebuffer();
         const framebufferScaleFactor = (device.maxPixelRatio / window.devicePixelRatio) * this._framebufferScaleFactor;
-
-        this._baseLayer = new XRWebGLLayer(this._session, device.gl, {
-            alpha: true,
-            depth: true,
-            stencil: true,
-            framebufferScaleFactor: framebufferScaleFactor,
-            antialias: false
-        });
-
         const deviceType = device.deviceType;
         if ((deviceType === DEVICETYPE_WEBGL1 || deviceType === DEVICETYPE_WEBGL2) && window.XRWebGLBinding) {
             try {
@@ -826,12 +818,35 @@ class XrManager extends EventHandler {
                 this.fire('error', ex);
             }
         }
+        if ('extMultiview' in device && this.webglBinding) {
+            console.log('multiview mode enabled');
+            device.gl.bindFramebuffer(device.gl.DRAW_FRAMEBUFFER, this.xrFramebuffer);
+            this._projectionLayer = this.webglBinding.createProjectionLayer({
+                textureType: "texture-array",
+                depthFormat: device.gl.DEPTH24_STENCIL8,
+                fixedFoveation: 1
+              });
+              this._session.updateRenderState({
+                layers: [this._projectionLayer],
+                depthNear: this._depthNear,
+                depthFar: 10000
+            });
+        } else {
+            console.error('not in multiview mode')
+            // this._baseLayer = new XRWebGLLayer(this._session, device.gl, {
+            //     alpha: true,
+            //     depth: true,
+            //     stencil: true,
+            //     framebufferScaleFactor: framebufferScaleFactor,
+            //     antialias: false
+            // });
 
-        this._session.updateRenderState({
-            baseLayer: this._baseLayer,
-            depthNear: this._depthNear,
-            depthFar: this._depthFar
-        });
+            // this._session.updateRenderState({
+            //     baseLayer: this._baseLayer,
+            //     depthNear: this._depthNear,
+            //     depthFar: this._depthFar
+            // });
+        }
     }
 
     /** @private */
@@ -877,13 +892,13 @@ class XrManager extends EventHandler {
         if (!this._session) return false;
 
         // canvas resolution should be set on first frame availability or resolution changes
-        const width = frame.session.renderState.baseLayer.framebufferWidth;
-        const height = frame.session.renderState.baseLayer.framebufferHeight;
-        if (this._width !== width || this._height !== height) {
-            this._width = width;
-            this._height = height;
-            this.app.graphicsDevice.setResolution(width, height);
-        }
+        // const width = frame.session.renderState.baseLayer?.framebufferWidth;
+        // const height = frame.session.renderState.baseLayer.framebufferHeight;
+        // if (this._width !== width || this._height !== height) {
+        //     this._width = width;
+        //     this._height = height;
+        //     this.app.graphicsDevice.setResolution(width, height);
+        // }
 
         const pose = frame.getViewerPose(this._referenceSpace);
 

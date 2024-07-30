@@ -353,11 +353,11 @@ class XrView extends EventHandler {
         const layer = frame.session.renderState.baseLayer;
 
         // viewport
-        const viewport = layer.getViewport(this._xrView);
-        this._viewport.x = viewport.x;
-        this._viewport.y = viewport.y;
-        this._viewport.z = viewport.width;
-        this._viewport.w = viewport.height;
+        // const viewport = layer.getViewport(this._xrView);
+        // this._viewport.x = viewport.x;
+        // this._viewport.y = viewport.y;
+        // this._viewport.z = viewport.width;
+        // this._viewport.w = viewport.height;
 
         // matrices
         this._projMat.set(this._xrView.projectionMatrix);
