@@ -889,7 +889,6 @@ class Renderer {
     }
 
     drawInstance(device, meshInstance, mesh, style, normal) {
-
         const modelMatrix = meshInstance.node.worldTransform;
         this.modelMatrixId.setValue(modelMatrix.data);
         if (normal) {

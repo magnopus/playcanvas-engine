@@ -767,8 +767,18 @@ class XrManager extends EventHandler {
 
         // request reference space
         session.requestReferenceSpace(spaceType).then((referenceSpace) => {
+            const device = this.app.graphicsDevice;
             this._referenceSpace = referenceSpace;
-
+            const deviceType = device.deviceType;
+            if ((deviceType === DEVICETYPE_WEBGL1 || deviceType === DEVICETYPE_WEBGL2) && window.XRWebGLBinding) {
+                try {
+                    this.webglBinding = new XRWebGLBinding(this._session, device.gl); // eslint-disable-line no-undef
+                } catch (ex) {
+                    this.fire('error', ex);
+                }
+            }
+            this._projectionLayer = this.webglBinding.createProjectionLayer({ space: referenceSpace, stencil: false });
+            session.updateRenderState({ layers: [this._projectionLayer] });
             // old requestAnimationFrame will never be triggered,
             // so queue up new tick
             this.app.tick();
@@ -808,31 +818,25 @@ class XrManager extends EventHandler {
 
     _createBaseLayer() {
         const device = this.app.graphicsDevice;
-        this.xrFramebuffer = device.gl.createFramebuffer();
         const framebufferScaleFactor = (device.maxPixelRatio / window.devicePixelRatio) * this._framebufferScaleFactor;
-        const deviceType = device.deviceType;
-        if ((deviceType === DEVICETYPE_WEBGL1 || deviceType === DEVICETYPE_WEBGL2) && window.XRWebGLBinding) {
-            try {
-                this.webglBinding = new XRWebGLBinding(this._session, device.gl); // eslint-disable-line no-undef
-            } catch (ex) {
-                this.fire('error', ex);
-            }
-        }
-        if ('extMultiview' in device && this.webglBinding) {
+
+        //if ('extMultiview' in device && this.webglBinding) {
             console.log('multiview mode enabled');
-            device.gl.bindFramebuffer(device.gl.DRAW_FRAMEBUFFER, this.xrFramebuffer);
-            this._projectionLayer = this.webglBinding.createProjectionLayer({
-                textureType: "texture-array",
-                depthFormat: device.gl.DEPTH24_STENCIL8,
-                fixedFoveation: 1
-              });
-              this._session.updateRenderState({
-                layers: [this._projectionLayer],
-                depthNear: this._depthNear,
-                depthFar: 10000
-            });
-        } else {
-            console.error('not in multiview mode')
+            if (!this.xrFramebuffer) {
+                this.xrFramebuffer = device.gl.createFramebuffer();
+            }
+            //device.gl.bindFramebuffer(device.gl.DRAW_FRAMEBUFFER, this.xrFramebuffer);
+            // this._projectionLayer = this.webglBinding.createProjectionLayer({
+            //     textureType: "texture-array",
+            //     depthFormat: device.gl.DEPTH_COMPONENT24,
+            //   });
+            //   this._session.updateRenderState({
+            //     layers: [this._projectionLayer],
+            //     depthNear: this._depthNear,
+            //     depthFar: 10000
+            // });
+        //} else {
+            console.warn('not in multiview mode')
             // this._baseLayer = new XRWebGLLayer(this._session, device.gl, {
             //     alpha: true,
             //     depth: true,
@@ -846,7 +850,7 @@ class XrManager extends EventHandler {
             //     depthNear: this._depthNear,
             //     depthFar: this._depthFar
             // });
-        }
+       // }
     }
 
     /** @private */

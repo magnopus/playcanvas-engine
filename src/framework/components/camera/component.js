@@ -1009,14 +1009,14 @@ class CameraComponent extends Component {
      */
     startXr(type, spaceType, options) {
         if (type === XRTYPE_VR) {
-           const renderComponents = app?.root?.findComponents('render');
-           for (const r of renderComponents) {
-            for (const mesh of r.meshInstances) {
-                const mat = mesh.material;
-                mat.multiView = true;
-                mat.update();
-            }
-           }
+        //    const renderComponents = app?.root?.findComponents('render');
+        //    for (const r of renderComponents) {
+        //     for (const mesh of r.meshInstances) {
+        //         const mat = mesh.material;
+        //         mat.multiView = true;
+        //         mat.update();
+        //     }
+        //    }
         }
         this.system.app.xr.start(this, type, spaceType, options);
     }

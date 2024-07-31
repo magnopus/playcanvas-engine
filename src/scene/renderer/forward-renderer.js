@@ -606,46 +606,60 @@ class ForwardRenderer extends Renderer {
             let _views = [];
             if (camera.xr && camera.xr.session && camera.xr.views.list.length) {
                 const xr = camera.xr;
+                if (!xr.xrFramebuffer) {
+                    xr.xrFramebuffer = gl.createFramebuffer();
+                }
                 const views = xr.views;
+                gl.bindFramebuffer(gl.FRAMEBUFFER, xr.xrFramebuffer);
                 for (let v = 0; v < views.list.length; v++) {
                     const view = views.list[v];
-                    glLayer = xr.webglBinding.getViewSubImage(xr.session.renderState.layers[0], view._xrView);
+
+                    let viewport = null;
+                    let glLayer = xr.webglBinding.getViewSubImage(xr._projectionLayer, view._xrView);
                     glLayer.framebuffer = xr.xrFramebuffer;
+                    viewport = glLayer.viewport;
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, xr.xrFramebuffer);
+                    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, glLayer.colorTexture, 0);
+                    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, glLayer.depthStencilTexture, 0);
+
+                    gl.enable(gl.SCISSOR_TEST);
+                    gl.scissor(viewport.x, viewport.y, viewport.width, viewport.height);
+                    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                    gl.disable(gl.SCISSOR_TEST);
+
+                //     glLayer = xr.webglBinding.getViewSubImage(xr.session.renderState.layers[0], view._xrView);
+                //     gl.bindFramebuffer(gl.FRAMEBUFFER, xr.xrFramebuffer);
+                //   // console.log('glLayer fb',glLayer.framebuffer)
+                //     //glLayer.framebuffer = xr.xrFramebuffer;
                     
-                    
-                    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, xr.xrFramebuffer);
-                    let viewport = glLayer.viewport;
-                    const mv_ext = device.extMultiview;
-                    if (_views.length == 0) { // for multiview we need to set fbo only once, so only do this for the first view
-                       if (device.isMultiViewOculus) {
-                           mv_ext.framebufferTextureMultisampleMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, glLayer.colorTexture, 0, 0, 0, 2);
-                       } else {
-                            mv_ext.framebufferTextureMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, glLayer.colorTexture, 0, 0, 2);
-                        }
+                
+                //     let viewport = glLayer.viewport;
+                //     const mv_ext = device.extMultiview;
+                //     if (_views.length == 0) { // for multiview we need to set fbo only once, so only do this for the first view
+                //        if (device.isMultiViewOculus) {
+                //            mv_ext.framebufferTextureMultisampleMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, glLayer.colorTexture, 0, 0, 0, 2);
+                //        } else {
+                //             mv_ext.framebufferTextureMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, glLayer.colorTexture, 0, 0, 2);
+                //         }
 
-                        if (glLayer.depthStencilTexture === null) {
-                            console.log('depth null')
-                            if (this.depthStencilTex === null) {
-                                console.log("MaxViews = " + gl.getParameter(mv_ext.MAX_VIEWS_OVR));
-                                this.depthStencilTex = gl.createTexture();
-                                gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.depthStencilTex);
-                                gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.DEPTH_COMPONENT24, viewport.width, viewport.height, 2);
-                            }
-                        }
-                       if (device.isMultiViewOculus) {
-                          mv_ext.framebufferTextureMultisampleMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.DEPTH_ATTACHMENT, glLayer.depthStencilTexure, 0, 0, 0, 2);
-                       } else {
-                            mv_ext.framebufferTextureMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.DEPTH_ATTACHMENT, glLayer.depthStencilTexure, 0, 0, 2);
-                       }
-                        gl.disable(gl.SCISSOR_TEST);
-                        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-                    }
-
-                    _views.push({view, glLayer, viewport});
-                }
-
-                //device.setViewport(view.viewport.x, view.viewport.y, view.viewport.z, view.viewport.w);
-                let view = _views[0].view;
+                //         // if (glLayer.depthStencilTexture === null) {
+                //         //     console.log('depth null')
+                //         //     if (this.depthStencilTex === null) {
+                //         //         console.log("MaxViews = " + gl.getParameter(mv_ext.MAX_VIEWS_OVR));
+                //         //         this.depthStencilTex = gl.createTexture();
+                //         //         gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.depthStencilTex);
+                //         //         gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.DEPTH_COMPONENT24, viewport.width, viewport.height, 2);
+                //         //     }
+                //         // }
+                //     //    if (device.isMultiViewOculus) {
+                //     //       mv_ext.framebufferTextureMultisampleMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.DEPTH_ATTACHMENT, glLayer.depthStencilTexure, 0, 0, 0, 2);
+                //     //    } else {
+                //     //         mv_ext.framebufferTextureMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.DEPTH_ATTACHMENT, glLayer.depthStencilTexure, 0, 0, 2);
+                //     //    }
+                //         gl.disable(gl.SCISSOR_TEST);
+                //         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                //     }
+                //let view = _views[0].view;
                 this.viewIndexId.setValue(0);
 
 
@@ -657,21 +671,28 @@ class ForwardRenderer extends Renderer {
                 this.viewProjId.setValue(view.projViewOffMat.data);
                 this.viewPosId.setValue(view.positionData);
 
-                view = view = _views[1].view;
+                //view = view = _views[1].view;
           //      this.projSkyboxId2.setValue(view.projMat.data);
             //    this.projId2.setValue(view.projMat.data);
             //    this.viewId2.setValue(view.viewOffMat.data);
             //    this.viewInvId2.setValue(view.viewInvOffMat.data);
             //    this.viewId32.setValue(view.viewMat3.data);
                 this.viewProjId2.setValue(view.projViewOffMat.data);
+                
+        device.defaultFramebuffer = xr.xrFramebuffer;
            //     this.viewPosId2.setValue(view.positionData);
-                this.drawInstance(device, drawCall, mesh, style, true);
+           if (v === 0) {
+            this.drawInstance(device, drawCall, mesh, style, true);
+        } else {
+            this.drawInstance2(device, drawCall, mesh, style);
+        }
+                    _views.push({view, glLayer, viewport});
+                }
 
-                // if (v === 0) {
-                //     this.drawInstance(device, drawCall, mesh, style, true);
-                // } else {
-                //     this.drawInstance2(device, drawCall, mesh, style);
-                // }
+                //device.setViewport(view.viewport.x, view.viewport.y, view.viewport.z, view.viewport.w);
+        
+
+             
 
                 this._forwardDrawCalls++;
             } else {
