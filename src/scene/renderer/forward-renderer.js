@@ -611,6 +611,7 @@ class ForwardRenderer extends Renderer {
                 }
                 const views = xr.views;
                 gl.bindFramebuffer(gl.FRAMEBUFFER, xr.xrFramebuffer);
+                globalThis.gl = gl;
                 for (let v = 0; v < views.list.length; v++) {
                     const view = views.list[v];
 
@@ -621,11 +622,11 @@ class ForwardRenderer extends Renderer {
                     gl.bindFramebuffer(gl.FRAMEBUFFER, xr.xrFramebuffer);
                     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, glLayer.colorTexture, 0);
                     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, glLayer.depthStencilTexture, 0);
-
-                    gl.enable(gl.SCISSOR_TEST);
-                    gl.scissor(viewport.x, viewport.y, viewport.width, viewport.height);
-                    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-                    gl.disable(gl.SCISSOR_TEST);
+                    device.setViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+                   // gl.enable(gl.SCISSOR_TEST);
+                   // gl.scissor(viewport.x, viewport.y, viewport.width, viewport.height);
+                 //   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                   // gl.disable(gl.SCISSOR_TEST);
 
                 //     glLayer = xr.webglBinding.getViewSubImage(xr.session.renderState.layers[0], view._xrView);
                 //     gl.bindFramebuffer(gl.FRAMEBUFFER, xr.xrFramebuffer);
@@ -660,7 +661,7 @@ class ForwardRenderer extends Renderer {
                 //         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
                 //     }
                 //let view = _views[0].view;
-                this.viewIndexId.setValue(0);
+                this.viewIndexId.setValue(v);
 
 
                 this.projSkyboxId.setValue(view.projMat.data);
@@ -679,7 +680,7 @@ class ForwardRenderer extends Renderer {
             //    this.viewId32.setValue(view.viewMat3.data);
                 this.viewProjId2.setValue(view.projViewOffMat.data);
                 
-        device.defaultFramebuffer = xr.xrFramebuffer;
+       // device.defaultFramebuffer = xr.xrFramebuffer;
            //     this.viewPosId2.setValue(view.positionData);
            if (v === 0) {
             this.drawInstance(device, drawCall, mesh, style, true);

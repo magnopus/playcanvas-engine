@@ -777,7 +777,12 @@ class XrManager extends EventHandler {
                     this.fire('error', ex);
                 }
             }
-            this._projectionLayer = this.webglBinding.createProjectionLayer({ space: referenceSpace, stencil: false });
+            this._projectionLayer = this.webglBinding.createProjectionLayer({
+                //space: referenceSpace,
+               // stencil: false
+               fixedFoveation: 1,
+               depthFormat: device.gl.DEPTH24_STENCIL24
+            });
             session.updateRenderState({ layers: [this._projectionLayer] });
             // old requestAnimationFrame will never be triggered,
             // so queue up new tick
@@ -822,9 +827,9 @@ class XrManager extends EventHandler {
 
         //if ('extMultiview' in device && this.webglBinding) {
             console.log('multiview mode enabled');
-            if (!this.xrFramebuffer) {
-                this.xrFramebuffer = device.gl.createFramebuffer();
-            }
+            // if (!this.xrFramebuffer) {
+            //     this.xrFramebuffer = device.gl.createFramebuffer();
+            // }
             //device.gl.bindFramebuffer(device.gl.DRAW_FRAMEBUFFER, this.xrFramebuffer);
             // this._projectionLayer = this.webglBinding.createProjectionLayer({
             //     textureType: "texture-array",
@@ -894,15 +899,23 @@ class XrManager extends EventHandler {
      */
     update(frame) {
         if (!this._session) return false;
-
+        const layer = frame.session.renderState.baseLayer ?? frame.session.renderState.layers[0];
+        let width = 0;
+        let height = 0;
         // canvas resolution should be set on first frame availability or resolution changes
-        // const width = frame.session.renderState.baseLayer?.framebufferWidth;
-        // const height = frame.session.renderState.baseLayer.framebufferHeight;
-        // if (this._width !== width || this._height !== height) {
-        //     this._width = width;
-        //     this._height = height;
-        //     this.app.graphicsDevice.setResolution(width, height);
-        // }
+        if ('framebufferWidth' in layer) {
+            width = layer.framebufferWidth;
+            height = layer.framebufferHeight;
+        } else {
+            width = layer.textureWidth;
+            height = layer.textureHeight;
+        }
+    
+        if (this._width !== width || this._height !== height) {
+            this._width = width;
+            this._height = height;
+            this.app.graphicsDevice.setResolution(width, height);
+        }
 
         const pose = frame.getViewerPose(this._referenceSpace);
 
