@@ -777,13 +777,7 @@ class XrManager extends EventHandler {
                     this.fire('error', ex);
                 }
             }
-            this._projectionLayer = this.webglBinding.createProjectionLayer({
-                //space: referenceSpace,
-               // stencil: false
-               fixedFoveation: 1,
-               depthFormat: device.gl.DEPTH24_STENCIL24
-            });
-            session.updateRenderState({ layers: [this._projectionLayer] });
+
             // old requestAnimationFrame will never be triggered,
             // so queue up new tick
             this.app.tick();
@@ -825,37 +819,29 @@ class XrManager extends EventHandler {
         const device = this.app.graphicsDevice;
         const framebufferScaleFactor = (device.maxPixelRatio / window.devicePixelRatio) * this._framebufferScaleFactor;
 
-        //if ('extMultiview' in device && this.webglBinding) {
-            console.log('multiview mode enabled');
-            // if (!this.xrFramebuffer) {
-            //     this.xrFramebuffer = device.gl.createFramebuffer();
-            // }
-            //device.gl.bindFramebuffer(device.gl.DRAW_FRAMEBUFFER, this.xrFramebuffer);
-            // this._projectionLayer = this.webglBinding.createProjectionLayer({
-            //     textureType: "texture-array",
-            //     depthFormat: device.gl.DEPTH_COMPONENT24,
-            //   });
-            //   this._session.updateRenderState({
-            //     layers: [this._projectionLayer],
-            //     depthNear: this._depthNear,
-            //     depthFar: 10000
-            // });
-        //} else {
-            console.warn('not in multiview mode')
-            // this._baseLayer = new XRWebGLLayer(this._session, device.gl, {
-            //     alpha: true,
-            //     depth: true,
-            //     stencil: true,
-            //     framebufferScaleFactor: framebufferScaleFactor,
-            //     antialias: false
-            // });
+        if (device.extMultiview) {
+            this._projectionLayer = this.webglBinding.createProjectionLayer({
+                //space: referenceSpace,
+            // stencil: false
+            fixedFoveation: 1,
+            depthFormat: device.gl.DEPTH24_STENCIL24
+            });
+            session.updateRenderState({ layers: [this._projectionLayer] });
+        } else {
+            this._baseLayer = new XRWebGLLayer(this._session, device.gl, {
+                alpha: true,
+                depth: true,
+                stencil: true,
+                framebufferScaleFactor: framebufferScaleFactor,
+                antialias: false
+            });
 
-            // this._session.updateRenderState({
-            //     baseLayer: this._baseLayer,
-            //     depthNear: this._depthNear,
-            //     depthFar: this._depthFar
-            // });
-       // }
+            this._session.updateRenderState({
+                baseLayer: this._baseLayer,
+                depthNear: this._depthNear,
+                depthFar: this._depthFar
+            });
+        }
     }
 
     /** @private */
