@@ -1028,7 +1028,6 @@ class WebglGraphicsDevice extends GraphicsDevice {
         return null;
     }
 
-    /** @ignore */
     get extDisjointTimerQuery() {
         // lazy evaluation as this is not typically used
         if (!this._extDisjointTimerQuery) {
@@ -1417,8 +1416,8 @@ class WebglGraphicsDevice extends GraphicsDevice {
      *
      * @param {RenderTarget} [source] - The source render target. Defaults to frame buffer.
      * @param {RenderTarget} [dest] - The destination render target. Defaults to frame buffer.
-     * @param {boolean} [color] - If true will copy the color buffer. Defaults to false.
-     * @param {boolean} [depth] - If true will copy the depth buffer. Defaults to false.
+     * @param {boolean} [color] - If true, will copy the color buffer. Defaults to false.
+     * @param {boolean} [depth] - If true, will copy the depth buffer. Defaults to false.
      * @returns {boolean} True if the copy was successful, false otherwise.
      */
     copyRenderTarget(source, dest, color, depth) {
@@ -1467,21 +1466,21 @@ class WebglGraphicsDevice extends GraphicsDevice {
 
         DebugGraphics.pushGpuMarker(this, 'COPY-RT');
 
-        if (this.isWebGL2 && dest) {
+        if (this.isWebGL2) {
             const prevRt = this.renderTarget;
             this.renderTarget = dest;
             this.updateBegin();
 
             // copy from single sampled framebuffer
             const src = source ? source.impl._glFrameBuffer : this.backBuffer?.impl._glFrameBuffer;
+            const dst = dest ? dest.impl._glFrameBuffer : this.backBuffer?.impl._glFrameBuffer;
 
-            const dst = dest.impl._glFrameBuffer;
             Debug.assert(src !== dst, 'Source and destination framebuffers must be different when blitting.');
 
             gl.bindFramebuffer(gl.READ_FRAMEBUFFER, src);
             gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, dst);
-            const w = source ? source.width : dest.width;
-            const h = source ? source.height : dest.height;
+            const w = source ? source.width : dest ? dest.width : this.width;
+            const h = source ? source.height : dest ? dest.height : this.height;
 
             gl.blitFramebuffer(0, 0, w, h,
                                0, 0, w, h,
@@ -2335,6 +2334,10 @@ class WebglGraphicsDevice extends GraphicsDevice {
                     this.gl.clearStencil(stencil);
                     this.clearStencil = stencil;
                 }
+
+                gl.stencilMask(0xFF);
+                this.stencilWriteMaskFront = 0xFF;
+                this.stencilWriteMaskBack = 0xFF;
             }
 
             // Clear the frame buffer
@@ -2818,7 +2821,7 @@ class WebglGraphicsDevice extends GraphicsDevice {
     }
 
     /**
-     * Fullscreen mode.
+     * Sets whether the device is currently in fullscreen mode.
      *
      * @type {boolean}
      */
@@ -2831,6 +2834,11 @@ class WebglGraphicsDevice extends GraphicsDevice {
         }
     }
 
+    /**
+     * Gets whether the device is currently in fullscreen mode.
+     *
+     * @type {boolean}
+     */
     get fullscreen() {
         return !!document.fullscreenElement;
     }
