@@ -67,6 +67,7 @@ class ForwardRenderer extends Renderer {
      */
     constructor(graphicsDevice) {
         super(graphicsDevice);
+
         const device = this.device;
 
         this._forwardDrawCalls = 0;
@@ -124,7 +125,6 @@ class ForwardRenderer extends Renderer {
 
         this.pcssDiskSamples = vogelDiskPrecalculationSamples(16);
         this.pcssSphereSamples = vogelSpherePrecalculationSamples(16);
-        this.depthStencilTex = undefined;
     }
 
     destroy() {
@@ -601,472 +601,375 @@ class ForwardRenderer extends Renderer {
             device.setIndexBuffer(mesh.indexBuffer[style]);
 
             drawCallback?.(drawCall, i);
-            const gl = device.gl;
-            globalThis.gl = gl;
-            let glLayer;
-            let _views = [];
+
             if (camera.xr && camera.xr.session && camera.xr.views.list.length) {
-                const xr = camera.xr;
-                const views = xr.views;
-                if (xr.extMultiview) {
-                    if (!xr.xrFramebuffer) {
-                        xr.xrFramebuffer = gl.createFramebuffer();
+                const views = camera.xr.views;
+
+                for (let v = 0; v < views.list.length; v++) {
+                    const view = views.list[v];
+
+                    device.setViewport(view.viewport.x, view.viewport.y, view.viewport.z, view.viewport.w);
+
+                    this.projId.setValue(view.projMat.data);
+                    this.projSkyboxId.setValue(view.projMat.data);
+                    this.viewId.setValue(view.viewOffMat.data);
+                    this.viewInvId.setValue(view.viewInvOffMat.data);
+                    this.viewId3.setValue(view.viewMat3.data);
+                    this.viewProjId.setValue(view.projViewOffMat.data);
+                    this.viewPosId.setValue(view.positionData);
+                    this.viewIndexId.setValue(v);
+
+                    if (v === 0) {
+                        this.drawInstance(device, drawCall, mesh, style, true);
+                    } else {
+                        this.drawInstance2(device, drawCall, mesh, style);
                     }
-                    gl.bindFramebuffer(gl.FRAMEBUFFER, xr.xrFramebuffer);
-                    for (let v = 0; v < views.list.length; v++) {
-                        const view = views.list[v];
 
-                        let viewport = null;
-                        let glLayer = xr.webglBinding.getViewSubImage(xr._projectionLayer, view._xrView);
-                        glLayer.framebuffer = xr.xrFramebuffer;
-                        viewport = glLayer.viewport;
-                        gl.bindFramebuffer(gl.FRAMEBUFFER, xr.xrFramebuffer);
-                        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, glLayer.colorTexture, 0);
-                        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, glLayer.depthStencilTexture, 0);
-                        device.setViewport(viewport.x, viewport.y, viewport.width, viewport.height);
-                        this.viewIndexId.setValue(v);
-
-
-                        this.projSkyboxId.setValue(view.projMat.data);
-                        this.projId.setValue(view.projMat.data);
-                        this.viewId.setValue(view.viewOffMat.data);
-                        this.viewInvId.setValue(view.viewInvOffMat.data);
-                        this.viewId3.setValue(view.viewMat3.data);
-                        this.viewProjId.setValue(view.projViewOffMat.data);
-                        this.viewPosId.setValue(view.positionData);
-
-                        //view = view = _views[1].view;
-                        //      this.projSkyboxId2.setValue(view.projMat.data);
-                        //    this.projId2.setValue(view.projMat.data);
-                        //    this.viewId2.setValue(view.viewOffMat.data);
-                        //    this.viewInvId2.setValue(view.viewInvOffMat.data);
-                        //    this.viewId32.setValue(view.viewMat3.data);
-                        this.viewProjId2.setValue(view.projViewOffMat.data);
-
-                        // device.defaultFramebuffer = xr.xrFramebuffer;
-                        //     this.viewPosId2.setValue(view.positionData);
-                        if (v === 0) {
-                            this.drawInstance(device, drawCall, mesh, style, true);
-                        } else {
-                            this.drawInstance2(device, drawCall, mesh, style);
-                        }
-                        _views.push({ view, glLayer, viewport });
-                    }
-                } else {
-                    for (let v = 0; v < views.list.length; v++) {
-                        const view = views.list[v];
-    
-                        device.setViewport(view.viewport.x, view.viewport.y, view.viewport.z, view.viewport.w);
-    
-                        this.projId.setValue(view.projMat.data);
-                        this.projSkyboxId.setValue(view.projMat.data);
-                        this.viewId.setValue(view.viewOffMat.data);
-                        this.viewInvId.setValue(view.viewInvOffMat.data);
-                        this.viewId3.setValue(view.viewMat3.data);
-                        this.viewProjId.setValue(view.projViewOffMat.data);
-                        this.viewPosId.setValue(view.positionData);
-                        this.viewIndexId.setValue(v);
-    
-                        if (v === 0) {
-                            this.drawInstance(device, drawCall, mesh, style, true);
-                        } else {
-                            this.drawInstance2(device, drawCall, mesh, style);
-                        }
-    
-                        this._forwardDrawCalls++;
-                    }
+                    this._forwardDrawCalls++;
                 }
+            } else {
+                this.drawInstance(device, drawCall, mesh, style, true);
+                this._forwardDrawCalls++;
+            }
 
-                // gl.enable(gl.SCISSOR_TEST);
-                // gl.scissor(viewport.x, viewport.y, viewport.width, viewport.height);
-                //   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-                // gl.disable(gl.SCISSOR_TEST);
+            // Unset meshInstance overrides back to material values if next draw call will use the same material
+            if (i < preparedCallsCount - 1 && !preparedCalls.isNewMaterial[i + 1]) {
+                material.setParameters(device, drawCall.parameters);
+            }
 
-                //     glLayer = xr.webglBinding.getViewSubImage(xr.session.renderState.layers[0], view._xrView);
-                //     gl.bindFramebuffer(gl.FRAMEBUFFER, xr.xrFramebuffer);
-                //   // console.log('glLayer fb',glLayer.framebuffer)
-                //     //glLayer.framebuffer = xr.xrFramebuffer;
-
-
-                //     let viewport = glLayer.viewport;
-                //     const mv_ext = device.extMultiview;
-                //     if (_views.length == 0) { // for multiview we need to set fbo only once, so only do this for the first view
-                //        if (device.isMultiViewOculus) {
-                //            mv_ext.framebufferTextureMultisampleMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, glLayer.colorTexture, 0, 0, 0, 2);
-                //        } else {
-                //             mv_ext.framebufferTextureMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, glLayer.colorTexture, 0, 0, 2);
-                //         }
-
-                //         // if (glLayer.depthStencilTexture === null) {
-                //         //     console.log('depth null')
-                //         //     if (this.depthStencilTex === null) {
-                //         //         console.log("MaxViews = " + gl.getParameter(mv_ext.MAX_VIEWS_OVR));
-                //         //         this.depthStencilTex = gl.createTexture();
-                //         //         gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.depthStencilTex);
-                //         //         gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.DEPTH_COMPONENT24, viewport.width, viewport.height, 2);
-                //         //     }
-                //         // }
-                //     //    if (device.isMultiViewOculus) {
-                //     //       mv_ext.framebufferTextureMultisampleMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.DEPTH_ATTACHMENT, glLayer.depthStencilTexure, 0, 0, 0, 2);
-                //     //    } else {
-                //     //         mv_ext.framebufferTextureMultiviewOVR(gl.DRAW_FRAMEBUFFER, gl.DEPTH_ATTACHMENT, glLayer.depthStencilTexure, 0, 0, 2);
-                //     //    }
-                //         gl.disable(gl.SCISSOR_TEST);
-                //         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-                //     }
-                //let view = _views[0].view;
-
-            
-
-            //device.setViewport(view.viewport.x, view.viewport.y, view.viewport.z, view.viewport.w);
-
-
-
-
-            this._forwardDrawCalls++;
-        } else {
-            this.drawInstance(device, drawCall, mesh, style, true);
-            this._forwardDrawCalls++;
+            DebugGraphics.popGpuMarker(device);
         }
-
-        // Unset meshInstance overrides back to material values if next draw call will use the same material
-        if (i < preparedCallsCount - 1 && !preparedCalls.isNewMaterial[i + 1]) {
-            material.setParameters(device, drawCall.parameters);
-        }
-
-        DebugGraphics.popGpuMarker(device);
-    }
-}
-
-renderForward(camera, allDrawCalls, sortedLights, pass, drawCallback, layer, flipFaces) {
-
-    // #if _PROFILER
-    const forwardStartTime = now();
-    // #endif
-
-    // run first pass over draw calls and handle material / shader updates
-    const preparedCalls = this.renderForwardPrepareMaterials(camera, allDrawCalls, sortedLights, layer, pass);
-
-    // render mesh instances
-    this.renderForwardInternal(camera, preparedCalls, sortedLights, pass, drawCallback, flipFaces);
-
-    _drawCallList.clear();
-
-    // #if _PROFILER
-    this._forwardTime += now() - forwardStartTime;
-    // #endif
-}
-
-/**
- * Forward render mesh instances on a specified layer, using a camera and a render target.
- * Shaders used are based on the shaderPass provided, with optional clustered lighting support.
- *
- * @param {import('../camera.js').Camera} camera - The
- * camera.
- * @param {import('../../platform/graphics/render-target.js').RenderTarget|undefined} renderTarget - The
- * render target.
- * @param {import('../layer.js').Layer} layer - The layer.
- * @param {boolean} transparent - True if transparent sublayer should be rendered, opaque
- * otherwise.
- * @param {number} shaderPass - A type of shader to use during rendering.
- * @param {import('../../platform/graphics/bind-group.js').BindGroup[]} viewBindGroups - An array
- * storing the view level bing groups (can be empty array, and this function populates if per
- * view).
- * @param {object} [options] - Object for passing optional arguments.
- * @param {boolean} [options.clearColor] - True if the color buffer should be cleared.
- * @param {boolean} [options.clearDepth] - True if the depth buffer should be cleared.
- * @param {boolean} [options.clearStencil] - True if the stencil buffer should be cleared.
- * @param {import('../lighting/world-clusters.js').WorldClusters} [options.lightClusters] - The
- * world clusters object to be used for clustered lighting.
- * @param {import('../mesh-instance.js').MeshInstance[]} [options.meshInstances] - The mesh
- * instances to be rendered. Use when layer is not provided.
- * @param {object} [options.splitLights] - The split lights to be used for clustered lighting.
- */
-renderForwardLayer(camera, renderTarget, layer, transparent, shaderPass, viewBindGroups, options = {}) {
-
-    const { scene, device } = this;
-    const clusteredLightingEnabled = scene.clusteredLightingEnabled;
-
-    this.setupViewport(camera, renderTarget);
-
-    // clearing
-    const clearColor = options.clearColor ?? false;
-    const clearDepth = options.clearDepth ?? false;
-    const clearStencil = options.clearStencil ?? false;
-    if (clearColor || clearDepth || clearStencil) {
-        this.clear(camera, clearColor, clearDepth, clearStencil);
     }
 
-    let visible, splitLights;
-    if (layer) {
-        // #if _PROFILER
-        const sortTime = now();
-        // #endif
-
-        layer.sortVisible(camera, transparent);
+    renderForward(camera, allDrawCalls, sortedLights, pass, drawCallback, layer, flipFaces) {
 
         // #if _PROFILER
-        this._sortTime += now() - sortTime;
+        const forwardStartTime = now();
         // #endif
 
-        const culledInstances = layer.getCulledInstances(camera);
-        visible = transparent ? culledInstances.transparent : culledInstances.opaque;
+        // run first pass over draw calls and handle material / shader updates
+        const preparedCalls = this.renderForwardPrepareMaterials(camera, allDrawCalls, sortedLights, layer, pass);
 
-        // add debug mesh instances to visible list
-        scene.immediate.onPreRenderLayer(layer, visible, transparent);
+        // render mesh instances
+        this.renderForwardInternal(camera, preparedCalls, sortedLights, pass, drawCallback, flipFaces);
 
-        // set up layer uniforms
-        if (layer.requiresLightCube) {
-            this.lightCube.update(scene.ambientLight, layer._lights);
-            this.constantLightCube.setValue(this.lightCube.colors);
-        }
+        _drawCallList.clear();
 
-        splitLights = layer.splitLights;
-
-    } else {
-        visible = options.meshInstances;
-        splitLights = options.splitLights ?? _noLights;
+        // #if _PROFILER
+        this._forwardTime += now() - forwardStartTime;
+        // #endif
     }
 
-    Debug.assert(visible, 'Either layer or options.meshInstances must be provided');
+    /**
+     * Forward render mesh instances on a specified layer, using a camera and a render target.
+     * Shaders used are based on the shaderPass provided, with optional clustered lighting support.
+     *
+     * @param {import('../camera.js').Camera} camera - The
+     * camera.
+     * @param {import('../../platform/graphics/render-target.js').RenderTarget|undefined} renderTarget - The
+     * render target.
+     * @param {import('../layer.js').Layer} layer - The layer.
+     * @param {boolean} transparent - True if transparent sublayer should be rendered, opaque
+     * otherwise.
+     * @param {number} shaderPass - A type of shader to use during rendering.
+     * @param {import('../../platform/graphics/bind-group.js').BindGroup[]} viewBindGroups - An array
+     * storing the view level bing groups (can be empty array, and this function populates if per
+     * view).
+     * @param {object} [options] - Object for passing optional arguments.
+     * @param {boolean} [options.clearColor] - True if the color buffer should be cleared.
+     * @param {boolean} [options.clearDepth] - True if the depth buffer should be cleared.
+     * @param {boolean} [options.clearStencil] - True if the stencil buffer should be cleared.
+     * @param {import('../lighting/world-clusters.js').WorldClusters} [options.lightClusters] - The
+     * world clusters object to be used for clustered lighting.
+     * @param {import('../mesh-instance.js').MeshInstance[]} [options.meshInstances] - The mesh
+     * instances to be rendered. Use when layer is not provided.
+     * @param {object} [options.splitLights] - The split lights to be used for clustered lighting.
+     */
+    renderForwardLayer(camera, renderTarget, layer, transparent, shaderPass, viewBindGroups, options = {}) {
 
-    // upload clustered lights uniforms
-    if (clusteredLightingEnabled) {
-        const lightClusters = options.lightClusters ?? this.worldClustersAllocator.empty;
-        lightClusters.activate();
+        const { scene, device } = this;
+        const clusteredLightingEnabled = scene.clusteredLightingEnabled;
 
-        // debug rendering of clusters
+        this.setupViewport(camera, renderTarget);
+
+        // clearing
+        const clearColor = options.clearColor ?? false;
+        const clearDepth = options.clearDepth ?? false;
+        const clearStencil = options.clearStencil ?? false;
+        if (clearColor || clearDepth || clearStencil) {
+            this.clear(camera, clearColor, clearDepth, clearStencil);
+        }
+
+        let visible, splitLights;
         if (layer) {
-            if (!this.clustersDebugRendered && scene.lighting.debugLayer === layer.id) {
-                this.clustersDebugRendered = true;
-                WorldClustersDebug.render(lightClusters, this.scene);
+            // #if _PROFILER
+            const sortTime = now();
+            // #endif
+
+            layer.sortVisible(camera, transparent);
+
+            // #if _PROFILER
+            this._sortTime += now() - sortTime;
+            // #endif
+
+            const culledInstances = layer.getCulledInstances(camera);
+            visible = transparent ? culledInstances.transparent : culledInstances.opaque;
+
+            // add debug mesh instances to visible list
+            scene.immediate.onPreRenderLayer(layer, visible, transparent);
+
+            // set up layer uniforms
+            if (layer.requiresLightCube) {
+                this.lightCube.update(scene.ambientLight, layer._lights);
+                this.constantLightCube.setValue(this.lightCube.colors);
             }
-        }
-    }
 
-    // Set the not very clever global variable which is only useful when there's just one camera
-    scene._activeCamera = camera;
-
-    const viewCount = this.setCameraUniforms(camera, renderTarget);
-    if (device.supportsUniformBuffers) {
-        this.setupViewUniformBuffers(viewBindGroups, this.viewUniformFormat, this.viewBindGroupFormat, viewCount);
-    }
-
-    // enable flip faces if either the camera has _flipFaces enabled or the render target has flipY enabled
-    const flipFaces = !!(camera._flipFaces ^ renderTarget?.flipY);
-
-    const forwardDrawCalls = this._forwardDrawCalls;
-    this.renderForward(camera,
-        visible,
-        splitLights,
-        shaderPass,
-        layer?.onDrawCall,
-        layer,
-        flipFaces);
-
-    if (layer)
-        layer._forwardDrawCalls += this._forwardDrawCalls - forwardDrawCalls;
-}
-
-setSceneConstants() {
-    const scene = this.scene;
-
-    // Set up ambient/exposure
-    this.dispatchGlobalLights(scene);
-
-    // Set up the fog
-    if (scene.fog !== FOG_NONE) {
-        this.fogColor[0] = scene.fogColor.r;
-        this.fogColor[1] = scene.fogColor.g;
-        this.fogColor[2] = scene.fogColor.b;
-        if (scene.gammaCorrection) {
-            for (let i = 0; i < 3; i++) {
-                this.fogColor[i] = Math.pow(this.fogColor[i], 2.2);
-            }
-        }
-        this.fogColorId.setValue(this.fogColor);
-        if (scene.fog === FOG_LINEAR) {
-            this.fogStartId.setValue(scene.fogStart);
-            this.fogEndId.setValue(scene.fogEnd);
-        } else {
-            this.fogDensityId.setValue(scene.fogDensity);
-        }
-    }
-
-    // Set up screen size // should be RT size?
-    const device = this.device;
-    this._screenSize[0] = device.width;
-    this._screenSize[1] = device.height;
-    this._screenSize[2] = 1 / device.width;
-    this._screenSize[3] = 1 / device.height;
-    this.screenSizeId.setValue(this._screenSize);
-
-    this.pcssDiskSamplesId.setValue(this.pcssDiskSamples);
-    this.pcssSphereSamplesId.setValue(this.pcssSphereSamples);
-}
-
-/**
- * Builds a frame graph for the rendering of the whole frame.
- *
- * @param {import('../frame-graph.js').FrameGraph} frameGraph - The frame-graph that is built.
- * @param {import('../composition/layer-composition.js').LayerComposition} layerComposition - The
- * layer composition used to build the frame graph.
- * @ignore
- */
-buildFrameGraph(frameGraph, layerComposition) {
-
-    const scene = this.scene;
-    const webgl1 = this.device.isWebGL1;
-    frameGraph.reset();
-
-    // update composition, cull everything, assign atlas slots for clustered lighting
-    this.update(layerComposition);
-
-    if (scene.clusteredLightingEnabled) {
-
-        // clustered lighting passes
-        const { shadowsEnabled, cookiesEnabled } = scene.lighting;
-        this._renderPassUpdateClustered.update(frameGraph, shadowsEnabled, cookiesEnabled, this.lights, this.localLights);
-        frameGraph.addRenderPass(this._renderPassUpdateClustered);
-
-    } else {
-
-        // non-clustered local shadows - these are shared by all cameras (not entirely correctly)
-        this._shadowRendererLocal.buildNonClusteredRenderPasses(frameGraph, this.localLights);
-    }
-
-    // main passes
-    let startIndex = 0;
-    let newStart = true;
-    let renderTarget = null;
-    const renderActions = layerComposition._renderActions;
-
-    for (let i = startIndex; i < renderActions.length; i++) {
-
-        const renderAction = renderActions[i];
-        const { layer, camera } = renderAction;
-
-        if (renderAction.useCameraPasses) {
-
-            // schedule render passes from the camera
-            camera.camera.renderPasses.forEach((renderPass) => {
-                frameGraph.addRenderPass(renderPass);
-            });
+            splitLights = layer.splitLights;
 
         } else {
+            visible = options.meshInstances;
+            splitLights = options.splitLights ?? _noLights;
+        }
 
-            // on webgl1, depth pass renders ahead of the main camera instead of the middle of the frame
-            const depthPass = camera.camera.renderPassDepthGrab;
-            if (depthPass && webgl1 && renderAction.firstCameraUse) {
-                depthPass.options.resizeSource = camera.camera.renderTarget;
-                depthPass.update(this.scene);
-                frameGraph.addRenderPass(depthPass);
-            }
+        Debug.assert(visible, 'Either layer or options.meshInstances must be provided');
 
-            const isDepthLayer = layer.id === LAYERID_DEPTH;
+        // upload clustered lights uniforms
+        if (clusteredLightingEnabled) {
+            const lightClusters = options.lightClusters ?? this.worldClustersAllocator.empty;
+            lightClusters.activate();
 
-            // skip depth layer on webgl1 if color grab pass is not enabled, as depth pass renders ahead of the main camera
-            if (webgl1 && isDepthLayer && !camera.renderSceneColorMap)
-                continue;
-
-            const isGrabPass = isDepthLayer && (camera.renderSceneColorMap || camera.renderSceneDepthMap);
-
-            // start of block of render actions rendering to the same render target
-            if (newStart) {
-                newStart = false;
-                startIndex = i;
-                renderTarget = renderAction.renderTarget;
-            }
-
-            // info about the next render action
-            const nextRenderAction = renderActions[i + 1];
-            const isNextLayerDepth = nextRenderAction ? nextRenderAction.layer.id === LAYERID_DEPTH : false;
-            const isNextLayerGrabPass = isNextLayerDepth && (camera.renderSceneColorMap || camera.renderSceneDepthMap) && !webgl1;
-            const nextNeedDirShadows = nextRenderAction ? (nextRenderAction.firstCameraUse && this.cameraDirShadowLights.has(nextRenderAction.camera.camera)) : false;
-
-            // end of the block using the same render target if the next render action uses a different render target, or needs directional shadows
-            // rendered before it or similar or needs other pass before it.
-            if (!nextRenderAction || nextRenderAction.renderTarget !== renderTarget ||
-                nextNeedDirShadows || isNextLayerGrabPass || isGrabPass) {
-
-                // render the render actions in the range
-                const isDepthOnly = isDepthLayer && startIndex === i;
-                if (!isDepthOnly) {
-                    this.addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, i);
+            // debug rendering of clusters
+            if (layer) {
+                if (!this.clustersDebugRendered && scene.lighting.debugLayer === layer.id) {
+                    this.clustersDebugRendered = true;
+                    WorldClustersDebug.render(lightClusters, this.scene);
                 }
+            }
+        }
 
-                // depth layer triggers grab passes if enabled
-                if (isDepthLayer) {
+        // Set the not very clever global variable which is only useful when there's just one camera
+        scene._activeCamera = camera;
 
-                    if (camera.renderSceneColorMap) {
-                        const colorGrabPass = camera.camera.renderPassColorGrab;
-                        colorGrabPass.source = camera.renderTarget;
-                        frameGraph.addRenderPass(colorGrabPass);
-                    }
+        const viewCount = this.setCameraUniforms(camera, renderTarget);
+        if (device.supportsUniformBuffers) {
+            this.setupViewUniformBuffers(viewBindGroups, this.viewUniformFormat, this.viewBindGroupFormat, viewCount);
+        }
 
-                    if (camera.renderSceneDepthMap && !webgl1) {
-                        frameGraph.addRenderPass(camera.camera.renderPassDepthGrab);
-                    }
+        // enable flip faces if either the camera has _flipFaces enabled or the render target has flipY enabled
+        const flipFaces = !!(camera._flipFaces ^ renderTarget?.flipY);
+
+        const forwardDrawCalls = this._forwardDrawCalls;
+        this.renderForward(camera,
+                           visible,
+                           splitLights,
+                           shaderPass,
+                           layer?.onDrawCall,
+                           layer,
+                           flipFaces);
+
+        if (layer)
+            layer._forwardDrawCalls += this._forwardDrawCalls - forwardDrawCalls;
+    }
+
+    setSceneConstants() {
+        const scene = this.scene;
+
+        // Set up ambient/exposure
+        this.dispatchGlobalLights(scene);
+
+        // Set up the fog
+        if (scene.fog !== FOG_NONE) {
+            this.fogColor[0] = scene.fogColor.r;
+            this.fogColor[1] = scene.fogColor.g;
+            this.fogColor[2] = scene.fogColor.b;
+            if (scene.gammaCorrection) {
+                for (let i = 0; i < 3; i++) {
+                    this.fogColor[i] = Math.pow(this.fogColor[i], 2.2);
                 }
+            }
+            this.fogColorId.setValue(this.fogColor);
+            if (scene.fog === FOG_LINEAR) {
+                this.fogStartId.setValue(scene.fogStart);
+                this.fogEndId.setValue(scene.fogEnd);
+            } else {
+                this.fogDensityId.setValue(scene.fogDensity);
+            }
+        }
 
-                // postprocessing
-                if (renderAction.triggerPostprocess && camera?.onPostprocessing) {
-                    const renderPass = new RenderPassPostprocessing(this.device, this, renderAction);
+        // Set up screen size // should be RT size?
+        const device = this.device;
+        this._screenSize[0] = device.width;
+        this._screenSize[1] = device.height;
+        this._screenSize[2] = 1 / device.width;
+        this._screenSize[3] = 1 / device.height;
+        this.screenSizeId.setValue(this._screenSize);
+
+        this.pcssDiskSamplesId.setValue(this.pcssDiskSamples);
+        this.pcssSphereSamplesId.setValue(this.pcssSphereSamples);
+    }
+
+    /**
+     * Builds a frame graph for the rendering of the whole frame.
+     *
+     * @param {import('../frame-graph.js').FrameGraph} frameGraph - The frame-graph that is built.
+     * @param {import('../composition/layer-composition.js').LayerComposition} layerComposition - The
+     * layer composition used to build the frame graph.
+     * @ignore
+     */
+    buildFrameGraph(frameGraph, layerComposition) {
+
+        const scene = this.scene;
+        const webgl1 = this.device.isWebGL1;
+        frameGraph.reset();
+
+        // update composition, cull everything, assign atlas slots for clustered lighting
+        this.update(layerComposition);
+
+        if (scene.clusteredLightingEnabled) {
+
+            // clustered lighting passes
+            const { shadowsEnabled, cookiesEnabled } = scene.lighting;
+            this._renderPassUpdateClustered.update(frameGraph, shadowsEnabled, cookiesEnabled, this.lights, this.localLights);
+            frameGraph.addRenderPass(this._renderPassUpdateClustered);
+
+        } else {
+
+            // non-clustered local shadows - these are shared by all cameras (not entirely correctly)
+            this._shadowRendererLocal.buildNonClusteredRenderPasses(frameGraph, this.localLights);
+        }
+
+        // main passes
+        let startIndex = 0;
+        let newStart = true;
+        let renderTarget = null;
+        const renderActions = layerComposition._renderActions;
+
+        for (let i = startIndex; i < renderActions.length; i++) {
+
+            const renderAction = renderActions[i];
+            const { layer, camera } = renderAction;
+
+            if (renderAction.useCameraPasses)  {
+
+                // schedule render passes from the camera
+                camera.camera.renderPasses.forEach((renderPass) => {
                     frameGraph.addRenderPass(renderPass);
+                });
+
+            } else {
+
+                // on webgl1, depth pass renders ahead of the main camera instead of the middle of the frame
+                const depthPass = camera.camera.renderPassDepthGrab;
+                if (depthPass && webgl1 && renderAction.firstCameraUse) {
+                    depthPass.options.resizeSource = camera.camera.renderTarget;
+                    depthPass.update(this.scene);
+                    frameGraph.addRenderPass(depthPass);
                 }
 
-                newStart = true;
+                const isDepthLayer = layer.id === LAYERID_DEPTH;
+
+                // skip depth layer on webgl1 if color grab pass is not enabled, as depth pass renders ahead of the main camera
+                if (webgl1 && isDepthLayer && !camera.renderSceneColorMap)
+                    continue;
+
+                const isGrabPass = isDepthLayer && (camera.renderSceneColorMap || camera.renderSceneDepthMap);
+
+                // start of block of render actions rendering to the same render target
+                if (newStart) {
+                    newStart = false;
+                    startIndex = i;
+                    renderTarget = renderAction.renderTarget;
+                }
+
+                // info about the next render action
+                const nextRenderAction = renderActions[i + 1];
+                const isNextLayerDepth = nextRenderAction ? nextRenderAction.layer.id === LAYERID_DEPTH : false;
+                const isNextLayerGrabPass = isNextLayerDepth && (camera.renderSceneColorMap || camera.renderSceneDepthMap) && !webgl1;
+                const nextNeedDirShadows = nextRenderAction ? (nextRenderAction.firstCameraUse && this.cameraDirShadowLights.has(nextRenderAction.camera.camera)) : false;
+
+                // end of the block using the same render target if the next render action uses a different render target, or needs directional shadows
+                // rendered before it or similar or needs other pass before it.
+                if (!nextRenderAction || nextRenderAction.renderTarget !== renderTarget ||
+                    nextNeedDirShadows || isNextLayerGrabPass || isGrabPass) {
+
+                    // render the render actions in the range
+                    const isDepthOnly = isDepthLayer && startIndex === i;
+                    if (!isDepthOnly) {
+                        this.addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, i);
+                    }
+
+                    // depth layer triggers grab passes if enabled
+                    if (isDepthLayer) {
+
+                        if (camera.renderSceneColorMap) {
+                            const colorGrabPass = camera.camera.renderPassColorGrab;
+                            colorGrabPass.source = camera.renderTarget;
+                            frameGraph.addRenderPass(colorGrabPass);
+                        }
+
+                        if (camera.renderSceneDepthMap && !webgl1) {
+                            frameGraph.addRenderPass(camera.camera.renderPassDepthGrab);
+                        }
+                    }
+
+                    // postprocessing
+                    if (renderAction.triggerPostprocess && camera?.onPostprocessing) {
+                        const renderPass = new RenderPassPostprocessing(this.device, this, renderAction);
+                        frameGraph.addRenderPass(renderPass);
+                    }
+
+                    newStart = true;
+                }
             }
         }
     }
-}
 
-/**
- * @param {import('../frame-graph.js').FrameGraph} frameGraph - The frame graph.
- * @param {import('../composition/layer-composition.js').LayerComposition} layerComposition - The
- * layer composition.
- */
-addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, endIndex) {
+    /**
+     * @param {import('../frame-graph.js').FrameGraph} frameGraph - The frame graph.
+     * @param {import('../composition/layer-composition.js').LayerComposition} layerComposition - The
+     * layer composition.
+     */
+    addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, endIndex) {
 
-    const renderPass = new RenderPassForward(this.device, layerComposition, this.scene, this);
-    renderPass.init(renderTarget);
+        const renderPass = new RenderPassForward(this.device, layerComposition, this.scene, this);
+        renderPass.init(renderTarget);
 
-    const renderActions = layerComposition._renderActions;
-    for (let i = startIndex; i <= endIndex; i++) {
-        renderPass.addRenderAction(renderActions[i]);
+        const renderActions = layerComposition._renderActions;
+        for (let i = startIndex; i <= endIndex; i++) {
+            renderPass.addRenderAction(renderActions[i]);
+        }
+
+        frameGraph.addRenderPass(renderPass);
     }
 
-    frameGraph.addRenderPass(renderPass);
-}
+    /**
+     * @param {import('../composition/layer-composition.js').LayerComposition} comp - The layer
+     * composition.
+     */
+    update(comp) {
 
-/**
- * @param {import('../composition/layer-composition.js').LayerComposition} comp - The layer
- * composition.
- */
-update(comp) {
+        this.frameUpdate();
+        this.shadowRenderer.frameUpdate();
 
-    this.frameUpdate();
-    this.shadowRenderer.frameUpdate();
+        // update the skybox, since this might change _meshInstances
+        this.scene._updateSkyMesh();
 
-    // update the skybox, since this might change _meshInstances
-    this.scene._updateSkyMesh();
+        // update layer composition
+        this.updateLayerComposition(comp);
 
-    // update layer composition
-    this.updateLayerComposition(comp);
+        this.collectLights(comp);
 
-    this.collectLights(comp);
+        // Single per-frame calculations
+        this.beginFrame(comp);
+        this.setSceneConstants();
 
-    // Single per-frame calculations
-    this.beginFrame(comp);
-    this.setSceneConstants();
+        // visibility culling of lights, meshInstances, shadows casters
+        // after this the scene culling is done and script callbacks can be called to report which objects are visible
+        this.cullComposition(comp);
 
-    // visibility culling of lights, meshInstances, shadows casters
-    // after this the scene culling is done and script callbacks can be called to report which objects are visible
-    this.cullComposition(comp);
-
-    // GPU update for visible objects requiring one
-    this.gpuUpdate(this.processingMeshInstances);
-}
+        // GPU update for visible objects requiring one
+        this.gpuUpdate(this.processingMeshInstances);
+    }
 }
 
 export { ForwardRenderer };

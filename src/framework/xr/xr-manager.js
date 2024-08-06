@@ -772,17 +772,7 @@ class XrManager extends EventHandler {
 
         // request reference space
         session.requestReferenceSpace(spaceType).then((referenceSpace) => {
-            const device = this.app.graphicsDevice;
             this._referenceSpace = referenceSpace;
-            const deviceType = device.deviceType;
-            if (!this.webglBinding && (deviceType === DEVICETYPE_WEBGL1 || deviceType === DEVICETYPE_WEBGL2) && window.XRWebGLBinding) {
-                try {
-                    console.log('binding 1');
-                    this.webglBinding = new XRWebGLBinding(this._session, device.gl); // eslint-disable-line no-undef
-                } catch (ex) {
-                    this.fire('error', ex);
-                }
-            }
 
             // old requestAnimationFrame will never be triggered,
             // so queue up new tick
@@ -825,36 +815,28 @@ class XrManager extends EventHandler {
         const device = this.app.graphicsDevice;
         const framebufferScaleFactor = (device.maxPixelRatio / window.devicePixelRatio) * this._framebufferScaleFactor;
 
-        if (device.extMultiview) {
-            this._projectionLayer = this.webglBinding.createProjectionLayer({
-                //space: referenceSpace,
-            // stencil: false
-            fixedFoveation: 1,
-            depthFormat: device.gl.DEPTH24_STENCIL24
-            });
-            session.updateRenderState({ layers: [this._projectionLayer] });
-        } else {
-            this._baseLayer = new XRWebGLLayer(this._session, device.gl, {
-                alpha: true,
-                depth: true,
-                stencil: true,
-                framebufferScaleFactor: framebufferScaleFactor,
-                antialias: false
-            });
+        this._baseLayer = new XRWebGLLayer(this._session, device.gl, {
+            alpha: true,
+            depth: true,
+            stencil: true,
+            framebufferScaleFactor: framebufferScaleFactor,
+            antialias: false
+        });
 
-            this._session.updateRenderState({
-                baseLayer: this._baseLayer,
-                depthNear: this._depthNear,
-                depthFar: this._depthFar
-            });
         const deviceType = device.deviceType;
-        if (!this.webglBinding && (deviceType === DEVICETYPE_WEBGL1 || deviceType === DEVICETYPE_WEBGL2) && window.XRWebGLBinding) {
+        if ((deviceType === DEVICETYPE_WEBGL1 || deviceType === DEVICETYPE_WEBGL2) && window.XRWebGLBinding) {
             try {
                 this.webglBinding = new XRWebGLBinding(this._session, device.gl);
             } catch (ex) {
                 this.fire('error', ex);
             }
         }
+
+        this._session.updateRenderState({
+            baseLayer: this._baseLayer,
+            depthNear: this._depthNear,
+            depthFar: this._depthFar
+        });
     }
 
     /** @private */
@@ -898,18 +880,10 @@ class XrManager extends EventHandler {
      */
     update(frame) {
         if (!this._session) return false;
-        const layer = frame.session.renderState.baseLayer ?? frame.session.renderState.layers[0];
-        let width = 0;
-        let height = 0;
+
         // canvas resolution should be set on first frame availability or resolution changes
-        if ('framebufferWidth' in layer) {
-            width = layer.framebufferWidth;
-            height = layer.framebufferHeight;
-        } else {
-            width = layer.textureWidth;
-            height = layer.textureHeight;
-        }
-    
+        const width = frame.session.renderState.baseLayer.framebufferWidth;
+        const height = frame.session.renderState.baseLayer.framebufferHeight;
         if (this._width !== width || this._height !== height) {
             this._width = width;
             this._height = height;
