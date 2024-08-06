@@ -38,10 +38,24 @@ class InstancingData {
     vertexBuffer = null;
 
     /**
+     * True if the vertex buffer is destroyed when the mesh instance is destroyed.
+     *
+     * @type {boolean}
+     */
+    _destroyVertexBuffer = false;
+
+    /**
      * @param {number} numObjects - The number of objects instanced.
      */
     constructor(numObjects) {
         this.count = numObjects;
+    }
+
+    destroy() {
+        if (this._destroyVertexBuffer) {
+            this.vertexBuffer?.destroy();
+        }
+        this.vertexBuffer = null;
     }
 }
 
@@ -333,7 +347,7 @@ class MeshInstance {
     }
 
     /**
-     * The render style of the mesh instance. Can be:
+     * Sets the render style of the mesh instance. Can be:
      *
      * - {@link RENDERSTYLE_SOLID}
      * - {@link RENDERSTYLE_WIREFRAME}
@@ -348,12 +362,17 @@ class MeshInstance {
         this.mesh.prepareRenderState(renderStyle);
     }
 
+    /**
+     * Gets the render style of the mesh instance.
+     *
+     * @type {number}
+     */
     get renderStyle() {
         return this._renderStyle;
     }
 
     /**
-     * The graphics mesh being instanced.
+     * Sets the graphics mesh being instanced.
      *
      * @type {import('./mesh.js').Mesh}
      */
@@ -373,12 +392,17 @@ class MeshInstance {
         }
     }
 
+    /**
+     * Gets the graphics mesh being instanced.
+     *
+     * @type {import('./mesh.js').Mesh}
+     */
     get mesh() {
         return this._mesh;
     }
 
     /**
-     * The world space axis-aligned bounding box for this mesh instance.
+     * Sets the world space axis-aligned bounding box for this mesh instance.
      *
      * @type {BoundingBox}
      */
@@ -386,6 +410,11 @@ class MeshInstance {
         this._aabb = aabb;
     }
 
+    /**
+     * Gets the world space axis-aligned bounding box for this mesh instance.
+     *
+     * @type {BoundingBox}
+     */
     get aabb() {
         // use specified world space aabb
         if (!this._updateAabb) {
@@ -544,7 +573,7 @@ class MeshInstance {
     }
 
     /**
-     * The material used by this mesh instance.
+     * Sets the material used by this mesh instance.
      *
      * @type {import('./materials/material.js').Material}
      */
@@ -573,6 +602,11 @@ class MeshInstance {
         }
     }
 
+    /**
+     * Gets the material used by this mesh instance.
+     *
+     * @type {import('./materials/material.js').Material}
+     */
     get material() {
         return this._material;
     }
@@ -594,18 +628,24 @@ class MeshInstance {
     }
 
     /**
-     * In some circumstances mesh instances are sorted by a distance calculation to determine their
-     * rendering order. Set this callback to override the default distance calculation, which gives
-     * the dot product of the camera forward vector and the vector between the camera position and
-     * the center of the mesh instance's axis-aligned bounding box. This option can be particularly
-     * useful for rendering transparent meshes in a better order than default.
+     * Sets the callback to calculate sort distance. In some circumstances mesh instances are
+     * sorted by a distance calculation to determine their rendering order. Set this callback to
+     * override the default distance calculation, which gives the dot product of the camera forward
+     * vector and the vector between the camera position and the center of the mesh instance's
+     * axis-aligned bounding box. This option can be particularly useful for rendering transparent
+     * meshes in a better order than the default.
      *
-     * @type {CalculateSortDistanceCallback}
+     * @type {CalculateSortDistanceCallback|null}
      */
     set calculateSortDistance(calculateSortDistance) {
         this._calculateSortDistance = calculateSortDistance;
     }
 
+    /**
+     * Gets the callback to calculate sort distance.
+     *
+     * @type {CalculateSortDistanceCallback|null}
+     */
     get calculateSortDistance() {
         return this._calculateSortDistance;
     }
@@ -622,9 +662,10 @@ class MeshInstance {
     }
 
     /**
-     * The skin instance managing skinning of this mesh instance, or null if skinning is not used.
+     * Sets the skin instance managing skinning of this mesh instance. Set to null if skinning is
+     * not used.
      *
-     * @type {import('./skin-instance.js').SkinInstance}
+     * @type {import('./skin-instance.js').SkinInstance|null}
      */
     set skinInstance(val) {
         this._skinInstance = val;
@@ -632,14 +673,20 @@ class MeshInstance {
         this._setupSkinUpdate();
     }
 
+    /**
+     * Gets the skin instance managing skinning of this mesh instance.
+     *
+     * @type {import('./skin-instance.js').SkinInstance|null}
+     */
     get skinInstance() {
         return this._skinInstance;
     }
 
     /**
-     * The morph instance managing morphing of this mesh instance, or null if morphing is not used.
+     * Sets the morph instance managing morphing of this mesh instance. Set to null if morphing is
+     * not used.
      *
-     * @type {import('./morph-instance.js').MorphInstance}
+     * @type {import('./morph-instance.js').MorphInstance|null}
      */
     set morphInstance(val) {
 
@@ -656,6 +703,11 @@ class MeshInstance {
         this._updateShaderDefs(shaderDefs);
     }
 
+    /**
+     * Gets the morph instance managing morphing of this mesh instance.
+     *
+     * @type {import('./morph-instance.js').MorphInstance|null}
+     */
     get morphInstance() {
         return this._morphInstance;
     }
@@ -680,7 +732,7 @@ class MeshInstance {
     }
 
     /**
-     * Mask controlling which {@link LightComponent}s light this mesh instance, which
+     * Sets the mask controlling which {@link LightComponent}s light this mesh instance, which
      * {@link CameraComponent} sees it and in which {@link Layer} it is rendered. Defaults to 1.
      *
      * @type {number}
@@ -690,12 +742,18 @@ class MeshInstance {
         this._updateShaderDefs(toggles | (val << 16));
     }
 
+    /**
+     * Gets the mask controlling which {@link LightComponent}s light this mesh instance, which
+     * {@link CameraComponent} sees it and in which {@link Layer} it is rendered.
+     *
+     * @type {number}
+     */
     get mask() {
         return this._shaderDefs >> 16;
     }
 
     /**
-     * Number of instances when using hardware instancing to render the mesh.
+     * Sets the number of instances when using hardware instancing to render the mesh.
      *
      * @type {number}
      */
@@ -704,6 +762,11 @@ class MeshInstance {
             this.instancingData.count = value;
     }
 
+    /**
+     * Gets the number of instances when using hardware instancing to render the mesh.
+     *
+     * @type {number}
+     */
     get instancingCount() {
         return this.instancingData ? this.instancingData.count : 0;
     }
@@ -736,6 +799,8 @@ class MeshInstance {
 
         // make sure material clears references to this meshInstance
         this.material = null;
+
+        this.instancingData?.destroy();
     }
 
     // shader uniform names for lightmaps
