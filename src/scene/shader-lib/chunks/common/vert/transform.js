@@ -1,7 +1,11 @@
 export default /* glsl */`
+
+
 #ifdef PIXELSNAP
 uniform vec4 uScreenSize;
 #endif
+
+
 
 #ifdef SCREENSPACE
 uniform float projectionFlipY;
@@ -120,10 +124,15 @@ vec4 getPosition() {
         #endif
     #else
     #ifdef SCREENSPACE
-    screenPos = posW;
-    screenPos.y *= projectionFlipY;
+        screenPos = posW;
+        screenPos.y *= projectionFlipY;
     #else
-    screenPos = matrix_viewProjection * posW;
+        #ifdef MULTIVIEW
+            mat4 m = gl_ViewID_OVR == 0u ? matrix_viewProjection : matrix_viewProjection_2;
+            screenPos =  mat * posW;
+        #else
+            screenPos = matrix_viewProjection * posW;
+        #endif
     #endif
 
     #ifdef PIXELSNAP

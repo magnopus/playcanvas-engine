@@ -820,7 +820,7 @@ class XrManager extends EventHandler {
             depth: true,
             stencil: true,
             framebufferScaleFactor: framebufferScaleFactor,
-            antialias: false
+            antialias: true
         });
 
         const deviceType = device.deviceType;

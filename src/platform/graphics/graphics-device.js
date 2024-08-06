@@ -455,6 +455,8 @@ class GraphicsDevice extends EventHandler {
 
         this.textureBias = this.scope.resolve("textureBias");
         this.textureBias.setValue(0.0);
+        this.extMultiview = undefined;
+        this.isMultiViewOculus = false;
     }
 
     /**

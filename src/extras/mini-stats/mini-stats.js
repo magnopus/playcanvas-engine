@@ -54,7 +54,8 @@ class MiniStats {
 
         options = options || MiniStats.getDefaultOptions();
         // Magnopus patched
-        this.xOffset = options?.xOffset ?? 64;
+        this.xOffset = options?.xOffset ?? app.xr?.active ? 300 : 64;
+        this.yOffset =  app.xr?.active ? 300 : 0;
         // create graphs
         this.initGraphs(app, device, options);
 
@@ -350,11 +351,11 @@ class MiniStats {
         for (let i = 0; i < graphs.length; ++i) {
             const graph = graphs[i];
 
-            let y = i * (height + gspacing);
+            let y = i * (height + gspacing) + this.yOffset;
 
             // Magnopus patched - start
             let x = this.xOffset;
-
+ 
             // render the graph
             graph.render(render2d, x, y, width, height);
 
