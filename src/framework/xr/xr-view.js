@@ -351,21 +351,19 @@ class XrView extends EventHandler {
             this._xrCamera = this._xrView.camera;
 
         const layer = frame.session.renderState.baseLayer;
-        // viewport
-        if (layer) {
-            const viewport = layer.getViewport(this._xrView);
-            this._viewport.x = viewport.x;
-            this._viewport.y = viewport.y;
-            this._viewport.z = viewport.width;
-            this._viewport.w = viewport.height;
-        }
 
+        // viewport
+        const viewport = layer.getViewport(this._xrView);
+        this._viewport.x = viewport.x;
+        this._viewport.y = viewport.y;
+        this._viewport.z = viewport.width;
+        this._viewport.w = viewport.height;
 
         // matrices
         this._projMat.set(this._xrView.projectionMatrix);
         this._viewMat.set(this._xrView.transform.inverse.matrix);
         this._viewInvMat.set(this._xrView.transform.matrix);
-        console.log('draw view');
+
         this._updateTextureColor();
         this._updateDepth(frame);
     }

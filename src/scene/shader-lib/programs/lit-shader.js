@@ -155,8 +155,6 @@ class LitShader {
     }
 
     _vsAddTransformCode(code, device, chunks, options) {
-        if (options.multiView) code += '#define MULTIVIEW\n';
-        if (options.multiView) console.log('MULTIVIEW!!!');
         code += this.chunks.transformVS;
         return code;
     }

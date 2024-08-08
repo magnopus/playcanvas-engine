@@ -2161,14 +2161,7 @@ const makeTick = function (_app) {
 
         if (frame) {
             shouldRenderFrame = application.xr?.update(frame);
-            const gl = application.graphicsDevice.gl;
-            if (application.xr && application.xr.xrFramebuffer) {
-                application.graphicsDevice.defaultFramebuffer = application.xr.xrFramebuffer;
-            } else {
-                console.log('nope');
-                application.graphicsDevice.defaultFramebuffer = null;
-
-            }
+            application.graphicsDevice.defaultFramebuffer = frame.session.renderState.baseLayer.framebuffer;
         } else {
             application.graphicsDevice.defaultFramebuffer = null;
         }

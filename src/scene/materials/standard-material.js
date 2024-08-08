@@ -1221,8 +1221,7 @@ function _defineMaterialProps() {
 
         return uniform;
     });
-    // magnopus patched
-    _defineFlag('multiView', false);
+
     _defineFlag('ambientTint', false);
     _defineFlag('diffuseTint', false);
     _defineFlag('sheenTint', false);

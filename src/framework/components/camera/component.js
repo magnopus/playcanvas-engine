@@ -7,8 +7,6 @@ import { ShaderPass } from '../../../scene/shader-pass.js';
 import { Component } from '../component.js';
 
 import { PostEffectQueue } from './post-effect-queue.js';
-import { XRTYPE_VR } from '../../xr/constants.js';
-import { app } from '../../app-base.js';
 
 /**
  * Callback used by {@link CameraComponent#calculateTransform} and {@link CameraComponent#calculateProjection}.
@@ -1154,16 +1152,6 @@ class CameraComponent extends Component {
      * });
      */
     startXr(type, spaceType, options) {
-        if (type === XRTYPE_VR) {
-        //    const renderComponents = app?.root?.findComponents('render');
-        //    for (const r of renderComponents) {
-        //     for (const mesh of r.meshInstances) {
-        //         const mat = mesh.material;
-        //         mat.multiView = true;
-        //         mat.update();
-        //     }
-        //    }
-        }
         this.system.app.xr.start(this, type, spaceType, options);
     }
 
@@ -1180,14 +1168,6 @@ class CameraComponent extends Component {
      * });
      */
     endXr(callback) {
-        const renderComponents = app?.root?.findComponents('render') ?? []
-           for (const r of renderComponents) {
-            for (const mesh of r.meshInstances) {
-                const mat = mesh.material;
-                mat.multiView = false;
-                mat.update();
-            }
-           }
         if (!this._camera.xr) {
             if (callback) callback(new Error('Camera is not in XR'));
             return;
