@@ -15,6 +15,7 @@ import { RenderPassTAA } from './render-pass-taa.js';
 import { RenderPassPrepass } from './render-pass-prepass.js';
 import { RenderPassSsao } from './render-pass-ssao.js';
 import { RenderingParams } from '../../scene/renderer/rendering-params.js';
+import { RenderPassVolumetricLight } from './render-pass-volumetric-lights.js';
 
 export const SSAOTYPE_NONE = 'none';
 export const SSAOTYPE_LIGHTING = 'lighting';
@@ -37,6 +38,8 @@ class CameraFrameOptions {
 
     // TAA
     taaEnabled = false;
+
+    volumetricsEnabled = true;
 
     // Bloom
     bloomEnabled = false;
@@ -68,6 +71,8 @@ class RenderPassCameraFrame extends RenderPass {
     composePass;
 
     bloomPass;
+
+    volumetricsPass;
 
     ssaoPass;
 
@@ -113,6 +118,7 @@ class RenderPassCameraFrame extends RenderPass {
         this.scenePass = null;
         this.composePass = null;
         this.bloomPass = null;
+        this.volumetricsPass = null;
         this.ssaoPass = null;
         this.taaPass = null;
     }
@@ -146,6 +152,7 @@ class RenderPassCameraFrame extends RenderPass {
             options.ssaoBlurEnabled !== currentOptions.ssaoBlurEnabled ||
             options.taaEnabled !== currentOptions.taaEnabled ||
             options.bloomEnabled !== currentOptions.bloomEnabled ||
+            options.volumetricsEnabled !== currentOptions.volumetricsEnabled ||
             options.prepassEnabled !== currentOptions.prepassEnabled;
     }
 
@@ -244,7 +251,7 @@ class RenderPassCameraFrame extends RenderPass {
     collectPasses() {
 
         // use these prepared render passes in the order they should be executed
-        return [this.prePass, this.ssaoPass, this.scenePass, this.colorGrabPass, this.scenePassTransparent, this.taaPass, this.bloomPass, this.composePass, this.afterPass];
+        return [this.prePass, this.ssaoPass, this.volumetricsPass, this.scenePass, this.colorGrabPass, this.scenePassTransparent, this.taaPass,, this.bloomPass, this.composePass, this.afterPass];
     }
 
     createPasses(options) {
@@ -264,6 +271,9 @@ class RenderPassCameraFrame extends RenderPass {
         // bloom
         this.setupBloomPass(options, sceneTextureWithTaa);
 
+        // Volumetric lights
+        this.setupVolumetricsPass(options, sceneTextureWithTaa);
+
         // compose
         this.setupComposePass(options);
 
@@ -278,7 +288,7 @@ class RenderPassCameraFrame extends RenderPass {
             const { scene, renderer } = app;
 
             // ssao & taa need resolved depth
-            const resolveDepth = this.options.ssaoType !== SSAOTYPE_NONE || this.options.taaEnabled;
+            const resolveDepth = this.options.ssaoType !== SSAOTYPE_NONE || this.options.taaEnabled || true;
 
             this.prePass = new RenderPassPrepass(device, scene, renderer, cameraComponent, this.sceneDepth, resolveDepth, this.sceneOptions, options.samples);
         }
@@ -349,6 +359,13 @@ class RenderPassCameraFrame extends RenderPass {
         }
     }
 
+    setupVolumetricsPass(options, inputTexture) {
+        if (options.volumetricsEnabled) {
+            // create a volumetrics pass, which generates volume texture based on the provided texture
+            this.volumetricsPass = new RenderPassVolumetricLight(this.app, this.device, inputTexture, this.hdrFormat);
+        }
+    }
+
     setupTaaPass(options) {
         let textureWithTaa = this.sceneTexture;
         if (options.taaEnabled) {
@@ -365,6 +382,7 @@ class RenderPassCameraFrame extends RenderPass {
         // create a compose pass, which combines the results of the scene and other passes
         this.composePass = new RenderPassCompose(this.device);
         this.composePass.bloomTexture = this.bloomPass?.bloomTexture;
+        this.composePass.volumetricsTexture = this.volumetricsPass?.volumetricsTexture;
         this.composePass.taaEnabled = options.taaEnabled;
 
         // compose pass renders directly to target renderTarget

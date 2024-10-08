@@ -22,6 +22,10 @@ const fragmentShader = /* glsl */ `
         uniform float bloomIntensity;
     #endif
 
+    #ifdef VOLUMETRICS
+        uniform sampler2D volumetricsTexture;
+    #endif
+
     #ifdef SSAO
         uniform sampler2D ssaoTexture;
     #endif
@@ -139,6 +143,11 @@ const fragmentShader = /* glsl */ `
             result = cas(result, uv, sharpness);
         #endif
 
+        #ifdef VOLUMETRICS
+            vec3 volume = texture2DLodEXT(volumetricsTexture, uv, 0.0).rgb;
+            result += volume;
+        #endif
+
         #ifdef SSAO
             result *= texture2DLodEXT(ssaoTexture, uv0, 0.0).r;
         #endif
@@ -184,6 +193,8 @@ class RenderPassCompose extends RenderPassShaderQuad {
 
     _bloomTexture = null;
 
+    _volumetricsTexture = null;
+
     _ssaoTexture = null;
 
     _toneMapping = TONEMAP_LINEAR;
@@ -226,6 +237,7 @@ class RenderPassCompose extends RenderPassShaderQuad {
         const { scope } = graphicsDevice;
         this.sceneTextureId = scope.resolve('sceneTexture');
         this.bloomTextureId = scope.resolve('bloomTexture');
+        this.volumetricsTextureId = scope.resolve('volumetricsTexture');
         this.ssaoTextureId = scope.resolve('ssaoTexture');
         this.bloomIntensityId = scope.resolve('bloomIntensity');
         this.bcsId = scope.resolve('brightnessContrastSaturation');
@@ -245,6 +257,17 @@ class RenderPassCompose extends RenderPassShaderQuad {
 
     get bloomTexture() {
         return this._bloomTexture;
+    }
+
+    set volumetricsTexture(value) {
+        if (this._volumetricsTexture !== value) {
+            this._volumetricsTexture = value;
+            this._shaderDirty = true;
+        }
+    }
+
+    get volumetricsTexture() {
+        return this._volumetricsTexture;
     }
 
     set ssaoTexture(value) {
@@ -351,6 +374,7 @@ class RenderPassCompose extends RenderPassShaderQuad {
 
             const key = `${this.toneMapping}` +
                 `-${this.bloomTexture ? 'bloom' : 'nobloom'}` +
+                `-${this.volumetricsTexture ? 'volumetrics' : 'novolumetrics'}` +
                 `-${this.ssaoTexture ? 'ssao' : 'nossao'}` +
                 `-${this.gradingEnabled ? 'grading' : 'nograding'}` +
                 `-${this.vignetteEnabled ? 'vignette' : 'novignette'}` +
@@ -364,6 +388,7 @@ class RenderPassCompose extends RenderPassShaderQuad {
 
                 const defines =
                     (this.bloomTexture ? '#define BLOOM\n' : '') +
+                    (this.volumetricsTexture ? '#define VOLUMETRICS\n' : '') +
                     (this.ssaoTexture ? '#define SSAO\n' : '') +
                     (this.gradingEnabled ? '#define GRADING\n' : '') +
                     (this.vignetteEnabled ? '#define VIGNETTE\n' : '') +
@@ -392,6 +417,10 @@ class RenderPassCompose extends RenderPassShaderQuad {
         if (this._bloomTexture) {
             this.bloomTextureId.setValue(this._bloomTexture);
             this.bloomIntensityId.setValue(this.bloomIntensity);
+        }
+
+        if (this._volumetricsTexture) {
+            this.volumetricsTextureId.setValue(this._volumetricsTexture);
         }
 
         if (this._ssaoTexture) {
