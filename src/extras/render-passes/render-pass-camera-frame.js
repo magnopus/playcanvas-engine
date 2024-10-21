@@ -22,9 +22,11 @@ export const SSAOTYPE_LIGHTING = 'lighting';
 export const SSAOTYPE_COMBINE = 'combine';
 
 class CameraFrameOptions {
+    formats;
+
     samples = 1;
 
-    sceneColorMap = true;
+    sceneColorMap = false;
 
     // skybox is the last layer rendered before the grab passes
     lastGrabLayerId = LAYERID_SKYBOX;
@@ -116,17 +118,20 @@ class RenderPassCameraFrame extends RenderPass {
 
         this.prePass = null;
         this.scenePass = null;
+        this.scenePassTransparent = null;
+        this.colorGrabPass = null;
         this.composePass = null;
         this.bloomPass = null;
         this.volumetricsPass = null;
         this.ssaoPass = null;
         this.taaPass = null;
+        this.afterPass = null;
     }
 
     sanitizeOptions(options) {
         options = Object.assign({}, _defaultOptions, options);
 
-        // automatically enabled prepass when required internally
+        // automatically enable prepass when required internally
         if (options.taaEnabled || options.ssaoType !== SSAOTYPE_NONE) {
             options.prepassEnabled = true;
         }
@@ -148,12 +153,22 @@ class RenderPassCameraFrame extends RenderPass {
 
     needsReset(options) {
         const currentOptions = this.options;
+
+        // helper to compare arrays
+        const arraysNotEqual = (arr1, arr2) => arr1 !== arr2 &&
+            (!(Array.isArray(arr1) && Array.isArray(arr2)) ||
+            arr1.length !== arr2.length ||
+            !arr1.every((value, index) => value === arr2[index]));
+
         return options.ssaoType !== currentOptions.ssaoType ||
             options.ssaoBlurEnabled !== currentOptions.ssaoBlurEnabled ||
             options.taaEnabled !== currentOptions.taaEnabled ||
+            options.samples !== currentOptions.samples ||
             options.bloomEnabled !== currentOptions.bloomEnabled ||
             options.volumetricsEnabled !== currentOptions.volumetricsEnabled ||
-            options.prepassEnabled !== currentOptions.prepassEnabled;
+            options.prepassEnabled !== currentOptions.prepassEnabled ||
+            options.sceneColorMap !== currentOptions.sceneColorMap ||
+            arraysNotEqual(options.formats, currentOptions.formats);
     }
 
     // manually called, applies changes
@@ -181,7 +196,7 @@ class RenderPassCameraFrame extends RenderPass {
         const cameraComponent = this.cameraComponent;
         const targetRenderTarget = cameraComponent.renderTarget;
 
-        this.hdrFormat = device.getRenderableHdrFormat() || PIXELFORMAT_RGBA8;
+        this.hdrFormat = device.getRenderableHdrFormat(options.formats, true, options.samples) || PIXELFORMAT_RGBA8;
 
         // camera renders in HDR mode (linear output, no tonemapping)
         if (!cameraComponent.rendering) {
@@ -233,7 +248,7 @@ class RenderPassCameraFrame extends RenderPass {
             colorBuffer: this.sceneTexture,
             depthBuffer: this.sceneDepth,
             samples: options.samples,
-            flipY: !!targetRenderTarget?.flipY
+            flipY: !!targetRenderTarget?.flipY  // flipY is inherited from the target renderTarget
         });
 
         this.sceneOptions = {
@@ -336,9 +351,17 @@ class RenderPassCameraFrame extends RenderPass {
             this.scenePassTransparent.init(this.rt);
             ret.lastAddedIndex = this.scenePassTransparent.addLayers(composition, cameraComponent, ret.lastAddedIndex, ret.clearRenderTarget, options.lastSceneLayerId, options.lastSceneLayerIsTransparent);
 
-            // if prepass is enabled, we need to store the depth, as by default it gets discarded
-            if (options.prepassEnabled) {
-                this.scenePassTransparent.depthStencilOps.storeDepth = true;
+            // if no layers are rendered by this pass, remove it
+            if (!this.scenePassTransparent.rendersAnything) {
+                this.scenePassTransparent.destroy();
+                this.scenePassTransparent = null;
+            }
+
+            if (this.scenePassTransparent) {
+                // if prepass is enabled, we need to store the depth, as by default it gets discarded
+                if (options.prepassEnabled) {
+                    this.scenePassTransparent.depthStencilOps.storeDepth = true;
+                }
             }
         }
 
@@ -353,7 +376,8 @@ class RenderPassCameraFrame extends RenderPass {
     }
 
     setupBloomPass(options, inputTexture) {
-        if (options.bloomEnabled) {
+        // HDR bloom is not supported on RGBA8 format
+        if (options.bloomEnabled && this.hdrFormat !== PIXELFORMAT_RGBA8) {
             // create a bloom pass, which generates bloom texture based on the provided texture
             this.bloomPass = new RenderPassBloom(this.device, inputTexture, this.hdrFormat);
         }
@@ -418,7 +442,7 @@ class RenderPassCameraFrame extends RenderPass {
 
         // TAA history buffer is double buffered, assign the current one to the follow up passes.
         this.composePass.sceneTexture = sceneTexture;
-        if (this.options.bloomEnabled) {
+        if (this.options.bloomEnabled && this.bloomPass) {
             this.bloomPass.sourceTexture = sceneTexture;
         }
     }
