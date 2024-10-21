@@ -50,115 +50,89 @@ const fsUpscale = /* glsl */ `
 `;
 
 const fs = /* glsl */  `
-  #define MAX_LIGHTS 8
-        // Fragment Shader
-        precision highp float;
+#define MAX_LIGHTS 8
+// Fragment Shader
+precision highp float;
 
+uniform mat4 matrix_projection;
+uniform mat4 matrix_viewProjection;
+uniform mat4 matrix_inverseViewProjection;
 
-        uniform mat4 matrix_projection;
-        uniform mat4 matrix_viewProjection;
+uniform vec3 view_position;
 
-        uniform vec3 view_position;
+uniform vec4 uLightProps[MAX_LIGHTS]; // x: innerConeAngle, y: outerConeAngle, z: intensity, w: range
+uniform mat4 matrix_lightmodel[MAX_LIGHTS];
+uniform vec3 uLightColor[MAX_LIGHTS];
+uniform int uLightCount;
+uniform float uTime;
 
-        //uLightInnerConeAngle
-        //uLightOuterConeAngle
-        //uLightIntensity
-        //uLightAttenuation
-        uniform vec4 uLightProps[MAX_LIGHTS];
-        uniform mat4 matrix_lightmodel[MAX_LIGHTS];
-        uniform vec3 uLightColor[MAX_LIGHTS];
-        uniform int uLightCount;
-        uniform float uTime;
+uniform sampler2D uSceneDepthMap;
 
-        in vec2 uv0;
+in vec2 uv0;
 
-        ${shaderChunks.screenDepthPS}
-        
-        float random(vec2 co) {
-            return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
-        }
+float random(vec2 co) {
+    return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+}
 
-        float noise (in vec2 st) {
-        vec2 i = floor(st);
-        vec2 f = fract(st);
+const mat4 LIGHT_DIRECTION_CORRECTION = mat4(
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, -1.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0
+);
 
-        // Four corners in 2D of a tile
-        float a = random(i);
-        float b = random(i + vec2(1.0, 0.0));
-        float c = random(i + vec2(0.0, 1.0));
-        float d = random(i + vec2(1.0, 1.0));
+vec3 calculateVolumetricLight(
+    vec3 rayStart,
+    vec3 rayDir,
+    float stepSize,
+    int numSteps,
+    mat4 lightModelMatrix,
+    vec3 lightColor,
+    float lightIntensity,
+    float innerConeAngle,
+    float outerConeAngle,
+    float lightRange
+) {
+    vec3 lightPos = (lightModelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 lightDir = normalize((lightModelMatrix * LIGHT_DIRECTION_CORRECTION * vec4(0.0, 0.0, -1.0, 0.0)).xyz);
 
-        vec2 u = f * f * (3.0 - 2.0 * f);
+    float cosOuterCone = cos(outerConeAngle);
+    float cosInnerCone = cos(innerConeAngle);
 
-        return mix(a, b, u.x) +
-                (c - a)* u.y * (1.0 - u.x) +
-                (d - b) * u.x * u.y;
-    }
+    vec3 finalColor = vec3(0.0);
 
-    #define OCTAVES 6
-    float fbm (in vec2 st) {
-        // Initial values
-        float value = 0.0;
-        float amplitude = .5;
-        float frequency = 0.;
-        //
-        // Loop of octaves
-        for (int i = 0; i < OCTAVES; i++) {
-            value += amplitude * noise(st);
-            st *= 2.;
-            amplitude *= .5;
-        }
-        return value;
-    }
+    // Precompute values outside the loop
+    float randomOffset = random(uv0) * stepSize;
 
-    const mat4 LIGHT_DIRECTION_CORRECTION = mat4(
-        1, 0, 0, 0,
-        0, 0, 1, 0,
-        0, -1, 0, 0,
-        0, 0, 0, 1
-    );
-
-    vec3 calculateVolumetricLight(vec3 rayStart, vec3 rayDir, float stepSize, float numOfSteps, mat4 lightModelMatrix, 
-                              vec3 lightColor, float lightIntensity, float innerConeAngle, 
-                              float outerConeAngle, float lightRange) {
-
-      vec3 lightPos = (lightModelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-      vec3 lightDir = normalize((lightModelMatrix * LIGHT_DIRECTION_CORRECTION * vec4(0.0, 0.0, -1.0, 0.0)).xyz);
-
-      float cosOuterCone = cos(outerConeAngle);
-      float cosInnerCone = cos(innerConeAngle);
-
-      vec3 finalColor = vec3(0.0);
-
-      for (float i = 0.0; i < numOfSteps; i++) {
-        vec3 samplePos = rayStart + rayDir * (stepSize * i + random(uv0) * stepSize);
+    for (int i = 0; i < numSteps; i++) {
+        float t = stepSize * float(i) + randomOffset;
+        vec3 samplePos = rayStart + rayDir * t;
         vec3 lightToSample = samplePos - lightPos;
         float distToLight = length(lightToSample);
 
         if (distToLight > lightRange) continue;
+
         float cosAngle = dot(normalize(lightToSample), -lightDir);
-
         if (cosAngle > cosOuterCone) {
-          float attenuation = 1.0 / (distToLight * distToLight);
-          float invAttenuation = smoothstep(0.25,0.8, distToLight);
-          float spotEffect = smoothstep(cosOuterCone, cosInnerCone, cosAngle);
-          float absorption = exp(-distToLight * 0.1);
-          float noise = (fbm(samplePos.xz/2.0 + uTime/8.0) * fbm(samplePos.yz/2.0 + uTime/8.0));
-          //float noise = 0.2;
-          finalColor += lightColor * lightIntensity * attenuation * spotEffect * absorption * invAttenuation * stepSize *0.8 * noise;
-        }
-      }
-      return finalColor;
-    }
+            float attenuation = 1.0 / (distToLight * distToLight);
+            float invAttenuation = smoothstep(0.25, 0.8, distToLight);
+            float spotEffect = smoothstep(cosOuterCone, cosInnerCone, cosAngle);
+            float absorption = exp(-distToLight * 0.1);
+            float noise = 0.2; // skip noise for now
 
-  void main() {
+            finalColor += lightColor * lightIntensity * attenuation * spotEffect * absorption * invAttenuation * stepSize * 0.8 * noise;
+        }
+    }
+    return finalColor;
+}
+
+void main() {
     float depth = texture2D(uSceneDepthMap, uv0).r;
-   
-      // Reconstruct world position from depth
+
+    // Reconstruct world position from depth
     vec4 clipSpace = vec4(uv0 * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-    vec4 viewSpace = inverse(matrix_viewProjection) * clipSpace;
+    vec4 viewSpace = matrix_inverseViewProjection * clipSpace;
     vec3 worldPos = viewSpace.xyz / viewSpace.w;
-    
 
     vec3 rayStart = view_position;
     vec3 rayDir = normalize(worldPos - rayStart);
@@ -167,27 +141,32 @@ const fs = /* glsl */  `
     float stepSize = 0.1;
     float maxDistance = 50.0;
 
-    float numOfSteps = rayLength / stepSize;
-    numOfSteps = min(maxDistance / stepSize, rayLength / stepSize);
+    int numOfSteps = int(min(maxDistance / stepSize, rayLength / stepSize));
     vec3 totalVolumetricLighting = vec3(0.0);
 
-    for (int i = 0; i < MAX_LIGHTS; i++) {
-        if (i >= uLightCount) break;
+    for (int i = 0; i < uLightCount; i++) {
         float innerConeAngle = uLightProps[i].x;
         float outerConeAngle = uLightProps[i].y;
         float lightIntensity = uLightProps[i].z;
         float lightRange = uLightProps[i].w;
+
         totalVolumetricLighting += calculateVolumetricLight(
-            rayStart, rayDir, stepSize, numOfSteps,
-            matrix_lightmodel[i], uLightColor[i], lightIntensity, innerConeAngle, outerConeAngle, lightRange
+            rayStart,
+            rayDir,
+            stepSize,
+            numOfSteps,
+            matrix_lightmodel[i],
+            uLightColor[i],
+            lightIntensity,
+            innerConeAngle,
+            outerConeAngle,
+            lightRange
         );
     }
-    
-    
-    //xtotalVolumetricLighting /= numOfSteps;
-    gl_FragColor = vec4(clamp(vec3(0.0), vec3(1.0),totalVolumetricLighting),1.0);
-   // gl_FragColor = vec4(depth,depth,depth,1.0);
-  }
+
+    gl_FragColor = vec4(clamp(totalVolumetricLighting, 0.0, 1.0), 1.0);
+}
+
 `;
 
 /**
@@ -241,8 +220,8 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
 
         this.init(rt, {
             resizeSource: this.sourceTexture,
-            scaleX: 0.25,
-            scaleY: 0.25
+            scaleX: 0.5,
+            scaleY: 0.5
         });
 
         // clear the color to avoid load op

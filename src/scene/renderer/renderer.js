@@ -51,6 +51,7 @@ import { RenderPassUpdateClustered } from './render-pass-update-clustered.js';
 
 let _skinUpdateIndex = 0;
 const viewProjMat = new Mat4();
+const invViewProjMat = new Mat4();
 const viewInvMat = new Mat4();
 const viewMat = new Mat4();
 const viewMat3 = new Mat3();
@@ -219,6 +220,7 @@ class Renderer {
         this.viewId = scope.resolve('matrix_view');
         this.viewId3 = scope.resolve('matrix_view3');
         this.viewProjId = scope.resolve('matrix_viewProjection');
+        this.invViewProjId = scope.resolve('matrix_inverseViewProjection');
         this.flipYId = scope.resolve('projectionFlipY');
         this.tbnBasis = scope.resolve('tbnBasis');
         this.nearClipId = scope.resolve('camera_near');
@@ -437,6 +439,10 @@ class Renderer {
             // ViewProjection Matrix
             viewProjMat.mul2(projMat, viewMat);
             this.viewProjId.setValue(viewProjMat.data);
+
+            // InverseViewProjection Matrix
+            invViewProjMat.invert(viewProjMat);
+            this.invViewProjId.setValue(invViewProjMat.data);
 
             // store matrices needed by TAA
             camera._storeShaderMatrices(viewProjMat, jitterX, jitterY, this.device.renderVersion);
