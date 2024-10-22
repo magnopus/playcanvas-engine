@@ -266,7 +266,7 @@ class RenderPassCameraFrame extends RenderPass {
     collectPasses() {
 
         // use these prepared render passes in the order they should be executed
-        return [this.prePass, this.ssaoPass, this.volumetricsPass, this.scenePass, this.colorGrabPass, this.scenePassTransparent, this.taaPass,, this.bloomPass, this.composePass, this.afterPass];
+        return [this.prePass, this.ssaoPass, this.scenePass, this.colorGrabPass, this.volumetricsPass, this.scenePassTransparent, this.taaPass, this.bloomPass, this.composePass, this.afterPass];
     }
 
     createPasses(options) {
