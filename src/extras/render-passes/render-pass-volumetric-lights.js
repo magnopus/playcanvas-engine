@@ -2,9 +2,8 @@
 import { Color } from '../../core/math/color.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
-import { ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST, PIXELFORMAT_111110F } from '../../platform/graphics/constants.js';
+import { ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST } from '../../platform/graphics/constants.js';
 import { RenderPassShaderQuad } from '../../scene/graphics/render-pass-shader-quad.js';
-import { shaderChunks } from '../../scene/shader-lib/chunks/chunks.js';
 
 const MAX_LIGHTS = 8;
 
@@ -52,6 +51,8 @@ const fsUpscale = /* glsl */ `
 const fs = /* glsl */  `
 #define MAX_LIGHTS 8
 precision highp float;
+
+// Existing uniforms remain the same
 uniform mat4 matrix_projection;
 uniform mat4 matrix_viewProjection;
 uniform mat4 matrix_inverseViewProjection;
@@ -65,157 +66,185 @@ uniform sampler2DShadow uShadowMap[MAX_LIGHTS];
 uniform mat4 uLightViewProjMatrix[MAX_LIGHTS];
 uniform sampler2D uSceneDepthMap;
 in vec2 uv0;
-float random(vec2 co) {
-	return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+
+// Improved noise function that maintains temporal stability
+float gold_noise(vec2 coordinate, float seed) {
+    float phi = 1.61803398874989484820459;
+    float alpha = fract(dot(coordinate, vec2(phi, phi * phi)) * seed);
+    return fract(sin(alpha) * 43758.5453123);
 }
+
+// Light scattering phase function
+float henyeyGreenstein(float cosTheta, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5);
+}
+
 const mat4 LIGHT_DIRECTION_CORRECTION = mat4(
-	1.0, 0.0, 0.0, 0.0,
-	0.0, 0.0, 1.0, 0.0,
-	0.0, -1.0, 0.0, 0.0,
-	0.0, 0.0, 0.0, 1.0
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, -1.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0
 );
-vec3 calculateVolumetricLight(
-	vec3 rayStart,
-	vec3 rayDir,
-	float stepSize,
-	int numSteps,
-	mat4 lightModelMatrix,
-	mat4 lightViewProjMatrix,
-	sampler2DShadow shadowMap,
-	vec3 lightColor,
-	float lightIntensity,
-	float innerConeAngle,
-	float outerConeAngle,
-	float lightRange
-) {
-	vec3 lightPos = (lightModelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-	vec3 lightDir = normalize((lightModelMatrix * LIGHT_DIRECTION_CORRECTION * vec4(0.0, 0.0, -1.0, 0.0)).xyz);
-	float cosOuterCone = cos(outerConeAngle);
-	float cosInnerCone = cos(innerConeAngle);
-	vec3 finalColor = vec3(0.0);
-	float randomOffset = random(uv0) * stepSize;
-	for (int i = 0; i < numSteps; i++) {
-		float t = stepSize * float(i) + randomOffset;
-		vec3 samplePos = rayStart + rayDir * t;
-		vec3 lightToSample = samplePos - lightPos;
-		float distToLight = length(lightToSample);
-		if (distToLight > lightRange) continue;
-		float cosAngle = dot(normalize(lightToSample), -lightDir);
-		if (cosAngle > cosOuterCone) {
-			vec4 samplePosLightSpace = lightViewProjMatrix * vec4(samplePos, 1.0);
-			samplePosLightSpace.xyz /= samplePosLightSpace.w;
-			vec3 shadowCoord = samplePosLightSpace.xyz;
-			//shadowCoord.z = shadowCoord.z * 0.5 + 0.5;
-			if (shadowCoord.x >= 0.0 && shadowCoord.x <= 1.0 &&
-				shadowCoord.y >= 0.0 && shadowCoord.y <= 1.0 &&
-				shadowCoord.z >= 0.0 && shadowCoord.z <= 1.0) {
-				float bias = 0.01;
-			float shadowMapDepth = texture(shadowMap, vec3(shadowCoord.xy, shadowCoord.z));
-				float near = 0.005;
-				float far = 5.0;
-				float linearDepth = (2.0 * near * far) / (far + near - (shadowMapDepth * 2.0 - 1.0) * (far - near));
-				float coord = (2.0 * near * far) / (far + near - (shadowCoord.z * 2.0 - 1.0) * (far - near));
-				float depthLightSpace = shadowCoord.z;
-				float depthShadowMap = shadowMapDepth;
-				float shadow = (depthLightSpace - bias) <= depthShadowMap ? 1.0 : 0.0;
-				float attenuation = 1.0 / (distToLight * distToLight);
-				float invAttenuation = smoothstep(0.25, 0.8, distToLight);
-				float spotEffect = smoothstep(cosOuterCone, cosInnerCone, cosAngle);
-				float absorption = exp(-distToLight * 0.1);
-				float noise = 1.0;
-				finalColor += lightColor * spotEffect * attenuation * absorption * shadow;
-			}
-		}
-	}
-	return finalColor;
+
+struct LightSample {
+    float shadow;
+    float distToLight;
+    float cosAngle;
+    vec3 lightToSample;
+};
+
+// Separate shadow sampling function to handle the WebGL2 sampler array limitation
+float getShadowSample(int lightIndex, vec3 shadowCoord, float bias) {
+    // Using early returns to potentially skip unnecessary checks
+    if (lightIndex >= MAX_LIGHTS) return 0.0;
+    if (any(lessThan(shadowCoord, vec3(0.0))) || any(greaterThan(shadowCoord, vec3(1.0)))) return 0.0;
+    
+    switch (lightIndex) {
+        case 0: return texture(uShadowMap[0], vec3(shadowCoord.xy, shadowCoord.z - bias));
+        case 1: return texture(uShadowMap[1], vec3(shadowCoord.xy, shadowCoord.z - bias));
+        case 2: return texture(uShadowMap[2], vec3(shadowCoord.xy, shadowCoord.z - bias));
+        case 3: return texture(uShadowMap[3], vec3(shadowCoord.xy, shadowCoord.z - bias));
+        default: return 0.0;
+    }
 }
+
+vec3 calculateVolumetricLight(
+    vec3 rayStart,
+    vec3 rayDir,
+    float stepSize,
+    int numSteps,
+    mat4 lightModelMatrix,
+    mat4 lightViewProjMatrix,
+    int lightIndex,
+    vec3 lightColor,
+    float lightIntensity,
+    float innerConeAngle,
+    float outerConeAngle,
+    float lightRange
+) {
+    vec3 lightPos = (lightModelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 lightDir = normalize((lightModelMatrix * LIGHT_DIRECTION_CORRECTION * vec4(0.0, 0.0, -1.0, 0.0)).xyz);
+    float cosOuterCone = cos(outerConeAngle);
+    float cosInnerCone = cos(innerConeAngle);
+    
+    // Initialize accumulation variables
+    vec3 finalColor = vec3(0.0);
+    float transmittance = 1.0;
+    
+    // Temporal jittering for noise reduction
+    float timeOffset = fract(uTime * 0.1);
+    float randomOffset = gold_noise(uv0, timeOffset) * stepSize;
+    
+    // Calculate base distance for adaptive sampling
+    float baseDistance = length(lightPos - rayStart);
+    float maxDistance = min(lightRange * 1.2, length(rayDir) * float(numSteps) * stepSize);
+    
+    for (int i = 0; i < numSteps && transmittance > 0.01; i++) {
+        // Adaptive step size based on distance from light
+        float currentDist = float(i) * stepSize;
+        float adaptiveStep = stepSize * (1.0 + currentDist * 0.1);
+        float t = currentDist + randomOffset;
+        
+        // Early termination
+        if (t > maxDistance) break;
+        
+        vec3 samplePos = rayStart + rayDir * t;
+        vec3 lightToSample = samplePos - lightPos;
+        float distToLight = length(lightToSample);
+        
+        if (distToLight > lightRange) continue;
+        
+        float cosAngle = dot(normalize(lightToSample), -lightDir);
+        if (cosAngle > cosOuterCone) {
+            // Transform to light space
+            vec4 samplePosLightSpace = lightViewProjMatrix * vec4(samplePos, 1.0);
+            vec3 shadowCoord = samplePosLightSpace.xyz / samplePosLightSpace.w;
+            
+            // Calculate bias based on angle
+            float bias = 0.01 * (1.0 - cosAngle);
+            
+            // Get shadow value using the separate function
+            float shadow = getShadowSample(lightIndex, shadowCoord, bias);
+            
+            if (shadow > 0.0) {
+                // Calculate scattering
+                float phase = henyeyGreenstein(dot(rayDir, normalize(lightToSample)), -0.2);
+                
+                // Distance attenuation with smoother falloff
+                float attenuation = 1.0 / (1.0 + distToLight * distToLight * 0.02);
+                
+                // Improved spot light falloff
+                float spotEffect = smoothstep(cosOuterCone, cosInnerCone, cosAngle);
+                
+                // Variable density using 3D noise
+                float density = 0.1 * (1.0 + 0.5 * gold_noise(samplePos.xy * 0.1, timeOffset));
+                
+                // Calculate extinction
+                float extinction = exp(-distToLight * density);
+                
+                // Accumulate light contribution
+                vec3 contribution = lightColor * spotEffect * attenuation * extinction * shadow * phase;
+                finalColor += contribution * transmittance * adaptiveStep;
+                
+                // Update transmittance
+                transmittance *= exp(-density * adaptiveStep);
+            }
+        }
+    }
+    
+    return finalColor * lightIntensity;
+}
+
 void main() {
-	float depth = texture2D(uSceneDepthMap, uv0).r;
-	vec4 clipSpace = vec4(uv0 * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-	vec4 viewSpace = matrix_inverseViewProjection * clipSpace;
-	vec3 worldPos = viewSpace.xyz / viewSpace.w;
-	vec3 rayStart = view_position;
-	vec3 rayDir = normalize(worldPos - rayStart);
-	float rayLength = length(worldPos - rayStart);
-	float stepSize = 0.1;
-	float maxDistance = 50.0;
-	int numOfSteps = int(min(maxDistance / stepSize, rayLength / stepSize));
-	vec3 totalVolumetricLighting = vec3(0.0);
-	for (int v = 0; v < MAX_LIGHTS; v++) {
-		if (v > uLightCount) continue;
-		int i = v;
-		float innerConeAngle = uLightProps[i].x;
-		float outerConeAngle = uLightProps[i].y;
-		float lightIntensity = uLightProps[i].z;
-		float lightRange = uLightProps[i].w;
-		 switch (int(v)){
-			case 0:
-				totalVolumetricLighting += calculateVolumetricLight(
-					rayStart,
-					rayDir,
-					stepSize,
-					numOfSteps,
-					matrix_lightmodel[i],
-					uLightViewProjMatrix[i],
-					uShadowMap[0],
-					uLightColor[i],
-					lightIntensity,
-					innerConeAngle,
-					outerConeAngle,
-					lightRange
-				);
-				break;
-			case 1:
-				totalVolumetricLighting += calculateVolumetricLight(
-					rayStart,
-					rayDir,
-					stepSize,
-					numOfSteps,
-					matrix_lightmodel[i],
-					uLightViewProjMatrix[i],
-					uShadowMap[1],
-					uLightColor[i],
-					lightIntensity,
-					innerConeAngle,
-					outerConeAngle,
-					lightRange
-				);
-				break;
-			case 2:
-				totalVolumetricLighting += calculateVolumetricLight(
-					rayStart,
-					rayDir,
-					stepSize,
-					numOfSteps,
-					matrix_lightmodel[i],
-					uLightViewProjMatrix[i],
-					uShadowMap[2],
-					uLightColor[i],
-					lightIntensity,
-					innerConeAngle,
-					outerConeAngle,
-					lightRange
-				);
-				break;
-			case 3:
-				totalVolumetricLighting += calculateVolumetricLight(
-					rayStart,
-					rayDir,
-					stepSize,
-					numOfSteps,
-					matrix_lightmodel[i],
-					uLightViewProjMatrix[i],
-					uShadowMap[3],
-					uLightColor[i],
-					lightIntensity,
-					innerConeAngle,
-					outerConeAngle,
-					lightRange
-				);
-				break;
-		 }
-	}
-	gl_FragColor = vec4(clamp(totalVolumetricLighting, 0.0, 1.0), 1.0);
+    // Get world position from depth
+    float depth = texture(uSceneDepthMap, uv0).r;
+    vec4 clipSpace = vec4(uv0 * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 viewSpace = matrix_inverseViewProjection * clipSpace;
+    vec3 worldPos = viewSpace.xyz / viewSpace.w;
+    
+    // Setup ray
+    vec3 rayStart = view_position;
+    vec3 rayDir = normalize(worldPos - rayStart);
+    float rayLength = length(worldPos - rayStart);
+    
+    // Adaptive step size based on view distance
+    float baseStepSize = 0.1;
+    float adaptiveStepSize = baseStepSize * (1.0 + length(worldPos - rayStart) * 0.01);
+    float maxDistance = 50.0;
+    int numOfSteps = int(min(maxDistance / adaptiveStepSize, rayLength / adaptiveStepSize));
+    
+    vec3 totalVolumetricLighting = vec3(0.0);
+    
+    // Process each light
+    for (int v = 0; v < MAX_LIGHTS; v++) {
+        if (v >= uLightCount) break;
+        
+        float innerConeAngle = uLightProps[v].x;
+        float outerConeAngle = uLightProps[v].y;
+        float lightIntensity = uLightProps[v].z;
+        float lightRange = uLightProps[v].w;
+        
+        totalVolumetricLighting += calculateVolumetricLight(
+            rayStart,
+            rayDir,
+            adaptiveStepSize,
+            numOfSteps,
+            matrix_lightmodel[v],
+            uLightViewProjMatrix[v],
+            v,
+            uLightColor[v],
+            lightIntensity,
+            innerConeAngle,
+            outerConeAngle,
+            lightRange
+        );
+    }
+    
+    // Tone mapping and exposure adjustment
+    vec3 finalColor = totalVolumetricLighting / (vec3(1.0) + totalVolumetricLighting);
+    
+    gl_FragColor = vec4(finalColor, 1.0);
 }
 
 `;
@@ -373,6 +402,7 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
             scope.resolve('matrix_lightmodel[0]').setValue(values.matrix_lightmodel);
             scope.resolve('uShadowMap[0]').setValue(values.uShadowMap);
             scope.resolve('uLightViewProjMatrix[0]').setValue(values.uLightViewProjMatrix);
+            scope.resolve('uTime').setValue(performance.now());
             super.execute();
         }
 
