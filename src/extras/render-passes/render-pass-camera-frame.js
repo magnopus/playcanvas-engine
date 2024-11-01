@@ -266,7 +266,7 @@ class RenderPassCameraFrame extends RenderPass {
     collectPasses() {
 
         // use these prepared render passes in the order they should be executed
-        return [this.prePass, this.ssaoPass, this.scenePass, this.colorGrabPass, this.volumetricsPass, this.scenePassTransparent, this.taaPass, this.bloomPass, this.composePass, this.afterPass];
+        return [this.prePass, this.scenePass, this.colorGrabPass, this.volumetricsPass, this.scenePassTransparent, this.taaPass, this.bloomPass, this.composePass, this.afterPass];
     }
 
     createPasses(options) {
@@ -386,7 +386,7 @@ class RenderPassCameraFrame extends RenderPass {
     setupVolumetricsPass(options, inputTexture) {
         if (options.volumetricsEnabled) {
             // create a volumetrics pass, which generates volume texture based on the provided texture
-            this.volumetricsPass = new RenderPassVolumetricLight(this.app, this.device, inputTexture, this.hdrFormat);
+            this.volumetricsPass = new RenderPassVolumetricLight(this.app, this.device, inputTexture, this.hdrFormat, this.sceneDepth);
         }
     }
 

@@ -6,6 +6,7 @@ import { ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST } from '../../platform/graphics/c
 import { RenderPassShaderQuad } from '../../scene/graphics/render-pass-shader-quad.js';
 import { getBlueNoiseTexture } from '../../scene/graphics/noise-textures.js';
 import { voluemtricLightShader, MAX_LIGHTS } from './volumetric-shader.js';
+import { RenderPassUpsample } from './render-pass-upsample.js';
 
 
 /**
@@ -45,11 +46,12 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
     /** @type {AppBase} */
     app;
 
-    constructor(app, device, sourceTexture, textureFormat) {
+    constructor(app, device, sourceTexture, textureFormat, sceneDepth) {
         super(device);
         this.app = app;
         this.textureFormat = textureFormat;
         this.sourceTexture = sourceTexture;
+        this.sceneDepth = sceneDepth;
 
         // main Volumetric render pass
         this.shader = this.createQuadShader('VolumeShader', voluemtricLightShader);
@@ -67,6 +69,15 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
         const clearColor = new Color(0, 0, 0, 0);
         this.setClearColor(clearColor);
         this.volumetricsTextureId = device.scope.resolve('volumetricsTexture');
+
+        const blurRT = this.createRenderTarget('SsaoTempTexture');
+
+        const blurPassHorizontal = new RenderPassUpsample(device, rt.colorBuffer);
+        blurPassHorizontal.init(blurRT, {
+            resizeSource: rt.sourceTexture
+        });
+        this.volumetricsTexture = blurRT.colorBuffer;
+        this.afterPasses.push(blurPassHorizontal);
     }
 
     destroy() {
@@ -127,12 +138,15 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
 
         const lights = this.app.root.findComponents('light');
         let volumetricLights = lights.filter(
-            light => light.enabled && light.light.visibleThisFrame && light.type === 'spot'
+            light => light.enabled && light.volumetric && light.light.visibleThisFrame && light.type === 'spot'
         );
         volumetricLights = volumetricLights.slice(0, MAX_LIGHTS);
+        // nothing to do
+        if (volumetricLights.length === 0) return;
         scope.resolve('uLightCount').setValue(volumetricLights.length);
         const values = {
             uLightProps: [],
+            scatteringCoeff: [],
             uLightColour: [],
             matrix_lightmodel: [],
             uShadowMap: [],
@@ -148,9 +162,15 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
                 light.intensity,
                 light.range ?? 20
             ];
+            values.scatteringCoeff = [
+                ...values.scatteringCoeff,
+                light.scattering,
+                light.extinction
+            ];
             values.uLightColour = [...values.uLightColour, r, g, b];
-            values.uShadowMap = light.light._shadowMap.texture;
-            values.uLightViewProjMatrix = [...values.uLightViewProjMatrix, ...light.light._renderData[0].shadowMatrix.data];
+            values.uShadowMap = light.light._shadowMap?.texture;
+            const shadowMat = light.light._renderData[0]?.shadowMatrix?.data;
+            values.uLightViewProjMatrix.push(...[...shadowMat]);
             values.matrix_lightmodel = [...values.matrix_lightmodel, ...Array.from(light.entity.getWorldTransform().data)];
         }
         if (volumetricLights.length) {
@@ -158,10 +178,15 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
             scope.resolve('uLightColor[0]').setValue(values.uLightColour);
             scope.resolve('matrix_lightmodel[0]').setValue(values.matrix_lightmodel);
             scope.resolve('uShadowMap').setValue(values.uShadowMap);
+        //    scope.resolve('uHasShadowMap[0]').setValue(values.uHasShadowMap);
             scope.resolve('uLightViewProjMatrix[0]').setValue(values.uLightViewProjMatrix);
             scope.resolve('uTime').setValue(1);
+            scope.resolve('uSceneDepthMap').setValue(this.sceneDepth);
+            scope.resolve('scatteringCoeff[0]').setValue(values.scatteringCoeff);
             scope.resolve('uBlueNoiseTexture').setValue(getBlueNoiseTexture(device));
             super.execute();
+
+            
         }
     }
 

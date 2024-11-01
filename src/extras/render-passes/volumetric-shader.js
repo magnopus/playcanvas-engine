@@ -32,6 +32,7 @@ uniform mat4 matrix_projection;
 uniform mat4 matrix_viewProjection;
 uniform mat4 matrix_inverseViewProjection;
 uniform vec3 view_position;
+uniform vec2 scatteringCoeff[MAX_LIGHTS];
 
 // Light properties
 uniform vec4 uLightProps[MAX_LIGHTS];        // x: innerConeAngle, y: outerConeAngle, z: intensity, w: range
@@ -44,13 +45,36 @@ uniform sampler2DShadow uShadowMap;
 uniform mat4 uLightViewProjMatrix[MAX_LIGHTS];
 
 // Scene information
-uniform sampler2D uSceneDepthMap;            // Scene depth buffer
+uniform highp sampler2D uSceneDepthMap;            // Scene depth buffer
 uniform sampler2D uBlueNoiseTexture;         // Blue noise for dithering
 uniform float uTime;                         // Current time for temporal variation
 
 // Input from vertex shader
 in vec2 uv0;                                // Screen-space UV coordinates
 
+/**
+ * Converts view space depth to linear depth
+ * Required for proper depth comparisons during ray marching
+ */
+
+float linearizeDepth(float z, vec4 cameraParams) {
+    if (cameraParams.w == 0.0)
+        return (cameraParams.z * cameraParams.y) / (cameraParams.y + z * (cameraParams.z - cameraParams.y));
+    else
+        return cameraParams.z + z * (cameraParams.y - cameraParams.z);
+}
+
+
+
+/**
+ * Converts view space depth to linear depth
+ * Required for proper depth comparisons during ray marching
+ */
+float linearizeDepth2(float depth, mat4 projMatrix) {
+    float near = projMatrix[3][2] / (projMatrix[2][2] - 1.0);
+    float far = projMatrix[3][2] / (projMatrix[2][2] + 1.0);
+    return (2.0 * near * far) / (far + near - depth * (far - near));
+}
 /**
  * Blue noise sampling function
  * Uses temporal offset to prevent static noise patterns
@@ -156,7 +180,8 @@ vec3 calculateVolumetricLight(
     float lightIntensity,
     float innerConeAngle,
     float outerConeAngle,
-    float lightRange
+    float lightRange,
+    vec2 scatteringProps
 ) {
     // Transform light position and direction to world space
     vec3 lightPos = (lightModelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
@@ -192,18 +217,34 @@ vec3 calculateVolumetricLight(
     vec3 finalColor = vec3(0.0);
     float transmittance = 1.0;
     
-    // Physical constants for light scattering
-    const float scatteringCoeff = 0.08;
-    const float extinctionCoeff = 0.02;
-    
     // Ray marching loop
     for (int i = 0; i < numSteps && transmittance > 0.01; i++) {
         if (t > t1) break;
         
+        // Calculate current sample position
+        vec3 samplePos = rayStart + rayDir * t;
+        
+        // Project sample position to screen space for depth testing
+        vec4 sampleProjected = matrix_viewProjection * vec4(samplePos, 1.0);
+        vec3 screenPos = sampleProjected.xyz / sampleProjected.w;
+        
+        // Convert to UV coordinates
+        vec2 sampleUV = screenPos.xy * 0.5 + 0.5;
+        
+        // Sample scene depth and compare with current sample depth
+        float sceneDepth = texture(uSceneDepthMap, uv0).r;
+        float sampleLinearDepth = linearizeDepth2(screenPos.z, matrix_projection);
+        float sceneLinearDepth = linearizeDepth2(sceneDepth, matrix_projection);
+        
+        // Skip this sample if it's behind scene geometry
+        if (sampleLinearDepth > sceneLinearDepth + 0.001) {
+            t += stepSize;
+            continue;
+        }
+        
         float sampleOffset = getRayMarchingOffset(gl_FragCoord.xy, float(i), t);
         
         // Calculate sample position with distance-based noise reduction
-        vec3 samplePos = rayStart + rayDir * t;
         float distToLight = length(samplePos - lightPos);
         float normalizedDist = smoothstep(0.0, lightRange * 0.3, distToLight);
         
@@ -233,10 +274,10 @@ vec3 calculateVolumetricLight(
                     // Distance-based noise for density
                     float densityNoise = getBlueNoise(floor(samplePos.xy * 10.0));
                     float noiseInfluence = mix(0.02, 0.1, normalizedDist);
-                    float density = scatteringCoeff * (0.98 + densityNoise * noiseInfluence);
+                    float density = scatteringProps.x * (0.98 + densityNoise * noiseInfluence);
                     
                     // Beer-Lambert law for extinction
-                    float extinction = exp(-extinctionCoeff * distToLight);
+                    float extinction = exp(-scatteringProps.y * distToLight);
                     
                     // Accumulate light contribution
                     vec3 contribution = lightColor * lightIntensity * falloff * spotEffect * shadow * extinction;
@@ -244,7 +285,7 @@ vec3 calculateVolumetricLight(
                     
                     // Update transmittance with distance-based noise
                     float transNoiseInfluence = mix(0.02, 0.06, normalizedDist);
-                    transmittance *= exp(-extinctionCoeff * stepSize * (0.98 + densityNoise * transNoiseInfluence));
+                    transmittance *= exp(-scatteringProps.y * stepSize * (0.98 + densityNoise * transNoiseInfluence));
                 }
             }
         }
@@ -296,13 +337,18 @@ void main() {
             lightIntensity,
             innerConeAngle,
             outerConeAngle,
-            lightRange
+            lightRange,
+            scatteringCoeff[v]
         );
     }
     
     // Tone mapping (HDR -> LDR conversion)
     vec3 finalColor = totalVolumetricLighting / (vec3(1.0) + totalVolumetricLighting);
-    
-    gl_FragColor = vec4(finalColor, 1.0);
+            // Convert to UV coordinates
+       // vec2 sampleUV = screenPos.xy * 0.5 + 0.5;
+                float sceneDepth = texture(uSceneDepthMap, uv0).r;
+        //float sampleLinearDepth = linearizeDepth(screenPos.z, matrix_projection);
+        float sceneLinearDepth = linearizeDepth(sceneDepth, vec4(1.0 / 10.0,  10.0,  0.1, 0.0));
+    gl_FragColor = vec4(finalColor,1.0);
 }
 `;

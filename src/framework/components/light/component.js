@@ -519,6 +519,66 @@ class LightComponent extends Component {
     }
 
     /**
+     * Sets whether this light is volumetric. Affects spot lights only. Defaults to false.
+     *
+     * @type {boolean}
+     */
+    set volumetric(arg) {
+        this._setValue('volumetric', arg, function (newValue, oldValue) {
+            this.light.volumetric = newValue;
+        });
+    }
+
+    /**
+     * Gets whether this light is volumetric
+     *
+     * @type {boolean}
+     */
+    get volumetric() {
+        return this.data.type === 'spot' && this.data.volumetric;
+    }
+
+    /**
+     * Sets the amount of light scattering when volumetric. Affects spot lights only. Defaults to false.
+     *
+     * @type {number}
+     */
+    set scattering(arg) {
+        this._setValue('scattering', arg, function (newValue, oldValue) {
+            this.light.scattering = newValue;
+        });
+    }
+
+    /**
+     * Gets the amount of light scattering when volumetric
+     *
+     * @type {number}
+     */
+    get scattering() {
+        return this.data.scattering;
+    }
+
+    /**
+     * Sets the amount of light extinction when volumetric, meaning it fades away faster. Affects spot lights only. Defaults to false.
+     *
+     * @type {number}
+     */
+    set extinction(arg) {
+        this._setValue('extinction', arg, function (newValue, oldValue) {
+            this.light.extinction = newValue;
+        });
+    }
+
+    /**
+     * Gets whether this light is extinction
+     *
+     * @type {number}
+     */
+    get extinction() {
+        return this.data.extinction;
+    }
+
+    /**
      * Sets the fall off mode for the light. This controls the rate at which a light attenuates
      * from its position. Can be:
      *
