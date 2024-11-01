@@ -2,7 +2,7 @@
 import { Color } from '../../core/math/color.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
-import { ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST } from '../../platform/graphics/constants.js';
+import { ADDRESS_CLAMP_TO_EDGE, FILTER_LINEAR, FILTER_NEAREST } from '../../platform/graphics/constants.js';
 import { RenderPassShaderQuad } from '../../scene/graphics/render-pass-shader-quad.js';
 import { getBlueNoiseTexture } from '../../scene/graphics/noise-textures.js';
 import { voluemtricLightShader, MAX_LIGHTS } from './volumetric-shader.js';
@@ -61,8 +61,8 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
 
         this.init(rt, {
             resizeSource: this.sourceTexture,
-            scaleX: 0.25,
-            scaleY: 0.25
+            scaleX: 0.5,
+            scaleY: 0.5
         });
 
         // clear the color to avoid load op
@@ -122,8 +122,8 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
                 height: 1,
                 format: this.textureFormat,
                 mipmaps: false,
-                minFilter: FILTER_NEAREST,
-                magFilter: FILTER_NEAREST,
+                minFilter: FILTER_LINEAR,
+                magFilter: FILTER_LINEAR,
                 addressU: ADDRESS_CLAMP_TO_EDGE,
                 addressV: ADDRESS_CLAMP_TO_EDGE
             })
