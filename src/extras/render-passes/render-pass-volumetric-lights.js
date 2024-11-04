@@ -7,6 +7,7 @@ import { RenderPassShaderQuad } from '../../scene/graphics/render-pass-shader-qu
 import { getBlueNoiseTexture } from '../../scene/graphics/noise-textures.js';
 import { voluemtricLightShader, MAX_LIGHTS } from './volumetric-shader.js';
 import { RenderPassUpsample } from './render-pass-upsample.js';
+import { RenderPassDepthAwareBlur } from './render-pass-depth-aware-blur.js';
 
 
 /**
@@ -71,13 +72,28 @@ class RenderPassVolumetricLight extends RenderPassShaderQuad {
         this.volumetricsTextureId = device.scope.resolve('volumetricsTexture');
 
         const blurRT = this.createRenderTarget('SsaoTempTexture');
+        const blurRT2 = this.createRenderTarget('SsaoTempTexture2');
+        const blurRT3 = this.createRenderTarget('SsaoTempTexture3');
 
-        const blurPassHorizontal = new RenderPassUpsample(device, rt.colorBuffer);
-        blurPassHorizontal.init(blurRT, {
-            resizeSource: rt.sourceTexture
+        const upscalePass = new RenderPassUpsample(device, rt.colorBuffer);
+        upscalePass.init(blurRT, {
+            resizeSource: this.sourceTexture
         });
-        this.volumetricsTexture = blurRT.colorBuffer;
+
+        const blurPassHorizontal = new RenderPassDepthAwareBlur(device, blurRT.colorBuffer, true);
+        blurPassHorizontal.init(blurRT2, {
+            resizeSource: this.sourceTexture
+        });
+
+        const blurPassVertical = new RenderPassDepthAwareBlur(device, blurRT2.colorBuffer, false);
+        blurPassVertical.init(blurRT3, {
+            resizeSource: this.sourceTexture
+        });
+        
+        this.afterPasses.push(upscalePass);
         this.afterPasses.push(blurPassHorizontal);
+        this.afterPasses.push(blurPassVertical);
+        this.volumetricsTexture = blurRT3.colorBuffer;
     }
 
     destroy() {
