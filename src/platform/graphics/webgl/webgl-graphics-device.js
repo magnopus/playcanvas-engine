@@ -153,16 +153,18 @@ class WebglGraphicsDevice extends GraphicsDevice {
             Debug.log('Antialiasing has been turned off due to rendering issues on AppleWebKit 15.4');
         }
 
-        // #5856 - turn off antialiasing on Windows Firefox
-        if (platform.browserName === 'firefox' && platform.name === 'windows') {
+        // #5856 - turn off antialiasing on Firefox running on Windows / Android
+        if (platform.browserName === 'firefox') {
             const ua = (typeof navigator !== 'undefined') ? navigator.userAgent : '';
             const match = ua.match(/Firefox\/(\d+(\.\d+)*)/);
             const firefoxVersion = match ? match[1] : null;
             if (firefoxVersion) {
                 const version = parseFloat(firefoxVersion);
-                if (version >= 120 || version === 115) {
+                const disableAntialias = (platform.name === 'windows' && (version >= 120 || version === 115)) ||
+                                         (platform.name === 'android' && version >= 132);
+                if (disableAntialias) {
                     options.antialias = false;
-                    Debug.log(`Antialiasing has been turned off due to rendering issues on Windows Firefox esr115 and 120+. Current version: ${firefoxVersion}`);
+                    Debug.log(`Antialiasing has been turned off due to rendering issues on Firefox ${platform.name} platform version ${firefoxVersion}`);
                 }
             }
         }
@@ -1270,7 +1272,7 @@ class WebglGraphicsDevice extends GraphicsDevice {
             // generate mipmaps
             for (let i = 0; i < colorBufferCount; i++) {
                 const colorOps = renderPass.colorArrayOps[i];
-                if (colorOps.mipmaps) {
+                if (colorOps.genMipmaps) {
                     const colorBuffer = target._colorBuffers[i];
                     if (colorBuffer && colorBuffer.impl._glTexture && colorBuffer.mipmaps) {
 
@@ -2044,7 +2046,7 @@ class WebglGraphicsDevice extends GraphicsDevice {
         Debug.assert(renderTarget.colorBuffer === texture);
 
         const buffer = new ArrayBuffer(TextureUtils.calcLevelGpuSize(width, height, 1, texture._format));
-        const data = new (getPixelFormatArrayType(texture._format))(buffer);
+        const data = options.data ?? new (getPixelFormatArrayType(texture._format))(buffer);
 
         this.setRenderTarget(renderTarget);
         this.initRenderTarget(renderTarget);
