@@ -1028,9 +1028,11 @@ class LitShader {
                 backend.append('    addReflection(dReflDirW, litArgs_gloss);');
 
                 if (options.fresnelModel > 0) {
+                    // magnopus patched
+                    decl.append('uniform float projectionFlipY;');
                     backend.append(`    dReflection.rgb *= 
                         getFresnel(
-                            dot(dViewDirW, litArgs_worldNormal), 
+                            dot(dViewDirW, litArgs_worldNormal * projectionFlipY), 
                             litArgs_gloss, 
                             litArgs_specularity
                         #if defined(LIT_IRIDESCENCE)
