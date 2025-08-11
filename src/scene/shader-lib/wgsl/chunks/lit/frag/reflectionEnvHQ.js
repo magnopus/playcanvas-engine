@@ -1,7 +1,7 @@
 export default /* wgsl */`
 #ifndef ENV_ATLAS
     #define ENV_ATLAS
-    var texture_envAtlas: texture_2d<f32>;
+    var texture_envAtlas: texture_2d_array<f32>;
     var texture_envAtlasSampler: sampler;
 #endif
 
@@ -9,7 +9,7 @@ var texture_cubeMap: texture_cube<f32>;
 var texture_cubeMapSampler: sampler;
 uniform material_reflectivity: f32;
 
-fn calcReflection(reflDir: vec3f, gloss: f32) -> vec3f {
+fn calcReflection(reflDir: vec3f, gloss: f32, index: i32) -> vec3f {
     let dir: vec3f = cubeMapProject(reflDir) * vec3f(-1.0, 1.0, 1.0);
     let uv: vec2f = toSphericalUv(dir);
 
@@ -19,13 +19,14 @@ fn calcReflection(reflDir: vec3f, gloss: f32) -> vec3f {
     let flevel: f32 = level - ilevel;
 
     let sharp: vec3f = {reflectionCubemapDecode}(textureSample(texture_cubeMap, texture_cubeMapSampler, dir));
-    let roughA: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, mapRoughnessUv(uv, ilevel)));
-    let roughB: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, mapRoughnessUv(uv, ilevel + 1.0)));
+    let roughA: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, mapRoughnessUv(uv, ilevel), index));
+    let roughB: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, mapRoughnessUv(uv, ilevel + 1.0), index));
 
     return processEnvironment(mix(sharp, mix(roughA, roughB, flevel), min(level, 1.0)));
 }
 
 fn addReflection(reflDir: vec3f, gloss: f32) {
-    dReflection = dReflection + vec4f(calcReflection(reflDir, gloss), uniform.material_reflectivity);
+    let probeIndex = 0; // hardcoded for now
+     dReflection = dReflection + vec4f(calcReflection(reflDir, gloss, probeIndex), uniform.material_reflectivity);
 }
 `;
