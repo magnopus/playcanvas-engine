@@ -201,15 +201,17 @@ class Mesh extends RefCountedObject {
      *   - {@link PRIMITIVE_TRIFAN}
      *
      * - `base` is the offset of the first index or vertex to dispatch in the draw call.
+     * - `baseVertex` is the number added to each index value before indexing into the vertex buffers. (supported only in WebGPU, ignored in WebGL2)
      * - `count` is the number of indices or vertices to dispatch in the draw call.
      * - `indexed` specifies whether to interpret the primitive as indexed, thereby using the
      * currently set index buffer.
      *
-     * @type {{type: number, base: number, count: number, indexed?: boolean}[]}
+     * @type {{type: number, base: number, baseVertex: number, count: number, indexed?: boolean}[]}
      */
     primitive = [{
         type: 0,
         base: 0,
+        baseVertex: 0,
         count: 0
     }];
 
@@ -1044,6 +1046,7 @@ class Mesh extends RefCountedObject {
             this.primitive[RENDERSTYLE_POINTS] = {
                 type: PRIMITIVE_POINTS,
                 base: 0,
+                baseVertex: 0,
                 count: this.vertexBuffer ? this.vertexBuffer.numVertices : 0,
                 indexed: false
             };
@@ -1076,15 +1079,15 @@ class Mesh extends RefCountedObject {
 
             const base = this.primitive[RENDERSTYLE_SOLID].base;
             const count = this.primitive[RENDERSTYLE_SOLID].count;
+            const baseVertex = this.primitive[RENDERSTYLE_SOLID].baseVertex || 0;
             const indexBuffer = this.indexBuffer[RENDERSTYLE_SOLID];
             const srcIndices = new typedArrayIndexFormats[indexBuffer.format](indexBuffer.storage);
-
             const seen = new Set();
 
             for (let j = base; j < base + count; j += 3) {
                 for (let k = 0; k < 3; k++) {
-                    const i1 = srcIndices[j + offsets[k][0]];
-                    const i2 = srcIndices[j + offsets[k][1]];
+                    const i1 = srcIndices[j + offsets[k][0]] + baseVertex;
+                    const i2 = srcIndices[j + offsets[k][1]] + baseVertex;
                     const hash = (i1 > i2) ? ((i2 * numVertices) + i1) : ((i1 * numVertices) + i2);
                     if (!seen.has(hash)) {
                         seen.add(hash);
@@ -1108,6 +1111,7 @@ class Mesh extends RefCountedObject {
         this.primitive[RENDERSTYLE_WIREFRAME] = {
             type: PRIMITIVE_LINES,
             base: 0,
+            baseVertex: 0,
             count: lines.length,
             indexed: true
         };
