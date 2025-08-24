@@ -13,7 +13,8 @@ import {
     // magnopus patched additional UVS
     SHADERDEF_UV2,
     SHADERDEF_UV3,
-    SHADERDEF_UV4
+    SHADERDEF_UV4,
+    SHADOW_CASCADE_ALL
 } from './constants.js';
 import { GraphNode } from './graph-node.js';
 import { getDefaultMaterial } from './materials/default-material.js';
@@ -40,6 +41,7 @@ import { array } from '../core/array-utils.js';
  * @import { UniformBufferFormat } from '../platform/graphics/uniform-buffer-format.js'
  * @import { Vec3 } from '../core/math/vec3.js'
  * @import { VertexBuffer } from '../platform/graphics/vertex-buffer.js'
+ * @import { CameraComponent } from '../framework/components/camera/component.js';
  */
 
 let id = 0;
@@ -81,6 +83,38 @@ class InstancingData {
             this.vertexBuffer?.destroy();
         }
         this.vertexBuffer = null;
+    }
+}
+
+/**
+ * Internal data structure used to store data used by indirect rendering.
+ *
+ * @ignore
+ */
+class IndirectData {
+    /**
+     * A map of camera components to their corresponding slot in the indirect buffer.
+     *
+     * @type {Map<CameraComponent, number>}
+     */
+    map = new Map();
+
+    /**
+     * An array of 4 integers used to store mesh metadata needed for indirect rendering.
+     *
+     * @type {Int32Array}
+     */
+    meshMetaData = new Int32Array(4);
+
+    /**
+     * Retrieves the slot in the indirect buffer for a specific camera.
+     *
+     * @param {CameraComponent|null} camera - The camera component to retrieve the slot for, or null
+     * if the slot should be used for all cameras.
+     * @returns {number|undefined} - The slot in the indirect buffer, or undefined.
+     */
+    get(camera) {
+        return this.map.get(camera) ?? this.map.get(null);
     }
 }
 
@@ -184,6 +218,40 @@ class ShaderInstance {
  * An instance of a {@link Mesh}. A single mesh can be referenced by many mesh instances that can
  * have different transforms and materials.
  *
+ * ### Instancing
+ *
+ * Hardware instancing lets the GPU draw many copies of the same geometry with a single draw call.
+ * Use {@link setInstancing} to attach a vertex buffer that holds per-instance data
+ * (for example a mat4 world-matrix for every instance). Set {@link instancingCount}
+ * to control how many instances are rendered. Passing `null` to {@link setInstancing}
+ * disables instancing once again.
+ *
+ * ```javascript
+ * // vb is a vertex buffer with one 4×4 matrix per instance
+ * meshInstance.setInstancing(vb);
+ * meshInstance.instancingCount = numInstances;
+ * ```
+ *
+ * **Examples**
+ *
+ * - {@link https://playcanvas.github.io/#graphics/instancing-basic graphics/instancing-basic}
+ * - {@link https://playcanvas.github.io/#graphics/instancing-custom graphics/instancing-custom}
+ *
+ * ### GPU-Driven Indirect Rendering (WebGPU Only)
+ *
+ * Instead of issuing draw calls from the CPU, parameters are written into a GPU
+ * storage buffer and executed via indirect draw commands. Allocate a slot with
+ * `GraphicsDevice.getIndirectDrawSlot()`, then bind the mesh instance to that slot:
+ *
+ * ```javascript
+ * const slot = app.graphicsDevice.getIndirectDrawSlot();
+ * meshInstance.setIndirect(null, slot); // first arg can be a CameraComponent or null
+ * ```
+ *
+ * **Example**
+ *
+ * - {@link https://playcanvas.github.io/#compute/indirect-draw compute/indirect-draw}
+ *
  * @category Graphics
  */
 class MeshInstance {
@@ -196,6 +264,16 @@ class MeshInstance {
      * @type {boolean}
      */
     castShadow = false;
+
+    /**
+     * Specifies a bitmask that controls which shadow cascades a mesh instance contributes
+     * to when rendered with a {@link LIGHTTYPE_DIRECTIONAL} light source.
+     * This setting is only effective if the {@link castShadow} property is enabled.
+     * Defaults to {@link SHADOW_CASCADE_ALL}, which means the mesh casts shadows into all available cascades.
+     *
+     * @type {number}
+     */
+    shadowCascadeMask = SHADOW_CASCADE_ALL;
 
     /**
      * Controls whether the mesh instance can be culled by frustum culling (see
@@ -274,6 +352,12 @@ class MeshInstance {
      * @ignore
      */
     instancingData = null;
+
+    /**
+     * @type {IndirectData|null}
+     * @ignore
+     */
+    indirectData = null;
 
     /**
      * @type {Record<string, {scopeId: ScopeId|null, data: any, passFlags: number}>}
@@ -1021,15 +1105,15 @@ class MeshInstance {
 
     updateKey() {
 
-        // 31      : sign bit (leave)
-        // 30 - 25 : 8 bits for draw bucket - this is the highest priority for sorting
-        // 24      : 1 bit for alpha test / coverage, to render them after opaque to keep GPU efficiency
-        // 23 - 0  : 24 bits for material ID
+        // 31      : sign bit (leave as 0)
+        // 30 - 23 : 8 bits for draw bucket - highest priority for sorting
+        // 22      : 1 bit for alpha test / coverage, to render them after opaque for GPU efficiency
+        // 21 - 0  : 22 bits for material ID
         const { material } = this;
         this._sortKeyForward =
-            (this._drawBucket << 25) |
-            ((material.alphaToCoverage || material.alphaTest) ? 0x1000000 : 0) |
-            (material.id & 0xffffff);
+            (this._drawBucket << 23) |
+            ((material.alphaToCoverage || material.alphaTest) ? 0x400000 : 0) |
+            (material.id & 0x3fffff);
     }
 
     /**
@@ -1058,6 +1142,56 @@ class MeshInstance {
         }
 
         this._updateShaderDefs(vertexBuffer ? (this._shaderDefs | SHADERDEF_INSTANCING) : (this._shaderDefs & ~SHADERDEF_INSTANCING));
+    }
+
+    /**
+     * Sets the {@link MeshInstance} to be rendered using indirect rendering, where the GPU,
+     * typically using a Compute shader, stores draw call parameters in a buffer.
+     * Note that this is only supported on WebGPU, and ignored on other platforms.
+     *
+     * @param {CameraComponent|null} camera - Camera component to set indirect data for, or
+     * null if the indirect slot should be used for all cameras.
+     * @param {number} slot - Slot in the buffer to set the draw call parameters. Allocate a slot
+     * in the buffer by calling {@link GraphicsDevice#getIndirectDrawSlot}.
+     */
+    setIndirect(camera, slot) {
+
+        this._allocIndirectData();
+
+        // store camera to slot mapping
+        this.indirectData.map.set(camera?.camera ?? null, slot);
+
+        // remove all data from this map at the end of the frame, slot needs to be assigned each frame
+        const device = this.mesh.device;
+        device.mapsToClear.add(this.indirectData.map);
+    }
+
+    /**
+     * Retrieves the mesh metadata needed for indirect rendering.
+     *
+     * @returns {Int32Array} - A typed array with 4 elements representing the mesh metadata, which
+     * is typically needed when generating indirect draw call parameters using Compute shader. These
+     * can be provided to the Compute shader using vec4i uniform. The values are based on
+     * {@link Mesh#primitive}, stored in this order: [count, base, baseVertex, 0]. The last value is
+     * always zero and is reserved for future use.
+     */
+    getIndirectMetaData() {
+
+        this._allocIndirectData();
+
+        const prim = this.mesh?.primitive[this.renderStyle];
+        const data = this.indirectData.meshMetaData;
+        data[0] = prim.count;
+        data[1] = prim.base;
+        data[2] = prim.baseVertex;
+        // data[3] is padding, can be used for first instance in the future
+        return data;
+    }
+
+    _allocIndirectData() {
+        if (!this.indirectData) {
+            this.indirectData = new IndirectData();
+        }
     }
 
     ensureMaterial(device) {

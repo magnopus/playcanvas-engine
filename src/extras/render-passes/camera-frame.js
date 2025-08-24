@@ -322,8 +322,7 @@ class CameraFrame {
         // handle layer changes on the camera - render passes need to be update to reflect the changes
         this.cameraLayersChanged = cameraComponent.on('set:layers', () => {
             if (this.renderPassCamera) {
-                // magnopus patched https://magnopus.atlassian.net/browse/OB-4477
-                this.update();
+                if (this.renderPassCamera) this.renderPassCamera.layersDirty = true;
             }
         });
     }
@@ -369,7 +368,7 @@ class CameraFrame {
      * @returns {RenderPassCameraFrame} - The render pass.
      */
     createRenderPass() {
-        return new RenderPassCameraFrame(this.app, this.cameraComponent, this.options);
+        return new RenderPassCameraFrame(this.app, this, this.cameraComponent, this.options);
     }
 
     /**

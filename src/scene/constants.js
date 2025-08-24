@@ -409,6 +409,41 @@ export const shadowTypeInfo = new Map([
 ]);
 
 /**
+ * The flag that controls shadow rendering for the 0 cascade
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_0 = 1;
+
+/**
+ * The flag that controls shadow rendering for the 1 cascade
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_1 = 2;
+
+/**
+ * The flag that controls shadow rendering for the 2 cascade
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_2 = 4;
+
+/**
+ * The flag that controls shadow rendering for the 3 cascade
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_3 = 8;
+
+/**
+ * The flag that controls shadow rendering for the all cascades
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_ALL = 255;
+
+/**
  * Box filter.
  *
  * @category Graphics
@@ -1094,15 +1129,22 @@ export const EVENT_PRERENDER_LAYER = 'prerender:layer';
 export const EVENT_POSTRENDER_LAYER = 'postrender:layer';
 
 /**
- * Name of event fired before visibility culling is performed for the camera
+ * Name of event fired before visibility culling is performed for the camera.
  *
  * @ignore
  */
 export const EVENT_PRECULL = 'precull';
 
 /**
- * Name of event after before visibility culling is performed for the camera
+ * Name of event after visibility culling is performed for the camera.
  *
  * @ignore
  */
 export const EVENT_POSTCULL = 'postcull';
+
+/**
+ * Name of event after the engine has finished culling all cameras.
+ *
+ * @ignore
+ */
+export const EVENT_CULL_END = 'cull:end';
