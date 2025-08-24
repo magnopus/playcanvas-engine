@@ -1,8 +1,8 @@
 export default /* wgsl */`
 #ifndef ENV_ATLAS
 #define ENV_ATLAS
-    var texture_envAtlas: texture_2d<f32>;
-    var texture_envAtlasSampler: sampler;
+    var texture_envAtlas: texture_2d_array<f32>;
+    var texture_envAtlasSampler: sampler; 
 #endif
 uniform material_reflectivity: f32;
 
@@ -22,7 +22,7 @@ fn shinyMipLevel(uv: vec2f) -> f32 {
     return clamp(0.5 * log2(maxd) - 1.0 + uniform.textureBias, 0.0, 5.0);
 }
 
-fn calcReflection(reflDir: vec3f, gloss: f32) -> vec3f {
+fn calcReflection(reflDir: vec3f, gloss: f32, index: i32) -> vec3f {
     let dir: vec3f = cubeMapProject(reflDir) * vec3f(-1.0, 1.0, 1.0);
     let uv: vec2f = toSphericalUv(dir);
 
@@ -48,15 +48,16 @@ fn calcReflection(reflDir: vec3f, gloss: f32) -> vec3f {
         weight = 0.0;
     }
 
-    let linearA: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, uv0));
-    let linearB: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, uv1));
+    let linearA: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, uv0, index));
+    let linearB: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, uv1, index));
     let linear0: vec3f = mix(linearA, linearB, weight);
-    let linear1: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, mapRoughnessUv(uv, ilevel + 1.0)));
+    let linear1: vec3f = {reflectionDecode}(textureSample(texture_envAtlas, texture_envAtlasSampler, mapRoughnessUv(uv, ilevel + 1.0), index));
 
     return processEnvironment(mix(linear0, linear1, level - ilevel));
 }
 
 fn addReflection(reflDir: vec3f, gloss: f32) {
-    dReflection = dReflection + vec4f(calcReflection(reflDir, gloss), uniform.material_reflectivity);
+    let probeIndex = 0; // hardcoded for now
+     dReflection = dReflection + vec4f(calcReflection(reflDir, gloss, probeIndex), uniform.material_reflectivity);
 }
 `;

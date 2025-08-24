@@ -1788,6 +1788,8 @@ class AppBase extends EventHandler {
             material.cull = CULLFACE_NONE;
             material.setParameter('colorMap', texture);
             material.shaderDesc = filterable ? this.scene.immediate.getTextureShaderDesc(texture.encoding) : this.scene.immediate.getUnfilterableTextureShaderDesc();
+            // magnopus patched, ensure drawTexture isn't obscured by the scene
+            material.depthTest = false;
             material.update();
         }
 
