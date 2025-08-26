@@ -457,7 +457,7 @@ class WebgpuTexture {
         dummyUse(image instanceof HTMLCanvasElement && image.getContext('2d'));
 
         Debug.trace(TRACEID_RENDER_QUEUE, `IMAGE-TO-TEX: mip:${mipLevel} index:${index} ${this.texture.name}`);
-        device.wgpu.importExternalTexture(src, dst, copySize);
+        device.wgpu.queue.copyExternalImageToTexture(src, dst, copySize);
     }
 
     uploadTypedArrayData(device, data, mipLevel, index) {

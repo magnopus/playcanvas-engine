@@ -1,7 +1,7 @@
 export default /* glsl */`
 #ifndef ENV_ATLAS
 #define ENV_ATLAS
-    uniform sampler2D texture_envAtlas;
+    uniform sampler2DArray texture_envAtlas;
 #endif
 uniform float material_reflectivity;
 
@@ -21,7 +21,7 @@ float shinyMipLevel(vec2 uv) {
     return clamp(0.5 * log2(maxd) - 1.0 + textureBias, 0.0, 5.0);
 }
 
-vec3 calcReflection(vec3 reflDir, float gloss) {
+vec3 calcReflection(vec3 reflDir, float gloss, int probeIndex) {
     // Magnopus patched, fix Rotation
   vec3 dir = cubeMapProject(reflDir) * vec3(1.0, 1.0, -1.0);
     vec2 uv = toSphericalUv(dir);

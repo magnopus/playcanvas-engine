@@ -101,7 +101,7 @@ fn evaluateBackend() -> FragmentOutput {
             #endif
 
             // Fresnel has to be applied to reflections
-            addReflection(dReflDirW, litArgs_gloss);
+            addReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);
 
             #ifdef LIT_FRESNEL_MODEL
 
