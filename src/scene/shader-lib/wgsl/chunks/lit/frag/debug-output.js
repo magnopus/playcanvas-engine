@@ -23,6 +23,12 @@ output.color = vec4f(litArgs_specularity, 1.0);
 output.color = vec4f(vec3f(litArgs_gloss) , 1.0);
 #endif
 
+// magnopus patched - start
+#ifdef DEBUG_ROUGHNESS_PASS
+output.color = vec4f(1.0 - vec3f(litArgs_gloss) , 1.0);
+#endif
+// magnopus patched - end
+
 #ifdef DEBUG_METALNESS_PASS
 output.color = vec4f(vec3f(litArgs_metalness) , 1.0);
 #endif

@@ -867,6 +867,15 @@ export const SHADERPASS_SPECULARITY = 'debug_specularity';
  */
 export const SHADERPASS_GLOSS = 'debug_gloss';
 
+// magnopus patched - start
+/**
+ * Shader used for debug rendering of roughness.
+ *
+ * @category Graphics
+ */
+export const SHADERPASS_ROUGHNESS = 'debug_roughness';
+// magnopus patched - end
+
 /**
  * Shader used for debug rendering of metalness.
  *
