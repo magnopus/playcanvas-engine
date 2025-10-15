@@ -36,6 +36,12 @@ gl_FragColor = vec4(litArgs_specularity, 1.0);
 gl_FragColor = vec4(vec3(litArgs_gloss) , 1.0);
 #endif
 
+// magnopus patched - start
+#ifdef DEBUG_ROUGHNESS_PASS
+gl_FragColor = vec4(1.0 - vec3(litArgs_gloss) , 1.0);
+#endif
+// magnopus patched - end
+
 #ifdef DEBUG_METALNESS_PASS
 gl_FragColor = vec4(vec3(litArgs_metalness) , 1.0);
 #endif
