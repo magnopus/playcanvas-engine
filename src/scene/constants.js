@@ -1160,3 +1160,18 @@ export const EVENT_POSTCULL = 'postcull';
  * @ignore
  */
 export const EVENT_CULL_END = 'cull:end';
+
+/**
+ * @ignore
+ */
+export const GSPLAT_FORWARD = 1;
+
+/**
+ * @ignore
+ */
+export const GSPLAT_SHADOW = 2;
+
+/**
+ * @ignore
+ */
+export const SHADOWCAMERA_NAME = 'pcShadowCamera';

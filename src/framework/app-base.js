@@ -1042,9 +1042,20 @@ class AppBase extends EventHandler {
         this.stats.frame.updateStart = now();
         // #endif
 
+        // script update
+        this.stats.frame.scriptUpdateStart = now();
         this.systems.fire(this._inTools ? 'toolsUpdate' : 'update', dt);
+        this.stats.frame.scriptUpdate = now() - this.stats.frame.scriptUpdateStart;
+
+        // animation update
+        this.stats.frame.animUpdateStart = now();
         this.systems.fire('animationUpdate', dt);
+        this.stats.frame.animUpdate = now() - this.stats.frame.animUpdateStart;
+
+        // post update
+        this.stats.frame.scriptPostUpdateStart = now();
         this.systems.fire('postUpdate', dt);
+        this.stats.frame.scriptPostUpdate = now() - this.stats.frame.scriptPostUpdateStart;
 
         // fire update event
         this.fire('update', dt);
@@ -1089,9 +1100,7 @@ class AppBase extends EventHandler {
 
         this.fire('postrender');
 
-        // #if _PROFILER
         this.stats.frame.renderTime = now() - this.stats.frame.renderStart;
-        // #endif
 
         this.graphicsDevice.frameEnd();
     }
@@ -1869,6 +1878,10 @@ class AppBase extends EventHandler {
         this.fire('destroy', this); // fire destroy event
         this.off('librariesloaded');
 
+        // Clean up gsplat sort timing event listener
+        this._gsplatSortedEvt?.off();
+        this._gsplatSortedEvt = null;
+
         if (typeof document !== 'undefined') {
             document.removeEventListener('visibilitychange', this._visibilityChangeHandler, false);
             document.removeEventListener('mozvisibilitychange', this._visibilityChangeHandler, false);
@@ -2020,6 +2033,11 @@ class AppBase extends EventHandler {
      */
     _registerSceneImmediate(scene) {
         this.on('postrender', scene.immediate.onPostRender, scene.immediate);
+
+        // Listen for gsplat sort timing events and accumulate
+        this._gsplatSortedEvt = scene.on('gsplat:sorted', (sortTime) => {
+            this.stats.frame.gsplatSort += sortTime;
+        });
     }
 }
 
@@ -2107,6 +2125,7 @@ const makeTick = function (_app) {
             }
 
             application.fire('frameend');
+            application.stats.frameEnd();
         }
 
         application._inFrameUpdate = false;
