@@ -1319,14 +1319,17 @@ class AppBase extends EventHandler {
                 height = windowHeight;
                 width = height * r;
             }
+            this.graphicsDevice.canvas.style.width = `${width}px`;
+            this.graphicsDevice.canvas.style.height = `${height}px`;
         } else if (this._fillMode === FILLMODE_FILL_WINDOW) {
             width = windowWidth;
             height = windowHeight;
+            this.graphicsDevice.canvas.style.width = '100dvw';
+            this.graphicsDevice.canvas.style.height = '100dvh';
         }
         // OTHERWISE: FILLMODE_NONE use width and height that are provided
 
-        this.graphicsDevice.canvas.style.width = `${width}px`;
-        this.graphicsDevice.canvas.style.height = `${height}px`;
+
 
         this.updateCanvasSize();
 
