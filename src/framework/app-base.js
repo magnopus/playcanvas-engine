@@ -1329,8 +1329,6 @@ class AppBase extends EventHandler {
         }
         // OTHERWISE: FILLMODE_NONE use width and height that are provided
 
-
-
         this.updateCanvasSize();
 
         // return the final values calculated for width and height
