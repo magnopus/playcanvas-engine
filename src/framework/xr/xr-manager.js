@@ -318,7 +318,6 @@ class XrManager extends EventHandler {
         this._available[XRTYPE_VR] = false;
         this._available[XRTYPE_AR] = false;
 
-        this.views = new XrViews(this);
         this.domOverlay = new XrDomOverlay(this);
         this.hitTest = new XrHitTest(this);
         this.imageTracking = new XrImageTracking(this);
@@ -583,8 +582,7 @@ class XrManager extends EventHandler {
      * end.
      *
      * @param {XrErrorCallback} [callback] - Optional callback function called once session is
-     * started. The callback has one argument Error - it is null if successfully started XR
-     * session.
+     * ended. The callback has one argument Error - it is null if successfully ended XR session.
      * @example
      * app.keyboard.on('keydown', (evt) => {
      *     if (evt.key === pc.KEY_ESCAPE && app.xr.active) {
@@ -732,6 +730,10 @@ class XrManager extends EventHandler {
             this._setClipPlanes(this._camera.nearClip, this._camera.farClip);
         };
 
+        const onFrameRateChange = () => {
+            this.fire('frameratechange', this._session?.frameRate);
+        };
+
         // clean up once session is ended
         const onEnd = () => {
             if (this._camera) {
@@ -743,6 +745,7 @@ class XrManager extends EventHandler {
 
             session.removeEventListener('end', onEnd);
             session.removeEventListener('visibilitychange', onVisibilityChange);
+            session.removeEventListener('frameratechange', onFrameRateChange);
 
             if (!failed) this.fire('end');
 
@@ -756,7 +759,7 @@ class XrManager extends EventHandler {
             // old requestAnimationFrame will never be triggered,
             // so queue up new tick
             if (this.app.systems) {
-                this.app.tick();
+                this.app.requestAnimationFrame();
             }
         };
 
@@ -779,9 +782,7 @@ class XrManager extends EventHandler {
             this._supportedFrameRates = null;
         }
 
-        this._session.addEventListener('frameratechange', () => {
-            this.fire('frameratechange', this._session?.frameRate);
-        });
+        this._session.addEventListener('frameratechange', onFrameRateChange);
 
         // request reference space
         session.requestReferenceSpace(spaceType).then((referenceSpace) => {
@@ -789,7 +790,7 @@ class XrManager extends EventHandler {
 
             // old requestAnimationFrame will never be triggered,
             // so queue up new tick
-            this.app.tick();
+            this.app.requestAnimationFrame();
 
             if (callback) callback(null);
             this.fire('start');

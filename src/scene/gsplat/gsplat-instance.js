@@ -12,14 +12,14 @@ import { BLEND_NONE, BLEND_PREMULTIPLIED } from '../constants.js';
 /**
  * @import { Camera } from '../camera.js'
  * @import { GraphNode } from '../graph-node.js'
+ * @import { Mesh } from '../mesh.js'
  * @import { Texture } from '../../platform/graphics/texture.js'
+ * @import { VertexBuffer } from '../../platform/graphics/vertex-buffer.js'
  */
 
 const mat = new Mat4();
 const cameraPosition = new Vec3();
 const cameraDirection = new Vec3();
-const viewport = [0, 0];
-
 /** @ignore */
 class GSplatInstance {
     /** @type {GSplatResourceBase} */
@@ -59,6 +59,7 @@ class GSplatInstance {
      * @param {object} [options] - Options for the instance.
      * @param {ShaderMaterial|null} [options.material] - The material instance.
      * @param {boolean} [options.highQualitySH] - Whether to use the high quality or the approximate spherical harmonic calculation. Only applies to SOGS data.
+     * @param {import('../scene.js').Scene} [options.scene] - The scene to fire sort timing events on.
      */
     constructor(resource, options = {}) {
         this.resource = resource;
@@ -75,7 +76,7 @@ class GSplatInstance {
             this._material = options.material;
 
             // patch splat order
-            this._material.setParameter('splatOrder', this.orderTexture);
+            this.setMaterialOrderTexture(this._material);
         } else {
             // construct the material
             this._material = new ShaderMaterial({
@@ -97,8 +98,9 @@ class GSplatInstance {
             this._material.update();
         }
 
-        this.meshInstance = new MeshInstance(resource.mesh, this._material);
-        this.meshInstance.setInstancing(resource.instanceIndices, true);
+        resource.ensureMesh();
+        this.meshInstance = new MeshInstance(/** @type {Mesh} */ (resource.mesh), this._material);
+        this.meshInstance.setInstancing(/** @type {VertexBuffer} */ (resource.instanceIndices), true);
         this.meshInstance.gsplatInstance = this;
 
         // only start rendering the splat after we've received the splat order data
@@ -109,7 +111,7 @@ class GSplatInstance {
         const chunks = resource.chunks?.slice();
 
         // create sorter
-        this.sorter = new GSplatSorter();
+        this.sorter = new GSplatSorter(options.scene);
         this.sorter.init(this.orderTexture, centers, chunks);
         this.sorter.on('updated', (count) => {
             // limit splat render count to exclude those behind the camera
@@ -124,11 +126,22 @@ class GSplatInstance {
     }
 
     destroy() {
+        this.resource?.releaseMesh();
         this.orderTexture?.destroy();
         this.resolveSH?.destroy();
         this.material?.destroy();
         this.meshInstance?.destroy();
         this.sorter?.destroy();
+    }
+
+    /**
+     * Set order data parameters on the material.
+     *
+     * @param {ShaderMaterial} material - The material to configure.
+     */
+    setMaterialOrderTexture(material) {
+        material.setParameter('splatOrder', this.orderTexture);
+        material.setParameter('splatTextureSize', this.orderTexture.width);
     }
 
     /**
@@ -140,7 +153,7 @@ class GSplatInstance {
             this._material = value;
 
             // patch order texture
-            this._material.setParameter('splatOrder', this.orderTexture);
+            this.setMaterialOrderTexture(this._material);
 
             if (this.meshInstance) {
                 this.meshInstance.material = value;
@@ -165,29 +178,12 @@ class GSplatInstance {
 
         // set instance properties
         material.setParameter('numSplats', 0);
-        material.setParameter('splatOrder', this.orderTexture);
+        this.setMaterialOrderTexture(material);
         material.setParameter('alphaClip', 0.3);
         material.setDefine(`DITHER_${options.dither ? 'BLUENOISE' : 'NONE'}`, '');
         material.cull = CULLFACE_NONE;
         material.blendType = options.dither ? BLEND_NONE : BLEND_PREMULTIPLIED;
         material.depthWrite = !!options.dither;
-    }
-
-    updateViewport(cameraNode) {
-        const camera = cameraNode?.camera;
-        const renderTarget = camera?.renderTarget;
-        const { width, height } = renderTarget ?? this.resource.device;
-
-        viewport[0] = width;
-        viewport[1] = height;
-
-        // adjust viewport for stereoscopic VR sessions
-        const xr = camera?.camera?.xr;
-        if (xr?.active && xr.views.list.length === 2) {
-            viewport[0] *= 0.5;
-        }
-
-        this.material.setParameter('viewport', viewport);
     }
 
     /**
@@ -212,8 +208,6 @@ class GSplatInstance {
                 this.sorter.setCamera(cameraPosition, cameraDirection);
             }
         }
-
-        this.updateViewport(cameraNode);
     }
 
     update() {

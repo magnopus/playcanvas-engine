@@ -8,8 +8,6 @@ window.focus();
 
 const gfxOptions = {
     deviceTypes: [deviceType],
-    glslangUrl: `${rootPath}/static/lib/glslang/glslang.js`,
-    twgslUrl: `${rootPath}/static/lib/twgsl/twgsl.js`,
 
     // disable antialiasing as gaussian splats do not benefit from it and it's expensive
     antialias: false
@@ -122,13 +120,9 @@ assetListLoader.load(() => {
     // toggle unified rendering for all gsplats via controls
     data.on('unified:set', () => {
         const unified = !!data.get('unified');
-        const comps = /** @type {any[]} */ (app.root.findComponents('gsplat'));
-        comps.forEach((comp /** @type {import('playcanvas').GSplatComponent} */) => {
-            comp.enabled = false;
-            comp.entity.enabled = false;
+        const comps = /** @type {pc.GSplatComponent[]} */ (app.root.findComponents('gsplat'));
+        comps.forEach((comp) => {
             comp.unified = unified;
-            comp.enabled = true;
-            comp.entity.enabled = true;
         });
     });
 });
