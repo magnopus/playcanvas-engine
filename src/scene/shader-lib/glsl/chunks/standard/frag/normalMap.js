@@ -14,9 +14,26 @@ export default /* glsl */`
     }
 #endif
 
+// magnopus patched
+#ifdef MAG_STEREO_TEXTURE
+uniform int normalStereoVideoType; // 0: None, 1: SideBySide, 2: TopBottom
+#endif
+// end magnopus patched
+
 void getNormal() {
 #ifdef STD_NORMAL_TEXTURE
+    // magnopus patched
+    #ifdef MAG_STEREO_TEXTURE
+    vec2 stereoUV = getStereoVideoUV({STD_NORMAL_TEXTURE_UV}, normalStereoVideoType);
+
+    // Identical to the unpatched version except for the texture coordinates
+    vec3 normalMap = {STD_NORMAL_TEXTURE_DECODE}(texture2DBias({STD_NORMAL_TEXTURE_NAME}, stereoUV, textureBias));
+    #else
+    // end magnopus patched
     vec3 normalMap = {STD_NORMAL_TEXTURE_DECODE}(texture2DBias({STD_NORMAL_TEXTURE_NAME}, {STD_NORMAL_TEXTURE_UV}, textureBias));
+    // magnopus patched
+    #endif
+    // end magnopus patched
     normalMap = mix(vec3(0.0, 0.0, 1.0), normalMap, material_bumpiness);
 
     #ifdef STD_NORMALDETAIL_TEXTURE

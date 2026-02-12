@@ -14,9 +14,26 @@ export default /* wgsl */`
     }
 #endif
 
+// magnopus patched
+#ifdef MAG_STEREO_TEXTURE
+uniform normalStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
+#endif
+// end magnopus patched
+
 fn getNormal() {
 #ifdef STD_NORMAL_TEXTURE
+    // magnopus patched
+    #ifdef MAG_STEREO_TEXTURE
+    var stereoUV: vec2f = getStereoVideoUV({STD_NORMAL_TEXTURE_UV}, uniform.normalStereoVideoType);
+
+    // Identical to the unpatched version except for the texture coordinates
+    var normalMap: vec3f = {STD_NORMAL_TEXTURE_DECODE}(textureSampleBias({STD_NORMAL_TEXTURE_NAME}, {STD_NORMAL_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias));
+    #else
+    // end magnopus patched
     var normalMap: vec3f = {STD_NORMAL_TEXTURE_DECODE}(textureSampleBias({STD_NORMAL_TEXTURE_NAME}, {STD_NORMAL_TEXTURE_NAME}Sampler, {STD_NORMAL_TEXTURE_UV}, uniform.textureBias));
+    // magnopus patched
+    #endif
+    // end magnopus patched
     normalMap = mix(vec3f(0.0, 0.0, 1.0), normalMap, uniform.material_bumpiness);
 
     #ifdef STD_NORMALDETAIL_TEXTURE
