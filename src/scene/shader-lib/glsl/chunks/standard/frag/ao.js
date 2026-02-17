@@ -28,6 +28,7 @@ void getAO() {
         float aoBase = texture2DBias({STD_AO_TEXTURE_NAME}, {STD_AO_TEXTURE_UV}, textureBias).{STD_AO_TEXTURE_CHANNEL};
         // magnopus patched
         #endif
+        // end magnopus patched
 
         #ifdef STD_AODETAIL_TEXTURE
             float aoDetail = texture2DBias({STD_AODETAIL_TEXTURE_NAME}, {STD_AODETAIL_TEXTURE_UV}, textureBias).{STD_AODETAIL_TEXTURE_CHANNEL};
