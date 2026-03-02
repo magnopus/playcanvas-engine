@@ -5,6 +5,7 @@ uniform float material_emissiveIntensity;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform int emissiveStereoVideoType; // 0: None, 1: SideBySide, 2: TopBottom
+uniform int emissiveStereoIsFlipped; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
@@ -14,7 +15,7 @@ void getEmission() {
     #ifdef STD_EMISSIVE_TEXTURE
         // magnopus patched
         #ifdef MAG_STEREO_TEXTURE
-            vec2 stereoUV = getStereoVideoUV({STD_EMISSIVE_TEXTURE_UV}, emissiveStereoVideoType);
+            vec2 stereoUV = getStereoVideoUV({STD_EMISSIVE_TEXTURE_UV}, emissiveStereoVideoType, emissiveStereoIsFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
             dEmission *= {STD_EMISSIVE_TEXTURE_DECODE}(texture2DBias({STD_EMISSIVE_TEXTURE_NAME}, stereoUV, textureBias)).{STD_EMISSIVE_TEXTURE_CHANNEL};

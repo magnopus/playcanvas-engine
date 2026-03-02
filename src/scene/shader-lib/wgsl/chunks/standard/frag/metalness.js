@@ -6,6 +6,7 @@ uniform material_metalness: f32;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform metalnessStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
+uniform metalnessStereoIsFlipped: i32; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
@@ -19,7 +20,7 @@ fn getMetalness() {
     #ifdef STD_METALNESS_TEXTURE
         // magnopus patched
         #ifdef MAG_STEREO_TEXTURE
-            var stereoUV: vec2f = getStereoVideoUV({STD_METALNESS_TEXTURE_UV}, uniform.metalnessStereoVideoType);
+            var stereoUV: vec2f = getStereoVideoUV({STD_METALNESS_TEXTURE_UV}, uniform.metalnessStereoVideoType, uniform.metalnessStereoIsFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
             metalness = metalness * textureSampleBias({STD_METALNESS_TEXTURE_NAME}, {STD_METALNESS_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias).{STD_METALNESS_TEXTURE_CHANNEL};

@@ -11,6 +11,7 @@ export default /* wgsl */`
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform aoStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
+uniform aoStereoIsFlipped: i32; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
@@ -20,7 +21,7 @@ fn getAO() {
     #ifdef STD_AO_TEXTURE
         // magnopus patched
         #ifdef MAG_STEREO_TEXTURE
-            var stereoUV: vec2f = getStereoVideoUV({STD_AO_TEXTURE_UV}, uniform.aoStereoVideoType);
+            var stereoUV: vec2f = getStereoVideoUV({STD_AO_TEXTURE_UV}, uniform.aoStereoVideoType, uniform.aoStereoIsFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
             var aoBase: f32 = textureSampleBias({STD_AO_TEXTURE_NAME}, {STD_AO_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias).{STD_AO_TEXTURE_CHANNEL};

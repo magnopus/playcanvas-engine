@@ -6,6 +6,7 @@ uniform float material_metalness;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform int metalnessStereoVideoType; // 0: None, 1: SideBySide, 2: TopBottom
+uniform int metalnessStereoIsFlipped; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
@@ -19,7 +20,7 @@ void getMetalness() {
     #ifdef STD_METALNESS_TEXTURE
         // magnopus patched
         #ifdef MAG_STEREO_TEXTURE
-        vec2 stereoUV = getStereoVideoUV({STD_METALNESS_TEXTURE_UV}, metalnessStereoVideoType);
+        vec2 stereoUV = getStereoVideoUV({STD_METALNESS_TEXTURE_UV}, metalnessStereoVideoType, metalnessStereoIsFlipped);
 
         metalness *= texture2DBias({STD_METALNESS_TEXTURE_NAME}, stereoUV, textureBias).{STD_METALNESS_TEXTURE_CHANNEL};
         #else

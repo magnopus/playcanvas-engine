@@ -4,6 +4,7 @@ uniform material_opacity: f32;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform opacityStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
+uniform opacityStereoIsFlipped: i32; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
@@ -13,7 +14,7 @@ fn getOpacity() {
     #ifdef STD_OPACITY_TEXTURE
         // magnopus patched
         #ifdef MAG_STEREO_TEXTURE
-            var stereoUV: vec2f = getStereoVideoUV({STD_OPACITY_TEXTURE_UV}, uniform.opacityStereoVideoType);
+            var stereoUV: vec2f = getStereoVideoUV({STD_OPACITY_TEXTURE_UV}, uniform.opacityStereoVideoType, uniform.opacityStereoIsFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
             dAlpha = dAlpha * textureSampleBias({STD_OPACITY_TEXTURE_NAME}, {STD_OPACITY_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias).{STD_OPACITY_TEXTURE_CHANNEL};
