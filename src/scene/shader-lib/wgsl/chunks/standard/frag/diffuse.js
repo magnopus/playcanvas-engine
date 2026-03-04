@@ -4,6 +4,7 @@ uniform material_diffuse: vec3f;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform diffuseStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
+uniform diffuseIsStereoFlipped: i32; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
@@ -17,7 +18,7 @@ fn getAlbedo() {
     #ifdef STD_DIFFUSE_TEXTURE
         // magnopus patched
         #ifdef MAG_STEREO_TEXTURE
-            var stereoUV: vec2f = getStereoVideoUV({STD_DIFFUSE_TEXTURE_UV}, uniform.diffuseStereoVideoType);
+            var stereoUV: vec2f = getStereoVideoUV({STD_DIFFUSE_TEXTURE_UV}, uniform.diffuseStereoVideoType, uniform.diffuseIsStereoFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
             var albedoTexture: vec3f = {STD_DIFFUSE_TEXTURE_DECODE}(textureSampleBias({STD_DIFFUSE_TEXTURE_NAME}, {STD_DIFFUSE_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias)).{STD_DIFFUSE_TEXTURE_CHANNEL};

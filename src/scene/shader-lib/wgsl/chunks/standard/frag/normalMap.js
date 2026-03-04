@@ -17,6 +17,7 @@ export default /* wgsl */`
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform normalStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
+uniform normalIsStereoFlipped: i32; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
@@ -24,7 +25,7 @@ fn getNormal() {
 #ifdef STD_NORMAL_TEXTURE
     // magnopus patched
     #ifdef MAG_STEREO_TEXTURE
-    var stereoUV: vec2f = getStereoVideoUV({STD_NORMAL_TEXTURE_UV}, uniform.normalStereoVideoType);
+    var stereoUV: vec2f = getStereoVideoUV({STD_NORMAL_TEXTURE_UV}, uniform.normalStereoVideoType, uniform.normalIsStereoFlipped);
 
     // Identical to the unpatched version except for the texture coordinates
     var normalMap: vec3f = {STD_NORMAL_TEXTURE_DECODE}(textureSampleBias({STD_NORMAL_TEXTURE_NAME}, {STD_NORMAL_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias));

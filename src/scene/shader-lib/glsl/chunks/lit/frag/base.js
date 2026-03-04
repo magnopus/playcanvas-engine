@@ -13,11 +13,11 @@ uniform int lod_level;
 uniform float view_index;
 
 // stereoVideoType - 0: None, 1: SideBySide, 2: TopBottom
-vec2 getStereoVideoUV(vec2 uv, int stereoVideoType) {
+vec2 getStereoVideoUV(vec2 uv, int stereoVideoType, int isStereoFlipped) {
     vec2 stereoUV = uv;
 
     if (stereoVideoType > 0) {
-        float isLeftEye = float(view_index == 0.0);
+        float isLeftEye = (view_index == float(isStereoFlipped)) ? 1.0 : 0.0;
 
         vec2 offset = vec2(0.0, 0.0);
         vec2 scale = vec2(1.0, 1.0);

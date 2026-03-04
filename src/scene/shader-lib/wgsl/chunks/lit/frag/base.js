@@ -7,11 +7,11 @@ uniform view_position: vec3f;
 uniform view_index: f32;
 
 // stereoVideoType - 0: None, 1: SideBySide, 2: TopBottom
-fn getStereoVideoUV(uv: vec2f, stereoVideoType: i32) -> vec2f {
+fn getStereoVideoUV(uv: vec2f, stereoVideoType: i32, isStereoFlipped: i32) -> vec2f {
     var stereoUV = uv;
 
     if (stereoVideoType > 0) {
-        let isLeftEye = select(0.0, 1.0, uniform.view_index == 0.0);
+        let isLeftEye = select(0.0, 1.0, uniform.view_index == uniform.isStereoFlipped);
 
         var offset = vec2f(0.0, 0.0);
         var scale = vec2f(1.0, 1.0);

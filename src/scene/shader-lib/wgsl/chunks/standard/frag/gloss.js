@@ -6,6 +6,7 @@ export default /* wgsl */`
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform glossStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
+uniform glossIsStereoFlipped: i32; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
@@ -19,7 +20,7 @@ fn getGlossiness() {
     #ifdef STD_GLOSS_TEXTURE
         // magnopus patched
         #ifdef MAG_STEREO_TEXTURE
-            var stereoUV: vec2f = getStereoVideoUV({STD_GLOSS_TEXTURE_UV}, uniform.glossStereoVideoType);
+            var stereoUV: vec2f = getStereoVideoUV({STD_GLOSS_TEXTURE_UV}, uniform.glossStereoVideoType, uniform.glossIsStereoFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
             dGlossiness = dGlossiness * textureSampleBias({STD_GLOSS_TEXTURE_NAME}, {STD_GLOSS_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias).{STD_GLOSS_TEXTURE_CHANNEL};

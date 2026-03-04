@@ -6,6 +6,7 @@ uniform float material_gloss;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform int glossStereoVideoType; // 0: None, 1: SideBySide, 2: TopBottom
+uniform int glossIsStereoFlipped; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
@@ -19,7 +20,7 @@ void getGlossiness() {
     #ifdef STD_GLOSS_TEXTURE
         // magnopus patched
         #ifdef MAG_STEREO_TEXTURE
-            vec2 stereoUV = getStereoVideoUV({STD_GLOSS_TEXTURE_UV}, glossStereoVideoType);
+            vec2 stereoUV = getStereoVideoUV({STD_GLOSS_TEXTURE_UV}, glossStereoVideoType, glossIsStereoFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
             dGlossiness *= texture2DBias({STD_GLOSS_TEXTURE_NAME}, stereoUV, textureBias).{STD_GLOSS_TEXTURE_CHANNEL};
