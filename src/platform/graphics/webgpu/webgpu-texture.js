@@ -155,6 +155,12 @@ class WebgpuTexture {
     }
 
     destroy(device) {
+        // defer GPU texture destruction until after command buffer submission
+        device.deferDestroy(this.gpuTexture);
+        this.gpuTexture = null;
+        this.view = null;
+        this.viewCache.clear();
+        this.samplers.length = 0;
     }
 
     propertyChanged(flag) {
@@ -191,7 +197,12 @@ class WebgpuTexture {
             return view;
         }
 
-        Debug.assert(this.view);
+        Debug.call(() => {
+            if (!this.view) {
+                Debug.errorOnce('View failed to be created for texture, texture is possibly destroyed', this);
+            }
+        });
+
         return this.view;
     }
 
@@ -316,6 +327,9 @@ class WebgpuTexture {
     uploadImmediate(device, texture) {
 
         if (texture._needsUpload || texture._needsMipmapsUpload) {
+            Debug.assert(!device.insideRenderPass,
+                `Texture.upload() for "${texture.name}" was called while inside a render pass, which is not currently supported. ` +
+                'Move texture updates to the before() or after() function of the RenderPass.');
             this.uploadData(device);
 
             texture._needsUpload = false;

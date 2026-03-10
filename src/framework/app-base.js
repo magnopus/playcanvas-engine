@@ -1141,6 +1141,7 @@ class AppBase extends EventHandler {
         this.graphicsDevice._drawCallsPerFrame = 0;
 
         stats.gsplats = this.renderer._gsplatCount;
+        stats.gsplatBufferCopy = this.renderer._gsplatBufferCopy ?? 0;
     }
 
     /** @private */

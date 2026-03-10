@@ -24,6 +24,7 @@ import { LightmapCache } from './graphics/lightmap-cache.js';
 import { DebugGraphics } from '../platform/graphics/debug-graphics.js';
 import { hash32Fnv1a } from '../core/hash.js';
 import { array } from '../core/array-utils.js';
+import { PickerId } from './picker-id.js';
 
 /**
  * @import { BindGroupFormat } from '../platform/graphics/bind-group-format.js'
@@ -46,7 +47,6 @@ import { array } from '../core/array-utils.js';
  * @import { CameraComponent } from '../framework/components/camera/component.js';
  */
 
-let id = 0;
 const _tmpAabb = new BoundingBox();
 const _tempBoneAabb = new BoundingBox();
 const _tempSphere = new BoundingSphere();
@@ -326,7 +326,7 @@ class MeshInstance {
     gsplatInstance = null;
 
     /** @ignore */
-    id = id++;
+    id = PickerId.get();
 
     /**
      * Custom function used to customize culling (e.g. for 2D UI elements).
