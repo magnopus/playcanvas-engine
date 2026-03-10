@@ -54,6 +54,14 @@ class GSplatRenderer {
     forceCopyMaterial = true;
 
     /**
+     * Cached work buffer format version for detecting extra stream changes.
+     *
+     * @type {number}
+     * @private
+     */
+    _workBufferFormatVersion = -1;
+
+    /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {GraphNode} node - The graph node.
      * @param {GraphNode} cameraNode - The camera node.
@@ -66,6 +74,7 @@ class GSplatRenderer {
         this.cameraNode = cameraNode;
         this.layer = layer;
         this.workBuffer = workBuffer;
+        this._workBufferFormatVersion = workBuffer.format.extraStreamsVersion;
 
         // construct the material which renders the splats from the work buffer
         this._material = new ShaderMaterial({
@@ -86,6 +95,11 @@ class GSplatRenderer {
         this._material.defines.forEach((value, key) => {
             this._internalDefines.add(key);
         });
+
+        // Also protect defines that may be added dynamically
+        this._internalDefines.add('GSPLAT_UNIFIED_ID');
+        this._internalDefines.add('PICK_CUSTOM_ID');
+        this._internalDefines.add('GSPLAT_INDIRECT_DRAW');
 
         this.meshInstance = this.createMeshInstance();
     }
@@ -147,30 +161,31 @@ class GSplatRenderer {
     }
 
     configureMaterial() {
-        const { device, workBuffer } = this;
+        const { workBuffer } = this;
 
-        // input format
-        this._material.setDefine('GSPLAT_WORKBUFFER_DATA', true);
-        this._material.setDefine('STORAGE_ORDER', device.isWebGPU);
+        // Inject format's shader chunks (uses workBuffer.format)
+        this._injectFormatChunks();
 
-        // Check if using RGBA16U format (fallback for when RGBA16F not supported)
-        const isColorUint = workBuffer.colorTextureFormat === PIXELFORMAT_RGBA16U;
-        this._material.setDefine('GSPLAT_COLOR_UINT', isColorUint);
-
-        // input textures (work buffer textures)
-        this._material.setParameter('splatColor', workBuffer.colorTexture);
-        this._material.setParameter('splatTexture0', workBuffer.splatTexture0);
-        this._material.setParameter('splatTexture1', workBuffer.splatTexture1);
+        // Set defines
         this._material.setDefine('SH_BANDS', '0');
+
+        // Set GSPLAT_COLOR_FLOAT define based on work buffer's color format
+        const colorStream = workBuffer.format.getStream('dataColor');
+        if (colorStream && colorStream.format !== PIXELFORMAT_RGBA16U) {
+            this._material.setDefine('GSPLAT_COLOR_FLOAT', '');
+        }
+
+        // Enable unified ID defines when pcId stream exists
+        this._updateIdDefines();
+
+        // Bind work buffer textures from the texture map
+        this._bindWorkBufferTextures();
 
         // set instance properties
         const dither = false;
         this._material.setParameter('numSplats', 0);
 
-        // Set order data - texture for WebGL only at init time, it does not need to be updated
-        if (workBuffer.orderTexture) {
-            this._material.setParameter('splatOrder', workBuffer.orderTexture);
-        }
+        this.setOrderData();
 
         this._material.setParameter('alphaClip', 0.3);
         this._material.setDefine(`DITHER_${dither ? 'BLUENOISE' : 'NONE'}`, '');
@@ -178,6 +193,37 @@ class GSplatRenderer {
         this._material.blendType = dither ? BLEND_NONE : BLEND_PREMULTIPLIED;
         this._material.depthWrite = !!dither;
         this._material.update();
+    }
+
+    /**
+     * Binds work buffer textures to the material.
+     *
+     * @private
+     */
+    _bindWorkBufferTextures() {
+        const { workBuffer } = this;
+
+        for (const stream of workBuffer.format.resourceStreams) {
+            const texture = workBuffer.getTexture(stream.name);
+            if (texture) {
+                this._material.setParameter(stream.name, texture);
+            }
+        }
+    }
+
+    /**
+     * Injects format shader chunks into the material.
+     * Called during initialization and after copying settings from user material.
+     * @private
+     */
+    _injectFormatChunks() {
+        const chunks = this.device.isWebGPU ? this._material.shaderChunks.wgsl : this._material.shaderChunks.glsl;
+        const wbFormat = this.workBuffer.format;
+
+        // Use work buffer format for declarations and read code
+        // getInputDeclarations() returns all streams (base + extra)
+        chunks.set('gsplatDeclarationsVS', wbFormat.getInputDeclarations());
+        chunks.set('gsplatReadVS', wbFormat.getReadCode());
     }
 
     update(count, textureSize) {
@@ -193,6 +239,54 @@ class GSplatRenderer {
         this.meshInstance.visible = count > 0;
     }
 
+    /**
+     * Updates renderer for indirect draw mode. The instance count and numSplats
+     * are GPU-driven via indirect draw args and a storage buffer.
+     *
+     * @param {number} textureSize - The work buffer texture size.
+     */
+    updateIndirect(textureSize) {
+        this._material.setParameter('splatTextureSize', textureSize);
+        this.meshInstance.visible = true;
+    }
+
+    /**
+     * Configures indirect draw on the mesh instance and binds compaction buffers.
+     * Must be called each frame when compaction is active (slots are per-frame).
+     *
+     * @param {number} drawSlot - The indirect draw slot index in the device's buffer.
+     * @param {StorageBuffer} compactedSplatIds - Buffer containing sorted visible splat IDs.
+     * @param {StorageBuffer} numSplatsBuffer - Buffer containing numSplats for vertex shader.
+     */
+    setIndirectDraw(drawSlot, compactedSplatIds, numSplatsBuffer) {
+        this.meshInstance.setIndirect(null, drawSlot, 1);
+
+        // Bind compaction buffers for vertex shader
+        this._material.setParameter('compactedSplatIds', compactedSplatIds);
+        this._material.setParameter('numSplatsStorage', numSplatsBuffer);
+
+        // Set GSPLAT_INDIRECT_DRAW define if not already set
+        if (!this._material.getDefine('GSPLAT_INDIRECT_DRAW')) {
+            this._material.setDefine('GSPLAT_INDIRECT_DRAW', true);
+            this._material.update();
+        }
+    }
+
+    /**
+     * Disables indirect draw, restoring the renderer to direct (CPU-sorted) mode.
+     */
+    disableIndirectDraw() {
+        this.meshInstance.setIndirect(null, -1);
+
+        if (this._material.getDefine('GSPLAT_INDIRECT_DRAW')) {
+            this._material.setDefine('GSPLAT_INDIRECT_DRAW', false);
+            this._material.update();
+        }
+
+        // Restore order data from work buffer (CPU upload path)
+        this.setOrderData();
+    }
+
     setOrderData() {
         // Set the appropriate order data resource based on device type
         if (this.device.isWebGPU) {
@@ -202,16 +296,6 @@ class GSplatRenderer {
         }
     }
 
-    /**
-     * Sets a storage buffer containing sorted indices directly as the order data.
-     * Used by GPU sorting to bypass CPU upload.
-     *
-     * @param {StorageBuffer} buffer - The storage buffer containing sorted indices (u32 values).
-     */
-    setOrderBuffer(buffer) {
-        this._material.setParameter('splatOrder', buffer);
-    }
-
     frameUpdate(params) {
 
         // Update colorRampIntensity parameter every frame when overdraw is enabled
@@ -219,10 +303,52 @@ class GSplatRenderer {
             this._material.setParameter('colorRampIntensity', params.colorRampIntensity);
         }
 
+        // Check if work buffer format has changed (extra streams added)
+        this._syncWithWorkBufferFormat();
+
         // Copy material settings from params.material if dirty or on first update
         if (this.forceCopyMaterial || params.material.dirty) {
             this.copyMaterialSettings(params.material);
             this.forceCopyMaterial = false;
+        }
+    }
+
+    /**
+     * Updates the ID-related defines based on whether pcId stream exists.
+     *
+     * @private
+     */
+    _updateIdDefines() {
+        // GSPLAT_UNIFIED_ID enables reading component ID from work buffer
+        // PICK_CUSTOM_ID prevents pick.js from declaring meshInstanceId uniform
+        const hasPcId = !!this.workBuffer.format.getStream('pcId');
+        this._material.setDefine('GSPLAT_UNIFIED_ID', hasPcId);
+        this._material.setDefine('PICK_CUSTOM_ID', hasPcId);
+    }
+
+    /**
+     * Syncs with work buffer format when extra streams are added.
+     *
+     * @private
+     */
+    _syncWithWorkBufferFormat() {
+        const wbFormat = this.workBuffer.format;
+        if (this._workBufferFormatVersion !== wbFormat.extraStreamsVersion) {
+            this._workBufferFormatVersion = wbFormat.extraStreamsVersion;
+
+            // Sync work buffer textures with format
+            this.workBuffer.syncWithFormat();
+
+            // Re-inject format chunks with extra stream declarations
+            this._injectFormatChunks();
+
+            // Bind any new textures from the work buffer
+            this._bindWorkBufferTextures();
+
+            // Enable unified ID defines when pcId stream exists
+            this._updateIdDefines();
+
+            this._material.update();
         }
     }
 
@@ -260,6 +386,9 @@ class GSplatRenderer {
         if (sourceMaterial.hasShaderChunks) {
             this._material.shaderChunks.copy(sourceMaterial.shaderChunks);
         }
+
+        // Re-inject format chunks that may have been overwritten by copy
+        this._injectFormatChunks();
 
         this._material.update();
     }

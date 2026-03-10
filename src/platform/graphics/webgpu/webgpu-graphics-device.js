@@ -48,6 +48,15 @@ const _indirectDispatchEntryByteSize = 3 * 4;
 
 class WebgpuGraphicsDevice extends GraphicsDevice {
     /**
+     * Array of GPU resources pending destruction. Resources are destroyed after the current
+     * command buffers are submitted to ensure they're not in use.
+     *
+     * @type {Array<GPUTexture|GPUBuffer|GPUQuerySet>}
+     * @private
+     */
+    _deferredDestroys = [];
+
+    /**
      * Object responsible for caching and creation of render pipelines.
      */
     renderPipeline = new WebgpuRenderPipeline(this);
@@ -143,6 +152,14 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
     emptyBindGroup;
 
     /**
+     * Monotonically increasing counter incremented each time queue.submit() is called.
+     *
+     * @type {number}
+     * @ignore
+     */
+    submitVersion = 0;
+
+    /**
      * Current command buffer encoder.
      *
      * @type {GPUCommandEncoder|null}
@@ -232,6 +249,8 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
         // WGSL features
         const wgslFeatures = window.navigator.gpu.wgslLanguageFeatures;
         this.supportsStorageTextureRead = wgslFeatures?.has('readonly_and_readwrite_storage_textures');
+        this.supportsSubgroupUniformity = wgslFeatures?.has('subgroup_uniformity');
+        this.supportsSubgroupId = wgslFeatures?.has('subgroup_id');
 
         this.initCapsDefines();
     }
@@ -306,6 +325,7 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
         this.supportsClipDistances = requireFeature('clip-distances');
         this.supportsTextureFormatTier1 = requireFeature('texture-format-tier1');
         this.supportsTextureFormatTier2 = requireFeature('texture-format-tier2');
+        this.supportsTextureFormatTier1 ||= this.supportsTextureFormatTier2;
         this.supportsPrimitiveIndex = requireFeature('primitive-index');
         Debug.log(`WEBGPU features: ${requiredFeatures.join(', ')}`);
 
@@ -720,7 +740,7 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
                 // render pipeline
                 pipeline = this.renderPipeline.get(primitive, vb0?.format, vb1?.format, indexBuffer?.format, this.shader, this.renderTarget,
                     this.bindGroupFormats, this.blendState, this.depthState, this.cullMode,
-                    this.stencilEnabled, this.stencilFront, this.stencilBack);
+                    this.stencilEnabled, this.stencilFront, this.stencilBack, this.frontFace);
                 Debug.assert(pipeline);
 
                 if (this.pipeline !== pipeline) {
@@ -837,6 +857,10 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
 
     setCullMode(cullMode) {
         this.cullMode = cullMode;
+    }
+
+    setFrontFace(frontFace) {
+        this.frontFace = frontFace;
     }
 
     setAlphaToCoverage(state) {
@@ -1105,9 +1129,32 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
 
             this.wgpu.queue.submit(this.commandBuffers);
             this.commandBuffers.length = 0;
+            this.submitVersion++;
 
             // notify dynamic buffers
             this.dynamicBuffers.onCommandBuffersSubmitted();
+        }
+
+        // destroy deferred resources after submit to ensure they're no longer referenced
+        const deferredDestroys = this._deferredDestroys;
+        if (deferredDestroys.length > 0) {
+            for (let i = 0; i < deferredDestroys.length; i++) {
+                deferredDestroys[i].destroy();
+            }
+            deferredDestroys.length = 0;
+        }
+    }
+
+    /**
+     * Defer destruction of a GPU resource until after the current command buffers are submitted.
+     * This ensures the resource is not destroyed while still referenced by pending GPU commands.
+     *
+     * @param {GPUTexture|GPUBuffer|GPUQuerySet} gpuResource - The GPU resource to destroy.
+     * @private
+     */
+    deferDestroy(gpuResource) {
+        if (gpuResource) {
+            this._deferredDestroys.push(gpuResource);
         }
     }
 

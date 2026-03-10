@@ -103,7 +103,13 @@ import { CameraFrameOptions, RenderPassCameraFrame } from './render-pass-camera-
  * @typedef {Object} ColorLUT
  * Properties related to the color lookup table (LUT) effect, a postprocessing technique used to
  * apply a color transformation to the image.
- * @property {Texture|null} texture - The texture of the color LUT effect. Defaults to null.
+ * @property {Texture|null} texture - The LUT texture. This must be a 2D "horizontal strip" texture
+ * representing an unwrapped 3D LUT (the same format used by Unreal Engine). For an N×N×N 3D LUT,
+ * the texture dimensions are N² × N pixels (width × height). For example, a 16×16×16 LUT uses a
+ * 256×16 texture, and a 32×32×32 LUT uses a 1024×32 texture. The texture contains N horizontal
+ * slices representing the blue channel, with each slice mapping red to the X-axis and green to
+ * the Y-axis. Note that HALD LUTs (e.g. from ImageMagick) and Unity LUTs use different layouts
+ * and are not compatible. Defaults to null.
  * @property {number} intensity - The intensity of the color LUT effect. Defaults to 1.
  */
 
@@ -136,6 +142,28 @@ import { CameraFrameOptions, RenderPassCameraFrame } from './render-pass-camera-
  * and blue color channels diverge increasingly with greater distance from the center of the screen.
  * @property {number} intensity - The intensity of the fringing effect, 0-100 range. Defaults to 0,
  * making it disabled.
+ */
+
+/**
+ * @typedef {Object} ColorEnhance
+ * Properties related to the color enhancement effect, a postprocessing technique that provides
+ * HDR-aware adjustments for shadows, highlights, vibrance, and dehaze. Shadows and highlights allow
+ * selective adjustment of dark and bright areas of the image, vibrance is a smart saturation
+ * that boosts less-saturated colors more than already-saturated ones, and dehaze removes atmospheric
+ * haze to increase clarity and contrast.
+ * @property {boolean} enabled - Whether color enhancement is enabled. Defaults to false.
+ * @property {number} shadows - The shadow adjustment, -3 to 3 range. Uses an exponential curve where
+ * -3 gives 0.125x, 0 gives 1x, and +3 gives 8x brightness on dark areas. Defaults to 0.
+ * @property {number} highlights - The highlight adjustment, -3 to 3 range. Uses an exponential curve
+ * where -3 gives 0.125x, 0 gives 1x, and +3 gives 8x brightness on bright areas. Defaults to 0.
+ * @property {number} vibrance - The vibrance (smart saturation), -1 to 1 range. Positive values boost
+ * saturation of less-saturated colors more than already-saturated ones. Negative values desaturate.
+ * Defaults to 0.
+ * @property {number} midtones - The midtone adjustment, -1 to 1 range. Positive values brighten
+ * midtones, negative values darken midtones, with shadows and highlights more strongly preserved
+ * than by a linear exposure change. Defaults to 0.
+ * @property {number} dehaze - The dehaze adjustment, -1 to 1 range. Positive values remove atmospheric
+ * haze, increasing clarity and contrast. Negative values add a haze effect. Defaults to 0.
  */
 
 /**
@@ -297,6 +325,20 @@ class CameraFrame {
     };
 
     /**
+     * Color enhancement settings.
+     *
+     * @type {ColorEnhance}
+     */
+    colorEnhance = {
+        enabled: false,
+        shadows: 0,
+        highlights: 0,
+        vibrance: 0,
+        midtones: 0,
+        dehaze: 0
+    };
+
+    /**
      * DoF settings.
      *
      * @type {Dof}
@@ -439,7 +481,7 @@ class CameraFrame {
         if (!this._enabled) return;
 
         const cameraComponent = this.cameraComponent;
-        const { options, renderPassCamera, rendering, bloom, grading, vignette, fringing, taa, ssao } = this;
+        const { options, renderPassCamera, rendering, bloom, grading, colorEnhance, vignette, fringing, taa, ssao } = this;
 
         // options that can cause the passes to be re-created
         this.updateOptions();
@@ -498,6 +540,15 @@ class CameraFrame {
         composePass.fringingEnabled = fringing.intensity > 0;
         if (composePass.fringingEnabled) {
             composePass.fringingIntensity = fringing.intensity;
+        }
+
+        composePass.colorEnhanceEnabled = colorEnhance.enabled;
+        if (colorEnhance.enabled) {
+            composePass.colorEnhanceShadows = colorEnhance.shadows;
+            composePass.colorEnhanceHighlights = colorEnhance.highlights;
+            composePass.colorEnhanceVibrance = colorEnhance.vibrance;
+            composePass.colorEnhanceMidtones = colorEnhance.midtones;
+            composePass.colorEnhanceDehaze = colorEnhance.dehaze;
         }
 
         // enable camera jitter if taa is enabled

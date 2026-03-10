@@ -1,11 +1,12 @@
 export default /* wgsl */`
 
-// stores the source UV and order of the splat
+// Shared splat identification (index, uv) and setSplat() helper
+#include "gsplatSplatVS"
+
+// stores the render order and corner for this vertex
 struct SplatSource {
     order: u32,         // render order
-    id: u32,            // splat id
-    uv: vec2<i32>,      // splat uv
-    cornerUV: vec2f,    // corner coordinates for this vertex of the gaussian (-1, -1)..(1, 1)
+    cornerUV: half2     // corner coordinates for this vertex of the gaussian (-1, -1)..(1, 1)
 }
 
 // stores the camera and clip space position of the gaussian center
@@ -20,10 +21,10 @@ struct SplatCenter {
 
 // stores the offset from center for the current gaussian
 struct SplatCorner {
-    offset: vec2f,        // corner offset from center in clip space
-    uv: vec2f,            // corner uv
+    offset: vec3f,        // corner offset (clip XY for 3DGS, model XYZ for 2DGS)
+    uv: half2,            // corner uv
     #if GSPLAT_AA
-        aaFactor: f32, // for scenes generated with antialiasing
+        aaFactor: half, // for scenes generated with antialiasing
     #endif
 }
 

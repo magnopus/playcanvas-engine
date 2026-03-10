@@ -1,18 +1,34 @@
 import { Debug } from '../../core/debug.js';
-import { ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST, PIXELFORMAT_R32U, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA16U, PIXELFORMAT_RGBA32U, PIXELFORMAT_RG32U, BUFFERUSAGE_COPY_DST, SEMANTIC_POSITION } from '../../platform/graphics/constants.js';
+import { Frustum } from '../../core/shape/frustum.js';
+import { Mat4 } from '../../core/math/mat4.js';
+import { Vec2 } from '../../core/math/vec2.js';
+import {
+    ADDRESS_CLAMP_TO_EDGE, PIXELFORMAT_R32U, PIXELFORMAT_RGBA16U, PIXELFORMAT_RGBA32F,
+    BUFFERUSAGE_COPY_DST, SEMANTIC_POSITION, getGlslShaderType
+} from '../../platform/graphics/constants.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { Texture } from '../../platform/graphics/texture.js';
+import { TextureUtils } from '../../platform/graphics/texture-utils.js';
 import { UploadStream } from '../../platform/graphics/upload-stream.js';
 import { QuadRender } from '../graphics/quad-render.js';
 import { ShaderUtils } from '../shader-lib/shader-utils.js';
 import glslGsplatCopyToWorkBufferPS from '../shader-lib/glsl/chunks/gsplat/frag/gsplatCopyToWorkbuffer.js';
 import wgslGsplatCopyToWorkBufferPS from '../shader-lib/wgsl/chunks/gsplat/frag/gsplatCopyToWorkbuffer.js';
+import glslGsplatCopyInstancedQuadVS from '../shader-lib/glsl/chunks/gsplat/vert/gsplatCopyInstancedQuad.js';
+import wgslGsplatCopyInstancedQuadVS from '../shader-lib/wgsl/chunks/gsplat/vert/gsplatCopyInstancedQuad.js';
+import { GSplatNodeCullRenderPass } from './gsplat-node-cull-render-pass.js';
 import { GSplatWorkBufferRenderPass } from './gsplat-work-buffer-render-pass.js';
+import { GSplatStreams } from '../gsplat/gsplat-streams.js';
 
 let id = 0;
+const tmpSize = new Vec2();
+const _viewProjMat = new Mat4();
+const _frustum = new Frustum();
+const _frustumPlanes = new Float32Array(24);
 
 /**
+ * @import { GSplatFormat } from '../gsplat/gsplat-format.js'
  * @import { GSplatInfo } from "./gsplat-info.js"
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { GraphNode } from '../graph-node.js';
@@ -31,16 +47,23 @@ class WorkBufferRenderInfo {
     /** @type {QuadRender} */
     quadRender;
 
-    constructor(device, key, material, colorTextureFormat, colorOnly) {
-        this.device = device;
+    /**
+     * @param {GraphicsDevice} device - The graphics device.
+     * @param {string} key - Cache key for this render info.
+     * @param {ShaderMaterial} material - The material to use.
+     * @param {boolean} colorOnly - Whether to render only color (not full MRT).
+     * @param {GSplatFormat} format - The work buffer format descriptor.
+     */
+    constructor(device, key, material, colorOnly, format) {
         this.material = material;
 
         const clonedDefines = new Map(material.defines);
 
-        // when using fallback RGBA16U format
-        const isColorUint = colorTextureFormat === PIXELFORMAT_RGBA16U;
-        const colorOutputType = isColorUint ? 'uvec4' : 'vec4';
-        if (isColorUint) {
+        // Derive color format from format's dataColor stream
+        // GSPLAT_COLOR_UINT is for WRITING to work buffer when using RGBA16U format
+        // (converts float color to packed half-float format)
+        const colorStream = format.getStream('dataColor');
+        if (colorStream.format === PIXELFORMAT_RGBA16U) {
             clonedDefines.set('GSPLAT_COLOR_UINT', '');
         }
 
@@ -49,19 +72,55 @@ class WorkBufferRenderInfo {
             clonedDefines.set('GSPLAT_COLOR_ONLY', '');
         }
 
-        const shader = ShaderUtils.createShader(this.device, {
+        // Enable ID output when pcId stream exists in format
+        if (format.getStream('pcId')) {
+            clonedDefines.set('GSPLAT_ID', '');
+        }
+
+        // Enable node index output when pcNodeIndex stream exists in format
+        if (format.getStream('pcNodeIndex')) {
+            clonedDefines.set('GSPLAT_NODE_INDEX', '');
+        }
+
+        // Get custom shader chunks from material (for container support)
+        const fragmentIncludes = material.hasShaderChunks ?
+            (device.isWebGPU ? material.shaderChunks.wgsl : material.shaderChunks.glsl) :
+            undefined;
+
+        // Get streams to output - color-only mode uses just dataColor, otherwise all streams
+        const outputStreams = colorOnly ? [colorStream] : [...format.streams, ...format.extraStreams];
+
+        // Build fragmentOutputTypes from streams
+        const fragmentOutputTypes = [];
+        for (const stream of outputStreams) {
+            const info = getGlslShaderType(stream.format);
+            fragmentOutputTypes.push(info.returnType);
+        }
+
+        // Use instanced vertex shader for LOD path, fullscreen quad for non-LOD
+        const useInstanced = clonedDefines.has('GSPLAT_LOD');
+
+        const shaderOptions = {
             uniqueName: `SplatCopyToWorkBuffer:${key}`,
             attributes: { vertex_position: SEMANTIC_POSITION },
             vertexDefines: clonedDefines,
             fragmentDefines: clonedDefines,
-            vertexChunk: 'fullscreenQuadVS',
             fragmentGLSL: glslGsplatCopyToWorkBufferPS,
             fragmentWGSL: wgslGsplatCopyToWorkBufferPS,
-            fragmentOutputTypes: colorOnly ?
-                [colorOutputType] :
-                [colorOutputType, 'uvec4', 'uvec2']
-        });
+            fragmentIncludes: fragmentIncludes,
+            fragmentOutputTypes: fragmentOutputTypes
+        };
 
+        if (useInstanced) {
+            // Instanced LOD path: custom vertex shader that positions quads per instance
+            shaderOptions.vertexGLSL = glslGsplatCopyInstancedQuadVS;
+            shaderOptions.vertexWGSL = wgslGsplatCopyInstancedQuadVS;
+        } else {
+            // Standard fullscreen quad path
+            shaderOptions.vertexChunk = 'fullscreenQuadVS';
+        }
+
+        const shader = ShaderUtils.createShader(device, shaderOptions);
         this.quadRender = new QuadRender(shader);
     }
 
@@ -78,35 +137,38 @@ class GSplatWorkBuffer {
     /** @type {GraphicsDevice} */
     device;
 
+    /** @type {GSplatFormat} */
+    format;
+
     /** @type {number} */
     id = id++;
 
-    /** @type {number} */
-    colorTextureFormat;
+    /**
+     * Manages textures for format streams.
+     *
+     * @type {GSplatStreams}
+     */
+    streams;
 
-    /** @type {Texture} */
-    colorTexture;
-
-    /** @type {Texture} */
-    splatTexture0;
-
-    /** @type {Texture} */
-    splatTexture1;
-
-    /** @type {RenderTarget} */
+    /**
+     * Main MRT render target for all work buffer streams.
+     *
+     * @type {RenderTarget}
+     */
     renderTarget;
 
-    /** @type {RenderTarget} */
+    /**
+     * Color-only render target for updating just the dataColor stream.
+     *
+     * @type {RenderTarget}
+     */
     colorRenderTarget;
 
-    /** @type {Texture} */
+    /** @type {Texture|undefined} */
     orderTexture;
 
-    /** @type {StorageBuffer} */
+    /** @type {StorageBuffer|undefined} */
     orderBuffer;
-
-    /** @type {number} */
-    _textureSize = 1;
 
     /** @type {UploadStream} */
     uploadStream;
@@ -117,33 +179,77 @@ class GSplatWorkBuffer {
     /** @type {GSplatWorkBufferRenderPass} */
     colorRenderPass;
 
-    constructor(device) {
+    /**
+     * RGBA32F texture storing local-space bounding spheres for all selected nodes
+     * across all GSplatInfos. Each texel is (center.x, center.y, center.z, radius).
+     * Created lazily on first use and resized as needed.
+     *
+     * @type {Texture|null}
+     */
+    boundsSphereTexture = null;
+
+    /**
+     * R32U texture mapping each bounds entry to its GSplatInfo index (for transform lookup).
+     * Same dimensions as boundsSphereTexture. Created lazily on first use and resized as needed.
+     *
+     * @type {Texture|null}
+     */
+    boundsTransformIndexTexture = null;
+
+    /**
+     * R32U texture storing per-node visibility as packed bitmasks.
+     * Each texel packs 32 visibility bits, so width is boundsSphereTexture.width / 32.
+     * Written by the culling render pass.
+     *
+     * @type {Texture|null}
+     */
+    nodeVisibilityTexture = null;
+
+    /**
+     * Render target wrapping nodeVisibilityTexture for the culling pass.
+     *
+     * @type {RenderTarget|null}
+     */
+    cullingRenderTarget = null;
+
+    /**
+     * GPU frustum culling render pass. Created lazily on first use.
+     *
+     * @type {GSplatNodeCullRenderPass|null}
+     */
+    cullingPass = null;
+
+    /**
+     * Total number of bounds entries across all GSplatInfos.
+     *
+     * @type {number}
+     */
+    totalBoundsEntries = 0;
+
+    /**
+     * RGBA32F texture storing world matrices (3 texels per GSplatInfo, rows of a 4x3
+     * affine matrix) for transforming local bounding spheres to world space during
+     * GPU frustum culling.
+     * Created lazily on first use and resized as needed.
+     *
+     * @type {Texture|null}
+     */
+    transformsTexture = null;
+
+    /**
+     * @param {GraphicsDevice} device - The graphics device.
+     * @param {GSplatFormat} format - The work buffer format descriptor.
+     */
+    constructor(device, format) {
         this.device = device;
+        this.format = format;
 
-        // Detect compatible HDR format for color texture, fallback to RGBA16U if RGBA16F not supported
-        this.colorTextureFormat = device.getRenderableHdrFormat([PIXELFORMAT_RGBA16F]) || PIXELFORMAT_RGBA16U;
+        // Create streams manager and initialize with format
+        this.streams = new GSplatStreams(device);
+        this.streams.init(format, 1);
 
-        // Work buffer textures format:
-        // - colorTexture (RGBA16F/RGBA16U): RGBA color with alpha
-        // - splatTexture0 (RGBA32U): modelCenter.xyz (3×32-bit floats as uint) + 2×16-bit covariance halfs (covA.z, covB.z)
-        // - splatTexture1 (RG32U): 4×16-bit covariance halfs packed as (covA.xy, covB.xy)
-        this.colorTexture = this.createTexture('splatColor', this.colorTextureFormat, 1, 1);
-        this.splatTexture0 = this.createTexture('splatTexture0', PIXELFORMAT_RGBA32U, 1, 1);
-        this.splatTexture1 = this.createTexture('splatTexture1', PIXELFORMAT_RG32U, 1, 1);
-
-        this.renderTarget = new RenderTarget({
-            name: `GsplatWorkBuffer-MRT-${this.id}`,
-            colorBuffers: [this.colorTexture, this.splatTexture0, this.splatTexture1],
-            depth: false,
-            flipY: true
-        });
-
-        this.colorRenderTarget = new RenderTarget({
-            name: `GsplatWorkBuffer-Color-${this.id}`,
-            colorBuffer: this.colorTexture,
-            depth: false,
-            flipY: true
-        });
+        // Build render targets from textures
+        this._createRenderTargets();
 
         // Create upload stream for non-blocking uploads
         this.uploadStream = new UploadStream(device);
@@ -152,7 +258,15 @@ class GSplatWorkBuffer {
         if (device.isWebGPU) {
             this.orderBuffer = new StorageBuffer(device, 4, BUFFERUSAGE_COPY_DST);
         } else {
-            this.orderTexture = this.createTexture('SplatGlobalOrder', PIXELFORMAT_R32U, 1, 1);
+            this.orderTexture = new Texture(device, {
+                name: 'SplatGlobalOrder',
+                width: 1,
+                height: 1,
+                format: PIXELFORMAT_R32U,
+                mipmaps: false,
+                addressU: ADDRESS_CLAMP_TO_EDGE,
+                addressV: ADDRESS_CLAMP_TO_EDGE
+            });
         }
 
         // Create the optimized render pass for batched splat rendering
@@ -164,46 +278,97 @@ class GSplatWorkBuffer {
         this.colorRenderPass.init(this.colorRenderTarget);
     }
 
+    /**
+     * Creates or recreates render targets from current textures.
+     *
+     * @private
+     */
+    _createRenderTargets() {
+        // Work buffer does not support instance-level streams
+        Debug.assert(this.format.instanceStreams.length === 0,
+            'Work buffer format does not support instance-level streams (GSPLAT_STREAM_INSTANCE)');
+
+        // Destroy existing render targets
+        this.renderTarget?.destroy();
+        this.colorRenderTarget?.destroy();
+
+        // Collect all textures in order for MRT
+        const colorBuffers = this.streams.getTexturesInOrder();
+        this.renderTarget = new RenderTarget({
+            name: `GsplatWorkBuffer-MRT-${this.id}`,
+            colorBuffers: colorBuffers,
+            depth: false,
+            flipY: true
+        });
+
+        // Color-only render target uses just the first texture (dataColor)
+        const colorTexture = this.streams.getTexture('dataColor');
+        this.colorRenderTarget = new RenderTarget({
+            name: `GsplatWorkBuffer-Color-${this.id}`,
+            colorBuffer: colorTexture,
+            depth: false,
+            flipY: true
+        });
+
+        // Reinitialize render passes
+        this.renderPass?.init(this.renderTarget);
+        this.colorRenderPass?.init(this.colorRenderTarget);
+    }
+
+    /**
+     * Syncs textures and render targets with the format when extra streams are added.
+     * Call this before rendering to ensure all streams have textures.
+     */
+    syncWithFormat() {
+        const prevVersion = this.streams._formatVersion;
+        this.streams.syncWithFormat(this.format);
+
+        // If format changed, recreate render targets to include new textures
+        if (prevVersion !== this.streams._formatVersion) {
+            this._createRenderTargets();
+        }
+    }
+
+    /**
+     * Gets a texture by name.
+     *
+     * @param {string} name - The texture name.
+     * @returns {Texture|undefined} The texture, or undefined if not found.
+     */
+    getTexture(name) {
+        return this.streams.getTexture(name);
+    }
+
     destroy() {
         this.renderPass?.destroy();
         this.colorRenderPass?.destroy();
-        this.colorTexture?.destroy();
-        this.splatTexture0?.destroy();
-        this.splatTexture1?.destroy();
+        this.streams.destroy();
         this.orderTexture?.destroy();
         this.orderBuffer?.destroy();
         this.renderTarget?.destroy();
         this.colorRenderTarget?.destroy();
         this.uploadStream.destroy();
+        this.boundsSphereTexture?.destroy();
+        this.boundsTransformIndexTexture?.destroy();
+        this.nodeVisibilityTexture?.destroy();
+        this.cullingRenderTarget?.destroy();
+        this.cullingPass?.destroy();
+        this.transformsTexture?.destroy();
     }
 
     get textureSize() {
-        return this._textureSize;
+        return this.streams.textureDimensions.x;
     }
 
     setOrderData(data) {
+        const size = this.textureSize;
         if (this.device.isWebGPU) {
-            Debug.assert(data.length <= this._textureSize * this._textureSize);
+            Debug.assert(data.length <= size * size);
             this.uploadStream.upload(data, this.orderBuffer, 0, data.length);
         } else {
-            Debug.assert(data.length === this._textureSize * this._textureSize);
+            Debug.assert(data.length === size * size);
             this.uploadStream.upload(data, this.orderTexture, 0, data.length);
         }
-    }
-
-    createTexture(name, format, w, h) {
-        return new Texture(this.device, {
-            name: name,
-            width: w,
-            height: h,
-            format: format,
-            cubemap: false,
-            mipmaps: false,
-            minFilter: FILTER_NEAREST,
-            magFilter: FILTER_NEAREST,
-            addressU: ADDRESS_CLAMP_TO_EDGE,
-            addressV: ADDRESS_CLAMP_TO_EDGE
-        });
     }
 
     /**
@@ -213,7 +378,7 @@ class GSplatWorkBuffer {
         Debug.assert(textureSize);
         this.renderTarget.resize(textureSize, textureSize);
         this.colorRenderTarget.resize(textureSize, textureSize);
-        this._textureSize = textureSize;
+        this.streams.resize(textureSize, textureSize);
 
         if (this.device.isWebGPU) {
             const newByteSize = textureSize * textureSize * 4;
@@ -233,10 +398,12 @@ class GSplatWorkBuffer {
      * @param {GraphNode} cameraNode - The camera node.
      * @param {number[][]|undefined} colorsByLod - Array of RGB colors per LOD. Index by lodIndex; if a
      * shorter array is provided, index 0 will be reused as fallback.
+     * @param {Set<number>|null} [changedAllocIds] - When provided, only render sub-draws for intervals
+     * whose allocIds are in this set (per-node partial update).
      */
-    render(splats, cameraNode, colorsByLod) {
+    render(splats, cameraNode, colorsByLod, changedAllocIds = null) {
         // render splats using render pass
-        if (this.renderPass.update(splats, cameraNode, colorsByLod)) {
+        if (this.renderPass.update(splats, cameraNode, colorsByLod, changedAllocIds)) {
             this.renderPass.render();
         }
     }
@@ -254,6 +421,169 @@ class GSplatWorkBuffer {
         if (this.colorRenderPass.update(splats, cameraNode, colorsByLod)) {
             this.colorRenderPass.render();
         }
+    }
+
+    /**
+     * Updates the bounds sphere texture with local-space bounding spheres from pre-built
+     * bounds groups. Each group contributes one set of sphere entries and maps to one
+     * transform index.
+     *
+     * @param {Array<{splat: GSplatInfo, boundsBaseIndex: number, numBoundsEntries: number}>} boundsGroups - Pre-built bounds groups.
+     */
+    updateBoundsTexture(boundsGroups) {
+        let totalEntries = 0;
+        for (let i = 0; i < boundsGroups.length; i++) {
+            totalEntries += boundsGroups[i].numBoundsEntries;
+        }
+
+        this.totalBoundsEntries = totalEntries;
+
+        if (totalEntries === 0) return;
+
+        // Width is multiple of 32 so that 32 consecutive spheres always land on the same
+        // texture row, allowing the bit-packed culling shader to avoid per-iteration modulo/division.
+        const { x: width, y: height } = TextureUtils.calcTextureSize(totalEntries, tmpSize, 32);
+
+        // Create/resize bounds sphere texture (RGBA32F: center.xyz, radius)
+        if (!this.boundsSphereTexture) {
+            this.boundsSphereTexture = Texture.createDataTexture2D(this.device, 'boundsSphereTexture', width, height, PIXELFORMAT_RGBA32F);
+        } else {
+            this.boundsSphereTexture.resize(width, height);
+        }
+
+        // Create/resize transform index texture (R32U: group index per bounds entry)
+        if (!this.boundsTransformIndexTexture) {
+            this.boundsTransformIndexTexture = Texture.createDataTexture2D(this.device, 'boundsTransformIndexTexture', width, height, PIXELFORMAT_R32U);
+        } else {
+            this.boundsTransformIndexTexture.resize(width, height);
+        }
+
+        const sphereData = this.boundsSphereTexture.lock();
+        const indexData = /** @type {Uint32Array} */ (this.boundsTransformIndexTexture.lock());
+
+        for (let i = 0; i < boundsGroups.length; i++) {
+            const group = boundsGroups[i];
+            const base = group.boundsBaseIndex;
+            const count = group.numBoundsEntries;
+
+            group.splat.writeBoundsSpheres(sphereData, base * 4);
+
+            for (let j = 0; j < count; j++) {
+                indexData[base + j] = i;
+            }
+        }
+
+        this.boundsSphereTexture.unlock();
+        this.boundsTransformIndexTexture.unlock();
+    }
+
+    /**
+     * Updates the transforms texture with one world matrix per bounds group.
+     * Each matrix uses 3 texels (RGBA32F per row) in the texture.
+     *
+     * @param {Array<{splat: GSplatInfo, boundsBaseIndex: number, numBoundsEntries: number}>} boundsGroups - Pre-built bounds groups.
+     */
+    updateTransformsTexture(boundsGroups) {
+        const numMatrices = boundsGroups.length;
+        if (numMatrices === 0) return;
+
+        // 3 texels per matrix (rows of a 4x3 affine matrix). Width is a multiple of 3 so all 3
+        // texels of a matrix always land on the same texture row.
+        const totalTexels = numMatrices * 3;
+        const { x: width, y: height } = TextureUtils.calcTextureSize(totalTexels, tmpSize, 3);
+
+        if (!this.transformsTexture) {
+            this.transformsTexture = Texture.createDataTexture2D(this.device, 'transformsTexture', width, height, PIXELFORMAT_RGBA32F);
+        } else {
+            this.transformsTexture.resize(width, height);
+        }
+
+        const data = this.transformsTexture.lock();
+
+        // Write world matrices as 3 rows of a 4x3 matrix (row-major, 12 floats per matrix).
+        // Mat4.data is column-major: [col0(4), col1(4), col2(4), col3(4)].
+        // We store 3 rows, each as (Rx, Ry, Rz, T):
+        //   row0 = data[0], data[4], data[8],  data[12]
+        //   row1 = data[1], data[5], data[9],  data[13]
+        //   row2 = data[2], data[6], data[10], data[14]
+        // The shader reconstructs the mat4 by transposing + appending (0,0,0,1).
+        let offset = 0;
+        for (let i = 0; i < boundsGroups.length; i++) {
+            const m = boundsGroups[i].splat.node.getWorldTransform().data;
+            // row 0
+            data[offset++] = m[0]; data[offset++] = m[4]; data[offset++] = m[8]; data[offset++] = m[12];
+            // row 1
+            data[offset++] = m[1]; data[offset++] = m[5]; data[offset++] = m[9]; data[offset++] = m[13];
+            // row 2
+            data[offset++] = m[2]; data[offset++] = m[6]; data[offset++] = m[10]; data[offset++] = m[14];
+        }
+
+        this.transformsTexture.unlock();
+    }
+
+    /**
+     * Runs the GPU frustum culling pass to generate the node visibility texture.
+     * Computes the view-projection matrix, extracts frustum planes, and tests each
+     * bounding sphere against them.
+     *
+     * @param {Mat4} projectionMatrix - The camera projection matrix.
+     * @param {Mat4} viewMatrix - The camera view matrix.
+     */
+    updateNodeVisibility(projectionMatrix, viewMatrix) {
+        if (this.totalBoundsEntries === 0 || !this.boundsSphereTexture || !this.boundsTransformIndexTexture || !this.transformsTexture) {
+            return;
+        }
+
+        // Compute view-projection matrix and extract frustum planes
+        _viewProjMat.mul2(projectionMatrix, viewMatrix);
+        _frustum.setFromMat4(_viewProjMat);
+        for (let p = 0; p < 6; p++) {
+            const plane = _frustum.planes[p];
+            _frustumPlanes[p * 4 + 0] = plane.normal.x;
+            _frustumPlanes[p * 4 + 1] = plane.normal.y;
+            _frustumPlanes[p * 4 + 2] = plane.normal.z;
+            _frustumPlanes[p * 4 + 3] = plane.distance;
+        }
+
+        // Visibility texture is 32x smaller: each texel stores 32 sphere results as bits.
+        // Since boundsTextureWidth is a multiple of 32, the visibility texture is exactly
+        // (boundsWidth/32) x boundsHeight, keeping a 1:1 row correspondence and allowing
+        // the shader to derive visWidth = boundsTextureWidth / 32 without extra uniforms.
+        const width = this.boundsSphereTexture.width / 32;
+        const height = this.boundsSphereTexture.height;
+
+        // Create/resize visibility texture (R32U: bit-packed, 32 spheres per texel)
+        if (!this.nodeVisibilityTexture) {
+            this.nodeVisibilityTexture = Texture.createDataTexture2D(this.device, 'nodeVisibilityTexture', width, height, PIXELFORMAT_R32U);
+
+            this.cullingRenderTarget = new RenderTarget({
+                name: 'NodeCullingRT',
+                colorBuffer: this.nodeVisibilityTexture,
+                depth: false
+            });
+        } else if (this.nodeVisibilityTexture.width !== width || this.nodeVisibilityTexture.height !== height) {
+            this.nodeVisibilityTexture.resize(width, height);
+            /** @type {RenderTarget} */ (this.cullingRenderTarget).resize(width, height);
+        }
+
+        // Lazily create the culling render pass
+        if (!this.cullingPass) {
+            this.cullingPass = new GSplatNodeCullRenderPass(this.device);
+            this.cullingPass.init(this.cullingRenderTarget);
+            this.cullingPass.colorOps.clear = true;
+            this.cullingPass.colorOps.clearValue.set(0, 0, 0, 0);
+        }
+
+        // Set up uniforms and execute
+        this.cullingPass.setup(
+            this.boundsSphereTexture,
+            this.boundsTransformIndexTexture,
+            this.transformsTexture,
+            this.totalBoundsEntries,
+            _frustumPlanes
+        );
+
+        this.cullingPass.render();
     }
 }
 

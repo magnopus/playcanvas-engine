@@ -1,7 +1,22 @@
-import { Debug } from '../../core/debug.js';
+import {
+    PIXELFORMAT_R32U, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA16U,
+    PIXELFORMAT_RGBA32U, PIXELFORMAT_RG32U
+} from '../../platform/graphics/constants.js';
 import { ShaderMaterial } from '../materials/shader-material.js';
+import { GSplatFormat } from '../gsplat/gsplat-format.js';
+import { GSPLATDATA_COMPACT } from '../constants.js';
+
+import glslCompactRead from '../shader-lib/glsl/chunks/gsplat/vert/formats/containerCompactRead.js';
+import glslCompactWrite from '../shader-lib/glsl/chunks/gsplat/frag/formats/containerCompactWrite.js';
+import glslPackedRead from '../shader-lib/glsl/chunks/gsplat/vert/formats/containerPackedRead.js';
+import glslPackedWrite from '../shader-lib/glsl/chunks/gsplat/frag/formats/containerPackedWrite.js';
+import wgslCompactRead from '../shader-lib/wgsl/chunks/gsplat/vert/formats/containerCompactRead.js';
+import wgslCompactWrite from '../shader-lib/wgsl/chunks/gsplat/frag/formats/containerCompactWrite.js';
+import wgslPackedRead from '../shader-lib/wgsl/chunks/gsplat/vert/formats/containerPackedRead.js';
+import wgslPackedWrite from '../shader-lib/wgsl/chunks/gsplat/frag/formats/containerPackedWrite.js';
 
 /**
+ * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { Texture } from '../../platform/graphics/texture.js'
  */
 
@@ -16,6 +31,80 @@ class GSplatParams {
      * @private
      */
     _material = new ShaderMaterial();
+
+    /**
+     * Format descriptor for work buffer streams.
+     *
+     * @type {GSplatFormat}
+     * @private
+     */
+    _format;
+
+    /**
+     * @type {GraphicsDevice}
+     * @private
+     */
+    _device;
+
+    /**
+     * @type {string}
+     * @private
+     */
+    _dataFormat = GSPLATDATA_COMPACT;
+
+    /**
+     * Creates a new GSplatParams instance.
+     *
+     * @param {GraphicsDevice} device - The graphics device.
+     */
+    constructor(device) {
+        this._device = device;
+        this._format = this._createFormat(GSPLATDATA_COMPACT);
+    }
+
+    /**
+     * @param {string} dataFormat - The data format constant.
+     * @returns {GSplatFormat} The created format.
+     * @private
+     */
+    _createFormat(dataFormat) {
+        let format;
+
+        if (dataFormat === GSPLATDATA_COMPACT) {
+            // Compact work buffer format (20 bytes/splat):
+            // - dataColor (R32U): RGB color (11+11+10 bits, range [0, 4])
+            // - dataTransformA (RGBA32U): center.xyz (3×32-bit floats) + half-angle quaternion (11+11+10 bits)
+            //   See: https://marc-b-reynolds.github.io/quaternions/2017/05/02/QuatQuantPart1.html
+            // - dataTransformB (R32U): scale.xyz (3×8-bit log-encoded, e^-12..e^9) + alpha (8 bits)
+            format = new GSplatFormat(this._device, [
+                { name: 'dataColor', format: PIXELFORMAT_R32U },
+                { name: 'dataTransformA', format: PIXELFORMAT_RGBA32U },
+                { name: 'dataTransformB', format: PIXELFORMAT_R32U }
+            ], {
+                readGLSL: glslCompactRead,
+                readWGSL: wgslCompactRead
+            });
+            format.setWriteCode(glslCompactWrite, wgslCompactWrite);
+        } else {
+            // Large work buffer format (32 bytes/splat):
+            // - dataColor (RGBA16F/RGBA16U): RGBA color with alpha
+            // - dataTransformA (RGBA32U): center.xyz (3×32-bit floats as uint) + rotation.xy (2×16-bit halfs)
+            // - dataTransformB (RG32U): rotation.z + scale.xyz (4×16-bit halfs, scale.w derived via sqrt)
+            const colorFormat = this._device.getRenderableHdrFormat([PIXELFORMAT_RGBA16F]) || PIXELFORMAT_RGBA16U;
+            format = new GSplatFormat(this._device, [
+                { name: 'dataColor', format: colorFormat },
+                { name: 'dataTransformA', format: PIXELFORMAT_RGBA32U },
+                { name: 'dataTransformB', format: PIXELFORMAT_RG32U }
+            ], {
+                readGLSL: glslPackedRead,
+                readWGSL: wgslPackedRead
+            });
+            format.setWriteCode(glslPackedWrite, wgslPackedWrite);
+        }
+
+        format.allowStreamRemoval = true;
+        return format;
+    }
 
     /**
      * Enables debug rendering of AABBs for GSplat objects. Defaults to false.
@@ -36,13 +125,33 @@ class GSplatParams {
     radialSorting = false;
 
     /**
+     * @type {boolean}
+     * @private
+     */
+    _gpuSorting = false;
+
+    /**
      * Enables GPU-based sorting using compute shaders. WebGPU only.
-     * Must be set before gsplat components are created.
      *
      * @type {boolean}
      * @ignore
      */
-    gpuSorting = false;
+    set gpuSorting(value) {
+        if (value !== this._gpuSorting) {
+            this._gpuSorting = value;
+            this._syncNodeIndexStream();
+        }
+    }
+
+    /**
+     * Gets the GPU sorting enabled state.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    get gpuSorting() {
+        return this._gpuSorting;
+    }
 
     /**
      * Enables debug rendering of AABBs for GSplat octree nodes. Defaults to false.
@@ -85,6 +194,92 @@ class GSplatParams {
      */
     get colorizeLod() {
         return this._colorizeLod;
+    }
+
+    /**
+     * @type {boolean}
+     * @private
+     */
+    _enableIds = false;
+
+    /**
+     * Enables or disables per-component ID storage in the work buffer. When enabled, each GSplat
+     * component gets a unique ID written to the work buffer. This ID is used by the picking
+     * system to identify which component was picked, but is also available to custom shaders for
+     * effects like highlighting, animation, or any per-component differentiation.
+     *
+     * @type {boolean}
+     */
+    set enableIds(value) {
+        if (value && !this._enableIds) {
+            this._enableIds = true;
+            if (!this._format.getStream('pcId')) {
+                this._format.addExtraStreams([
+                    { name: 'pcId', format: PIXELFORMAT_R32U }
+                ]);
+            }
+        } else if (!value && this._enableIds) {
+            this._enableIds = false;
+            this._format.removeExtraStreams(['pcId']);
+        }
+    }
+
+    /**
+     * Gets the ID storage enabled state.
+     *
+     * @type {boolean}
+     */
+    get enableIds() {
+        return this._enableIds;
+    }
+
+    /**
+     * @type {boolean}
+     * @private
+     */
+    _culling = false;
+
+    /**
+     * Enables or disables GPU frustum culling. When enabled, octree nodes outside the camera
+     * frustum are culled on the GPU before rendering. WebGPU only.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    set culling(value) {
+        if (value !== this._culling) {
+            this._culling = value;
+            this._syncNodeIndexStream();
+        }
+    }
+
+    /**
+     * Gets the culling enabled state.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    get culling() {
+        return this._culling;
+    }
+
+    /**
+     * Adds or removes the pcNodeIndex extra stream based on current culling and gpuSorting state.
+     * Only the CPU sort + culling path needs per-splat node index in the work buffer; the GPU sort
+     * path uses interval-based compaction which reads node visibility directly from intervals.
+     *
+     * @private
+     */
+    _syncNodeIndexStream() {
+        const needsNodeIndex = this._culling && !(this._gpuSorting && this._device.isWebGPU);
+        const hasNodeIndex = !!this._format.getStream('pcNodeIndex');
+        if (needsNodeIndex && !hasNodeIndex) {
+            this._format.addExtraStreams([
+                { name: 'pcNodeIndex', format: PIXELFORMAT_R32U }
+            ]);
+        } else if (!needsNodeIndex && hasNodeIndex) {
+            this._format.removeExtraStreams(['pcNodeIndex']);
+        }
     }
 
     /**
@@ -219,13 +414,33 @@ class GSplatParams {
         return this._lodUnderfillLimit;
     }
 
+    /**
+     * @type {number}
+     * @private
+     */
+    _splatBudget = 0;
+
+    /**
+     * Target number of splats across all GSplats in the scene. When set > 0,
+     * the system adjusts LOD levels globally to stay within this budget.
+     * Set to 0 to disable budget enforcement and use LOD distances only (default).
+     *
+     * @type {number}
+     */
     set splatBudget(value) {
-        Debug.removed('GSplatParams.splatBudget is deprecated. Use GSplatComponent.splatBudget instead to set per-component budgets.');
+        if (this._splatBudget !== value) {
+            this._splatBudget = value;
+            this.dirty = true;
+        }
     }
 
+    /**
+     * Gets the target number of splats across all GSplats in the scene.
+     *
+     * @type {number}
+     */
     get splatBudget() {
-        Debug.removed('GSplatParams.splatBudget is deprecated. Use GSplatComponent.splatBudget instead to set per-component budgets.');
-        return 0;
+        return this._splatBudget;
     }
 
     /**
@@ -327,6 +542,45 @@ class GSplatParams {
     cooldownTicks = 100;
 
     /**
+     * Work buffer data format. Controls the precision and bandwidth of the intermediate work buffer
+     * used during unified GSplat rendering. Can be set to {@link GSPLATDATA_COMPACT} (20 bytes/splat)
+     * or {@link GSPLATDATA_LARGE} (32 bytes/splat). Defaults to {@link GSPLATDATA_COMPACT}.
+     *
+     * @type {string}
+     */
+    set dataFormat(value) {
+        if (this._dataFormat !== value) {
+            this._dataFormat = value;
+
+            // capture extra streams from the old format
+            const extraStreams = this._format.extraStreams.map(s => ({
+                name: s.name,
+                format: s.format,
+                storage: s.storage
+            }));
+
+            // create new format with the new data layout
+            this._format = this._createFormat(value);
+
+            // re-add extra streams
+            if (extraStreams.length > 0) {
+                this._format.addExtraStreams(extraStreams);
+            }
+
+            this.dirty = true;
+        }
+    }
+
+    /**
+     * Gets the work buffer data format.
+     *
+     * @type {string}
+     */
+    get dataFormat() {
+        return this._dataFormat;
+    }
+
+    /**
      * A material template that can be customized by the user. Any defines, parameters, or shader
      * chunks set on this material will be automatically applied to all GSplat components rendered
      * in unified mode. After making changes, call {@link Material#update} to for the changes to be applied
@@ -340,6 +594,23 @@ class GSplatParams {
      */
     get material() {
         return this._material;
+    }
+
+    /**
+     * Format descriptor for work buffer streams. Describes the textures used by the work buffer
+     * for intermediate storage during unified rendering. Users can add extra streams via
+     * {@link GSplatFormat#addExtraStreams} for custom per-splat data.
+     *
+     * @type {GSplatFormat}
+     * @example
+     * // Add a custom stream to store per-splat component IDs
+     * app.scene.gsplat.format.addExtraStreams([{
+     *     name: 'splatId',
+     *     format: pc.PIXELFORMAT_R32U
+     * }]);
+     */
+    get format() {
+        return this._format;
     }
 
     /**
