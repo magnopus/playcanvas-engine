@@ -1674,10 +1674,20 @@ const createMeshes = (device, gltf, bufferViews, options) => {
     const meshVariants = {};
     const meshDefaultMaterials = {};
     const promises = [];
+    const preprocess = options?.mesh?.preprocess;
+    const process = options?.mesh?.process ?? createMesh;
+    const postprocess = options?.mesh?.postprocess;
 
     const valid = (!options.skipMeshes && gltf?.meshes?.length && gltf?.accessors?.length && gltf?.bufferViews?.length);
-    const meshes = valid ? gltf.meshes.map((gltfMesh) => {
-        return createMesh(device, gltfMesh, gltf.accessors, bufferViews, vertexBufferDict, meshVariants, meshDefaultMaterials, options, promises);
+    const meshes = valid ? gltf.meshes.map((gltfMesh, index) => {
+        if (preprocess) {
+            preprocess(gltfMesh);
+        }
+        const mesh = process(device, gltfMesh, gltf.accessors, bufferViews, vertexBufferDict, meshVariants, meshDefaultMaterials, options, promises);
+        if (postprocess) {
+            postprocess(gltfMesh, mesh, index);
+        }
+        return mesh;
     }) : [];
 
     return {
