@@ -12,7 +12,7 @@ function swcOptions(isDebug, minify) {
     return {
         minify,
         jsc: {
-            target: 'es2020',
+            target: 'es2024',
             minify: {
                 format: {
                     comments: !isDebug || minify ? 'some' : 'all'

@@ -7,7 +7,9 @@ import { version, revision } from './rollup-version-revision.mjs';
  * @returns {string} - The banner.
  */
 function getBanner(config) {
-    return `/**
+// magnopus patched.
+    return `// @ts-self-types="./playcanvas.d.ts"
+/**
  * @license
  * PlayCanvas Engine v${version} revision ${revision}${config}
  * Copyright 2011-${new Date().getFullYear()} PlayCanvas Ltd. All rights reserved.
