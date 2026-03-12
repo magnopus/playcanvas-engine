@@ -61,6 +61,7 @@ function createScript(name, app) {
     }
     // magnopus patched need to ensure this comment is not removed
     /**
+     * @preserve
      * @type Class
      * @param {*} args - Arguments passed to the script constructor.
      */
