@@ -8,6 +8,10 @@ import { Quat } from '../core/math/quat.js';
 import { Vec3 } from '../core/math/vec3.js';
 import { getApplication } from '../framework/globals.js';
 
+/**
+ * @import { AppBase } from '../framework/app-base.js'
+ */
+
 const scaleCompensatePosTransform = new Mat4();
 const scaleCompensatePos = new Vec3();
 const scaleCompensateRot = new Quat();
@@ -306,7 +310,7 @@ class GraphNode extends EventHandler {
      * Create a new GraphNode instance.
      *
      * @param {string} [name] - The non-unique name of a graph node. Defaults to 'Untitled'.
-     * @param {Application} [app] - The current app instance.
+     * @param {AppBase} [app] - The current app instance.
      */
     constructor(name = 'Untitled', app) {
         super();

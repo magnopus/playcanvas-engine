@@ -33,7 +33,7 @@ export default [
                 'error',
                 {
                     // custom mjs script tags to not error on, add them to those from parent config
-                    definedTags: [...new Set([...existingTags, 'range', 'step', 'precision'])]
+                    definedTags: [...new Set([...existingTags, 'range', 'step', 'precision', 'preserve'])]
                 }
             ]
         }

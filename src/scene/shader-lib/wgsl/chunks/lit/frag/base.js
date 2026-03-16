@@ -11,7 +11,7 @@ fn getStereoVideoUV(uv: vec2f, stereoVideoType: i32, isStereoFlipped: i32) -> ve
     var stereoUV = uv;
 
     if (stereoVideoType > 0) {
-        let isLeftEye = select(0.0, 1.0, uniform.view_index == uniform.isStereoFlipped);
+        let isLeftEye = select(0.0, 1.0, uniform.view_index == f32(isStereoFlipped));
 
         var offset = vec2f(0.0, 0.0);
         var scale = vec2f(1.0, 1.0);
