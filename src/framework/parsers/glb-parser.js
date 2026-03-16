@@ -1674,6 +1674,7 @@ const createMeshes = (device, gltf, bufferViews, options) => {
     const meshVariants = {};
     const meshDefaultMaterials = {};
     const promises = [];
+    // magnopus patched
     const preprocess = options?.mesh?.preprocess;
     const process = options?.mesh?.process ?? createMesh;
     const postprocess = options?.mesh?.postprocess;
