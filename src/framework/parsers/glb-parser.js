@@ -1680,6 +1680,7 @@ const createMeshes = (device, gltf, bufferViews, options) => {
     const postprocess = options?.mesh?.postprocess;
 
     const valid = (!options.skipMeshes && gltf?.meshes?.length && gltf?.accessors?.length && gltf?.bufferViews?.length);
+ // magnopus patched
     const meshes = valid ? gltf.meshes.map((gltfMesh, index) => {
         if (preprocess) {
             preprocess(gltfMesh);
