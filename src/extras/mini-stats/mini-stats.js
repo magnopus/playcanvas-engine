@@ -70,6 +70,7 @@ const delayedStartStats = new Set([
  * graphs (script, anim, physics, render). Defaults to 1.
  * @property {number} [vramTimingMinSize] - Minimum size index at which to show VRAM subcategory
  * graphs. Defaults to 1.
+ * @property {number} [yOffset] - Vertical offset in pixels to apply to all graphs (magnopus patched).
  */
 
 /**
@@ -95,6 +96,8 @@ class MiniStats {
         this.freeRows = [];          // Available rows for reuse
         this.nextRowIndex = 0;       // Next new row to allocate
 
+        // magnopus patched
+        this.yOffset = options.yOffset ?? 0;
         // sizes must be set before initGraphs (needed by ensureTextureHeight)
         this.sizes = options.sizes;
 
@@ -321,7 +324,9 @@ class MiniStats {
             cpuTimingMinSize: 1,
 
             // minimum size index to show VRAM subcategory graphs
-            vramTimingMinSize: 1
+            vramTimingMinSize: 1,
+            // magnopus patched
+            yOffset: 0
         };
 
         if (extraStats.length > 0) {
@@ -514,7 +519,7 @@ class MiniStats {
         for (let i = 0; i < graphs.length; ++i) {
             const graph = graphs[i];
 
-            let y = i * (height + gspacing);
+            let y = i * (height + gspacing) + this.yOffset; // magnopus patched: apply yOffset to all graphs
 
             // render the graph
             graph.render(render2d, 0, y, width, height);
