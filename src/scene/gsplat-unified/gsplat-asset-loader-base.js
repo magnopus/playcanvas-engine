@@ -1,5 +1,8 @@
 import { Debug } from '../../core/debug.js';
 
+// magnopus patched
+// GSplat asset load requests can carry both a final load URL and an original logical URL.
+
 /**
  * Base class for GSplat asset loaders. This provides the interface that all
  * GSplat asset loaders must implement.
@@ -12,7 +15,8 @@ class GSplatAssetLoaderBase {
      * Initiates loading of a gsplat asset. This is a fire-and-forget operation that starts
      * the loading process.
      *
-     * @param {string} url - The URL of the gsplat file to load.
+     * @param {string|{ url: string, originalUrl?: string }} url - The URL of the gsplat file to
+     * load.
      * @abstract
      */
     load(url) {

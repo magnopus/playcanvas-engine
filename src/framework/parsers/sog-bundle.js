@@ -157,6 +157,23 @@ class SogBundleParser {
     }
 
     /**
+     * // magnopus patched
+     * Resolves a texture filename relative to the parent gsplat asset.
+     *
+     * @param {string} filename - The texture filename to resolve.
+     * @param {{ load: string, original: string }} url - The parent gsplat URL object.
+     * @param {Asset} asset - The parent gsplat asset.
+     * @returns {{ load: string, original: string }} The resolved load/original URL pair.
+     * @private
+     */
+    _resolveTextureUrl(filename, url, asset) {
+        return this.app.resolveUrl(filename, {
+            asset,
+            baseUrl: url.original
+        });
+    }
+
+    /**
      * @param {object} url - The URL of the resource to load.
      * @param {string} url.load - The URL to use for loading the resource.
      * @param {string} url.original - The original URL useful for identifying the resource type.
@@ -202,10 +219,13 @@ class SogBundleParser {
             for (const filename of filenames) {
                 const file = files.find(f => f.filename === filename);
                 let texture;
+                // magnopus patched
+                const resolved = this._resolveTextureUrl(filename, url, asset);
                 if (file) {
                     // file is embedded
                     texture = new Asset(filename, 'texture', {
                         url: `${url.load}/${filename}`,
+                        originalUrl: resolved.original,
                         filename,
                         contents: file.data
                     }, {
@@ -215,9 +235,9 @@ class SogBundleParser {
                     });
                 } else {
                     // file doesn't exist in bundle, treat it as a url
-                    const url = (new URL(filename, new URL(filename, window.location.href).toString())).toString();
                     texture = new Asset(filename, 'texture', {
-                        url,
+                        url: resolved.load,
+                        originalUrl: resolved.original,
                         filename
                     }, {
                         mipmaps: false

@@ -1680,7 +1680,7 @@ const createMeshes = (device, gltf, bufferViews, options) => {
     const postprocess = options?.mesh?.postprocess;
 
     const valid = (!options.skipMeshes && gltf?.meshes?.length && gltf?.accessors?.length && gltf?.bufferViews?.length);
- // magnopus patched
+    // magnopus patched
     const meshes = valid ? gltf.meshes.map((gltfMesh, index) => {
         if (preprocess) {
             preprocess(gltfMesh);
@@ -2094,7 +2094,7 @@ const getTextureSource = gltfTexture => gltfTexture.extensions?.KHR_texture_basi
     gltfTexture.source;
 
 // create gltf images. returns an array of promises that resolve to texture assets.
-const createImages = (gltf, bufferViews, urlBase, registry, options) => {
+const createImages = (gltf, bufferViews, loadUrlBase, originalUrlBase, registry, options) => {
     if (!gltf.images || gltf.images.length === 0) {
         return [];
     }
@@ -2167,14 +2167,14 @@ const createImages = (gltf, bufferViews, urlBase, registry, options) => {
         return set;
     };
 
-    const loadTexture = (gltfImage, url, bufferView, mimeType, options, srgb) => {
+    const loadTexture = (gltfImage, loadUrl, originalUrl, bufferView, mimeType, options, srgb) => {
         return new Promise((resolve, reject) => {
             const continuation = (bufferViewData) => {
                 const name = `${gltfImage.name || 'gltf-texture'}-${gltfTextureUniqueId++}`;
 
                 // construct the asset file
                 const file = {
-                    url: url || name
+                    url: loadUrl || name
                 };
                 if (bufferViewData) {
                     file.contents = bufferViewData.slice(0).buffer;
@@ -2185,6 +2185,11 @@ const createImages = (gltf, bufferViews, urlBase, registry, options) => {
                         file.filename = `${file.url}.${extension}`;
                     }
                 }
+
+                // magnopus patched
+                // For embedded GLB textures, preserve an extension-bearing logical URL so the
+                // texture handler can choose the correct parser (for example ktx2 vs img).
+                file.originalUrl = originalUrl || file.filename || loadUrl || name;
 
                 // create and load the asset
                 const data = { srgb };
@@ -2239,12 +2244,15 @@ const createImages = (gltf, bufferViews, urlBase, registry, options) => {
             } else if (gltfImage.hasOwnProperty('uri')) {
                 // uri specified
                 if (isDataURI(gltfImage.uri)) {
-                    return loadTexture(gltfImage, gltfImage.uri, null, getDataURIMimeType(gltfImage.uri), null, srgb);
+                    return loadTexture(gltfImage, gltfImage.uri, gltfImage.uri, null, getDataURIMimeType(gltfImage.uri), null, srgb);
                 }
-                return loadTexture(gltfImage, ABSOLUTE_URL.test(gltfImage.uri) ? gltfImage.uri : path.join(urlBase, gltfImage.uri), null, null, { crossOrigin: 'anonymous' }, srgb);
+                // magnopus patched
+                const resolvedLoadUrl = ABSOLUTE_URL.test(gltfImage.uri) ? gltfImage.uri : path.join(loadUrlBase, gltfImage.uri);
+                const resolvedOriginalUrl = ABSOLUTE_URL.test(gltfImage.uri) ? gltfImage.uri : path.join(originalUrlBase, gltfImage.uri);
+                return loadTexture(gltfImage, resolvedLoadUrl, resolvedOriginalUrl, null, null, { crossOrigin: 'anonymous' }, srgb);
             } else if (gltfImage.hasOwnProperty('bufferView') && gltfImage.hasOwnProperty('mimeType')) {
                 // bufferview
-                return loadTexture(gltfImage, null, bufferViews[gltfImage.bufferView], gltfImage.mimeType, null, srgb);
+                return loadTexture(gltfImage, null, null, bufferViews[gltfImage.bufferView], gltfImage.mimeType, null, srgb);
             }
 
             // fail
@@ -2325,7 +2333,7 @@ const createTextures = (gltf, images, options) => {
 };
 
 // load gltf buffers. returns an array of promises that resolve to typed arrays.
-const loadBuffers = (gltf, binaryChunk, urlBase, options) => {
+const loadBuffers = (gltf, binaryChunk, loadUrlBase, originalUrlBase, registry, options) => {
     if (!gltf.buffers || gltf.buffers.length === 0) {
         return [];
     }
@@ -2378,8 +2386,16 @@ const loadBuffers = (gltf, binaryChunk, urlBase, options) => {
                 }
 
                 return new Promise((resolve, reject) => {
+                    // magnopus patched
+                    const resolvedUrl = registry._loader?._app?.resolveUrl?.({
+                        load: ABSOLUTE_URL.test(gltfBuffer.uri) ? gltfBuffer.uri : path.join(loadUrlBase, gltfBuffer.uri),
+                        original: ABSOLUTE_URL.test(gltfBuffer.uri) ? gltfBuffer.uri : path.join(originalUrlBase, gltfBuffer.uri)
+                    }) ?? {
+                        load: ABSOLUTE_URL.test(gltfBuffer.uri) ? gltfBuffer.uri : path.join(loadUrlBase, gltfBuffer.uri)
+                    };
+
                     http.get(
-                        ABSOLUTE_URL.test(gltfBuffer.uri) ? gltfBuffer.uri : path.join(urlBase, gltfBuffer.uri),
+                        resolvedUrl.load,
                         { cache: true, responseType: 'arraybuffer', retry: false },
                         (err, result) => {
                             if (err) {
@@ -2586,7 +2602,7 @@ const createBufferViews = (gltf, buffers, options) => {
 
 class GlbParser {
     // parse the gltf or glb data asynchronously, loading external resources
-    static parse(filename, urlBase, data, device, registry, options, callback) {
+    static parse(filename, loadUrlBase, originalUrlBase, data, device, registry, options, callback) {
         // parse the data
         parseChunk(filename, data, (err, chunks) => {
             if (err) {
@@ -2601,9 +2617,9 @@ class GlbParser {
                     return;
                 }
 
-                const buffers = loadBuffers(gltf, chunks.binaryChunk, urlBase, options);
+                const buffers = loadBuffers(gltf, chunks.binaryChunk, loadUrlBase, originalUrlBase, registry, options);
                 const bufferViews = createBufferViews(gltf, buffers, options);
-                const images = createImages(gltf, bufferViews, urlBase, registry, options);
+                const images = createImages(gltf, bufferViews, loadUrlBase, originalUrlBase, registry, options);
                 const textures = createTextures(gltf, images, options);
 
                 createResources(device, gltf, bufferViews, textures, options)

@@ -58,7 +58,7 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     /**
      * Queue of URLs waiting to be loaded.
      *
-     * @type {string[]}
+     * @type {(string|{ url: string, originalUrl?: string })[]}
      * @private
      */
     _loadQueue = [];
@@ -87,6 +87,28 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     constructor(registry) {
         super();
         this._registry = registry;
+    }
+
+    /**
+     * // magnopus patched
+     * Normalizes a gsplat load request into a key plus original/load URL pair.
+     *
+     * @param {string|{ url: string, originalUrl?: string }} url - The URL request to normalize.
+     * @returns {{ key: string, originalUrl: string }} The normalized request info.
+     * @private
+     */
+    _normalizeUrl(url) {
+        if (typeof url === 'string') {
+            return {
+                key: url,
+                originalUrl: url
+            };
+        }
+
+        return {
+            key: url.url,
+            originalUrl: url.originalUrl ?? url.url
+        };
     }
 
 
@@ -131,19 +153,22 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
      * Initiates loading of a gsplat asset. This is a fire-and-forget operation that starts
      * the loading process. Use getResource() later to check if the asset has finished loading.
      *
-     * @param {string} url - The URL of the gsplat file to load.
+     * @param {string|{ url: string, originalUrl?: string }} url - The URL of the gsplat file to
+     * load.
      */
     load(url) {
         Debug.assert(url);
+        // magnopus patched
+        const { key } = this._normalizeUrl(url);
 
         // Skip if already loading or loaded
-        const asset = this._urlToAsset.get(url);
-        if (asset?.loaded || this._currentlyLoading.has(url)) {
+        const asset = this._urlToAsset.get(key);
+        if (asset?.loaded || this._currentlyLoading.has(key)) {
             return;
         }
 
         // Skip if already queued
-        if (this._loadQueue.includes(url)) {
+        if (this._loadQueue.some(entry => this._normalizeUrl(entry).key === key)) {
             return;
         }
 
@@ -159,36 +184,43 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     /**
      * Starts loading an asset immediately.
      *
-     * @param {string} url - The URL of the gsplat file to load.
+     * @param {string|{ url: string, originalUrl?: string }} url - The URL of the gsplat file to
+     * load.
      * @private
      */
     _startLoading(url) {
+        // magnopus patched
+        const { key, originalUrl } = this._normalizeUrl(url);
+
         // Add to currently loading set
-        this._currentlyLoading.add(url);
+        this._currentlyLoading.add(key);
 
         // Get or create asset
-        let asset = this._urlToAsset.get(url);
+        let asset = this._urlToAsset.get(key);
 
         if (!asset) {
             // Create a new gsplat asset
             // @ts-ignore - minimalMemory is a custom option for gsplat assets
-            asset = new Asset(url, 'gsplat', { url }, {}, { minimalMemory: true });
+            asset = new Asset(key, 'gsplat', {
+                url: key,
+                originalUrl
+            }, {}, { minimalMemory: true });
 
             // Assert that registry doesn't already have an asset for this URL
             // If it does, there's a code ownership issue - GSplatAssetLoader should be the only
             // creator of gsplat assets with these URLs
-            Debug.assert(!this._registry.getByUrl(url),
-                `Asset with URL ${url} already exists in registry but not tracked by GSplatAssetLoader`);
+            Debug.assert(!this._registry.getByUrl(key),
+                `Asset with URL ${key} already exists in registry but not tracked by GSplatAssetLoader`);
 
             this._registry.add(asset);
 
             // Track this asset in our map
-            this._urlToAsset.set(url, asset);
+            this._urlToAsset.set(key, asset);
         }
 
         // Attach event listeners
-        asset.once('load', () => this._onAssetLoadSuccess(url, asset));
-        asset.once('error', err => this._onAssetLoadError(url, asset, err));
+        asset.once('load', () => this._onAssetLoadSuccess(key, asset));
+        asset.once('error', err => this._onAssetLoadError(key, asset, err));
 
         // Start loading the asset
         if (!asset.loaded && !asset.loading) {
@@ -291,7 +323,8 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
         this._currentlyLoading.delete(url);
 
         // Remove from queue if present
-        const queueIndex = this._loadQueue.indexOf(url);
+        // magnopus patched
+        const queueIndex = this._loadQueue.findIndex(entry => this._normalizeUrl(entry).key === url);
         if (queueIndex !== -1) {
             this._loadQueue.splice(queueIndex, 1);
         }

@@ -129,7 +129,19 @@ class ResourceLoader {
             return;
         }
 
-        const key = ResourceLoader.makeKey(url, type);
+        // magnopus patched
+        const resolvedUrl = this._app.resolveUrl({
+            load: url,
+            original: asset?.getFileOriginalUrl?.() ?? url
+        }, {
+            asset,
+            handler
+        });
+        // magnopus patched
+        const cacheUrl = asset?.file?.hash && asset.type !== 'script' ?
+            `${resolvedUrl.original}?t=${asset.file.hash}` :
+            resolvedUrl.original;
+        const key = ResourceLoader.makeKey(cacheUrl, type);
 
         if (this._cache[key] !== undefined) {
             // in cache
@@ -193,7 +205,7 @@ class ResourceLoader {
                 }, asset);
             };
 
-            const normalizedUrl = url.split('?')[0];
+            const normalizedUrl = resolvedUrl.load.split('?')[0];
             if (this._app.enableBundles && this._app.bundles.hasUrl(normalizedUrl) && !(options && options.bundlesIgnore)) {
                 // if there is no loaded bundle with asset, then start loading a bundle
                 if (!this._app.bundles.urlIsLoadedOrLoading(normalizedUrl)) {
@@ -218,14 +230,11 @@ class ResourceLoader {
                 this._app.bundles.loadUrl(normalizedUrl, (err, fileUrlFromBundle) => {
                     handleLoad(err, {
                         load: fileUrlFromBundle,
-                        original: normalizedUrl
+                        original: resolvedUrl.original
                     });
                 });
             } else {
-                handleLoad(null, {
-                    load: url,
-                    original: asset && asset.file.filename || url
-                });
+                handleLoad(null, resolvedUrl);
             }
         }
     }

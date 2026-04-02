@@ -42,6 +42,7 @@ import {
     RESOLUTION_AUTO, RESOLUTION_FIXED
 } from './constants.js';
 import { Asset } from './asset/asset.js';
+import { ABSOLUTE_URL } from './asset/constants.js';
 import { AssetRegistry } from './asset/asset-registry.js';
 import { BundleRegistry } from './bundle/bundle-registry.js';
 import { ComponentSystemRegistry } from './components/registry.js';
@@ -60,6 +61,7 @@ import { ShaderChunks } from '../scene/shader-lib/shader-chunks.js';
 
 /**
  * @import { AppOptions } from './app-options.js'
+ * @import { AppUrlResolver } from './app-options.js'
  * @import { BatchManager } from '../scene/batching/batch-manager.js'
  * @import { ElementInput } from './input/element-input.js'
  * @import { GamePads } from '../platform/input/game-pads.js'
@@ -344,6 +346,14 @@ class AppBase extends EventHandler {
     loader = new ResourceLoader(this);
 
     /**
+     * // magnopus patched
+     * Callback used to resolve logical asset URLs to their final load URLs.
+     *
+     * @type {AppUrlResolver|null}
+     */
+    urlResolver = null;
+
+    /**
      * The asset registry managed by the application.
      *
      * @type {AssetRegistry}
@@ -488,7 +498,7 @@ class AppBase extends EventHandler {
     init(appOptions) {
         const {
             assetPrefix, batchManager, componentSystems, elementInput, gamepads, graphicsDevice, keyboard,
-            lightmapper, mouse, resourceHandlers, scriptsOrder, scriptPrefix, soundManager, touch, xr
+            lightmapper, mouse, resourceHandlers, scriptsOrder, scriptPrefix, soundManager, touch, urlResolver, xr
         } = appOptions;
 
         Debug.assert(graphicsDevice, 'The application cannot be created without a valid GraphicsDevice');
@@ -508,6 +518,8 @@ class AppBase extends EventHandler {
 
         this.assets = new AssetRegistry(this.loader);
         if (assetPrefix) this.assets.prefix = assetPrefix;
+        // magnopus patched
+        this.urlResolver = urlResolver || null;
 
         this.bundles = new BundleRegistry(this.assets);
         this.scriptsOrder = scriptsOrder || [];
@@ -595,6 +607,51 @@ class AppBase extends EventHandler {
         // bind tick function to current scope
         /* eslint-disable-next-line no-use-before-define */
         this.tick = makeTick(this); // Circular linting issue as makeTick and Application reference each other
+    }
+
+    /**
+     * // magnopus patched
+     * Resolves a logical resource URL to its final load URL.
+     *
+     * @param {string|{ load: string, original: string }} url - The URL to resolve.
+     * @param {object} [options] - Context for the resolution.
+     * @param {Asset} [options.asset] - The asset being loaded.
+     * @param {string} [options.baseUrl] - The original base URL used to resolve relative paths.
+     * @param {import('./handlers/handler.js').ResourceHandler} [options.handler] - The requesting
+     * resource handler.
+     * @returns {{ load: string, original: string }} The resolved load/original URL pair.
+     */
+    resolveUrl(url, options = {}) {
+        const hasExplicitLoad = typeof url === 'object' && url.load !== undefined && url.original !== undefined && url.load !== url.original;
+        const resolved = typeof url === 'string' ? {
+            load: url,
+            original: url
+        } : {
+            load: url.load ?? url.original,
+            original: url.original ?? url.load
+        };
+
+        if (options.baseUrl && path.isRelativePath(resolved.original)) {
+            // magnopus patched
+            resolved.original = ABSOLUTE_URL.test(options.baseUrl) ?
+                new URL(resolved.original, options.baseUrl).toString() :
+                path.normalize(path.join(path.getDirectory(options.baseUrl), resolved.original));
+        }
+
+        if (!hasExplicitLoad && options.baseUrl && path.isRelativePath(resolved.load)) {
+            // magnopus patched
+            resolved.load = resolved.original;
+        }
+
+        const rewritten = this.urlResolver?.(resolved, options);
+        if (typeof rewritten === 'string') {
+            resolved.load = rewritten;
+        } else if (rewritten) {
+            resolved.load = rewritten.load ?? resolved.load;
+            resolved.original = rewritten.original ?? resolved.original;
+        }
+
+        return resolved;
     }
 
     static _applications = {};

@@ -1,3 +1,4 @@
+import { path } from '../../core/path.js';
 import { GlbContainerResource } from './glb-container-resource.js';
 import { GlbParser } from './glb-parser.js';
 
@@ -9,7 +10,11 @@ class GlbModelParser {
     }
 
     parse(data, callback, asset) {
-        GlbParser.parse('filename.glb', '', data, this._device, this._assets, asset?.options ?? {}, (err, result) => {
+        // magnopus patched
+        const loadUrlBase = asset ? path.extractPath(asset.getFileUrl()) : '';
+        const originalUrlBase = asset ? path.extractPath(asset.getFileOriginalUrl()) : '';
+
+        GlbParser.parse('filename.glb', loadUrlBase, originalUrlBase, data, this._device, this._assets, asset?.options ?? {}, (err, result) => {
             if (err) {
                 callback(err);
             } else {

@@ -1,4 +1,5 @@
 /**
+ * @import { Asset } from './asset/asset.js'
  * @import { BatchManager } from '../scene/batching/batch-manager.js'
  * @import { ComponentSystem } from './components/system.js'
  * @import { ElementInput } from './input/element-input.js'
@@ -11,6 +12,17 @@
  * @import { SoundManager } from '../platform/sound/manager.js'
  * @import { TouchDevice } from '../platform/input/touch-device.js'
  * @import { XrManager } from './xr/xr-manager.js'
+ */
+
+/**
+ * @callback AppUrlResolver
+ * @param {{ load: string, original: string }} url - The current load/original URL pair.
+ * @param {object} options - Context for the resolution.
+ * @param {Asset} [options.asset] - The asset being loaded.
+ * @param {string} [options.baseUrl] - The original URL used as the base for relative paths.
+ * @param {ResourceHandler} [options.handler] - The resource handler requesting the URL.
+ * @returns {string|{load?: string, original?: string}|undefined|null} The rewritten URL, or an
+ * object containing updated load and/or original URLs.
  */
 
 /**
@@ -66,6 +78,14 @@ class AppOptions {
      * @type {string}
      */
     assetPrefix;
+
+    /**
+     * // magnopus patched
+     * Callback used to resolve logical asset URLs to their final load URLs.
+     *
+     * @type {AppUrlResolver}
+     */
+    urlResolver;
 
     /**
      * Scripts in order of loading first.

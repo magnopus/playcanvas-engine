@@ -21,9 +21,12 @@ class GSplatOctreeResource {
      * @param {string} assetFileUrl - The file URL of the container asset.
      * @param {object} data - Parsed JSON data.
      * @param {object} assetLoader - Asset loader instance (framework-level object).
+     * @param {(url: string) => { load: string, original: string }} [resolveUrl] - Optional URL
+     * resolver used to expand relative paths.
      */
-    constructor(assetFileUrl, data, assetLoader) {
-        this.octree = new GSplatOctree(assetFileUrl, data);
+    constructor(assetFileUrl, data, assetLoader, resolveUrl) {
+        // magnopus patched
+        this.octree = new GSplatOctree(assetFileUrl, data, resolveUrl);
         this.octree.assetLoader = assetLoader;
         this.aabb.setMinMax(new Vec3(data.tree.bound.min), new Vec3(data.tree.bound.max));
     }

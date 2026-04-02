@@ -241,6 +241,9 @@ class Asset extends EventHandler {
      * @param {object} [file] - Details about the file the asset is made from. At the least must
      * contain the 'url' field. For assets that don't contain file data use null.
      * @param {string} [file.url] - The URL of the resource file that contains the asset data.
+     * @param {string} [file.originalUrl] - The logical URL of the resource file. When supplied,
+     * relative references are resolved against this URL while `file.url` can remain the final load
+     * URL.
      * @param {string} [file.filename] - The filename of the resource file or null if no filename
      * was set (e.g from using {@link AssetRegistry#loadFromUrl}).
      * @param {number} [file.size] - The size of the resource file or null if no size was set
@@ -333,7 +336,8 @@ class Asset extends EventHandler {
         }
 
         const oldFile = this._file;
-        const newFile = value ? new AssetFile(value.url, value.filename, value.hash, value.size, value.opt, value.contents) : null;
+        // magnopus patched
+        const newFile = value ? new AssetFile(value.url, value.filename, value.hash, value.size, value.opt, value.contents, value.originalUrl) : null;
 
         if (!!newFile !== !!oldFile || (newFile && !newFile.equals(oldFile))) {
             this._file = newFile;
@@ -483,18 +487,57 @@ class Asset extends EventHandler {
         }
 
         let url = file.url;
+        const app = this.registry?._loader?._app || getApplication();
 
         if (this.registry && this.registry.prefix && !ABSOLUTE_URL.test(url)) {
             url = this.registry.prefix + url;
         }
 
+        // magnopus patched
+        const unresolvedUrl = url;
+        if (app?.resolveUrl) {
+            url = app.resolveUrl({
+                load: url,
+                original: this.getFileOriginalUrl()
+            }, {
+                asset: this
+            }).load;
+        }
+
         // add file hash to avoid hard-caching problems
-        if (this.type !== 'script' && file.hash) {
+        if (this.type !== 'script' && file.hash && url === unresolvedUrl) {
             const separator = url.indexOf('?') !== -1 ? '&' : '?';
             url += `${separator}t=${file.hash}`;
         }
 
         return url;
+    }
+
+    /**
+     * // magnopus patched
+     * Return the logical/original URL for this asset file.
+     *
+     * @returns {string|null} The logical/original URL.
+     * @ignore
+     */
+    getFileOriginalUrl() {
+        const file = this.file;
+        if (!file) {
+            return null;
+        }
+
+        if (file.originalUrl) {
+            return file.originalUrl;
+        }
+
+        // magnopus patched
+        // Preserve filename-based format identification for blob / in-memory assets such as
+        // embedded GLB textures, where file.url may be a synthetic name without an extension.
+        if ((file.contents || file.url?.startsWith('blob:') || file.url?.startsWith('data:')) && file.filename) {
+            return file.filename;
+        }
+
+        return file.url || file.filename || null;
     }
 
     /**
@@ -510,8 +553,23 @@ class Asset extends EventHandler {
             return relativePath;
         }
 
-        const base = path.getDirectory(this.file.url);
-        return path.join(base, relativePath);
+        // magnopus patched
+        const originalUrl = this.getFileOriginalUrl();
+        const app = this.registry?._loader?._app || getApplication();
+        if (app?.resolveUrl && originalUrl) {
+            return app.resolveUrl(relativePath, {
+                asset: this,
+                baseUrl: originalUrl
+            }).original;
+        }
+
+        const baseUrl = originalUrl || this.file.url;
+        if (ABSOLUTE_URL.test(baseUrl)) {
+            return new URL(relativePath, baseUrl).toString();
+        }
+
+        const base = path.getDirectory(baseUrl);
+        return path.normalize(path.join(base, relativePath));
     }
 
     /**

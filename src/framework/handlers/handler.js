@@ -61,6 +61,23 @@ class ResourceHandler {
     }
 
     /**
+     * // magnopus patched
+     * Resolves a logical resource URL to its final load URL.
+     *
+     * @param {string|{ load: string, original: string }} url - The URL to resolve.
+     * @param {object} [options] - Context for the resolution.
+     * @param {Asset} [options.asset] - The asset being loaded.
+     * @param {string} [options.baseUrl] - The original base URL used to resolve relative paths.
+     * @returns {{ load: string, original: string }} The resolved load/original URL pair.
+     */
+    resolveUrl(url, options = {}) {
+        return this._app.resolveUrl(url, {
+            ...options,
+            handler: this
+        });
+    }
+
+    /**
      * Load a resource from a remote URL. The base implementation does nothing.
      *
      * @param {string|object} url - Either the URL of the resource to load or a structure

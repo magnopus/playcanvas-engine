@@ -51,7 +51,12 @@ class GSplatOctreeParser {
             if (!err) {
                 // create a resource with the parsed data, passing the asset's file URL
                 const assetLoader = new GSplatAssetLoader(this.app.assets);
-                const resource = new GSplatOctreeResource(asset.file.url, data, assetLoader);
+                // magnopus patched
+                const resolveUrl = relativeUrl => this.app.resolveUrl(relativeUrl, {
+                    asset,
+                    baseUrl: url.original
+                });
+                const resource = new GSplatOctreeResource(url.original, data, assetLoader, resolveUrl);
                 callback(null, resource);
             } else {
                 callback(`Error loading gsplat octree: ${url.original} [${err}]`);
