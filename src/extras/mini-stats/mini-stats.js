@@ -587,7 +587,7 @@ class MiniStats {
     updateDiv() {
         const rect = this.device.canvas.getBoundingClientRect();
         this.div.style.left = `${rect.left}px`;
-        this.div.style.bottom = `${window.innerHeight - rect.bottom}px`;
+        this.div.style.bottom = `${window.innerHeight - rect.bottom + this.yOffset}px`;
         this.div.style.width = `${this.width}px`;
         this.div.style.height = `${this.overallHeight}px`;
     }
