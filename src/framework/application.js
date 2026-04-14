@@ -107,6 +107,8 @@ class Application extends AppBase {
      * @param {GamePads} [options.gamepads] - Gamepad handler for input.
      * @param {string} [options.scriptPrefix] - Prefix to apply to script urls before loading.
      * @param {string} [options.assetPrefix] - Prefix to apply to asset urls before loading.
+     * @param {import('./app-options.js').AppUrlResolver} [options.urlResolver] - Callback used to
+     * resolve logical asset URLs to their final load URLs.
      * @param {GraphicsDevice} [options.graphicsDevice] - The graphics device used by the
      * application. If not provided, a WebGl graphics device will be created.
      * @param {object} [options.graphicsDeviceOptions] - Options object that is passed into the
@@ -136,6 +138,8 @@ class Application extends AppBase {
 
         appOptions.scriptPrefix = options.scriptPrefix;
         appOptions.assetPrefix = options.assetPrefix;
+        // magnopus patched
+        appOptions.urlResolver = options.urlResolver;
         appOptions.scriptsOrder = options.scriptsOrder;
 
         appOptions.soundManager = new SoundManager();

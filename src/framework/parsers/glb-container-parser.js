@@ -23,6 +23,8 @@ class GlbContainerParser {
                 GlbParser.parse(
                     this._getUrlWithoutParams(url.original),
                     path.extractPath(url.load),
+                    // magnopus patched
+                    path.extractPath(url.original),
                     result,
                     this._device,
                     asset.registry,

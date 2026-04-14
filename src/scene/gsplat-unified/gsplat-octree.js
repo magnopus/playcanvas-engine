@@ -9,6 +9,9 @@ import { Texture } from '../../platform/graphics/texture.js';
 // Temporary array reused to avoid allocations during cooldown ticking
 const _toDelete = [];
 
+// magnopus patched
+const isAbsoluteUrl = url => url.includes('://') || url.startsWith('//') || url.startsWith('data:') || url.startsWith('blob:');
+
 /**
  * @import { GSplatResource } from '../gsplat/gsplat-resource.js'
  * @import { GSplatOctreeNodeLod } from './gsplat-octree-node.js'
@@ -22,7 +25,7 @@ class GSplatOctree {
     nodes;
 
     /**
-     * @type {{ url: string, lodLevel: number }[]}
+     * @type {{ url: string, originalUrl: string, lodLevel: number }[]}
      */
     files;
 
@@ -107,27 +110,46 @@ class GSplatOctree {
     /**
      * @param {string} assetFileUrl - The file URL of the container asset.
      * @param {Object} data - The parsed JSON data containing info, filenames and tree.
+     * @param {(url: string) => { load: string, original: string }} [resolveUrl] - Optional URL
+     * resolver used to expand relative paths.
      */
-    constructor(assetFileUrl, data) {
+    constructor(assetFileUrl, data, resolveUrl) {
 
         this.lodLevels = data.lodLevels;
         this.assetFileUrl = assetFileUrl;
 
         // expand all file paths to full URLs upfront to avoid repeated joins later
         const baseDir = path.getDirectory(assetFileUrl);
-        this.files = data.filenames.map(url => ({
-            url: path.isRelativePath(url) ? path.join(baseDir, url) : url,
-            lodLevel: -1
-        }));
+        // magnopus patched
+        const fallbackResolveUrl = (url) => {
+            if (!path.isRelativePath(url)) {
+                return url;
+            }
+
+            return isAbsoluteUrl(assetFileUrl) ?
+                new URL(url, assetFileUrl).toString() :
+                path.normalize(path.join(baseDir, url));
+        };
+
+        this.files = data.filenames.map((url) => {
+            // magnopus patched
+            const resolvedUrl = resolveUrl?.(url);
+            const fallbackUrl = fallbackResolveUrl(url);
+
+            return {
+                url: resolvedUrl?.load ?? fallbackUrl,
+                originalUrl: resolvedUrl?.original ?? fallbackUrl,
+                lodLevel: -1
+            };
+        });
 
         // initialize per-file ref counts
         this.fileRefCounts = new Int32Array(this.files.length);
 
         // parse optional environment field and resolve path
         if (data.environment) {
-            this.environmentUrl = path.isRelativePath(data.environment) ?
-                path.join(baseDir, data.environment) :
-                data.environment;
+            // magnopus patched
+            this.environmentUrl = resolveUrl?.(data.environment).load ?? fallbackResolveUrl(data.environment);
         }
 
         // Extract leaf nodes from hierarchical tree structure
@@ -410,7 +432,8 @@ class GSplatOctree {
         }
 
         // Start/continue loading (asset loader handles duplicates internally)
-        this.assetLoader?.load(fullUrl);
+        // magnopus patched
+        this.assetLoader?.load(this.files[fileIndex]);
     }
 
     /**

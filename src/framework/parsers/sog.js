@@ -119,6 +119,35 @@ class SogParser {
         return false;
     }
 
+    /**
+     * // magnopus patched
+     * Resolves a texture filename relative to the parent gsplat asset.
+     *
+     * @param {string} filename - The texture filename to resolve.
+     * @param {{ load: string, original: string }} url - The parent gsplat URL object.
+     * @param {Asset} asset - The parent gsplat asset.
+     * @returns {{ load: string, original: string }} The resolved load/original URL pair.
+     * @private
+     */
+    _resolveTextureUrl(filename, url, asset) {
+        if (asset.options?.mapUrl) {
+            const original = this.app.resolveUrl(filename, {
+                asset,
+                baseUrl: url.original
+            }).original;
+
+            return {
+                load: asset.options.mapUrl(filename),
+                original
+            };
+        }
+
+        return this.app.resolveUrl(filename, {
+            asset,
+            baseUrl: url.original
+        });
+    }
+
     async loadTextures(url, callback, asset, meta) {
         // transform meta to latest shape
         if (meta.version !== 2) {
@@ -136,8 +165,11 @@ class SogParser {
         subs.forEach((sub) => {
             const files = meta[sub]?.files ?? [];
             textures[sub] = files.map((filename) => {
+                // magnopus patched
+                const resolved = this._resolveTextureUrl(filename, url, asset);
                 const texture = new Asset(filename, 'texture', {
-                    url: asset.options?.mapUrl?.(filename) ?? (new URL(filename, new URL(url.load, window.location.href).toString())).toString(),
+                    url: resolved.load,
+                    originalUrl: resolved.original,
                     filename
                 }, {
                     mipmaps: false

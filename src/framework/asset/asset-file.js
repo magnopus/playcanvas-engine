@@ -4,13 +4,15 @@
  * @ignore
  */
 class AssetFile {
-    constructor(url = '', filename = '', hash = null, size = null, opt = null, contents = null) {
+    constructor(url = '', filename = '', hash = null, size = null, opt = null, contents = null, originalUrl = null) {
         this.url = url;
         this.filename = filename;
         this.hash = hash;
         this.size = size;
         this.opt = opt;
         this.contents = contents;
+        // magnopus patched
+        this.originalUrl = originalUrl;
     }
 
     // Compare this AssetFile with another. Returns true if they have the same data
@@ -21,7 +23,9 @@ class AssetFile {
             this.hash === other.hash &&
             this.size === other.size &&
             this.opt === other.opt &&
-            this.contents === other.contents;
+            this.contents === other.contents &&
+            // magnopus patched
+            this.originalUrl === other.originalUrl;
     }
 }
 
