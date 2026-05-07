@@ -20,7 +20,11 @@ var uSceneDepthMap: texture_2d<uff>;
         uniform camera_params: vec4f; // x: 1 / camera_far,      y: camera_far,     z: camera_near,        w: is_ortho
     #endif
 
-    fn linearizeDepth(z: f32) -> f32 {
+    fn linearizeDepth(zIn: f32) -> f32 {
+        var z: f32 = zIn;
+        if (REVERSE_Z) {
+            z = 1.0 - z;
+        }
         if (uniform.camera_params.w == 0.0) { // Perspective
             return (uniform.camera_params.z * uniform.camera_params.y) / (uniform.camera_params.y + z * (uniform.camera_params.z - uniform.camera_params.y));
         } else {
@@ -30,11 +34,16 @@ var uSceneDepthMap: texture_2d<uff>;
 #endif
 
 fn delinearizeDepth(linearDepth: f32) -> f32 {
+    var z: f32;
     if (uniform.camera_params.w == 0.0) {
-        return (uniform.camera_params.y * (uniform.camera_params.z - linearDepth)) / (linearDepth * (uniform.camera_params.z - uniform.camera_params.y));
+        z = (uniform.camera_params.y * (uniform.camera_params.z - linearDepth)) / (linearDepth * (uniform.camera_params.z - uniform.camera_params.y));
     } else {
-        return (linearDepth - uniform.camera_params.z) / (uniform.camera_params.y - uniform.camera_params.z);
+        z = (linearDepth - uniform.camera_params.z) / (uniform.camera_params.y - uniform.camera_params.z);
     }
+    if (REVERSE_Z) {
+        z = 1.0 - z;
+    }
+    return z;
 }
 
 // Retrieves rendered linear camera depth by UV

@@ -26,7 +26,10 @@ fn normalOffsetPointShadow(shadowParams: vec4f, lightPos: vec3f, lightDir: vec3f
         let shadowTextureResolution: f32 = shadowParams.x;
         let uv: vec2f = getCubemapAtlasCoordinates(omniAtlasViewport, shadowEdgePixels, shadowTextureResolution, lightDir);
 
-        let shadowZ: f32 = length(lightDir) * shadowParams.w + shadowParams.z;
+        var shadowZ: f32 = length(lightDir) * shadowParams.w + shadowParams.z;
+        if (REVERSE_Z) {
+            shadowZ = 1.0 - shadowZ;
+        }
         return textureSampleCompareLevel(shadowMap, shadowMapSampler, uv, shadowZ);
     }
 
@@ -39,7 +42,10 @@ fn normalOffsetPointShadow(shadowParams: vec4f, lightPos: vec3f, lightDir: vec3f
         let shadowTextureResolution: f32 = shadowParams.x;
         let uv: vec2f = getCubemapAtlasCoordinates(omniAtlasViewport, shadowEdgePixels, shadowTextureResolution, lightDir);
 
-        let shadowZ: f32 = length(lightDir) * shadowParams.w + shadowParams.z;
+        var shadowZ: f32 = length(lightDir) * shadowParams.w + shadowParams.z;
+        if (REVERSE_Z) {
+            shadowZ = 1.0 - shadowZ;
+        }
         let shadowCoord: vec3f = vec3f(uv, shadowZ);
         return getShadowPCF3x3(shadowMap, shadowMapSampler, shadowCoord, shadowParams);
     }
@@ -53,7 +59,10 @@ fn normalOffsetPointShadow(shadowParams: vec4f, lightPos: vec3f, lightDir: vec3f
         let shadowTextureResolution: f32 = shadowParams.x;
         let uv: vec2f = getCubemapAtlasCoordinates(omniAtlasViewport, shadowEdgePixels, shadowTextureResolution, lightDir);
 
-        let shadowZ: f32 = length(lightDir) * shadowParams.w + shadowParams.z;
+        var shadowZ: f32 = length(lightDir) * shadowParams.w + shadowParams.z;
+        if (REVERSE_Z) {
+            shadowZ = 1.0 - shadowZ;
+        }
         let shadowCoord: vec3f = vec3f(uv, shadowZ);
         return getShadowPCF5x5(shadowMap, shadowMapSampler, shadowCoord, shadowParams);
     }

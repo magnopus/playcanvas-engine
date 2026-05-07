@@ -15,7 +15,7 @@ var<private> dBlendModeFogFactor : f32 = 1.0;
 
 fn getFogFactor() -> f32 {
 
-    let depth = pcPosition.z / pcPosition.w;
+    let depth = select(pcPosition.z / pcPosition.w, (1.0 - pcPosition.z) / pcPosition.w, REVERSE_Z);
 
     var fogFactor : f32 = 0.0;
 

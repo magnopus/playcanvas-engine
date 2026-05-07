@@ -49,7 +49,10 @@ fn PCSSFindBlocker(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, avgBlo
     for( var i: i32 = 0; i < shadowBlockerSamples; i = i + 1 ) {
         let diskUV: vec2f = generateDiskSample(&diskData);
         let sampleUV: vec2f = shadowCoords + diskUV * searchWidth;
-        let shadowMapDepth: f32 = textureSampleLevel(shadowMap, shadowMapSampler, sampleUV, 0.0).r;
+        var shadowMapDepth: f32 = textureSampleLevel(shadowMap, shadowMapSampler, sampleUV, 0.0).r;
+        if (REVERSE_Z) {
+            shadowMapDepth = 1.0 - shadowMapDepth;
+        }
         if ( shadowMapDepth < z ) {
             blockerSum = blockerSum + shadowMapDepth;
             numBlockers_local = numBlockers_local + 1;
@@ -67,7 +70,10 @@ fn PCSSFilter(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, uv: vec2f, 
     var sum: f32 = 0.0;
     for (var i: i32 = 0; i < shadowSamples; i = i + 1) {
         let offsetUV: vec2f = generateDiskSample(&diskData) * filterRadius;
-        let depth: f32 = textureSampleLevel(shadowMap, shadowMapSampler, uv + offsetUV, 0.0).r;
+        var depth: f32 = textureSampleLevel(shadowMap, shadowMapSampler, uv + offsetUV, 0.0).r;
+        if (REVERSE_Z) {
+            depth = 1.0 - depth;
+        }
         sum = sum + step(receiverDepth, depth);
     }
     return sum / f32(shadowSamples);
@@ -81,7 +87,11 @@ fn getPenumbra(dblocker: f32, dreceiver: f32, penumbraSize: f32, penumbraFalloff
 
 fn PCSSDirectional(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, shadowCoords: vec3f, cameraParams: vec4f, softShadowParams: vec4f) -> f32 {
 
-    let receiverDepth: f32 = shadowCoords.z;
+    // flip receiver to forward-z so the rest of the function operates in a single convention
+    var receiverDepth: f32 = shadowCoords.z;
+    if (REVERSE_Z) {
+        receiverDepth = 1.0 - receiverDepth;
+    }
     let randomSeed: f32 = fractSinRand(pcPosition.xy);
     let shadowSamples: i32 = i32(softShadowParams.x);
     let shadowBlockerSamples: i32 = i32(softShadowParams.y);
@@ -107,8 +117,9 @@ fn PCSSDirectional(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, shadow
             return 1.0;
         }
 
-        // penumbra size is based on the blocker depth
-        penumbra = getPenumbra(avgBlockerDepth, shadowCoords.z, penumbraSize, penumbraFalloff);
+        // penumbra size is based on the blocker depth (use receiverDepth — already in
+        // forward-z convention to match avgBlockerDepth from the blocker search)
+        penumbra = getPenumbra(avgBlockerDepth, receiverDepth, penumbraSize, penumbraFalloff);
 
     } else {
 

@@ -18,7 +18,13 @@ vec4 encodePickOutput(uint id) {
     #include "floatAsUintPS"
 
     vec4 getPickDepth() {
-        return float2uint(gl_FragCoord.z);
+        // emit forward-z depth (0=near, 1=far) regardless of hardware convention so that
+        // the picker decoder can always treat the encoded value as standard NDC depth
+        #ifdef REVERSE_Z
+            return float2uint(1.0 - gl_FragCoord.z);
+        #else
+            return float2uint(gl_FragCoord.z);
+        #endif
     }
 #endif
 `;
