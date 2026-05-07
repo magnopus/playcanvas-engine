@@ -32,33 +32,27 @@ app.on('destroy', () => window.removeEventListener('resize', resize));
 
 app.start();
 
-// overlay banner: explains current mode and what to compare against
+// overlay banner: bottom of canvas, shows current mode + comparison hint
 const banner = document.createElement('div');
 banner.style.cssText = [
     'position: absolute',
-    'top: 16px',
+    'bottom: 16px',
     'left: 16px',
     'right: 16px',
-    'padding: 12px 16px',
+    'padding: 8px 12px',
     'font-family: monospace',
     'font-size: 13px',
-    'line-height: 1.5',
     'color: #fff',
     'background: rgba(0, 0, 0, 0.6)',
     'border-radius: 4px',
     'pointer-events: none',
+    'text-align: center',
     'z-index: 10'
 ].join(';');
-const onLabel = '<span style="color: #6f6;">REVERSE-Z ON</span>';
-const offLabel = '<span style="color: #f66;">REVERSE-Z OFF</span>';
 if (device.isReverseZ) {
-    banner.innerHTML =
-        `${onLabel} (WebGPU). All five red/blue pairs sort correctly across 5 orders of magnitude (10m → 100km).<br>` +
-        'Switch the device dropdown to <b>WebGL2</b> to see the same scene without reverse-z — distant pairs lose precision and z-fight.';
+    banner.innerHTML = '<span style="color:#6f6;">REVERSE-Z ON</span> (WebGPU) — switch device to WebGL2 to see z-fighting at distance.';
 } else {
-    banner.innerHTML =
-        `${offLabel} (${device.isWebGPU ? 'WebGPU forward-z' : 'WebGL2 — no reverse-z support'}). Distant red/blue pairs z-fight (red flickers / disappears behind blue) because forward-z runs out of float precision near the far plane.<br>` +
-        'Switch the device dropdown to <b>WebGPU</b> to see the same scene with reverse-z enabled — all pairs sort cleanly.';
+    banner.innerHTML = '<span style="color:#f66;">REVERSE-Z OFF</span> (WebGL2) — switch device to WebGPU to see clean sorting at distance.';
 }
 canvas.parentElement?.appendChild(banner);
 app.on('destroy', () => banner.remove());
