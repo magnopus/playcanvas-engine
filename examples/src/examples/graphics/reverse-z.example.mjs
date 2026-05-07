@@ -6,7 +6,9 @@ const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('applic
 window.focus();
 
 const gfxOptions = {
-    deviceTypes: [deviceType]
+    deviceTypes: [deviceType],
+    // opt in to reverse-z when running on WebGPU; ignored on WebGL2
+    reverseZ: true
 };
 
 const device = await pc.createGraphicsDevice(canvas, gfxOptions);
