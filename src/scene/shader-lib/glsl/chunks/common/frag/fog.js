@@ -15,7 +15,11 @@ float dBlendModeFogFactor = 1.0;
 
 float getFogFactor() {
 
-    float depth = gl_FragCoord.z / gl_FragCoord.w;
+    #ifdef REVERSE_Z
+        float depth = (1.0 - gl_FragCoord.z) / gl_FragCoord.w;
+    #else
+        float depth = gl_FragCoord.z / gl_FragCoord.w;
+    #endif
     float fogFactor = 0.0;
 
     #if (FOG == LINEAR)

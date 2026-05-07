@@ -71,6 +71,15 @@ const _fixProjRangeMat = new Mat4().set([
     0, 0, 0.5, 1
 ]);
 
+// Converts a projection matrix in OpenGL style (depth range of -1..1) to a reverse-z DirectX style
+// (depth range of 1..0, i.e. near maps to 1, far maps to 0).
+const _fixProjRangeMatReverseZ = new Mat4().set([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, -0.5, 0,
+    0, 0, 0.5, 1
+]);
+
 // helton sequence of 2d offsets for jittering
 const _haltonSequence = [
     new Vec2(0.5, 0.333333),
@@ -341,10 +350,11 @@ class Renderer {
                 projMatSkybox = _tempProjMat1.mul2(_flipYMat, projMatSkybox);
             }
 
-            // update depth range of projection matrices (-1..1 to 0..1)
+            // update depth range of projection matrices (-1..1 to 0..1, or 1..0 for reverse-z)
             if (this.device.isWebGPU) {
-                projMat = _tempProjMat2.mul2(_fixProjRangeMat, projMat);
-                projMatSkybox = _tempProjMat3.mul2(_fixProjRangeMat, projMatSkybox);
+                const fix = this.device.isReverseZ ? _fixProjRangeMatReverseZ : _fixProjRangeMat;
+                projMat = _tempProjMat2.mul2(fix, projMat);
+                projMatSkybox = _tempProjMat3.mul2(fix, projMatSkybox);
             }
 
             // camera jitter

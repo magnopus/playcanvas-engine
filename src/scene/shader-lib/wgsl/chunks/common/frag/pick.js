@@ -18,7 +18,12 @@ fn encodePickOutput(id: u32) -> vec4f {
     #include "floatAsUintPS"
 
     fn getPickDepth() -> vec4f {
-        return float2uint(pcPosition.z);
+        // emit forward-z depth (0=near, 1=far) regardless of hardware convention
+        #ifdef REVERSE_Z
+            return float2uint(1.0 - pcPosition.z);
+        #else
+            return float2uint(pcPosition.z);
+        #endif
     }
 #endif
 `;
