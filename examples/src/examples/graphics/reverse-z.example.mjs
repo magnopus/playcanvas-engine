@@ -1,4 +1,4 @@
-// @config DESCRIPTION Reverse-Z depth buffering (default on WebGPU). Maps the camera near plane to depth=1 and far to depth=0, dramatically improving floating-point precision over large view distances. Camera uses near=0.1 / far=1,000,000. Switch the device type to WebGL2 to see the same scene without reverse-z (distant coplanar pairs z-fight) — WebGL2 lacks reverse-z support so it acts as the "feature off" comparison.
+// @config DESCRIPTION Reverse-Z depth buffering (Only on WebGPU). Maps the camera near plane to depth=1 and far to depth=0, dramatically improving floating-point precision over large view distances. Camera uses near=0.1 / far=1,000,000. Switch the device type to WebGL2 to see the same scene without reverse-z (distant coplanar pairs z-fight) — WebGL2 lacks reverse-z support so it acts as the "feature off" comparison.
 import { deviceType } from 'examples/utils';
 import * as pc from 'playcanvas';
 
@@ -33,31 +33,6 @@ window.addEventListener('resize', resize);
 app.on('destroy', () => window.removeEventListener('resize', resize));
 
 app.start();
-
-// overlay banner: bottom of canvas, shows current mode + comparison hint
-const banner = document.createElement('div');
-banner.style.cssText = [
-    'position: absolute',
-    'bottom: 16px',
-    'left: 16px',
-    'right: 16px',
-    'padding: 8px 12px',
-    'font-family: monospace',
-    'font-size: 13px',
-    'color: #fff',
-    'background: rgba(0, 0, 0, 0.6)',
-    'border-radius: 4px',
-    'pointer-events: none',
-    'text-align: center',
-    'z-index: 10'
-].join(';');
-if (device.isReverseZ) {
-    banner.innerHTML = '<span style="color:#6f6;">REVERSE-Z ON</span> (WebGPU) — switch device to WebGL2 to see z-fighting at distance.';
-} else {
-    banner.innerHTML = '<span style="color:#f66;">REVERSE-Z OFF</span> (WebGL2) — switch device to WebGPU to see clean sorting at distance.';
-}
-canvas.parentElement?.appendChild(banner);
-app.on('destroy', () => banner.remove());
 
 // camera with extreme near/far
 const camera = new pc.Entity('camera');
