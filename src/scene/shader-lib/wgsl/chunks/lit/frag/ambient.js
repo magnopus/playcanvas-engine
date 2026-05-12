@@ -3,6 +3,10 @@ export default /* wgsl */`
 #if LIT_AMBIENT_SOURCE == AMBIENTSH
     uniform ambientSH: array<vec3f, 9>;
 #endif
+// magnopus patched
+#if LIT_AMBIENT_SOURCE == CONSTANT
+  uniform light_globalAmbient: vec3f;
+#endif
 
 #if LIT_AMBIENT_SOURCE == ENVALATLAS
     #include "envAtlasPS"
