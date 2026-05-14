@@ -68,6 +68,17 @@ class RenderPassForward extends RenderPass {
     toneMapping;
 
     /**
+     * Per-pass exposure override. When set, the camera's `_exposure` (and any scene fallback) is
+     * replaced by this value for the duration of this pass. Used by the CameraFrame's `afterPass`
+     * to render UI / overlay layers with a fixed exposure of `1`, so they are not affected by the
+     * camera's pre-tonemap exposure.
+     *
+     * magnopus patched
+     * @type {number|undefined}
+     */
+    exposure;
+
+    /**
      * If true, do not clear the depth buffer before rendering, as it was already primed by a depth
      * pre-pass.
      *
@@ -294,6 +305,11 @@ class RenderPassForward extends RenderPass {
             if (this.gammaCorrection !== undefined) camera.gammaCorrection = this.gammaCorrection;
             if (this.toneMapping !== undefined) camera.toneMapping = this.toneMapping;
 
+            // override per-camera exposure for the duration of this pass
+            // magnopus patched
+            const originalExposure = camera.camera._exposure;
+            if (this.exposure !== undefined) camera.camera._exposure = this.exposure;
+
             // layer pre render event
             scene.fire(EVENT_PRERENDER_LAYER, camera, layer, transparent);
 
@@ -329,6 +345,8 @@ class RenderPassForward extends RenderPass {
             // restore gamma correction and tone mapping settings
             if (this.gammaCorrection !== undefined) camera.gammaCorrection = originalGammaCorrection;
             if (this.toneMapping !== undefined) camera.toneMapping = originalToneMapping;
+            // magnopus patched
+            if (this.exposure !== undefined) camera.camera._exposure = originalExposure;
         }
 
         DebugGraphics.popGpuMarker(this.device);
