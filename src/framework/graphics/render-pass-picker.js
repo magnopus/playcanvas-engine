@@ -10,6 +10,7 @@ import { SHADER_PICK, SHADER_DEPTH_PICK } from '../../scene/constants.js';
  * @import { Layer } from '../../scene/layer.js'
  * @import { MeshInstance } from '../../scene/mesh-instance.js'
  * @import { GSplatComponent } from '../components/gsplat/component.js'
+ * @import { Vec4 } from '../../core/math/vec4.js'
  */
 
 const tempMeshInstances = [];
@@ -43,6 +44,15 @@ class RenderPassPicker extends RenderPass {
     /** @type {boolean} */
     depth;
 
+    /** @type {Vec4|null} Optional scissor rect in render-target pixel coords, bottom-left origin. */
+    scissorRect = null;
+
+    /** @type {number[]} */
+    _qualifiedLayerIndices = [];
+
+    /** @type {Map<number, MeshInstance|null>} */
+    _pickMeshInstances = new Map();
+
     constructor(device, renderer) {
         super(device);
         this.renderer = renderer;
@@ -62,112 +72,150 @@ class RenderPassPicker extends RenderPass {
      * @param {Layer[]} layers - The layers to pick from.
      * @param {Map<number, MeshInstance | GSplatComponent>} mapping - Map to store ID to object mappings.
      * @param {boolean} depth - Whether to render depth information.
+     * @param {Vec4|null} [scissorRect] - Optional scissor rect in render-target pixel coords,
+     * bottom-left origin (x, y, w, h). If set, only fragments inside the rect are rasterized;
+     * outside the rect the cleared "no selection" value (white) remains.
      */
-    update(camera, scene, layers, mapping, depth) {
+    update(camera, scene, layers, mapping, depth, scissorRect = null) {
         this.camera = camera;
         this.scene = scene;
         this.layers = layers;
         this.mapping = mapping;
         this.depth = depth;
+        this.scissorRect = scissorRect;
 
         if (scene.clusteredLightingEnabled) {
             this.emptyWorldClusters = this.renderer.worldClustersAllocator.empty;
         }
     }
 
-    execute() {
-        const device = this.device;
+    // Filter qualifying layers and prepare gsplat pick mesh instances for the compute-based
+    // renderer. The execute() loop iterates the pre-built list instead of re-filtering.
+    before() {
+        this._qualifiedLayerIndices.length = 0;
+        this._pickMeshInstances.clear();
 
-        const { renderer, camera, scene, layers, mapping, renderTarget } = this;
+        const { camera, scene, layers } = this;
         const srcLayers = scene.layers.layerList;
         const subLayerEnabled = scene.layers.subLayerEnabled;
-        const isTransparent = scene.layers.subLayerList;
+
+        const gsplatDirector = this.renderer.gsplatDirector;
+        const pickerWidth = this.renderTarget?.width ?? 1;
+        const pickerHeight = this.renderTarget?.height ?? 1;
 
         for (let i = 0; i < srcLayers.length; i++) {
             const srcLayer = srcLayers[i];
+            if (layers && layers.indexOf(srcLayer) < 0) continue;
+            if (!srcLayer.enabled || !subLayerEnabled[i]) continue;
+            if (!srcLayer.camerasSet.has(camera.camera)) continue;
 
-            // skip the layer if it does not match the provided ones
-            if (layers && layers.indexOf(srcLayer) < 0) {
-                continue;
-            }
+            // store the index of the layers we need to render
+            this._qualifiedLayerIndices.push(i);
 
-            if (srcLayer.enabled && subLayerEnabled[i]) {
-
-                // if the layer is rendered by the camera
-                if (srcLayer.camerasSet.has(camera.camera)) {
-
-                    const transparent = isTransparent[i];
-                    DebugGraphics.pushGpuMarker(device, `${srcLayer.name}(${transparent ? 'TRANSP' : 'OPAQUE'})`);
-
-                    // if the layer clears the depth
-                    if (srcLayer._clearDepthBuffer) {
-                        renderer.clear(camera.camera, false, true, false);
-                    }
-
-                    // Use mesh instances from the layer. Ideally we'd just pick culled instances for the camera,
-                    // but we have no way of knowing if culling has been performed since changes to the layer.
-                    // Disadvantage here is that we render all mesh instances, even those not visible by the camera.
-                    const meshInstances = srcLayer.meshInstances;
-
-                    // only need mesh instances with a pick flag
-                    for (let j = 0; j < meshInstances.length; j++) {
-                        const meshInstance = meshInstances[j];
-                        if (meshInstance.pick && meshInstance.transparent === transparent) {
-                            tempMeshInstances.push(meshInstance);
-
-                            // keep the index -> meshInstance index mapping
-                            mapping.set(meshInstance.id, meshInstance);
-                        }
-                    }
-
-                    // Process gsplat placements when ID is enabled
-                    // The gsplat unified mesh instance is already handled above (added to layer.meshInstances)
-                    // Here we just need to add the placement ID -> component mapping
-                    if (scene.gsplat.enableIds) {
-                        const placements = srcLayer.gsplatPlacements;
-                        for (let j = 0; j < placements.length; j++) {
-                            const placement = placements[j];
-                            const component = placement.node?.gsplat;
-                            if (component) {
-                                mapping.set(placement.id, component);
-                            }
-                        }
-                    }
-
-                    if (tempMeshInstances.length > 0) {
-
-                        // upload clustered lights uniforms
-                        const clusteredLightingEnabled = scene.clusteredLightingEnabled;
-                        if (clusteredLightingEnabled) {
-                            const lightClusters = this.emptyWorldClusters;
-                            lightClusters.activate();
-                        }
-
-                        renderer.setCameraUniforms(camera.camera, renderTarget);
-
-                        // TODO: These uniforms are not required by the picker pass, but it uses the
-                        // forward view format which includes them. Ideally, each pass should be able
-                        // to specify its own view format to avoid setting unnecessary uniforms.
-                        renderer.dispatchGlobalLights(scene);
-                        device.scope.resolve('shadowAtlasParams').setValue(defaultShadowAtlasParams);
-
-                        if (device.supportsUniformBuffers) {
-                            // Initialize view bind group format if not already done
-                            renderer.initViewBindGroupFormat(clusteredLightingEnabled);
-                            renderer.setupViewUniformBuffers(this.viewBindGroups, renderer.viewUniformFormat, renderer.viewBindGroupFormat, null);
-                        }
-
-                        const shaderPass = this.depth ? SHADER_DEPTH_PICK : SHADER_PICK;
-                        renderer.renderForward(camera.camera, renderTarget, tempMeshInstances, lights, shaderPass, (meshInstance) => {
-                            device.setBlendState(this.blendState);
-                        });
-
-                        tempMeshInstances.length = 0;
-                    }
-
-                    DebugGraphics.popGpuMarker(device);
+            // kick off a compute tiled renderer for the gsplat manager on this layer, and store the mesh instance
+            // which copies the results to the pick buffer
+            if (gsplatDirector) {
+                const pickMI = gsplatDirector.prepareForPicking(camera.camera, pickerWidth, pickerHeight, srcLayer);
+                if (pickMI) {
+                    this._pickMeshInstances.set(i, pickMI);
                 }
             }
+        }
+    }
+
+    execute() {
+        const device = this.device;
+
+        const { renderer, camera, scene, mapping, renderTarget, scissorRect } = this;
+        const srcLayers = scene.layers.layerList;
+        const isTransparent = scene.layers.subLayerList;
+
+        // narrow rasterization to a sub-rect of the pick buffer.
+        // pass start has already cleared the full RT to white = "no selection",
+        // so fragments outside the scissor stay cleared.
+        // no need to restore — every render pass start resets viewport + scissor to full RT size.
+        if (scissorRect) {
+            device.setScissor(scissorRect.x, scissorRect.y, scissorRect.z, scissorRect.w);
+        }
+
+        for (const i of this._qualifiedLayerIndices) {
+            const srcLayer = srcLayers[i];
+            const transparent = isTransparent[i];
+            DebugGraphics.pushGpuMarker(device, `${srcLayer.name}(${transparent ? 'TRANSP' : 'OPAQUE'})`);
+
+            // if the layer clears the depth
+            if (srcLayer._clearDepthBuffer) {
+                renderer.clear(camera.camera, false, true, false);
+            }
+
+            // Use mesh instances from the layer. Ideally we'd just pick culled instances for the camera,
+            // but we have no way of knowing if culling has been performed since changes to the layer.
+            // Disadvantage here is that we render all mesh instances, even those not visible by the camera.
+            const meshInstances = srcLayer.meshInstances;
+
+            // only need mesh instances with a pick flag
+            for (let j = 0; j < meshInstances.length; j++) {
+                const meshInstance = meshInstances[j];
+                if (meshInstance.pick && meshInstance.transparent === transparent) {
+                    tempMeshInstances.push(meshInstance);
+
+                    // keep the index -> meshInstance index mapping
+                    mapping.set(meshInstance.id, meshInstance);
+                }
+            }
+
+            // Inject gsplat pick mesh instance for this layer (compute-based renderer only)
+            const pickMI = this._pickMeshInstances.get(i);
+            if (pickMI) {
+                tempMeshInstances.push(pickMI);
+            }
+
+            // Process gsplat placements when ID is enabled
+            // The gsplat unified mesh instance is already handled above (added to layer.meshInstances)
+            // Here we just need to add the placement ID -> component mapping
+            if (scene.gsplat.enableIds) {
+                const placements = srcLayer.gsplatPlacements;
+                for (let j = 0; j < placements.length; j++) {
+                    const placement = placements[j];
+                    const component = placement.node?.gsplat;
+                    if (component) {
+                        mapping.set(placement.id, component);
+                    }
+                }
+            }
+
+            if (tempMeshInstances.length > 0) {
+
+                // upload clustered lights uniforms
+                const clusteredLightingEnabled = scene.clusteredLightingEnabled;
+                if (clusteredLightingEnabled) {
+                    const lightClusters = this.emptyWorldClusters;
+                    lightClusters.activate();
+                }
+
+                renderer.setCameraUniforms(camera.camera, renderTarget);
+
+                // TODO: These uniforms are not required by the picker pass, but it uses the
+                // forward view format which includes them. Ideally, each pass should be able
+                // to specify its own view format to avoid setting unnecessary uniforms.
+                renderer.dispatchGlobalLights(scene);
+                device.scope.resolve('shadowAtlasParams').setValue(defaultShadowAtlasParams);
+
+                if (device.supportsUniformBuffers) {
+                    // Initialize view bind group format if not already done
+                    renderer.initViewBindGroupFormat(clusteredLightingEnabled);
+                    renderer.setupViewUniformBuffers(this.viewBindGroups, renderer.viewUniformFormat, renderer.viewBindGroupFormat, null);
+                }
+
+                const shaderPass = this.depth ? SHADER_DEPTH_PICK : SHADER_PICK;
+                renderer.renderForward(camera.camera, renderTarget, tempMeshInstances, lights, shaderPass, (meshInstance) => {
+                    device.setBlendState(this.blendState);
+                });
+
+                tempMeshInstances.length = 0;
+            }
+
+            DebugGraphics.popGpuMarker(device);
         }
     }
 }

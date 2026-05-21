@@ -1,4 +1,5 @@
 // @config DESCRIPTION This example shows how to use the Picker to pick GSplat objects in the scene.
+import { data } from 'examples/observer';
 import { deviceType, rootPath } from 'examples/utils';
 import * as pc from 'playcanvas';
 
@@ -82,8 +83,19 @@ assetListLoader.load(() => {
         });
     }
 
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
+
     // Enable gsplat ID for unified picking
     app.scene.gsplat.enableIds = true;
+    app.scene.gsplat.alphaClip = 0.2;
+    app.scene.gsplat.minPixelSize = 1;
 
     // Create an Entity with a camera component
     const camera = new pc.Entity();
@@ -92,6 +104,11 @@ assetListLoader.load(() => {
         toneMapping: pc.TONEMAP_ACES
     });
     camera.setLocalPosition(-2, -0.5, 2);
+
+    data.on('orthoCamera:set', (/** @type {boolean} */ value) => {
+        camera.camera.projection = value ? pc.PROJECTION_ORTHOGRAPHIC : pc.PROJECTION_PERSPECTIVE;
+        camera.camera.orthoHeight = 6;
+    });
 
     // add orbit camera script with a mouse and a touch support
     camera.addComponent('script');
@@ -165,15 +182,20 @@ assetListLoader.load(() => {
         const pickerScale = 0.25;
         picker.resize(canvas.clientWidth * pickerScale, canvas.clientHeight * pickerScale);
 
-        // render the ID texture
+        // render the ID texture — scissor to a single pixel around the click so only that
+        // fragment is rasterized into the pick buffer
         const worldLayer = app.scene.layers.getLayerByName('World');
-        picker.prepare(camera.camera, app.scene, [worldLayer]);
+        const px = x * pickerScale;
+        const py = y * pickerScale;
+        picker.prepare(camera.camera, app.scene, [worldLayer], {
+            x: px, y: py, width: 1, height: 1
+        });
 
         // get the world position at the clicked point
-        picker.getWorldPointAsync(x * pickerScale, y * pickerScale).then((worldPoint) => {
+        picker.getWorldPointAsync(px, py).then((worldPoint) => {
             if (worldPoint) {
                 // get the meshInstance of the picked object
-                picker.getSelectionAsync(x * pickerScale, y * pickerScale, 1, 1).then((meshInstances) => {
+                picker.getSelectionAsync(px, py, 1, 1).then((meshInstances) => {
 
                     if (meshInstances.length > 0) {
                         // Unified mode: picker returns the GSplatComponent directly
@@ -199,6 +221,7 @@ assetListLoader.load(() => {
                                 material: markerMaterial
                             });
                             markerSphere.setLocalScale(0.3, 0.3, 0.3);
+                            markerSphere.render.meshInstances[0].pick = false;
 
                             // parent it to the picked entity and convert world position to its local space
                             entity.entity.addChild(markerSphere);
