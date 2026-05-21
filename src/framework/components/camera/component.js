@@ -348,6 +348,26 @@ class CameraComponent extends Component {
     }
 
     /**
+     * Sets a per-camera exposure override. When non-null, this value is used as the exposure
+     * multiplier for this camera's render pass, overriding both `scene.exposure` and the
+     * physical-units derived exposure. Set to `null` to fall back to the scene-global value.
+     * magnopus patched
+     * @type {number|null}
+     */
+    set exposure(value) {
+        this._camera.exposure = value;
+    }
+
+    /**
+     * Gets the per-camera exposure override, or `null` when using the scene-global value.
+     * magnopus patched
+     * @type {number|null}
+     */
+    get exposure() {
+        return this._camera.exposure;
+    }
+
+    /**
      * Sets the aspect ratio (width divided by height) of the camera. If {@link aspectRatioMode} is
      * {@link ASPECT_AUTO}, then this value will be automatically calculated every frame, and you
      * can only read it. If it's {@link ASPECT_MANUAL}, you can set the value.
@@ -1353,6 +1373,8 @@ class CameraComponent extends Component {
      */
     copy(source) {
         this.aperture = source.aperture;
+        // magnopus patched
+        this.exposure = source.exposure;
         this.aspectRatio = source.aspectRatio;
         this.aspectRatioMode = source.aspectRatioMode;
         this.calculateProjection = source.calculateProjection;

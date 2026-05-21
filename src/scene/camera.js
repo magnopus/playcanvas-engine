@@ -109,6 +109,12 @@ class Camera {
         this._aperture = 16.0;
         this._shutter = 1.0 / 1000.0;
         this._sensitivity = 1000;
+        // Per-camera exposure multiplier override. When null, the renderer
+        // falls back to scene.exposure (or camera.getExposure() under
+        // physicalUnits). When set, this value is used directly for this
+        // camera's render pass, fully scoped pre-tonemap.
+        // magnopus patched
+        this._exposure = null;
 
         this._projMat = new Mat4();
         this._projMatDirty = true;
@@ -436,6 +442,23 @@ class Camera {
         return this._shutter;
     }
 
+    /**
+     * Per-camera exposure override. When null (default), the renderer uses
+     * scene.exposure (or the physical-units computed exposure). When set to a
+     * number, that value is used as the exposure multiplier for this camera's
+     * render pass — fully scoped pre-tonemap, so lighting, bloom thresholding
+     * and tonemap rolloff all see this value rather than the scene-global one.
+     *
+     * @type {number|null}
+     */
+    set exposure(value) {
+        this._exposure = value;
+    }
+
+    get exposure() {
+        return this._exposure;
+    }
+
     set xr(newValue) {
         if (this._xr !== newValue) {
             this._xr = newValue;
@@ -500,6 +523,8 @@ class Camera {
         this.aperture = other.aperture;
         this.shutter = other.shutter;
         this.sensitivity = other.sensitivity;
+        // magnopus patched
+        this.exposure = other.exposure;
 
         this.shaderPassInfo = other.shaderPassInfo;
         this.jitter = other.jitter;

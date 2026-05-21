@@ -520,6 +520,12 @@ class FramePassCameraFrame extends FramePass {
         this.afterPass = new RenderPassForward(this.device, composition, scene, renderer);
         this.afterPass.init(targetRenderTarget);
 
+        // UI / overlay layers rendered in this pass must not pick up the camera's
+        // pre-tonemap exposure — they sit past `lastSceneLayerId` and should
+        // appear at their authored brightness regardless of scene exposure.
+        // magnopus patched
+        this.afterPass.exposure = 1;
+
         // add all remaining layers the camera renders
         this.afterPass.addLayers(composition, cameraComponent, scenePassesInfo.lastAddedIndex, scenePassesInfo.clearRenderTarget);
     }
