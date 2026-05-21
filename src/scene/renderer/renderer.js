@@ -445,7 +445,14 @@ class Renderer {
         this.viewportSizeId.setValue(this.viewportSize);
 
         // exposure
-        this.exposureId.setValue(this.scene.physicalUnits ? camera.getExposure() : this.scene.exposure);
+        // Per-camera override takes precedence so secondary cameras
+        // (render-to-texture monitors, mirror cameras, etc.) can have their
+        // own exposure independent of the scene-global value.
+        // magnopus patched
+        const exposure = camera._exposure !== null ?
+            camera._exposure :
+            (this.scene.physicalUnits ? camera.getExposure() : this.scene.exposure);
+        this.exposureId.setValue(exposure);
 
         return viewList;
     }
