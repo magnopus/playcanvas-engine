@@ -1687,7 +1687,8 @@ const createMeshes = (device, gltf, bufferViews, options) => {
         }
         const mesh = process(device, gltfMesh, gltf.accessors, bufferViews, vertexBufferDict, meshVariants, meshDefaultMaterials, options, promises);
         if (postprocess) {
-            postprocess(gltfMesh, mesh, index);
+            // magnopus patched - pass gltf mesh index as a unique id
+            postprocess(gltfMesh, mesh, index, gltf, bufferViews);
         }
         return mesh;
     }) : [];
