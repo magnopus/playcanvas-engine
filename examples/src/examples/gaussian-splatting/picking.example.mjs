@@ -1,7 +1,10 @@
-// @config DESCRIPTION This example shows how to use the Picker to pick GSplat objects in the scene.
-import { data } from 'examples/observer';
-import { deviceType, rootPath } from 'examples/utils';
+// @config
+//
+// This example shows how to use the Picker to pick GSplat objects in the scene.
+
 import * as pc from 'playcanvas';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -44,12 +47,12 @@ app.on('destroy', () => {
 });
 
 const assets = {
-    logo: new pc.Asset('gsplat', 'gsplat', { url: `${rootPath}/static/assets/splats/playcanvas-logo/meta.json` }),
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` }),
+    logo: new pc.Asset('gsplat', 'gsplat', { url: './assets/splats/playcanvas-logo/meta.json' }),
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' }),
     helipad: new pc.Asset(
         'helipad-env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/morning-env-atlas.png` },
+        { url: './assets/cubemaps/morning-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
@@ -71,8 +74,7 @@ assetListLoader.load(() => {
         const splat = new pc.Entity(`splat-${i}`);
         splat.addComponent('gsplat', {
             asset: assets.logo,
-            castShadows: false,
-            unified: true
+            castShadows: false
         });
 
         app.root.addChild(splat);
@@ -92,7 +94,7 @@ assetListLoader.load(() => {
     });
     data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
 
-    // Enable gsplat ID for unified picking
+    // Enable gsplat ID for picking
     app.scene.gsplat.enableIds = true;
     app.scene.gsplat.alphaClip = 0.2;
     app.scene.gsplat.minPixelSize = 1;
@@ -243,5 +245,3 @@ assetListLoader.load(() => {
         handlePointer(touch.x, touch.y);
     });
 });
-
-export { app };

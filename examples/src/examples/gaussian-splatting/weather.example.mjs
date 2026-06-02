@@ -1,11 +1,20 @@
-// @config NO_MINISTATS
-// @config DESCRIPTION Procedural infinite weather particles rendered as Gaussian splats over a LOD-streamed scene. Particles follow the camera using a deterministic 3D grid with hash-based positioning and animation.
-import { data } from 'examples/observer';
-import { deviceType, rootPath, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// Procedural infinite weather particles rendered as Gaussian splats over a LOD-streamed scene.
+// Particles follow the camera using a deterministic 3D grid with hash-based positioning and animation.
+//
+// @flag NO_MINISTATS
+//
+// @credit
+// title: Roman Parish
+// author: Andrii Shramko
+// source: https://www.linkedin.com/in/andrii-shramko/
 
-const { CameraControls } = await fileImport(`${rootPath}/static/scripts/esm/camera-controls.mjs`);
-const { GsplatWeather } = await fileImport(`${rootPath}/static/scripts/esm/gsplat/gsplat-weather.mjs`);
+import * as pc from 'playcanvas';
+import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
+import { GsplatWeather } from 'playcanvas/scripts/esm/gsplat/gsplat-weather.mjs';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -86,8 +95,7 @@ assetListLoader.load(() => {
     // Load the gsplat scene
     const gsplatEntity = new pc.Entity('Roman-Parish');
     gsplatEntity.addComponent('gsplat', {
-        asset: assets.scene,
-        unified: true
+        asset: assets.scene
     });
     gsplatEntity.setLocalEulerAngles(270, 0, 0);
     app.root.addChild(gsplatEntity);
@@ -263,5 +271,3 @@ assetListLoader.load(() => {
     data.on('extents.2:set', rebuild);
     data.on('density:set', rebuild);
 });
-
-export { app };

@@ -268,7 +268,9 @@ class ResourceLoader {
     }
 
     _onFailure(key, err) {
-        console.error(err);
+        // include a string-form message so external error reporters (which often JSON.stringify the
+        // arguments) get useful context, while keeping the original Error available for dev tools
+        console.error(`Failed to load resource [${key}]: ${err?.message ?? err}`, err);
         if (this._requests[key]) {
             for (let i = 0; i < this._requests[key].length; i++) {
                 this._requests[key][i](err);
@@ -342,14 +344,14 @@ class ResourceLoader {
     }
 
     /**
-     * Enables retrying of failed requests when loading assets.
+     * Enables retrying of failed requests when loading assets. Retries use exponential backoff and
+     * are also enabled by default for new applications.
      *
-     * @param {number} maxRetries - The maximum number of times to retry loading an asset. Defaults
-     * to 5.
-     * @ignore
+     * @param {number} [maxRetries] - The maximum number of times to retry loading an asset.
+     * Defaults to 5.
      */
     enableRetry(maxRetries = 5) {
-        maxRetries = Math.max(0, maxRetries) || 0;
+        maxRetries = Math.max(0, Math.floor(maxRetries)) || 0;
 
         for (const key in this._handlers) {
             this._handlers[key].maxRetries = maxRetries;
@@ -358,8 +360,6 @@ class ResourceLoader {
 
     /**
      * Disables retrying of failed requests when loading assets.
-     *
-     * @ignore
      */
     disableRetry() {
         for (const key in this._handlers) {

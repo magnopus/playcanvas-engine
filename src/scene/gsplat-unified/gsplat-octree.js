@@ -22,6 +22,15 @@ class GSplatOctree {
     nodes;
 
     /**
+     * Packed per-node axis-aligned bounds in octree local space for CPU hot paths (e.g. LOD).
+     * Length is {@link GSplatOctree.nodes}.length * 6. For node index `i`, base `b = i * 6`:
+     * `[minX, minY, minZ, maxX, maxY, maxZ]` matching {@link GSplatOctreeNode.bounds}.
+     *
+     * @type {Float32Array}
+     */
+    nodeBoundsMinMax;
+
+    /**
      * @type {{ url: string, originalUrl: string, lodLevel: number }[]}
      */
     files;
@@ -77,8 +86,6 @@ class GSplatOctree {
 
     /**
      * Reference count for environment usage.
-     *
-     * @type {number}
      */
     environmentRefCount = 0;
 
@@ -91,15 +98,12 @@ class GSplatOctree {
 
     /**
      * Whether this octree has been destroyed.
-     *
-     * @type {boolean}
      */
     destroyed = false;
 
     /**
      * Number of update ticks before unloading unused file resources. Set from GSplatParams.
      *
-     * @type {number}
      * @private
      */
     cooldownTicks = 100;
@@ -184,6 +188,23 @@ class GSplatOctree {
 
             return new GSplatOctreeNode(lods, nodeData.bound);
         });
+
+        // precompute node bounds for CPU hot paths
+        const nodeCount = this.nodes.length;
+        const boundsFlat = new Float32Array(nodeCount * 6);
+        for (let i = 0; i < nodeCount; i++) {
+            const bounds = this.nodes[i].bounds;
+            const mn = bounds.getMin();
+            const mx = bounds.getMax();
+            const b = i * 6;
+            boundsFlat[b + 0] = mn.x;
+            boundsFlat[b + 1] = mn.y;
+            boundsFlat[b + 2] = mn.z;
+            boundsFlat[b + 3] = mx.x;
+            boundsFlat[b + 4] = mx.y;
+            boundsFlat[b + 5] = mx.z;
+        }
+        this.nodeBoundsMinMax = boundsFlat;
     }
 
     /**
@@ -207,6 +228,7 @@ class GSplatOctree {
 
     /**
      * Trace out per-LOD counts of currently loaded file resources.
+     *
      * @private
      */
     _traceLodCounts() {
@@ -372,6 +394,10 @@ class GSplatOctree {
         const res = this.assetLoader?.getResource(fullUrl);
         if (res) {
             this.fileResources.set(fileIndex, res);
+
+            // The octree fully re-creates these resources on device loss, so the CPU-side
+            // ImageBitmap sources retained on the textures are not needed for re-upload.
+            res.releaseTextureSources?.();
 
             // if the file finished loading and is no longer needed, schedule a cooldown
             if (this.fileRefCounts[fileIndex] === 0) {

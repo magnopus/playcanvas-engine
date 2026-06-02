@@ -1,9 +1,16 @@
-// @config DESCRIPTION Shows a large world scene with LOD streaming and additional moving splats.
-import { data } from 'examples/observer';
-import { deviceType, rootPath, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// Shows a large world scene with LOD streaming and additional moving splats.
+//
+// @credit
+// title: Skatepark
+// author: Christoph Schindelar
+// source: https://superspl.at/user?id=schindelar3d
 
-const { CameraControls } = await fileImport(`${rootPath}/static/scripts/esm/camera-controls.mjs`);
+import * as pc from 'playcanvas';
+import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -74,13 +81,13 @@ const LOD_PRESETS = {
 
 const assets = {
     skatepark: new pc.Asset('skatepark', 'gsplat', { url: config.url }),
-    logo: new pc.Asset('logo', 'gsplat', { url: `${rootPath}/static/assets/splats/playcanvas-logo/meta.json` }),
-    biker: new pc.Asset('biker', 'gsplat', { url: `${rootPath}/static/assets/splats/biker.compressed.ply` }),
+    logo: new pc.Asset('logo', 'gsplat', { url: './assets/splats/playcanvas-logo/meta.json' }),
+    biker: new pc.Asset('biker', 'gsplat', { url: './assets/splats/biker.compressed.ply' }),
 
     envatlas: new pc.Asset(
         'env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/table-mountain-env-atlas.png` },
+        { url: './assets/cubemaps/table-mountain-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
@@ -140,8 +147,7 @@ assetListLoader.load(() => {
     // Create skatepark entity
     const skatepark = new pc.Entity('Skatepark');
     skatepark.addComponent('gsplat', {
-        asset: assets.skatepark,
-        unified: true
+        asset: assets.skatepark
     });
     skatepark.setLocalPosition(0, 0, 0);
     const [rotX, rotY, rotZ] = /** @type {[number, number, number]} */ (config.eulerAngles);
@@ -170,8 +176,7 @@ assetListLoader.load(() => {
     // Create biker entity at center, ground level
     const biker = new pc.Entity('Biker');
     biker.addComponent('gsplat', {
-        asset: assets.biker,
-        unified: true
+        asset: assets.biker
     });
     biker.setLocalPosition(worldCenter.x, worldCenter.y, worldCenter.z);
     biker.setLocalEulerAngles(180, 0, 0);
@@ -181,8 +186,7 @@ assetListLoader.load(() => {
     // Create first orbiting logo
     const logo1 = new pc.Entity('Logo1');
     logo1.addComponent('gsplat', {
-        asset: assets.logo,
-        unified: true
+        asset: assets.logo
     });
     logo1.setLocalEulerAngles(180, 90, 0);
     app.root.addChild(logo1);
@@ -190,8 +194,7 @@ assetListLoader.load(() => {
     // Create second orbiting logo
     const logo2 = new pc.Entity('Logo2');
     logo2.addComponent('gsplat', {
-        asset: assets.logo,
-        unified: true
+        asset: assets.logo
     });
     logo2.setLocalEulerAngles(180, 90, 0);
     logo2.setLocalScale(0.5, 0.5, 0.5);
@@ -274,5 +277,3 @@ assetListLoader.load(() => {
         data.set('data.stats.gsplats', app.stats.frame.gsplats.toLocaleString());
     });
 });
-
-export { app };

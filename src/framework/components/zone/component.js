@@ -5,11 +5,10 @@ import { Component } from '../component.js';
 
 const _matrix = new Mat4();
 /**
- * The ZoneComponent allows you to define an area in world space of certain size. This can be used
- * in various ways, such as affecting audio reverb when {@link AudioListenerComponent} is within
- * zone. Or create culling system with portals between zones to hide whole indoor sections for
- * performance reasons. And many other possible options. Zones are building blocks and meant to be
- * used in many different ways.
+ * The ZoneComponent enables an {@link Entity} to define a box-shaped area in world space of a
+ * certain size. Zones are a building block that can be used in various ways, such as affecting
+ * audio reverb when an {@link AudioListenerComponent} is within the zone, or creating a culling
+ * system with portals between zones to hide whole indoor sections for performance reasons.
  *
  * @property {"box"|"sphere"} shape The shape of this zone. Can be a `box` or a `sphere`.
  * @property {Vec3} halfExtents The half-extents of the box-shaped zone in the x, y and z axes. Defaults to [0.5, 0.5, 0.5].
@@ -89,6 +88,12 @@ class ZoneComponent extends Component {
      */
     static EVENT_REMOVE = 'remove';
 
+    /** @private */
+    _oldState = true;
+
+    /** @private */
+    _size = new Vec3();
+
     /**
      * Create a new ZoneComponent instance.
      *
@@ -98,6 +103,8 @@ class ZoneComponent extends Component {
      */
     constructor(system, entity) { // eslint-disable-line no-useless-constructor
         super(system, entity);
+
+        this.on('set_enabled', this._onSetEnabled, this);
     }
 
     /**

@@ -1,7 +1,11 @@
-// @config DESCRIPTION A static GSplatContainer with custom data format, rendered as multiple instances. Per-instance color tints are animated via shader uniforms using setParameter.
-import { data } from 'examples/observer';
-import { deviceType } from 'examples/utils';
+// @config
+//
+// A static GSplatContainer with custom data format, rendered as multiple instances. Per-instance color
+// tints are animated via shader uniforms using setParameter.
+
 import * as pc from 'playcanvas';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -186,8 +190,7 @@ for (let gx = 0; gx < 2; gx++) {
         for (let gz = 0; gz < 2; gz++) {
             const child = new pc.Entity(`splat_${gx}_${gy}_${gz}`);
             child.addComponent('gsplat', {
-                resource: container,
-                unified: true
+                resource: container
             });
             child.setLocalPosition(
                 (gx - 0.5) * spacing,
@@ -260,5 +263,3 @@ app.on('update', (dt) => {
     // Use update() with centersUpdated=false since centers are static (pre-filled)
     container.update(Math.floor(t * maxSplats), false);
 });
-
-export { app };

@@ -149,6 +149,8 @@ class SogParser {
     }
 
     async loadTextures(url, callback, asset, meta) {
+        const gsplatCentersEnabledAtLoad = this.app.scene?.gsplatCentersEnabled !== false;
+
         // transform meta to latest shape
         if (meta.version !== 2) {
             Debug.deprecated('Loading SOG v1 data which is deprecated. Please recompress your scene with latest tools.');
@@ -239,10 +241,6 @@ class SogParser {
         data.shBands = GSplatSogData.calcBands(data.sh_centroids?.width);
 
         const decompress = asset.data?.decompress;
-        const minimalMemory = asset.options?.minimalMemory ?? false;
-
-        // Pass minimalMemory to data
-        data.minimalMemory = minimalMemory;
 
         if (!decompress) {
             if (this._shouldAbort(asset, unloaded)) {
@@ -252,7 +250,10 @@ class SogParser {
             }
 
             // no need to prepare gpu data if decompressing
-            await data.prepareGpuData();
+            data.prepareCodebook();
+            if (gsplatCentersEnabledAtLoad) {
+                await data.prepareGpuData();
+            }
         }
 
         if (this._shouldAbort(asset, unloaded)) {
@@ -261,9 +262,10 @@ class SogParser {
             return;
         }
 
+        const prepareCenters = gsplatCentersEnabledAtLoad;
         const resource = decompress ?
-            new GSplatResource(this.app.graphicsDevice, await data.decompress()) :
-            new GSplatSogResource(this.app.graphicsDevice, data);
+            new GSplatResource(this.app.graphicsDevice, await data.decompress(), { prepareCenters }) :
+            new GSplatSogResource(this.app.graphicsDevice, data, { prepareCenters });
 
         if (this._shouldAbort(asset, unloaded)) {
             resource.destroy();
