@@ -207,6 +207,9 @@ import { CameraFrameOptions, FramePassCameraFrame } from './frame-pass-camera-fr
  * 3-8 range. Defaults to 5.
  * @property {boolean} highQuality - Whether the high quality implementation is used. This will have
  * a higher performance cost, but will produce better quality results. Defaults to true.
+ * @deprecated The DoF effect is now resolution-independent, so this flag is no longer required to
+ * keep the blur consistent across resolutions. It currently only changes the internal blur
+ * resolution (a performance vs. sampling-quality trade-off) and will be removed in a future release.
  */
 
 /**

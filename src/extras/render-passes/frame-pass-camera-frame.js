@@ -64,6 +64,10 @@ class CameraFrameOptions {
 
     dofNearBlur = false;
 
+    /**
+     * @deprecated The DoF effect is now resolution-independent; this only changes the internal blur
+     * resolution and will be removed in a future release.
+     */
     dofHighQuality = true;
 }
 
