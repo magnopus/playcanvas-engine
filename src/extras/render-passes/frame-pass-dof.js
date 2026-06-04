@@ -30,6 +30,12 @@ class FramePassDof extends FramePass {
 
     blurRingPoints = 3;
 
+    /**
+     * @type {boolean}
+     * @deprecated The DoF effect is now resolution-independent, so this flag is no longer required
+     * to keep the blur consistent across resolutions. It only changes the internal blur resolution
+     * (a performance vs. sampling-quality trade-off) and will be removed in a future release.
+     */
     highQuality = true;
 
     /** @type {Texture|null} */
@@ -53,6 +59,8 @@ class FramePassDof extends FramePass {
      * @param {Texture} sceneTexture - The full resolution texture.
      * @param {Texture} sceneTextureHalf - The half resolution texture.
      * @param {boolean} highQuality - Whether to use high quality setup.
+     * @deprecated The DoF effect is now resolution-independent; this only changes the internal blur
+     * resolution and will be removed in a future release.
      * @param {boolean} nearBlur - Whether to apply near blur.
      */
     constructor(device, cameraComponent, sceneTexture, sceneTextureHalf, highQuality, nearBlur) {
@@ -183,9 +191,10 @@ class FramePassDof extends FramePass {
         this.cocPass.focusDistance = this.focusDistance;
         this.cocPass.focusRange = this.focusRange;
 
-        // adjust blur sizes to give us the same results regardless of the quality (resolution)
+        // blur radius is expressed as a fraction of frame height in the blur shader, so the effect
+        // is now resolution- and quality-independent and needs no per-quality compensation
         this.blurPass.blurRadiusNear = this.blurRadius;
-        this.blurPass.blurRadiusFar = this.blurRadius * (this.highQuality ? 1 : 0.5);
+        this.blurPass.blurRadiusFar = this.blurRadius;
 
         this.blurPass.blurRings = this.blurRings;
         this.blurPass.blurRingPoints = this.blurRingPoints;
