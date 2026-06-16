@@ -108,8 +108,7 @@ class BatchManager {
      * @param {boolean} dynamic - Is this batch group dynamic? Will these objects move/rotate/scale
      * after being batched?
      * @param {number} maxAabbSize - Maximum size of any dimension of a bounding box around batched
-     * objects.
-     * {@link BatchManager#prepare} will split objects into local groups based on this size.
+     * objects. {@link prepare} will split objects into local groups based on this size.
      * @param {number} [id] - Optional custom unique id for the group (will be generated
      * automatically otherwise).
      * @param {number[]} [layers] - Optional layer ID array. Default is [{@link LAYERID_WORLD}].
@@ -316,10 +315,6 @@ class BatchManager {
             if (valid) {
                 arr = groupMeshInstances[node.model.batchGroupId] = arr.concat(valid);
                 node.model.removeModelFromLayers();
-
-                // #if _DEBUG
-                node.model._batchGroup = group;
-                // #endif
             }
         }
 
@@ -352,9 +347,6 @@ class BatchManager {
 
         if (valid) {
             group._ui = true;
-            // #if _DEBUG
-            node.element._batchGroup = group;
-            // #endif
         }
     }
 
@@ -387,9 +379,8 @@ class BatchManager {
                 if (node.sprite && node.sprite._meshInstance &&
                     (group.dynamic || node.sprite.sprite._renderMode === SPRITE_RENDERMODE_SIMPLE)) {
                     arr.push(node.sprite._meshInstance);
-                    node.sprite.removeModelFromLayers();
+                    node.sprite.removeFromLayers();
                     group._sprite = true;
-                    node.sprite._batchGroup = group;
                 }
             }
         }
@@ -468,6 +459,8 @@ class BatchManager {
      * - Too many instances for a single batch (hardware-dependent, expect 128 on low-end and 1024
      * on high-end).
      * - Bounding box of a batch is larger than maxAabbSize in any dimension.
+     * - Mesh instances differ in shadow casting ({@link MeshInstance#castShadow}) or directional
+     * shadow cascade mask ({@link MeshInstance#shadowCascadeMask}).
      *
      * @param {MeshInstance[]} meshInstances - Input list of mesh instances
      * @param {boolean} dynamic - Are we preparing for a dynamic batch? Instance count will matter
@@ -478,7 +471,7 @@ class BatchManager {
      * This is useful to keep a balance between the number of draw calls and the number of drawn
      * triangles, because smaller batches can be hidden when not visible in camera.
      * @returns {MeshInstance[][]} An array of arrays of mesh instances, each valid to pass to
-     * {@link BatchManager#create}.
+     * {@link create}.
      */
     prepare(meshInstances, dynamic, maxAabbSize = Number.POSITIVE_INFINITY, translucent) {
         if (meshInstances.length === 0) return [];
@@ -529,6 +522,8 @@ class BatchManager {
             const scaleSign = getScaleSign(meshInstancesLeftA[0]);
             const vertexFormatBatchingHash = meshInstancesLeftA[0].mesh.vertexBuffer.format.batchingHash;
             const indexed = meshInstancesLeftA[0].mesh.primitive[0].indexed;
+            const castShadow = meshInstancesLeftA[0].castShadow;
+            const shadowCascadeMask = meshInstancesLeftA[0].shadowCascadeMask;
             skipTranslucentAabb = null;
 
             for (let i = 1; i < meshInstancesLeftA.length; i++) {
@@ -568,6 +563,12 @@ class BatchManager {
                 }
                 // Split by negative scale
                 if (scaleSign !== getScaleSign(mi)) {
+                    skipMesh(mi);
+                    continue;
+                }
+
+                // Split by shadow casting — the batched MeshInstance exposes a single castShadow flag
+                if (castShadow !== mi.castShadow || shadowCascadeMask !== mi.shadowCascadeMask) {
                     skipMesh(mi);
                     continue;
                 }
@@ -664,7 +665,7 @@ class BatchManager {
     }
 
     /**
-     * Takes a mesh instance list that has been prepared by {@link BatchManager#prepare}, and
+     * Takes a mesh instance list that has been prepared by {@link prepare}, and
      * returns a {@link Batch} object. This method assumes that all mesh instances provided can be
      * rendered in a single draw call.
      *

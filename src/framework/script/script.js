@@ -217,11 +217,9 @@ export class Script extends EventHandler {
     }
 
     /**
-     * True if the instance of this script is in running state. False when script is not running,
-     * because the Entity or any of its parents are disabled or the {@link ScriptComponent} is
-     * disabled or the Script Instance is disabled. When disabled, no update methods will be called
-     * on each tick. `initialize` and `postInitialize` methods will run once when the script
-     * instance is in the `enabled` state during an app tick.
+     * Sets the enabled state of the script instance. When disabled, no update methods will be
+     * called on each tick. `initialize` and `postInitialize` methods will run once when the script
+     * instance is next in the `enabled` state during an app tick.
      *
      * @type {boolean}
      */
@@ -259,6 +257,13 @@ export class Script extends EventHandler {
         }
     }
 
+    /**
+     * Gets the running state of the script instance. Returns true when the script instance is
+     * enabled and its owning {@link Entity} (and all ancestors) and {@link ScriptComponent} are
+     * also enabled; otherwise false.
+     *
+     * @type {boolean}
+     */
     get enabled() {
         return this._enabled && !this._destroyed && this.entity.script.enabled && this.entity.enabled;
     }
@@ -360,14 +365,57 @@ export class Script extends EventHandler {
 const funcNameRegex = /^\s*function(?:\s|\s*\/\*.*\*\/\s*)+([^(\s\/]*)\s*/;
 
 /**
+ * Converts the first character of a string to lower case. Returns the input unchanged if it is
+ * empty or not a non-empty string (avoids throwing on e.g. an anonymous class's empty name).
+ *
+ * @param {string} str - The string to convert.
+ * @returns {string} The converted string.
+ */
+export const toLowerCamelCase = str => (str ? str[0].toLowerCase() + str.substring(1) : str);
+
+/**
+ * Returns the intrinsic (display) name of a script class - either a `scriptName` declared on the
+ * class itself, or its class name. Only an own `scriptName` is used, never one inherited from a
+ * base class: a subclass that does not declare its own `scriptName` would otherwise report its
+ * parent's name. This is primarily used for diagnostics; for the name a script is registered under
+ * use {@link getScriptRegistryName}.
+ *
  * @param {Function} constructorFn - The constructor function of the script type.
  * @returns {string|undefined} The script name.
  */
 export function getScriptName(constructorFn) {
     if (typeof constructorFn !== 'function') return undefined;
-    if (constructorFn.scriptName) return constructorFn.scriptName;
+    if (Object.prototype.hasOwnProperty.call(constructorFn, 'scriptName') && constructorFn.scriptName) {
+        return constructorFn.scriptName;
+    }
     if ('name' in Function.prototype) return constructorFn.name;
     if (constructorFn === Function || constructorFn === Function.prototype.constructor) return 'Function';
     const match = (`${constructorFn}`).match(funcNameRegex);
     return match ? match[1] : undefined;
+}
+
+/**
+ * Returns the name a script class should be registered (and looked up) under. Considers only
+ * properties declared on the class itself - never inherited from a base class - so that a subclass
+ * does not adopt (and then overwrite in the registry) the name already registered for its base
+ * class. Resolution order:
+ *
+ * 1. an own `__name` already assigned to the class (e.g. an explicit registration name);
+ * 2. an own `scriptName` declared on the class, used verbatim;
+ * 3. the class name converted to lowerCamelCase (the convention used when no name is declared,
+ *    matching the ESM asset loader and {@link ScriptComponent#create}).
+ *
+ * @param {Function} constructorFn - The constructor function of the script type.
+ * @returns {string|undefined} The resolved name, or undefined if it cannot be determined.
+ */
+export function getScriptRegistryName(constructorFn) {
+    if (typeof constructorFn !== 'function') return undefined;
+    if (Object.prototype.hasOwnProperty.call(constructorFn, '__name') && constructorFn.__name) {
+        return constructorFn.__name;
+    }
+    if (Object.prototype.hasOwnProperty.call(constructorFn, 'scriptName') && constructorFn.scriptName) {
+        return constructorFn.scriptName;
+    }
+    const name = getScriptName(constructorFn);
+    return name ? toLowerCamelCase(name) : undefined;
 }

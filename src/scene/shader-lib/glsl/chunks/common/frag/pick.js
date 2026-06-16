@@ -16,9 +16,19 @@ vec4 encodePickOutput(uint id) {
 
 #ifdef DEPTH_PICK_PASS
     #include "floatAsUintPS"
-
+    #ifndef CAMERAPLANES
+        #define CAMERAPLANES
+        uniform vec4 camera_params; // x: 1/far, y: far, z: near, w: isOrtho
+    #endif
     vec4 getPickDepth() {
-        return float2uint(gl_FragCoord.z);
+        float linearDepth;
+        if (camera_params.w > 0.5) {
+            linearDepth = gl_FragCoord.z;
+        } else {
+            float viewDist = 1.0 / gl_FragCoord.w;
+            linearDepth = (viewDist - camera_params.z) / (camera_params.y - camera_params.z);
+        }
+        return float2uint(linearDepth);
     }
 #endif
 `;

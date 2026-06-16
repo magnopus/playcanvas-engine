@@ -107,6 +107,17 @@ class WebgpuTexture {
 
         Debug.assert(texture.width > 0 && texture.height > 0, `Invalid texture dimensions ${texture.width}x${texture.height} for texture ${texture.name}`, texture);
 
+        // All compressed formats currently supported by the engine (BC, ETC2, ASTC 4x4) use 4x4
+        // pixel blocks. If ASTC formats with other block sizes (e.g. 5x4, 6x6, 8x8) are added,
+        // this needs to use per-format block dimensions instead of a hardcoded 4.
+        if (isCompressedPixelFormat(texture.format) && (texture.width % 4 !== 0 || texture.height % 4 !== 0)) {
+            Debug.error(`Compressed texture '${texture.name}' [${pixelFormatInfo.get(texture.format)?.name}] dimensions ${texture.width}x${texture.height} ` +
+                'are not a multiple of the block size 4. WebGPU requires compressed texture dimensions to be multiples of the block size. ' +
+                `Rounding up to ${math.roundUp(texture.width, 4)}x${math.roundUp(texture.height, 4)}, which may cause minor rendering artifacts.`, texture);
+            texture._width = math.roundUp(texture.width, 4);
+            texture._height = math.roundUp(texture.height, 4);
+        }
+
         this.desc = {
             size: {
                 width: texture.width,
@@ -350,7 +361,7 @@ class WebgpuTexture {
         if (this.desc && (this.desc.size.width !== texture.width || this.desc.size.height !== texture.height)) {
             Debug.warnOnce(`Texture '${texture.name}' is being recreated due to dimension change from ${this.desc.size.width}x${this.desc.size.height} to ${texture.width}x${texture.height}. Consider creating the texture with correct dimensions to avoid recreation.`);
 
-            this.gpuTexture.destroy();
+            device.deferDestroy(this.gpuTexture);
             this.create(device);
 
             // Notify bind groups that this texture has changed and needs rebinding
@@ -425,7 +436,13 @@ class WebgpuTexture {
 
                     } else { // 2d texture
 
-                        if (this.isExternalImage(mipObject)) {
+                        if (device._isHTMLElementInterface(mipObject) && device.supportsHtmlTextures) {
+
+                            // generic HTML element via the HTML-in-Canvas API
+                            this.uploadElementImage(device, mipObject, mipLevel, 0);
+                            anyUploads = true;
+
+                        } else if (this.isExternalImage(mipObject)) {
 
                             this.uploadExternalImage(device, mipObject, mipLevel, 0);
                             anyUploads = true;
@@ -456,6 +473,10 @@ class WebgpuTexture {
 
             texture._gpuSize = texture.gpuSize;
             texture.adjustVramSizeTracking(device._vram, texture._gpuSize);
+
+            if (texture.releaseSourceAfterUpload) {
+                texture.releaseImageSources();
+            }
         }
     }
 
@@ -499,6 +520,34 @@ class WebgpuTexture {
 
         Debug.trace(TRACEID_RENDER_QUEUE, `IMAGE-TO-TEX: mip:${mipLevel} index:${index} ${this.texture.name}`);
         device.wgpu.queue.copyExternalImageToTexture(src, dst, copySize);
+    }
+
+    // upload a generic HTML element via the HTML-in-Canvas API (copyElementImageToTexture)
+    uploadElementImage(device, element, mipLevel, index) {
+
+        Debug.assert(mipLevel < this.desc.mipLevelCount, `Accessing mip level ${mipLevel} of texture with ${this.desc.mipLevelCount} mip levels`, this);
+
+        const dst = {
+            texture: this.gpuTexture,
+            mipLevel: mipLevel,
+            origin: [0, 0, index],
+            aspect: 'all',  // can be: "all", "stencil-only", "depth-only"
+            premultipliedAlpha: this.texture._premultiplyAlpha
+        };
+
+        // texture dimensions at the specified mip level
+        const width = TextureUtils.calcLevelDimension(this.texture.width, mipLevel);
+        const height = TextureUtils.calcLevelDimension(this.texture.height, mipLevel);
+
+        // submit existing scheduled commands to the queue before copying to preserve the order
+        device.submit();
+
+        Debug.trace(TRACEID_RENDER_QUEUE, `ELEMENT-TO-TEX: mip:${mipLevel} index:${index} ${this.texture.name}`);
+
+        // scale the element's rendered image to the mip level's dimensions
+        const source = { source: element };
+        const destination = { destination: dst, width, height };
+        device.wgpu.queue.copyElementImageToTexture(source, destination);
     }
 
     uploadTypedArrayData(device, data, mipLevel, index) {

@@ -24,8 +24,6 @@ import { ShaderChunks } from '../../scene/shader-lib/shader-chunks.js';
 class RenderPassTAA extends RenderPassShaderQuad {
     /**
      * The index of the history texture to render to.
-     *
-     * @type {number}
      */
     historyIndex = 0;
 
@@ -59,7 +57,7 @@ class RenderPassTAA extends RenderPassShaderQuad {
         defines.set('QUALITY_HIGH', true);
 
         // add defines needed for correct use of screenDepthPS chunk
-        ShaderUtils.addScreenDepthChunkDefines(device, cameraComponent.shaderParams, defines);
+        ShaderUtils.addScreenDepthChunkDefines(cameraComponent.shaderParams, defines);
 
         this.shader = ShaderUtils.createShader(device, {
             uniqueName: 'TaaResolveShader',

@@ -1,9 +1,11 @@
-// @config DESCRIPTION This example demonstrates AABB-based cropping of gaussian splats with animated bounds.
-import { data } from 'examples/observer';
-import { deviceType, rootPath, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// This example demonstrates AABB-based cropping of gaussian splats with animated bounds.
 
-const { GsplatCropShaderEffect } = await fileImport(`${rootPath}/static/scripts/esm/gsplat/shader-effect-crop.mjs`);
+import * as pc from 'playcanvas';
+import { GsplatCropShaderEffect } from 'playcanvas/scripts/esm/gsplat/shader-effect-crop.mjs';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -47,15 +49,24 @@ app.on('destroy', () => {
 });
 
 const assets = {
-    hotel: new pc.Asset('gsplat', 'gsplat', { url: `${rootPath}/static/assets/splats/hotel-culpture.compressed.ply` }),
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` })
+    hotel: new pc.Asset('gsplat', 'gsplat', { url: './assets/splats/hotel-culpture.compressed.ply' }),
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' })
 };
 
 const assetListLoader = new pc.AssetListLoader(Object.values(assets), app.assets);
 assetListLoader.load(() => {
     app.start();
 
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
+
     // Default precise mode to true, paused to false, edge scale to 0.5
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
     data.set('precise', true);
     data.set('edgeScale', 0.5);
     let paused = false;
@@ -65,11 +76,10 @@ assetListLoader.load(() => {
         paused = !paused;
     });
 
-    // Create hotel gsplat with unified set to true
+    // Create hotel gsplat
     const hotel = new pc.Entity('hotel');
     hotel.addComponent('gsplat', {
-        asset: assets.hotel,
-        unified: true
+        asset: assets.hotel
     });
     hotel.setLocalEulerAngles(180, 0, 0);
     app.root.addChild(hotel);
@@ -222,5 +232,3 @@ assetListLoader.load(() => {
         }
     });
 });
-
-export { app };

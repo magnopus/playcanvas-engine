@@ -1,16 +1,21 @@
 // Single-thread compute shader that reads the visible splat count from the
-// prefix sum buffer and writes indirect draw arguments, indirect sort dispatch
-// arguments, numSplats for the vertex shader, and sortElementCount for sort shaders.
+// prefix sum buffer and writes indirect draw arguments, indirect dispatch
+// arguments (key gen, sort), numSplats for the vertex shader,
+// and sortElementCount for sort shaders.
 //
 // The visible count is obtained from prefixSumBuffer[totalSplats]. After the
 // exclusive prefix sum over N+1 elements (N flags + 1 sentinel), the value at
 // index N equals the total number of visible splats.
 
 import indirectCoreCS from '../common/comp/indirect-core.js';
+import dispatchCoreCS from '../common/comp/dispatch-core.js';
+import sortIndirectArgsCS from '../common/comp/sort-indirect-args.js';
 
 export const computeGsplatWriteIndirectArgsSource = /* wgsl */`
 
 ${indirectCoreCS}
+${dispatchCoreCS}
+${sortIndirectArgsCS}
 
 // Prefix sum buffer (flagBuffer after in-place exclusive scan)
 @group(0) @binding(0) var<storage, read> prefixSumBuffer: array<u32>;
@@ -31,8 +36,9 @@ ${indirectCoreCS}
 struct WriteArgsUniforms {
     drawSlot: u32,              // slot index into indirectDrawArgs
     indexCount: u32,            // indices per instance (768 = 6 * 128)
-    dispatchSlotOffset: u32,    // u32 offset into indirectDispatchArgs (slot * 3)
-    totalSplats: u32            // total splat count, index into prefixSumBuffer for visible count
+    dispatchSlotBase: u32,      // slot index of keygen dispatch; sort slots follow
+    totalSplats: u32,           // total splat count, index into prefixSumBuffer for visible count
+    sortIndirectInfo: vec4<u32> // sorter-owned [slotCount, g0, g1, g2] from prepareIndirect()
 };
 @group(0) @binding(5) var<uniform> uniforms: WriteArgsUniforms;
 
@@ -55,13 +61,21 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // Write numSplats for vertex shader
     numSplatsBuf[0] = count;
 
-    // Write indirect dispatch args for sort (shared slot for key gen, block sum, reorder)
-    // All use 256 threads/workgroup
-    let sortWorkgroupCount = (count + {SORT_THREADS_PER_WORKGROUP}u - 1u) / {SORT_THREADS_PER_WORKGROUP}u;
-    let dispatchOffset = uniforms.dispatchSlotOffset;
-    indirectDispatchArgs[dispatchOffset + 0u] = sortWorkgroupCount;
-    indirectDispatchArgs[dispatchOffset + 1u] = 1u;
-    indirectDispatchArgs[dispatchOffset + 2u] = 1u;
+    // --- Indirect dispatch args ---
+    // Layout: slot[base + 0] = key gen, slot[base + 1..base + 1 + sortSlotCount] = sort.
+    let keygenSlot = uniforms.dispatchSlotBase;
+    let keygenOffset = keygenSlot * 3u;
+
+    let keygenWorkgroupCount = (count + {KEYGEN_THREADS_PER_WORKGROUP}u - 1u) / {KEYGEN_THREADS_PER_WORKGROUP}u;
+    let keygenDim = calcDispatch2D(keygenWorkgroupCount, {MAX_WORKGROUPS_PER_DIM}u);
+    indirectDispatchArgs[keygenOffset + 0u] = keygenDim.x;
+    indirectDispatchArgs[keygenOffset + 1u] = keygenDim.y;
+    indirectDispatchArgs[keygenOffset + 2u] = 1u;
+
+    // Sort dispatch slots — delegated to the sorter-agnostic helper so this
+    // shader doesn't need to know how many slots or what granularity the
+    // active radix sort backend uses.
+    writeSortIndirectArgs(keygenSlot + 1u, count, uniforms.sortIndirectInfo);
 
     // Write sortElementCount for sort shaders (= visibleCount)
     sortElementCountBuf[0] = count;

@@ -68,16 +68,40 @@ const releaseTempArray = (a) => {
 };
 
 /**
- * The Entity is a core primitive of a PlayCanvas application. Generally speaking, any object in
- * your application will be represented by an Entity, along with a set of {@link Component}s. Each
- * component enables a particular capability. For example, the {@link RenderComponent} enables an
- * entity to render a 3D model, and the {@link ScriptComponent} enables an entity to run code that
- * implements custom behavior.
+ * An Entity is the core primitive of a PlayCanvas application. Every object in a scene (a camera, a
+ * light, a 3D model, a sound source, a piece of UI, or your own gameplay object) is represented by
+ * an Entity. On its own, an Entity is simply a named node in the scene graph; it gains behavior
+ * from the {@link Component}s attached to it.
  *
- * Entity is a subclass of {@link GraphNode} which allows entities to form a tree-like hierarchy
- * (based on parent/child relationships). The root of the entity hierarchy can be queried with
- * {@link AppBase#root}. Entities inherit a 3D transform from {@link GraphNode} which allows them
- * to be positioned, rotated and scaled.
+ * An Entity therefore brings together two things:
+ *
+ * - A transform: Entity extends {@link GraphNode}, so it has a position, rotation and scale, and
+ * can be parented to other entities to form a hierarchy. The root of that hierarchy is
+ * {@link AppBase#root}, and child entities inherit the transforms of their ancestors.
+ * - A set of components: each {@link Component} adds a single capability. For example, a
+ * {@link CameraComponent} renders the scene, a {@link LightComponent} lights it, a
+ * {@link RenderComponent} draws a 3D mesh, and a {@link ScriptComponent} runs your own code.
+ *
+ * Add a capability with {@link Entity#addComponent}, access it later through the matching property
+ * (such as {@link Entity#camera} or {@link Entity#render}), and remove it with
+ * {@link Entity#removeComponent}. An entity, together with all of its descendants and their
+ * components, can be enabled or disabled as a group via {@link GraphNode#enabled}, and removed from
+ * the scene with {@link Entity#destroy}.
+ *
+ * @example
+ * // Create an entity, give it a camera component, position it, and add it to the scene
+ * const camera = new pc.Entity('camera');
+ * camera.addComponent('camera', {
+ *     clearColor: new pc.Color(0.1, 0.1, 0.1)
+ * });
+ * camera.setPosition(0, 0, 10);
+ * app.root.addChild(camera);
+ * @example
+ * // Entities form a hierarchy: a child inherits its parent's transform
+ * const parent = new pc.Entity('parent');
+ * const child = new pc.Entity('child');
+ * parent.addChild(child);
+ * parent.setLocalPosition(5, 0, 0); // moves both parent and child
  */
 class Entity extends GraphNode {
     /**
@@ -293,7 +317,6 @@ class Entity extends GraphNode {
     /**
      * Used by component systems to speed up destruction.
      *
-     * @type {boolean}
      * @ignore
      */
     _destroying = false;
@@ -308,7 +331,6 @@ class Entity extends GraphNode {
      * Used to differentiate between the entities of a template root instance, which have it set to
      * true, and the cloned instance entities (set to false).
      *
-     * @type {boolean}
      * @ignore
      */
     _template = false;
@@ -503,8 +525,8 @@ class Entity extends GraphNode {
      * Search the entity and all of its descendants for the first component of specified type.
      *
      * @param {string} type - The name of the component type to retrieve.
-     * @returns {Component} A component of specified type, if the entity or any of its descendants
-     * has one. Returns undefined otherwise.
+     * @returns {Component|null} A component of specified type, if the entity or any of its
+     * descendants has one. Returns null otherwise.
      * @example
      * // Get the first found light component in the hierarchy tree that starts with this entity
      * const light = entity.findComponent("light");
@@ -561,18 +583,48 @@ class Entity extends GraphNode {
     }
 
     /**
+     * Sets the GUID for this Entity. Note that it is unlikely that you should need to change the
+     * GUID value of an Entity at run-time. Doing so will corrupt the graph this Entity is in.
+     *
+     * @type {string}
+     * @ignore
+     */
+    set guid(value) {
+        // remove current guid from entityIndex
+        const index = this._app._entityIndex;
+        if (this._guid) {
+            delete index[this._guid];
+        }
+
+        // add new guid to entityIndex
+        this._guid = value;
+        index[this._guid] = this;
+    }
+
+    /**
+     * Gets the GUID for this Entity.
+     *
+     * @type {string}
+     */
+    get guid() {
+        // if the guid hasn't been set yet then set it now before returning it
+        if (!this._guid) {
+            this.guid = guid.create();
+        }
+
+        return this._guid;
+    }
+
+    /**
      * Get the GUID value for this Entity.
      *
      * @returns {string} The GUID of the Entity.
      * @ignore
+     * @deprecated Use {@link Entity#guid} instead.
      */
     getGuid() {
-    // if the guid hasn't been set yet then set it now before returning it
-        if (!this._guid) {
-            this.setGuid(guid.create());
-        }
-
-        return this._guid;
+        Debug.deprecated('Entity#getGuid is deprecated. Use Entity#guid instead.');
+        return this.guid;
     }
 
     /**
@@ -581,17 +633,11 @@ class Entity extends GraphNode {
      *
      * @param {string} guid - The GUID to assign to the Entity.
      * @ignore
+     * @deprecated Use {@link Entity#guid} instead.
      */
     setGuid(guid) {
-    // remove current guid from entityIndex
-        const index = this._app._entityIndex;
-        if (this._guid) {
-            delete index[this._guid];
-        }
-
-        // add new guid to entityIndex
-        this._guid = guid;
-        index[this._guid] = this;
+        Debug.deprecated('Entity#setGuid is deprecated. Use Entity#guid instead.');
+        this.guid = guid;
     }
 
     /**
@@ -730,7 +776,7 @@ class Entity extends GraphNode {
     clone() {
         const duplicatedIdsMap = {};
         const clone = this._cloneRecursively(duplicatedIdsMap);
-        duplicatedIdsMap[this.getGuid()] = clone;
+        duplicatedIdsMap[this.guid] = clone;
 
         resolveDuplicatedEntityReferenceProperties(
             this,
@@ -782,7 +828,7 @@ class Entity extends GraphNode {
             if (oldChild instanceof Entity) {
                 const newChild = oldChild._cloneRecursively(duplicatedIdsMap);
                 clone.addChild(newChild);
-                duplicatedIdsMap[oldChild.getGuid()] = newChild;
+                duplicatedIdsMap[oldChild.guid] = newChild;
             }
         }
 
@@ -829,8 +875,7 @@ function resolveDuplicatedEntityReferenceProperties(
           !!oldSubtreeRoot.findByGuid(oldEntityReferenceId);
 
                 if (entityIsWithinOldSubtree) {
-                    const newEntityReferenceId =
-            duplicatedIdsMap[oldEntityReferenceId].getGuid();
+                    const newEntityReferenceId = duplicatedIdsMap[oldEntityReferenceId].guid;
 
                     if (newEntityReferenceId) {
                         newEntity.c[componentName][propertyName] = newEntityReferenceId;

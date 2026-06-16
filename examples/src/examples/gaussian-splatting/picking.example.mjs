@@ -1,6 +1,10 @@
-// @config DESCRIPTION This example shows how to use the Picker to pick GSplat objects in the scene.
-import { deviceType, rootPath } from 'examples/utils';
+// @config
+//
+// This example shows how to use the Picker to pick GSplat objects in the scene.
+
 import * as pc from 'playcanvas';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -43,12 +47,12 @@ app.on('destroy', () => {
 });
 
 const assets = {
-    logo: new pc.Asset('gsplat', 'gsplat', { url: `${rootPath}/static/assets/splats/playcanvas-logo/meta.json` }),
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` }),
+    logo: new pc.Asset('gsplat', 'gsplat', { url: './assets/splats/playcanvas-logo/meta.json' }),
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' }),
     helipad: new pc.Asset(
         'helipad-env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/morning-env-atlas.png` },
+        { url: './assets/cubemaps/morning-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
@@ -70,8 +74,7 @@ assetListLoader.load(() => {
         const splat = new pc.Entity(`splat-${i}`);
         splat.addComponent('gsplat', {
             asset: assets.logo,
-            castShadows: false,
-            unified: true
+            castShadows: false
         });
 
         app.root.addChild(splat);
@@ -82,8 +85,19 @@ assetListLoader.load(() => {
         });
     }
 
-    // Enable gsplat ID for unified picking
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
+
+    // Enable gsplat ID for picking
     app.scene.gsplat.enableIds = true;
+    app.scene.gsplat.alphaClip = 0.2;
+    app.scene.gsplat.minPixelSize = 1;
 
     // Create an Entity with a camera component
     const camera = new pc.Entity();
@@ -92,6 +106,11 @@ assetListLoader.load(() => {
         toneMapping: pc.TONEMAP_ACES
     });
     camera.setLocalPosition(-2, -0.5, 2);
+
+    data.on('orthoCamera:set', (/** @type {boolean} */ value) => {
+        camera.camera.projection = value ? pc.PROJECTION_ORTHOGRAPHIC : pc.PROJECTION_PERSPECTIVE;
+        camera.camera.orthoHeight = 6;
+    });
 
     // add orbit camera script with a mouse and a touch support
     camera.addComponent('script');
@@ -199,6 +218,7 @@ assetListLoader.load(() => {
                                 material: markerMaterial
                             });
                             markerSphere.setLocalScale(0.3, 0.3, 0.3);
+                            markerSphere.render.meshInstances[0].pick = false;
 
                             // parent it to the picked entity and convert world position to its local space
                             entity.entity.addChild(markerSphere);
@@ -220,5 +240,3 @@ assetListLoader.load(() => {
         handlePointer(touch.x, touch.y);
     });
 });
-
-export { app };

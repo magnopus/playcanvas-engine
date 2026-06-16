@@ -1,8 +1,5 @@
 import { Debug } from '../../core/debug.js';
 import { BoundingBox } from '../../core/shape/bounding-box.js';
-import { BUFFER_STATIC, SEMANTIC_ATTR13, TYPE_UINT32 } from '../../platform/graphics/constants.js';
-import { VertexFormat } from '../../platform/graphics/vertex-format.js';
-import { VertexBuffer } from '../../platform/graphics/vertex-buffer.js';
 import { Mesh } from '../mesh.js';
 import { ShaderMaterial } from '../materials/shader-material.js';
 import { WorkBufferRenderInfo } from '../gsplat-unified/gsplat-work-buffer.js';
@@ -25,7 +22,7 @@ const tempMap = new Map();
 /**
  * Base class for a GSplat resource and defines common properties.
  *
- *  @ignore
+ * @ignore
  */
 class GSplatResourceBase {
     /**
@@ -40,14 +37,39 @@ class GSplatResourceBase {
      */
     gsplatData;
 
-    /** @type {Float32Array} */
-    centers;
+    /**
+     * CPU-side splat center positions (xyz per splat), or null when not built for this resource.
+     *
+     * @type {Float32Array|null}
+     */
+    set centers(value) {
+        this._centers = value;
+    }
+
+    get centers() {
+        return this._centers;
+    }
+
+    /**
+     * True when a centers buffer has been allocated ({@link GSplatResourceBase#centers} is non-null).
+     * Reads internal storage only so checks do not trigger lazy allocation in {@link GSplatContainer}.
+     *
+     * @type {boolean}
+     */
+    get hasCenters() {
+        return this._centers != null;
+    }
+
+    /**
+     * @type {Float32Array|null}
+     * @protected
+     */
+    _centers = null;
 
     /**
      * Version counter for centers array changes. Remains 0 for static resources.
      * Only GSplatContainer increments this via its update() method.
      *
-     * @type {number}
      * @ignore
      */
     centersVersion = 0;
@@ -60,12 +82,6 @@ class GSplatResourceBase {
      * @ignore
      */
     mesh = null;
-
-    /**
-     * @type {VertexBuffer|null}
-     * @ignore
-     */
-    instanceIndices = null;
 
     /**
      * @type {number}
@@ -109,24 +125,30 @@ class GSplatResourceBase {
      */
     parameters = new Map();
 
-    /**
-     * @type {number}
-     * @private
-     */
+    /** @private */
     _refCount = 0;
 
-    /**
-     * @type {number}
-     * @private
-     */
+    /** @private */
     _meshRefCount = 0;
 
-    constructor(device, gsplatData) {
+    /**
+     * @param {GraphicsDevice} device - The graphics device.
+     * @param {object} gsplatData - Data source with getCenters(), calcAabb(), numSplats, etc.
+     * @param {object} [options] - Construction options.
+     * @param {boolean} [options.prepareCenters] - When omitted or true, calls gsplatData.getCenters()
+     * and stores the result. When false, {@link GSplatResourceBase#centers} stays null until set or
+     * materialized by a subclass (e.g. lazy allocation in GSplatContainer).
+     */
+    constructor(device, gsplatData, options = {}) {
         this.device = device;
         this.gsplatData = gsplatData;
         this.streams = new GSplatStreams(device);
 
-        this.centers = gsplatData.getCenters();
+        if (options.prepareCenters !== false) {
+            this._centers = gsplatData.getCenters();
+        } else {
+            this._centers = null;
+        }
 
         this.aabb = new BoundingBox();
         gsplatData.calcAabb(this.aabb);
@@ -154,7 +176,6 @@ class GSplatResourceBase {
     _actualDestroy() {
         this.streams.destroy();
         this.mesh?.destroy();
-        this.instanceIndices?.destroy();
         this.workBufferRenderInfos.forEach(info => info.destroy());
         this.workBufferRenderInfos.clear();
     }
@@ -203,7 +224,6 @@ class GSplatResourceBase {
         if (!this.mesh) {
             this.mesh = GSplatResourceBase.createMesh(this.device);
             this.mesh.aabb.copy(this.aabb);
-            this.instanceIndices = GSplatResourceBase.createInstanceIndices(this.device, this.gsplatData.numSplats);
         }
         this._meshRefCount++;
     }
@@ -218,8 +238,6 @@ class GSplatResourceBase {
         this._meshRefCount--;
         if (this._meshRefCount < 1) {
             this.mesh = null; // mesh instances destroy mesh when their refCount reaches zero
-            this.instanceIndices?.destroy();
-            this.instanceIndices = null;
         }
     }
 
@@ -240,11 +258,6 @@ class GSplatResourceBase {
         this.configureMaterialDefines(tempMap);
         tempMap.set('GSPLAT_LOD', '');
         if (colorOnly) tempMap.set('GSPLAT_COLOR_ONLY', '');
-
-        // Set HAS_NODE_MAPPING when resource has node mapping texture (octree resources)
-        if (this.streams.textures.has('nodeMappingTexture')) {
-            tempMap.set('HAS_NODE_MAPPING', '');
-        }
 
         let definesKey = '';
         for (const [k, v] of tempMap) {
@@ -321,28 +334,6 @@ class GSplatResourceBase {
         mesh.update();
 
         return mesh;
-    }
-
-    static createInstanceIndices(device, splatCount) {
-        const splatInstanceSize = GSplatResourceBase.instanceSize;
-        const numSplats = Math.ceil(splatCount / splatInstanceSize) * splatInstanceSize;
-        const numSplatInstances = numSplats / splatInstanceSize;
-
-        const indexData = new Uint32Array(numSplatInstances);
-        for (let i = 0; i < numSplatInstances; ++i) {
-            indexData[i] = i * splatInstanceSize;
-        }
-
-        const vertexFormat = new VertexFormat(device, [
-            { semantic: SEMANTIC_ATTR13, components: 1, type: TYPE_UINT32, asInt: true }
-        ]);
-
-        const instanceIndices = new VertexBuffer(device, vertexFormat, numSplatInstances, {
-            usage: BUFFER_STATIC,
-            data: indexData.buffer
-        });
-
-        return instanceIndices;
     }
 
     static get instanceSize() {

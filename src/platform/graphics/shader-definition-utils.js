@@ -205,7 +205,7 @@ class ShaderDefinitionUtils {
     }
 
     /**
-     * Generates WGSL enable directives based on device capabilities. Enable directives must come
+     * Generates WGSL `enable` / `requires` directives based on device capabilities. They must come
      * before all global declarations in WGSL shaders.
      *
      * @param {GraphicsDevice} device - The graphics device.
@@ -220,6 +220,27 @@ class ShaderDefinitionUtils {
         }
         if (shaderType === 'fragment' && device.supportsPrimitiveIndex) {
             code += 'enable primitive_index;\n';
+        }
+        if (device.supportsSubgroups) {
+            code += 'enable subgroups;\n';
+        }
+        if (device.supportsSubgroupId) {
+            code += 'requires subgroup_id;\n';
+        }
+        if (shaderType === 'compute' && device.supportsLinearIndexing) {
+            code += 'requires linear_indexing;\n';
+        }
+        if (device.supportsUnrestrictedPointerParameters) {
+            code += 'requires unrestricted_pointer_parameters;\n';
+        }
+        if (device.supportsPointerCompositeAccess) {
+            code += 'requires pointer_composite_access;\n';
+        }
+        if (device.supportsPacked4x8IntegerDotProduct) {
+            code += 'requires packed_4x8_integer_dot_product;\n';
+        }
+        if (device.supportsTextureAndSamplerLet) {
+            code += 'requires texture_and_sampler_let;\n';
         }
         return code;
     }

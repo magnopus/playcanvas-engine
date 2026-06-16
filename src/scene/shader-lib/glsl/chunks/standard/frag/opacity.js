@@ -1,5 +1,6 @@
 export default /* glsl */`
 uniform float material_opacity;
+uniform float material_alphaDitherScale;
 
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE

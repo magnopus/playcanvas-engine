@@ -3,9 +3,6 @@ import { path } from '../../core/path.js';
 import { Debug } from '../../core/debug.js';
 import { Tracing } from '../../core/tracing.js';
 import { TRACEID_OCTREE_RESOURCES } from '../../core/constants.js';
-import { PIXELFORMAT_R8U, PIXELFORMAT_R16U, PIXELFORMAT_R32U } from '../../platform/graphics/constants.js';
-import { Texture } from '../../platform/graphics/texture.js';
-
 // Temporary array reused to avoid allocations during cooldown ticking
 const _toDelete = [];
 
@@ -23,6 +20,15 @@ class GSplatOctree {
      * @type {GSplatOctreeNode[]}
      */
     nodes;
+
+    /**
+     * Packed per-node axis-aligned bounds in octree local space for CPU hot paths (e.g. LOD).
+     * Length is {@link GSplatOctree.nodes}.length * 6. For node index `i`, base `b = i * 6`:
+     * `[minX, minY, minZ, maxX, maxY, maxZ]` matching {@link GSplatOctreeNode.bounds}.
+     *
+     * @type {Float32Array}
+     */
+    nodeBoundsMinMax;
 
     /**
      * @type {{ url: string, originalUrl: string, lodLevel: number }[]}
@@ -80,8 +86,6 @@ class GSplatOctree {
 
     /**
      * Reference count for environment usage.
-     *
-     * @type {number}
      */
     environmentRefCount = 0;
 
@@ -94,15 +98,12 @@ class GSplatOctree {
 
     /**
      * Whether this octree has been destroyed.
-     *
-     * @type {boolean}
      */
     destroyed = false;
 
     /**
      * Number of update ticks before unloading unused file resources. Set from GSplatParams.
      *
-     * @type {number}
      * @private
      */
     cooldownTicks = 100;
@@ -187,6 +188,23 @@ class GSplatOctree {
 
             return new GSplatOctreeNode(lods, nodeData.bound);
         });
+
+        // precompute node bounds for CPU hot paths
+        const nodeCount = this.nodes.length;
+        const boundsFlat = new Float32Array(nodeCount * 6);
+        for (let i = 0; i < nodeCount; i++) {
+            const bounds = this.nodes[i].bounds;
+            const mn = bounds.getMin();
+            const mx = bounds.getMax();
+            const b = i * 6;
+            boundsFlat[b + 0] = mn.x;
+            boundsFlat[b + 1] = mn.y;
+            boundsFlat[b + 2] = mn.z;
+            boundsFlat[b + 3] = mx.x;
+            boundsFlat[b + 4] = mx.y;
+            boundsFlat[b + 5] = mx.z;
+        }
+        this.nodeBoundsMinMax = boundsFlat;
     }
 
     /**
@@ -210,6 +228,7 @@ class GSplatOctree {
 
     /**
      * Trace out per-LOD counts of currently loaded file resources.
+     *
      * @private
      */
     _traceLodCounts() {
@@ -249,43 +268,6 @@ class GSplatOctree {
                 this._extractLeafNodes(child, leafNodes);
             }
         }
-    }
-
-    /**
-     * Generates a node mapping texture for a file resource. Each texel maps a source splat index
-     * to its owning octree node index. Used by the GPU culling system to look up bounding spheres.
-     *
-     * @param {number} fileIndex - The file index in the octree files array.
-     * @param {GSplatResource} resource - The loaded file resource.
-     * @returns {Texture} The generated node mapping texture.
-     * @private
-     */
-    _generateNodeMappingTexture(fileIndex, resource) {
-        const numNodes = this.nodes.length;
-
-        // Choose format based on node count
-        const format = numNodes <= 256 ? PIXELFORMAT_R8U :
-            numNodes <= 65536 ? PIXELFORMAT_R16U : PIXELFORMAT_R32U;
-
-        const ArrayType = numNodes <= 256 ? Uint8Array :
-            numNodes <= 65536 ? Uint16Array : Uint32Array;
-
-        // Must use same dimensions as resource data textures for coordinate alignment
-        const dim = resource.streams.textureDimensions;
-        const data = new ArrayType(dim.x * dim.y);
-
-        // Each file corresponds to exactly one LOD level — go directly to that LOD
-        const lodLevel = this.files[fileIndex].lodLevel;
-        for (let nodeIndex = 0; nodeIndex < numNodes; nodeIndex++) {
-            const lod = this.nodes[nodeIndex].lods[lodLevel];
-            if (lod.fileIndex === fileIndex) {
-                for (let i = 0; i < lod.count; i++) {
-                    data[lod.offset + i] = nodeIndex;
-                }
-            }
-        }
-
-        return Texture.createDataTexture2D(resource.device, `nodeMappingTexture-${fileIndex}`, dim.x, dim.y, format, [data]);
     }
 
     getFileResource(fileIndex) {
@@ -411,14 +393,11 @@ class GSplatOctree {
         const fullUrl = this.files[fileIndex].url;
         const res = this.assetLoader?.getResource(fullUrl);
         if (res) {
-
-            // Generate and register nodeMappingTexture for GPU culling bounds lookup
-            if (!res.streams.textures.has('nodeMappingTexture')) {
-                const texture = this._generateNodeMappingTexture(fileIndex, res);
-                res.streams.textures.set('nodeMappingTexture', texture);
-            }
-
             this.fileResources.set(fileIndex, res);
+
+            // The octree fully re-creates these resources on device loss, so the CPU-side
+            // ImageBitmap sources retained on the textures are not needed for re-upload.
+            res.releaseTextureSources?.();
 
             // if the file finished loading and is no longer needed, schedule a cooldown
             if (this.fileRefCounts[fileIndex] === 0) {

@@ -110,7 +110,7 @@ class RenderTarget {
      *
      * @param {object} [options] - Object for passing optional arguments.
      * @param {boolean} [options.autoResolve] - If samples > 1, enables or disables automatic MSAA
-     * resolve after rendering to this RT (see {@link RenderTarget#resolve}). Defaults to true.
+     * resolve after rendering to this RT (see {@link resolve}). Defaults to true.
      * @param {Texture} [options.colorBuffer] - The texture that this render target will treat as a
      * rendering surface.
      * @param {Texture[]} [options.colorBuffers] - The textures that this render target will treat
@@ -514,7 +514,7 @@ class RenderTarget {
     /**
      * Accessor for multiple render target color buffers.
      *
-     * @param {*} index - Index of the color buffer to get.
+     * @param {number} index - Index of the color buffer to get.
      * @returns {Texture} - Color buffer at the specified index.
      */
     getColorBuffer(index) {
