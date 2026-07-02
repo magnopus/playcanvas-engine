@@ -912,6 +912,11 @@ function resolveDuplicatedEntityReferenceProperties(
             );
         }
 
+        // Handle entity joint attributes
+        if (components.joint) {
+            newEntity.joint.resolveDuplicatedEntityReferenceProperties(components.joint, duplicatedIdsMap);
+        }
+
         // Handle entity scrollview attributes
         if (components.scrollview) {
             newEntity.scrollview.resolveDuplicatedEntityReferenceProperties(

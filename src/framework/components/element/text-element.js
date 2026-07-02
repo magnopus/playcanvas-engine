@@ -685,7 +685,6 @@ class TextElement {
                 mi.setParameter('material_opacity', this._color.a);
                 mi.setParameter('font_sdfIntensity', this._font.intensity);
                 mi.setParameter('font_pxrange', this._getPxRange(this._font));
-                mi.setParameter('font_textureWidth', this._font.data.info.maps[i].width);
 
                 mi.setParameter('outline_color', this._outlineColorUniform);
                 mi.setParameter('outline_thickness', this._outlineThicknessScale * this._outlineThickness);
@@ -1394,6 +1393,11 @@ class TextElement {
 
     _onFontLoad(asset) {
         if (this.font !== asset.resource) {
+            // refresh localized text before applying a swapped-in font so it is not
+            // rendered with the previous locale's string
+            if (this._i18nKey) {
+                this._text = this._system.app.i18n.getText(this._i18nKey);
+            }
             this.font = asset.resource;
         }
     }
@@ -1410,7 +1414,6 @@ class TextElement {
                 if (mi) {
                     mi.setParameter('font_sdfIntensity', this._font.intensity);
                     mi.setParameter('font_pxrange', this._getPxRange(this._font));
-                    mi.setParameter('font_textureWidth', this._font.data.info.maps[i].width);
                 }
             }
         }
@@ -1794,7 +1797,6 @@ class TextElement {
                 if (mi) {
                     mi.setParameter('font_sdfIntensity', this._font.intensity);
                     mi.setParameter('font_pxrange', this._getPxRange(this._font));
-                    mi.setParameter('font_textureWidth', this._font.data.info.maps[i].width);
                     this._setTextureParams(mi, this._font.textures[i]);
                 }
             }

@@ -7,6 +7,7 @@ import { TextureView } from './texture-view.js';
 
 /**
  * @import { BindGroupFormat } from './bind-group-format.js'
+ * @import { DynamicBuffer } from './dynamic-buffer.js'
  * @import { GraphicsDevice } from './graphics-device.js'
  * @import { StorageBuffer } from './storage-buffer.js'
  * @import { Texture } from './texture.js'
@@ -51,6 +52,35 @@ class BindGroup {
      * @type {number[]}
      */
     uniformBufferOffsets = [];
+
+    /**
+     * For each uniform buffer slot, the dynamic GPU buffer a non-persistent uniform buffer was
+     * last built against. Used to detect when such a buffer is re-allocated into a different
+     * dynamic buffer (which requires the bind group to be rebuilt).
+     *
+     * @type {DynamicBuffer[]}
+     * @private
+     */
+    _uniformBufferContainers = [];
+
+    /**
+     * For each texture / storage-texture slot, the GPU implementation object the slot was last
+     * built against. A texture's `impl` is replaced when its GPU resource is recreated (e.g.
+     * {@link Texture#resize}), which can happen mid-render in the same render version the bind
+     * group was last built — so the {@link renderVersionDirty} check alone misses it and the bind
+     * group keeps a view of the (now destroyed) old GPU texture. Tracking impl identity forces a
+     * rebuild whenever the underlying GPU resource is recreated.
+     *
+     * @type {object[]}
+     * @private
+     */
+    _textureImpls = [];
+
+    /**
+     * @type {object[]}
+     * @private
+     */
+    _storageTextureImpls = [];
 
     /**
      * Create a new Bind Group.
@@ -142,7 +172,11 @@ class BindGroup {
         } else if (this.renderVersionUpdated < texture.renderVersionDirty) {
             // if the texture properties have changed
             this.dirty = true;
+        } else if (this._textureImpls[index] !== texture.impl) {
+            // the texture's GPU resource was recreated (e.g. resize) since the last build
+            this.dirty = true;
         }
+        this._textureImpls[index] = texture.impl;
     }
 
     /**
@@ -164,7 +198,11 @@ class BindGroup {
         } else if (this.renderVersionUpdated < texture.renderVersionDirty) {
             // if the texture properties have changed
             this.dirty = true;
+        } else if (this._storageTextureImpls[index] !== texture.impl) {
+            // the texture's GPU resource was recreated (e.g. resize) since the last build
+            this.dirty = true;
         }
+        this._storageTextureImpls[index] = texture.impl;
     }
 
     /**
@@ -232,9 +270,15 @@ class BindGroup {
             // offset
             this.uniformBufferOffsets[i] = uniformBuffer.offset;
 
-            // test if any of the uniform buffers have changed (not their content, but the buffer container itself)
-            if (this.renderVersionUpdated < uniformBuffer.renderVersionDirty) {
-                this.dirty = true;
+            // a non-persistent uniform buffer can be re-allocated into a different dynamic buffer,
+            // possibly several times per frame (e.g. XR multiview re-bakes the bind groups per
+            // view); rebuild the bind group whenever it moves. Persistent buffers never move.
+            if (!uniformBuffer.persistent) {
+                const container = uniformBuffer.allocation.gpuBuffer;
+                if (this._uniformBufferContainers[i] !== container) {
+                    this._uniformBufferContainers[i] = container;
+                    this.dirty = true;
+                }
             }
         }
 

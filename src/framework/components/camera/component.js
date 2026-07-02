@@ -192,6 +192,9 @@ class CameraComponent extends Component {
      * - {@link SHADERPASS_LIGHTING}
      * - {@link SHADERPASS_UV0}
      *
+     * The returned index can be used with {@link MeshInstance#shaderPassMask} to control which mesh
+     * instances are rendered in this pass.
+     *
      * @returns {number} The id of the shader pass.
      */
     setShaderPass(name) {
@@ -757,7 +760,7 @@ class CameraComponent extends Component {
     /**
      * Gets the array of layer IDs ({@link Layer#id}) to which this camera belongs.
      *
-     * @type {number[]}
+     * @type {ReadonlyArray<number>}
      */
     get layers() {
         return this._camera.layers;
@@ -907,7 +910,7 @@ class CameraComponent extends Component {
     /**
      * Gets the rendering rectangle for the camera.
      *
-     * @type {Vec4}
+     * @type {Readonly<Vec4>}
      */
     get rect() {
         return this._camera.rect;
@@ -1255,7 +1258,7 @@ class CameraComponent extends Component {
         this.system.removeCamera(this);
     }
 
-    onRemove() {
+    onBeforeRemove() {
         this.onDisable();
         this.off();
 
@@ -1366,12 +1369,13 @@ class CameraComponent extends Component {
      * });
      */
     endXr(callback) {
-        if (!this._camera.xr) {
+        const xr = this.system.app.xr;
+        if (xr?.camera !== this.entity) {
             if (callback) callback(new Error('Camera is not in XR'));
             return;
         }
 
-        this._camera.xr.end(callback);
+        xr.end(callback);
     }
 
     /**

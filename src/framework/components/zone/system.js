@@ -4,9 +4,11 @@ import { Component } from '../component.js';
 import { ComponentSystem } from '../system.js';
 
 import { ZoneComponent } from './component.js';
-import { ZoneComponentData } from './data.js';
 
 const _schema = ['enabled', 'shape', 'halfExtents', 'radius', 'useColliders'];
+/**
+ * @import { AppBase } from '../../app-base.js'
+ */
 
 /**
  * Creates and manages {@link ZoneComponent} instances.
@@ -35,7 +37,6 @@ class ZoneComponentSystem extends ComponentSystem {
 
         // Defining different types used by system.
         this.ComponentType = ZoneComponent;
-        this.DataType = ZoneComponentData;
 
         // Define data schema.
         this.schema = _schema;
@@ -176,7 +177,5 @@ class ZoneComponentSystem extends ComponentSystem {
         this.app.systems.off('update', this.onUpdate, this);
     }
 }
-
-Component._buildAccessors(ZoneComponent.prototype, _schema);
 
 export { ZoneComponentSystem };

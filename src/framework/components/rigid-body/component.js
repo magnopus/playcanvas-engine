@@ -9,10 +9,6 @@ import {
     BODYTYPE_DYNAMIC, BODYTYPE_KINEMATIC
 } from './constants.js';
 
-/**
- * @import { Entity } from '../../entity.js'
- */
-
 // Shared math variable to avoid excessive allocation
 let _ammoTransform;
 let _ammoVec1, _ammoVec2, _ammoQuat;
@@ -241,9 +237,10 @@ class RigidBodyComponent extends Component {
     }
 
     /**
-     * Gets the scaling factor for angular movement of the body in each axis.
+     * Gets the scaling factor for angular movement of the body in each axis. Use the setter to
+     * update the physics body.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get angularFactor() {
         return this._angularFactor;
@@ -266,9 +263,10 @@ class RigidBodyComponent extends Component {
     }
 
     /**
-     * Gets the rotational speed of the body around each world axis.
+     * Gets the rotational speed of the body around each world axis. Use the setter to update the
+     * physics body.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get angularVelocity() {
         if (this._body && this._type === BODYTYPE_DYNAMIC) {
@@ -386,9 +384,10 @@ class RigidBodyComponent extends Component {
     }
 
     /**
-     * Gets the scaling factor for linear movement of the body in each axis.
+     * Gets the scaling factor for linear movement of the body in each axis. Use the setter to
+     * update the physics body.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get linearFactor() {
         return this._linearFactor;
@@ -411,9 +410,9 @@ class RigidBodyComponent extends Component {
     }
 
     /**
-     * Gets the speed of the body in a given direction.
+     * Gets the speed of the body in a given direction. Use the setter to update the physics body.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get linearVelocity() {
         if (this._body && this._type === BODYTYPE_DYNAMIC) {
@@ -705,6 +704,10 @@ class RigidBodyComponent extends Component {
                 body.activate();
 
                 this._simulationEnabled = true;
+
+                // internal event consumed by the joint system to (re)create constraints
+                // against bodies that are present in the dynamics world
+                this.fire('simulationenabled');
             }
         }
     }
@@ -741,6 +744,12 @@ class RigidBodyComponent extends Component {
             body.forceActivationState(BODYSTATE_DISABLE_SIMULATION);
 
             this._simulationEnabled = false;
+
+            // internal event consumed by the joint system to destroy constraints that reference
+            // this body. The body has just been removed from the dynamics world above and is now
+            // inert, but is still a valid object - tearing the constraints down here keeps them
+            // from referencing the body once it is later destroyed or rebuilt.
+            this.fire('simulationdisabled');
         }
     }
 
@@ -1064,6 +1073,15 @@ class RigidBodyComponent extends Component {
                 if (motionState) {
                     motionState.setWorldTransform(_ammoTransform);
                 }
+            } else if (this._type === BODYTYPE_DYNAMIC && body.setInterpolationWorldTransform) {
+                // Sync the interpolation state so the transform read back by _updateDynamic is
+                // the teleport target on frames that run zero fixed sub-steps (high refresh
+                // rates); zero the interpolation velocities so it is exact, not extrapolated.
+                // Guarded: older ammo builds lack these bindings.
+                body.setInterpolationWorldTransform(_ammoTransform);
+                _ammoVec1.setValue(0, 0, 0);
+                body.setInterpolationLinearVelocity(_ammoVec1);
+                body.setInterpolationAngularVelocity(_ammoVec1);
             }
             body.activate();
         }
@@ -1094,8 +1112,8 @@ class RigidBodyComponent extends Component {
 
                 const component = entity.collision;
                 if (component && component._hasOffset) {
-                    const lo = component.data.linearOffset;
-                    const ao = component.data.angularOffset;
+                    const lo = component.linearOffset;
+                    const ao = component.angularOffset;
 
                     // Un-rotate the angular offset and then use the new rotation to
                     // un-translate the linear offset in local space
