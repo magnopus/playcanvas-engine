@@ -38,6 +38,22 @@ var<private> dModelMatrix: mat4x4f;
     #include "uv1VS"
 #endif
 
+//magnopus patched additional UVS
+#ifdef UV2
+    attribute vertex_texCoord2: vec2f;
+    #include "uv2VS"
+#endif
+
+#ifdef UV3
+    attribute vertex_texCoord3: vec2f;
+    #include "uv3VS"
+#endif
+
+#ifdef UV4
+    attribute vertex_texCoord4: vec2f;
+    #include "uv4VS"
+#endif
+
 
 #ifdef LINEAR_DEPTH
     #ifndef VIEWMATRIX
@@ -106,6 +122,28 @@ fn vertexMain(input : VertexInput) -> VertexOutput {
         var uv1: vec2f = getUv1();
         #ifdef UV1_UNMODIFIED
             output.vUv1 = uv1;
+        #endif
+    #endif
+
+    //magnopus patched additional UVS
+    #ifdef UV2
+        var uv2: vec2f = getUv2();
+        #ifdef UV2_UNMODIFIED
+            output.vUv2 = uv2;
+        #endif
+    #endif
+
+    #ifdef UV3
+        var uv3: vec2f = getUv3();
+        #ifdef UV3_UNMODIFIED
+            output.vUv3 = uv3;
+        #endif
+    #endif
+
+    #ifdef UV4
+        var uv4: vec2f = getUv4();
+        #ifdef UV4_UNMODIFIED
+            output.vUv4 = uv4;
         #endif
     #endif
 
