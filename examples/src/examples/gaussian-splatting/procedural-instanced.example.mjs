@@ -1,6 +1,11 @@
-// @config DESCRIPTION A static GSplatContainer with custom data format, rendered as multiple instances. Per-instance color tints are animated via shader uniforms using setParameter.
-import { deviceType } from 'examples/utils';
+// @config
+//
+// A static GSplatContainer with custom data format, rendered as multiple instances. Per-instance color
+// tints are animated via shader uniforms using setParameter.
+
 import * as pc from 'playcanvas';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -43,6 +48,15 @@ app.on('destroy', () => {
 });
 
 app.start();
+
+data.on('renderer:set', () => {
+    app.scene.gsplat.renderer = data.get('renderer');
+    const current = app.scene.gsplat.currentRenderer;
+    if (current !== data.get('renderer')) {
+        setTimeout(() => data.set('renderer', current), 0);
+    }
+});
+data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
 
 // Grid bounds for position denormalization
 const gridSize = 10;
@@ -97,7 +111,7 @@ const maxSplats = gridSize ** 3;
 const container = new pc.GSplatContainer(device, maxSplats, format);
 
 // Fill data texture (RGBA8: RGB=normalized position 0-1, A=brightness 0-1)
-const data = container.getTexture('data').lock();
+const textureData = container.getTexture('data').lock();
 // Fill centers array for sorting (Float32Array with xyz per splat)
 const centers = container.centers;
 
@@ -126,10 +140,10 @@ for (let x = 0; x < gridSize; x++) {
             const brightness = radial * 0.7 + diagonal * 0.3;
 
             // Data: RGB = normalized position (0-255), A = brightness (0-255)
-            data[idx * 4 + 0] = nx * 255;
-            data[idx * 4 + 1] = ny * 255;
-            data[idx * 4 + 2] = nz * 255;
-            data[idx * 4 + 3] = brightness * 255;
+            textureData[idx * 4 + 0] = nx * 255;
+            textureData[idx * 4 + 1] = ny * 255;
+            textureData[idx * 4 + 2] = nz * 255;
+            textureData[idx * 4 + 3] = brightness * 255;
 
             // Centers for sorting (xyz world position)
             centers[idx * 3 + 0] = px;
@@ -176,8 +190,7 @@ for (let gx = 0; gx < 2; gx++) {
         for (let gz = 0; gz < 2; gz++) {
             const child = new pc.Entity(`splat_${gx}_${gy}_${gz}`);
             child.addComponent('gsplat', {
-                resource: container,
-                unified: true
+                resource: container
             });
             child.setLocalPosition(
                 (gx - 0.5) * spacing,
@@ -250,5 +263,3 @@ app.on('update', (dt) => {
     // Use update() with centersUpdated=false since centers are static (pre-filled)
     container.update(Math.floor(t * maxSplats), false);
 });
-
-export { app };

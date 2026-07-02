@@ -1,18 +1,33 @@
-// @config DESCRIPTION This example demonstrates gsplat flipbook animation using dynamically loaded splat sequence of ply files.
-// @config NO_MINISTATS
-import { deviceType, rootPath, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// This example demonstrates gsplat flipbook animation using dynamically loaded splat sequence of ply
+// files.
+//
+// @flag NO_MINISTATS
+//
+// @credit
+// title: Mirror's Edge Apartment - Interior Scene
+// author: Aurélien Martel
+// source: https://sketchfab.com/3d-models/mirrors-edge-apartment-interior-scene-9804e9f2fe284070b081c96ceaf8af96
+// license: CC BY-NC 4.0 (https://creativecommons.org/licenses/by-nc/4.0/)
+//
+// @credit
+// title: Basketball Player
+// author: azad_geniusxr
 
-const { GsplatFlipbook } = await fileImport(`${rootPath}/static/scripts/esm/gsplat/gsplat-flipbook.mjs`);
-const { ShadowCatcher } = await fileImport(`${rootPath}/static/scripts/esm/shadow-catcher.mjs`);
+import * as pc from 'playcanvas';
+import { GsplatFlipbook } from 'playcanvas/scripts/esm/gsplat/gsplat-flipbook.mjs';
+import { ShadowCatcher } from 'playcanvas/scripts/esm/shadow-catcher.mjs';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
 const gfxOptions = {
     deviceTypes: [deviceType],
-    glslangUrl: `${rootPath}/static/lib/glslang/glslang.js`,
-    twgslUrl: `${rootPath}/static/lib/twgsl/twgsl.js`,
+    glslangUrl: './assets/wasm/glslang/glslang.js',
+    twgslUrl: './assets/wasm/twgsl/twgsl.js',
 
     // disable antialiasing as gaussian splats do not benefit from it and it's expensive
     antialias: false
@@ -54,11 +69,11 @@ const assets = {
     helipad: new pc.Asset(
         'helipad-env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/helipad-env-atlas.png` },
+        { url: './assets/cubemaps/helipad-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     ),
-    apartment: new pc.Asset('apartment', 'container', { url: `${rootPath}/static/assets/models/apartment.glb` }),
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` })
+    apartment: new pc.Asset('apartment', 'container', { url: './assets/models/apartment.glb' }),
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' })
 };
 
 const assetListLoader = new pc.AssetListLoader(Object.values(assets), app.assets);
@@ -109,8 +124,7 @@ assetListLoader.load(() => {
     // Create player flipbook
     const player = new pc.Entity('Player');
     player.addComponent('gsplat', {
-        castShadows: true,
-        unified: true
+        castShadows: true
     });
     player.addComponent('script');
     const flipbook = player.script.create(GsplatFlipbook);
@@ -128,8 +142,16 @@ assetListLoader.load(() => {
     player.setLocalScale(80, 80, 80);
     app.root.addChild(player);
 
-    // set alpha clip value, used by shadows
-    app.scene.gsplat.material.setParameter('alphaClip', 0.1);
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
+
+    app.scene.gsplat.alphaClip = 0.1;
 
     // Create shadow catcher
     const shadowCatcher = new pc.Entity('ShadowCatcher');
@@ -166,5 +188,3 @@ assetListLoader.load(() => {
     directionalLight.setEulerAngles(55, 70, 0);
     app.root.addChild(directionalLight);
 });
-
-export { app };

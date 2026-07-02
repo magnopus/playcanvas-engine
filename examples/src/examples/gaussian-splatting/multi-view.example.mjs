@@ -1,6 +1,11 @@
-// @config DESCRIPTION Renders Gaussian Splats from multiple camera viewports simultaneously with different projection types.
-import { deviceType, rootPath } from 'examples/utils';
+// @config
+//
+// Renders Gaussian Splats from multiple camera viewports simultaneously with different projection
+// types.
+
 import * as pc from 'playcanvas';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -44,12 +49,12 @@ app.on('destroy', () => {
 });
 
 const assets = {
-    logo: new pc.Asset('gsplat', 'gsplat', { url: `${rootPath}/static/assets/splats/playcanvas-logo/meta.json` }),
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` }),
+    logo: new pc.Asset('gsplat', 'gsplat', { url: './assets/splats/playcanvas-logo/meta.json' }),
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' }),
     helipad: new pc.Asset(
         'helipad-env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/helipad-env-atlas.png` },
+        { url: './assets/cubemaps/helipad-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
@@ -58,6 +63,15 @@ const assetListLoader = new pc.AssetListLoader(Object.values(assets), app.assets
 assetListLoader.load(() => {
     app.start();
 
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
+
     // setup skydome
     app.scene.skyboxMip = 2;
     app.scene.envAtlas = assets.helipad.resource;
@@ -65,8 +79,7 @@ assetListLoader.load(() => {
     // create a splat entity and place it in the world
     const logoEntity1 = new pc.Entity();
     logoEntity1.addComponent('gsplat', {
-        asset: assets.logo,
-        unified: true
+        asset: assets.logo
     });
     logoEntity1.setLocalPosition(0, 0.05, 0);
     logoEntity1.setLocalEulerAngles(180, 90, 0);
@@ -76,8 +89,7 @@ assetListLoader.load(() => {
     // create another splat entity and place it in the world
     const logoEntity2 = new pc.Entity();
     logoEntity2.addComponent('gsplat', {
-        asset: assets.logo,
-        unified: true
+        asset: assets.logo
     });
     logoEntity2.setLocalPosition(0, -0.5, 0);
     logoEntity2.setLocalEulerAngles(-90, -90, 0);
@@ -149,5 +161,3 @@ assetListLoader.load(() => {
         cameraRight.lookAt(logoEntity2.getPosition());
     });
 });
-
-export { app };

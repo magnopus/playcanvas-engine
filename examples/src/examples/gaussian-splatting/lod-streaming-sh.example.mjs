@@ -1,10 +1,17 @@
-// @config DESCRIPTION Demonstrates LOD streaming combined with spherical harmonics for view-dependent effects.
-import { data } from 'examples/observer';
-import { deviceType, rootPath, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// Demonstrates LOD streaming combined with spherical harmonics for view-dependent effects.
+//
+// @credit
+// title: Skatepark
+// author: Christoph Schindelar
+// source: https://superspl.at/user?id=schindelar3d
 
-const { CameraControls } = await fileImport(`${rootPath}/static/scripts/esm/camera-controls.mjs`);
-const { GsplatRevealGridEruption } = await fileImport(`${rootPath}/static/scripts/esm/gsplat/reveal-grid-eruption.mjs`);
+import * as pc from 'playcanvas';
+import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
+import { GsplatRevealGridEruption } from 'playcanvas/scripts/esm/gsplat/reveal-grid-eruption.mjs';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -89,7 +96,7 @@ const assets = {
     envatlas: new pc.Asset(
         'env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/table-mountain-env-atlas.png` },
+        { url: './assets/cubemaps/table-mountain-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
@@ -110,32 +117,29 @@ assetListLoader.load(() => {
     app.scene.gsplat.lodUnderfillLimit = config.lodUnderfillLimit;
 
     // set up SH update parameters
-    app.scene.gsplat.colorUpdateDistance = 1;
-    app.scene.gsplat.colorUpdateAngle = 4;
-    app.scene.gsplat.colorUpdateDistanceLodScale = 2;
-    app.scene.gsplat.colorUpdateAngleLodScale = 2;
+    app.scene.gsplat.colorUpdateAngle = 10;
+
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
 
     // initialize UI settings
-    data.set('debugLod', false);
-    data.set('colorizeSH', false);
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
+    data.set('debug', pc.GSPLAT_DEBUG_NONE);
     data.set('lodPreset', pc.platform.mobile ? 'mobile' : 'desktop');
     data.set('splatBudget', pc.platform.mobile ? 1 : 3);
 
-    app.scene.gsplat.colorizeLod = !!data.get('debugLod');
-    app.scene.gsplat.colorizeColorUpdate = !!data.get('colorizeSH');
-
-    data.on('debugLod:set', () => {
-        app.scene.gsplat.colorizeLod = !!data.get('debugLod');
-    });
-
-    data.on('colorizeSH:set', () => {
-        app.scene.gsplat.colorizeColorUpdate = !!data.get('colorizeSH');
+    data.on('debug:set', () => {
+        app.scene.gsplat.debug = data.get('debug');
     });
 
     const entity = new pc.Entity(config.name || 'gsplat');
     entity.addComponent('gsplat', {
-        asset: assets.church,
-        unified: true
+        asset: assets.church
     });
     entity.setLocalPosition(0, 0, 0);
     const [rotX, rotY, rotZ] = /** @type {[number, number, number]} */ (config.eulerAngles || [-90, 0, 0]);
@@ -220,5 +224,3 @@ assetListLoader.load(() => {
         data.set('data.stats.gsplats', app.stats.frame.gsplats.toLocaleString());
     });
 });
-
-export { app };

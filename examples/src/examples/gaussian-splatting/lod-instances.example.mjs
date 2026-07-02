@@ -1,9 +1,18 @@
-// @config DESCRIPTION Demonstrates a grid of Gaussian Splat instances using the LOD system for stable performance, with a custom data stream storing IDs to colorize splats via a color lookup texture.
-import { data } from 'examples/observer';
-import { deviceType, rootPath, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// Demonstrates a grid of Gaussian Splat instances using the LOD system for stable performance, with a
+// custom data stream storing IDs to colorize splats via a color lookup texture.
+//
+// @credit
+// title: PLAYBOT
+// author: Stephane Agullo
+// source: https://superspl.at/view?id=ee6d8bc4
+// license: CC BY 4.0 (http://creativecommons.org/licenses/by/4.0/)
 
-const { CameraControls } = await fileImport(`${rootPath}/static/scripts/esm/camera-controls.mjs`);
+import * as pc from 'playcanvas';
+import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -61,11 +70,11 @@ const GRID_SIZE = 20; // N x N grid
 const GRID_SPACING = 2; // spacing between instances in world units
 
 const assets = {
-    playbot: new pc.Asset('gsplat', 'gsplat', { url: `${rootPath}/static/assets/splats/playbot/lod-meta.json` }),
+    playbot: new pc.Asset('gsplat', 'gsplat', { url: './assets/splats/playbot/lod-meta.json' }),
     envatlas: new pc.Asset(
         'env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/helipad-env-atlas.png` },
+        { url: './assets/cubemaps/helipad-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
@@ -195,6 +204,15 @@ assetListLoader.load(() => {
         app.scene.gsplat.material.update();
     };
 
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
+
     // Initialize colorize setting (enabled by default)
     data.set('colorize', data.get('colorize') !== false);
     applyColorize(data.get('colorize'));
@@ -215,14 +233,13 @@ assetListLoader.load(() => {
     // create grid of instances centered around origin on XZ plane
     const half = (GRID_SIZE - 1) * 0.5;
 
-    // Create a grid of playbot instances using unified gsplat component
+    // Create a grid of playbot instances
     let componentIndex = 0;
     for (let z = 0; z < GRID_SIZE; z++) {
         for (let x = 0; x < GRID_SIZE; x++) {
             const entity = new pc.Entity(`playbot-${x}-${z}`);
             entity.addComponent('gsplat', {
-                asset: assets.playbot,
-                unified: true
+                asset: assets.playbot
             });
             const px = (x - half) * GRID_SPACING;
             const pz = (z - half) * GRID_SPACING;
@@ -288,5 +305,3 @@ assetListLoader.load(() => {
         data.set('data.stats.gsplats', app.stats.frame.gsplats.toLocaleString());
     });
 });
-
-export { app };

@@ -52,7 +52,12 @@ void main(void) {
     }
 
     // read color
-    vec4 clr = getColor();
+    #ifdef GSPLAT_SEPARATE_OPACITY
+        float opacity = getOpacity(); // must run before getColor() to cache color data
+        vec4 clr = vec4(getColor(), opacity);
+    #else
+        vec4 clr = getColor();
+    #endif
 
     #if GSPLAT_AA
         // apply AA compensation
@@ -75,8 +80,13 @@ void main(void) {
 
     modifySplatColor(modelCenter, clr);
 
-    // discard splats with alpha too low to contribute any visible pixel
-    if (255.0 * clr.w <= 1.0) {
+    // discard splats with alpha too low to contribute any visible pixel (threshold matches frag pass)
+    #if defined(SHADOW_PASS) || defined(PICK_PASS) || defined(PREPASS_PASS)
+        float alphaClipValue = alphaClip;
+    #else
+        float alphaClipValue = alphaClipForward;
+    #endif
+    if (clr.w <= alphaClipValue) {
         gl_Position = discardVec;
         return;
     }
@@ -100,7 +110,7 @@ void main(void) {
         clr.a *= (1.0 / 32.0) * colorRampIntensity;
         gaussianColor = vec4(rampColor, clr.a);
     #else
-        gaussianColor = vec4(prepareOutputFromGamma(max(clr.xyz, 0.0)), clr.w);
+        gaussianColor = vec4(prepareOutputFromGamma(max(clr.xyz, 0.0), -center.view.z), clr.w);
     #endif
 
     #ifndef DITHER_NONE

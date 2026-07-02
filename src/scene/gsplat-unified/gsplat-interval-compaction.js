@@ -1,16 +1,19 @@
-import { Debug } from '../../core/debug.js';
+import { Debug, DebugHelper } from '../../core/debug.js';
 import { Compute } from '../../platform/graphics/compute.js';
 import { Shader } from '../../platform/graphics/shader.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
-import { BindGroupFormat, BindStorageBufferFormat, BindTextureFormat, BindUniformBufferFormat } from '../../platform/graphics/bind-group-format.js';
+import { BindGroupFormat, BindStorageBufferFormat, BindUniformBufferFormat } from '../../platform/graphics/bind-group-format.js';
 import { UniformBufferFormat, UniformFormat } from '../../platform/graphics/uniform-buffer-format.js';
 import {
     BUFFERUSAGE_COPY_DST,
     BUFFERUSAGE_COPY_SRC,
-    SAMPLETYPE_UINT,
     SHADERLANGUAGE_WGSL,
     SHADERSTAGE_COMPUTE,
-    UNIFORMTYPE_UINT
+    UNIFORMTYPE_FLOAT,
+    UNIFORMTYPE_UINT,
+    UNIFORMTYPE_VEC3,
+    UNIFORMTYPE_VEC4,
+    UNIFORMTYPE_UVEC4
 } from '../../platform/graphics/constants.js';
 import { computeGsplatIntervalCullSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-interval-cull.js';
 import { computeGsplatIntervalScatterSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-interval-scatter.js';
@@ -20,15 +23,13 @@ import { GSplatResourceBase } from '../gsplat/gsplat-resource-base.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
+ * @import { GSplatFrustumCuller } from './gsplat-frustum-culler.js'
  * @import { GSplatWorldState } from './gsplat-world-state.js'
- * @import { Texture } from '../../platform/graphics/texture.js'
  */
 
 const WORKGROUP_SIZE = 256;
 
 const INDEX_COUNT = 6 * GSplatResourceBase.instanceSize;
-
-const SORT_THREADS_PER_WORKGROUP = 256;
 
 // 16 bytes per interval: { workBufferBase, splatCount, boundsIndex, pad }
 const INTERVAL_STRIDE = 4;
@@ -76,21 +77,14 @@ class GSplatIntervalCompaction {
     /**
      * World state version for which intervals were last uploaded. Avoids redundant
      * uploads when sortGpu is called repeatedly with the same world state.
-     *
-     * @type {number}
      */
     _uploadedVersion = -1;
 
-    /**
-     * Whether the current cull pass uses culling. Lazily created and recreated when
-     * switching between culling-enabled and culling-disabled modes.
-     *
-     * @type {boolean}
-     */
-    _cullingEnabled = false;
+    /** @type {Compute|null} */
+    _cullComputePerspective = null;
 
     /** @type {Compute|null} */
-    _cullCompute = null;
+    _cullComputeFisheye = null;
 
     /** @type {Compute|null} */
     _scatterCompute = null;
@@ -99,16 +93,16 @@ class GSplatIntervalCompaction {
     _writeIndirectArgsCompute = null;
 
     /** @type {BindGroupFormat|null} */
-    _cullBindGroupFormat = null;
+    _cullBindGroupFormatPerspective = null;
+
+    /** @type {BindGroupFormat|null} */
+    _cullBindGroupFormatFisheye = null;
 
     /** @type {BindGroupFormat|null} */
     _scatterBindGroupFormat = null;
 
     /** @type {BindGroupFormat|null} */
     _writeArgsBindGroupFormat = null;
-
-    /** @type {UniformBufferFormat|null} */
-    _cullUniformBufferFormat = null;
 
     /** @type {UniformBufferFormat|null} */
     _scatterUniformBufferFormat = null;
@@ -125,6 +119,8 @@ class GSplatIntervalCompaction {
 
         this.numSplatsBuffer = new StorageBuffer(device, 4, BUFFERUSAGE_COPY_SRC | BUFFERUSAGE_COPY_DST);
         this.sortElementCountBuffer = new StorageBuffer(device, 4, BUFFERUSAGE_COPY_SRC | BUFFERUSAGE_COPY_DST);
+        DebugHelper.setName(this.numSplatsBuffer, 'GsplatIntervalCompaction.numSplats');
+        DebugHelper.setName(this.sortElementCountBuffer, 'GsplatIntervalCompaction.sortElementCount');
         this.prefixSumKernel = new PrefixSumKernel(device);
 
         this._createUniformBufferFormats();
@@ -156,31 +152,25 @@ class GSplatIntervalCompaction {
         this._scatterBindGroupFormat = null;
         this._writeIndirectArgsCompute = null;
         this._writeArgsBindGroupFormat = null;
-        this._cullUniformBufferFormat = null;
         this._scatterUniformBufferFormat = null;
         this._writeArgsUniformBufferFormat = null;
     }
 
-    /**
-     * @private
-     */
+    /** @private */
     _destroyCullPass() {
-        this._cullCompute?.shader?.destroy();
-        this._cullBindGroupFormat?.destroy();
-        this._cullCompute = null;
-        this._cullBindGroupFormat = null;
+        this._cullComputePerspective?.shader?.destroy();
+        this._cullBindGroupFormatPerspective?.destroy();
+        this._cullComputePerspective = null;
+        this._cullBindGroupFormatPerspective = null;
+        this._cullComputeFisheye?.shader?.destroy();
+        this._cullBindGroupFormatFisheye?.destroy();
+        this._cullComputeFisheye = null;
+        this._cullBindGroupFormatFisheye = null;
     }
 
-    /**
-     * @private
-     */
+    /** @private */
     _createUniformBufferFormats() {
         const device = this.device;
-
-        this._cullUniformBufferFormat = new UniformBufferFormat(device, [
-            new UniformFormat('numIntervals', UNIFORMTYPE_UINT),
-            new UniformFormat('visWidth', UNIFORMTYPE_UINT)
-        ]);
 
         this._scatterUniformBufferFormat = new UniformBufferFormat(device, [
             new UniformFormat('numIntervals', UNIFORMTYPE_UINT),
@@ -192,61 +182,86 @@ class GSplatIntervalCompaction {
         this._writeArgsUniformBufferFormat = new UniformBufferFormat(device, [
             new UniformFormat('drawSlot', UNIFORMTYPE_UINT),
             new UniformFormat('indexCount', UNIFORMTYPE_UINT),
-            new UniformFormat('dispatchSlotOffset', UNIFORMTYPE_UINT),
-            new UniformFormat('totalSplats', UNIFORMTYPE_UINT)
+            new UniformFormat('dispatchSlotBase', UNIFORMTYPE_UINT),
+            new UniformFormat('totalSplats', UNIFORMTYPE_UINT),
+            new UniformFormat('sortIndirectInfo', UNIFORMTYPE_UVEC4)
         ]);
     }
 
     /**
-     * Ensures the cull compute pass exists for the requested culling mode.
+     * Creates a cull compute pass for the given mode.
      *
-     * @param {boolean} cullingEnabled - Whether frustum culling is active.
+     * @param {boolean} fisheye - Whether to create the fisheye (cone) variant.
+     * @returns {{ compute: Compute, bindGroupFormat: BindGroupFormat }} The created compute and bind group format.
      * @private
      */
-    _ensureCullPass(cullingEnabled) {
-        if (this._cullCompute && cullingEnabled === this._cullingEnabled) {
-            return;
-        }
-
-        this._destroyCullPass();
-        this._cullingEnabled = cullingEnabled;
-
+    _createCullPass(fisheye) {
         const device = this.device;
-        const suffix = cullingEnabled ? 'Culled' : '';
+        const suffix = fisheye ? 'Fisheye' : '';
 
-        const entries = [
+        const bindGroupFormat = new BindGroupFormat(device, [
             new BindUniformBufferFormat('uniforms', SHADERSTAGE_COMPUTE),
             new BindStorageBufferFormat('intervals', SHADERSTAGE_COMPUTE, true),
-            new BindStorageBufferFormat('countBuffer', SHADERSTAGE_COMPUTE, false)
-        ];
-        if (cullingEnabled) {
-            entries.push(new BindTextureFormat('nodeVisibilityTexture', SHADERSTAGE_COMPUTE, undefined, SAMPLETYPE_UINT, false));
-        }
-        this._cullBindGroupFormat = new BindGroupFormat(device, entries);
-
-        /** @type {Map<string, string>} */
-        const cdefines = new Map([
-            ['{WORKGROUP_SIZE}', WORKGROUP_SIZE.toString()]
+            new BindStorageBufferFormat('countBuffer', SHADERSTAGE_COMPUTE, false),
+            new BindStorageBufferFormat('boundsBuffer', SHADERSTAGE_COMPUTE, true),
+            new BindStorageBufferFormat('transformsBuffer', SHADERSTAGE_COMPUTE, true)
         ]);
-        if (cullingEnabled) {
-            cdefines.set('CULLING_ENABLED', '');
+
+        const cdefines = new Map([['{WORKGROUP_SIZE}', WORKGROUP_SIZE.toString()]]);
+        if (fisheye) {
+            cdefines.set('GSPLAT_FISHEYE', '');
         }
+
+        const uniformBufferFormat = fisheye ?
+            new UniformBufferFormat(device, [
+                new UniformFormat('cameraWorldPos', UNIFORMTYPE_VEC3),
+                new UniformFormat('maxTheta', UNIFORMTYPE_FLOAT),
+                new UniformFormat('cameraForward', UNIFORMTYPE_VEC3),
+                new UniformFormat('numIntervals', UNIFORMTYPE_UINT)
+            ]) :
+            new UniformBufferFormat(device, [
+                new UniformFormat('frustumPlanes', UNIFORMTYPE_VEC4, 6),
+                new UniformFormat('numIntervals', UNIFORMTYPE_UINT)
+            ]);
 
         const shader = new Shader(device, {
             name: `GSplatIntervalCull${suffix}`,
             shaderLanguage: SHADERLANGUAGE_WGSL,
             cshader: computeGsplatIntervalCullSource,
             cdefines: cdefines,
-            computeBindGroupFormat: this._cullBindGroupFormat,
-            computeUniformBufferFormats: { uniforms: this._cullUniformBufferFormat }
+            computeBindGroupFormat: bindGroupFormat,
+            computeUniformBufferFormats: { uniforms: uniformBufferFormat }
         });
 
-        this._cullCompute = new Compute(device, shader, `GSplatIntervalCull${suffix}`);
+        const compute = new Compute(device, shader, `GSplatIntervalCull${suffix}`);
+        return { compute, bindGroupFormat };
     }
 
     /**
+     * Returns the cached cull Compute for the given mode, lazily creating it on first use.
+     *
+     * @param {boolean} fisheye - Whether fisheye is active.
+     * @returns {Compute} The cached Compute instance.
      * @private
      */
+    _getCullCompute(fisheye) {
+        if (fisheye) {
+            if (!this._cullComputeFisheye) {
+                const { compute, bindGroupFormat } = this._createCullPass(true);
+                this._cullComputeFisheye = compute;
+                this._cullBindGroupFormatFisheye = bindGroupFormat;
+            }
+            return this._cullComputeFisheye;
+        }
+        if (!this._cullComputePerspective) {
+            const { compute, bindGroupFormat } = this._createCullPass(false);
+            this._cullComputePerspective = compute;
+            this._cullBindGroupFormatPerspective = bindGroupFormat;
+        }
+        return this._cullComputePerspective;
+    }
+
+    /** @private */
     _createScatterCompute() {
         const device = this.device;
 
@@ -273,9 +288,7 @@ class GSplatIntervalCompaction {
         this._scatterCompute = new Compute(device, shader, 'GSplatIntervalScatter');
     }
 
-    /**
-     * @private
-     */
+    /** @private */
     _createWriteIndirectArgsCompute() {
         const device = this.device;
 
@@ -290,7 +303,8 @@ class GSplatIntervalCompaction {
 
         const cdefines = new Map([
             ['{INSTANCE_SIZE}', GSplatResourceBase.instanceSize],
-            ['{SORT_THREADS_PER_WORKGROUP}', SORT_THREADS_PER_WORKGROUP]
+            ['{KEYGEN_THREADS_PER_WORKGROUP}', 256],
+            ['{MAX_WORKGROUPS_PER_DIM}', device.limits.maxComputeWorkgroupsPerDimension || 65535]
         ]);
 
         const shader = new Shader(device, {
@@ -317,6 +331,7 @@ class GSplatIntervalCompaction {
             this.compactedSplatIds?.destroy();
             this.allocatedCompactedCount = totalActiveSplats;
             this.compactedSplatIds = new StorageBuffer(this.device, totalActiveSplats * 4, BUFFERUSAGE_COPY_SRC);
+            DebugHelper.setName(this.compactedSplatIds, 'GsplatIntervalCompaction.compactedSplatIds');
         }
 
         const requiredCountSize = numIntervals + 1;
@@ -324,6 +339,7 @@ class GSplatIntervalCompaction {
             this.countBuffer?.destroy();
             this.allocatedCountBufferSize = requiredCountSize;
             this.countBuffer = new StorageBuffer(this.device, requiredCountSize * 4);
+            DebugHelper.setName(this.countBuffer, 'GsplatIntervalCompaction.count');
 
             if (this.prefixSumKernel) {
                 this.prefixSumKernel.destroyPasses();
@@ -351,6 +367,7 @@ class GSplatIntervalCompaction {
             this.intervalsBuffer?.destroy();
             this.allocatedIntervalCount = numIntervals;
             this.intervalsBuffer = new StorageBuffer(this.device, numIntervals * INTERVAL_STRIDE * 4, BUFFERUSAGE_COPY_DST);
+            DebugHelper.setName(this.intervalsBuffer, 'GsplatIntervalCompaction.intervals');
         }
 
         const data = new Uint32Array(numIntervals * INTERVAL_STRIDE);
@@ -384,28 +401,33 @@ class GSplatIntervalCompaction {
     /**
      * Runs the full interval compaction pipeline: cull+count, prefix sum, scatter.
      *
-     * @param {Texture|null} nodeVisibilityTexture - Bit-packed visibility texture (when culling).
+     * @param {GSplatFrustumCuller} frustumCuller - Frustum culler providing bounds/transforms storage buffers and frustum planes.
      * @param {number} numIntervals - Total number of intervals.
      * @param {number} totalActiveSplats - Total active splats across all intervals.
-     * @param {boolean} cullingEnabled - Whether frustum culling is active.
+     * @param {boolean} fisheyeEnabled - Whether fisheye cone culling should be used instead of frustum planes.
      */
-    dispatchCompact(nodeVisibilityTexture, numIntervals, totalActiveSplats, cullingEnabled) {
+    dispatchCompact(frustumCuller, numIntervals, totalActiveSplats, fisheyeEnabled) {
         if (numIntervals === 0) return;
 
         this._ensureCapacity(numIntervals, totalActiveSplats);
-        this._ensureCullPass(cullingEnabled);
+
+        const cullCompute = this._getCullCompute(fisheyeEnabled);
 
         // --- Pass 1: Interval cull + count ---
-        const cullCompute = this._cullCompute;
-
         cullCompute.setParameter('intervals', this.intervalsBuffer);
         cullCompute.setParameter('countBuffer', this.countBuffer);
-        if (cullingEnabled) {
-            cullCompute.setParameter('nodeVisibilityTexture', nodeVisibilityTexture);
+        cullCompute.setParameter('boundsBuffer', frustumCuller.boundsBuffer);
+        cullCompute.setParameter('transformsBuffer', frustumCuller.transformsBuffer);
+
+        if (fisheyeEnabled) {
+            cullCompute.setParameter('cameraWorldPos', frustumCuller.fisheyeCameraPos);
+            cullCompute.setParameter('maxTheta', frustumCuller.fisheyeMaxTheta);
+            cullCompute.setParameter('cameraForward', frustumCuller.fisheyeCameraForward);
+        } else {
+            cullCompute.setParameter('frustumPlanes[0]', frustumCuller.frustumPlanes);
         }
 
         cullCompute.setParameter('numIntervals', numIntervals);
-        cullCompute.setParameter('visWidth', cullingEnabled ? nodeVisibilityTexture.width : 0);
 
         const cullWorkgroups = Math.ceil(numIntervals / WORKGROUP_SIZE);
         cullCompute.setupDispatch(cullWorkgroups);
@@ -436,10 +458,15 @@ class GSplatIntervalCompaction {
      * Writes indirect draw and dispatch arguments from the prefix sum visible count.
      *
      * @param {number} drawSlot - Slot index in the device's indirect draw buffer.
-     * @param {number} dispatchSlot - Slot index in the device's indirect dispatch buffer.
+     * @param {number} dispatchSlotBase - Base slot index in the device's indirect
+     * dispatch buffer. Key-gen args go to `dispatchSlotBase`; sort args to
+     * `dispatchSlotBase + 1` onwards (as described by `sortIndirectInfo`).
      * @param {number} numIntervals - Total interval count (index into prefix sum for visible count).
+     * @param {Uint32Array} sortIndirectInfo - Sorter-owned 4-element Uint32 array
+     * returned by `ComputeRadixSort.prepareIndirect()`, used as a `vec4<u32>`
+     * uniform by the shader to drive the `writeSortIndirectArgs` helper.
      */
-    writeIndirectArgs(drawSlot, dispatchSlot, numIntervals) {
+    writeIndirectArgs(drawSlot, dispatchSlotBase, numIntervals, sortIndirectInfo) {
         const compute = this._writeIndirectArgsCompute;
 
         compute.setParameter('prefixSumBuffer', this.countBuffer);
@@ -450,8 +477,9 @@ class GSplatIntervalCompaction {
 
         compute.setParameter('drawSlot', drawSlot);
         compute.setParameter('indexCount', INDEX_COUNT);
-        compute.setParameter('dispatchSlotOffset', dispatchSlot * 3);
+        compute.setParameter('dispatchSlotBase', dispatchSlotBase);
         compute.setParameter('totalSplats', numIntervals);
+        compute.setParameter('sortIndirectInfo', sortIndirectInfo);
 
         compute.setupDispatch(1);
         this.device.computeDispatch([compute], 'GSplatIntervalWriteIndirectArgs');

@@ -1,11 +1,13 @@
-// @config DESCRIPTION This example demonstrates reveal effects for gaussian splats.
-import { data } from 'examples/observer';
-import { deviceType, rootPath, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// This example demonstrates reveal effects for gaussian splats.
 
-const { GsplatRevealRadial } = await fileImport(`${rootPath}/static/scripts/esm/gsplat/reveal-radial.mjs`);
-const { GsplatRevealRain } = await fileImport(`${rootPath}/static/scripts/esm/gsplat/reveal-rain.mjs`);
-const { GsplatRevealGridEruption } = await fileImport(`${rootPath}/static/scripts/esm/gsplat/reveal-grid-eruption.mjs`);
+import * as pc from 'playcanvas';
+import { GsplatRevealGridEruption } from 'playcanvas/scripts/esm/gsplat/reveal-grid-eruption.mjs';
+import { GsplatRevealRadial } from 'playcanvas/scripts/esm/gsplat/reveal-radial.mjs';
+import { GsplatRevealRain } from 'playcanvas/scripts/esm/gsplat/reveal-rain.mjs';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -49,8 +51,8 @@ app.on('destroy', () => {
 });
 
 const assets = {
-    hotel: new pc.Asset('gsplat', 'gsplat', { url: `${rootPath}/static/assets/splats/hotel-culpture.compressed.ply` }),
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` })
+    hotel: new pc.Asset('gsplat', 'gsplat', { url: './assets/splats/hotel-culpture.compressed.ply' }),
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' })
 };
 
 const assetListLoader = new pc.AssetListLoader(Object.values(assets), app.assets);
@@ -60,14 +62,22 @@ assetListLoader.load(() => {
     // Array of available effects (extensible for future effects)
     const effects = ['radial', 'rain', 'grid'];
 
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
+
     // Default to radial effect
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
     data.set('effect', 'radial');
 
-    // Create hotel gsplat with unified set to true
+    // Create hotel gsplat
     const hotel = new pc.Entity('hotel');
     hotel.addComponent('gsplat', {
-        asset: assets.hotel,
-        unified: true
+        asset: assets.hotel
     });
     hotel.setLocalEulerAngles(180, 0, 0);
     app.root.addChild(hotel);
@@ -243,5 +253,3 @@ assetListLoader.load(() => {
         }
     });
 });
-
-export { app };

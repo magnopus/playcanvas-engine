@@ -1,34 +1,37 @@
 // Read functions for compact work buffer format (20 bytes/splat):
 // - dataColor: R32U (4B): RGB color (11+11+10 bits, range [0, 4])
-// - dataTransformA: RGBA32U (16B): center.xyz as f32 + half-angle quaternion (11+11+10 bits)
-// - dataTransformB: R32U (4B): scale.xyz as 3x8-bit log-encoded + alpha (8 bits)
+// - dataTransformA: RGBA32U (16B): center.xyz as f32 + scale.xyz (3x8-bit log-encoded) + alpha (8 bits)
+// - dataTransformB: R32U (4B): half-angle quaternion (11+11+10 bits)
 export default /* glsl */`
+// Required call order: getCenter() first, then getOpacity() for early culling (no extra loads),
+// then getColor() (returns RGB only). getRotation(), getScale() can follow in any order.
 uvec4 cachedTransformA;
-uint cachedTransformB;
 
 vec3 getCenter() {
     cachedTransformA = loadDataTransformA();
-    cachedTransformB = loadDataTransformB().x;
     return vec3(uintBitsToFloat(cachedTransformA.r), uintBitsToFloat(cachedTransformA.g), uintBitsToFloat(cachedTransformA.b));
 }
 
-vec4 getColor() {
-    uint packed = loadDataColor().x;
-    float r = float(packed & 0x7FFu) * (4.0 / 2047.0);
-    float g = float((packed >> 11u) & 0x7FFu) * (4.0 / 2047.0);
-    float b = float((packed >> 22u) & 0x3FFu) * (4.0 / 1023.0);
-    float a = float(cachedTransformB >> 24u) / 255.0;
-    return vec4(r, g, b, a);
+float getOpacity() {
+    return float(cachedTransformA.a >> 24u) / 255.0;
+}
+
+vec3 getColor() {
+    uint data = loadDataColor().x;
+    float r = float(data & 0x7FFu) * (4.0 / 2047.0);
+    float g = float((data >> 11u) & 0x7FFu) * (4.0 / 2047.0);
+    float b = float((data >> 22u) & 0x3FFu) * (4.0 / 1023.0);
+    return vec3(r, g, b);
 }
 
 vec4 getRotation() {
-    uint packed = cachedTransformA.a;
+    uint data = loadDataTransformB().x;
 
     // dequantize half-angle projected quaternion: 11+11+10 bits to [-1, 1]
     vec3 p = vec3(
-        float(packed & 0x7FFu) / 2047.0 * 2.0 - 1.0,
-        float((packed >> 11u) & 0x7FFu) / 2047.0 * 2.0 - 1.0,
-        float((packed >> 22u) & 0x3FFu) / 1023.0 * 2.0 - 1.0
+        float(data & 0x7FFu) / 2047.0 * 2.0 - 1.0,
+        float((data >> 11u) & 0x7FFu) / 2047.0 * 2.0 - 1.0,
+        float((data >> 22u) & 0x3FFu) / 1023.0 * 2.0 - 1.0
     );
 
     // inverse half-angle transform, returns (w, x, y, z) format
@@ -37,10 +40,10 @@ vec4 getRotation() {
 }
 
 vec3 getScale() {
-    uint packed = cachedTransformB;
-    float sx = float(packed & 0xFFu);
-    float sy = float((packed >> 8u) & 0xFFu);
-    float sz = float((packed >> 16u) & 0xFFu);
+    uint data = cachedTransformA.a;
+    float sx = float(data & 0xFFu);
+    float sy = float((data >> 8u) & 0xFFu);
+    float sz = float((data >> 16u) & 0xFFu);
 
     // decode log-encoded scale: 0 = true zero, 1-255 maps linearly in log-space to e^-12..e^9
     const float logRange = 21.0 / 255.0;

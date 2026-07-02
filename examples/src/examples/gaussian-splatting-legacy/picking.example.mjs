@@ -1,7 +1,13 @@
-// @config HIDDEN
-// @config DESCRIPTION This example shows how to use the Picker to pick GSplat objects in the scene using legacy (non-unified) mode.
-import { deviceType, rootPath } from 'examples/utils';
+// @config
+//
+// This example shows how to use the Picker to pick GSplat objects in the scene using legacy
+// (non-unified) mode.
+//
+// @flag HIDDEN
+
 import * as pc from 'playcanvas';
+
+import { deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -44,12 +50,12 @@ app.on('destroy', () => {
 });
 
 const assets = {
-    logo: new pc.Asset('gsplat', 'gsplat', { url: `${rootPath}/static/assets/splats/playcanvas-logo/meta.json` }),
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` }),
+    logo: new pc.Asset('gsplat', 'gsplat', { url: './assets/splats/playcanvas-logo/meta.json' }),
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' }),
     helipad: new pc.Asset(
         'helipad-env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/morning-env-atlas.png` },
+        { url: './assets/cubemaps/morning-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
@@ -71,7 +77,8 @@ assetListLoader.load(() => {
         const splat = new pc.Entity(`splat-${i}`);
         splat.addComponent('gsplat', {
             asset: assets.logo,
-            castShadows: false
+            castShadows: false,
+            unified: false
         });
 
         app.root.addChild(splat);
@@ -162,15 +169,20 @@ assetListLoader.load(() => {
         const pickerScale = 0.25;
         picker.resize(canvas.clientWidth * pickerScale, canvas.clientHeight * pickerScale);
 
-        // render the ID texture
+        // render the ID texture — scissor to a single pixel around the click so only that
+        // fragment is rasterized into the pick buffer
         const worldLayer = app.scene.layers.getLayerByName('World');
-        picker.prepare(camera.camera, app.scene, [worldLayer]);
+        const px = x * pickerScale;
+        const py = y * pickerScale;
+        picker.prepare(camera.camera, app.scene, [worldLayer], {
+            x: px, y: py, width: 1, height: 1
+        });
 
         // get the world position at the clicked point
-        picker.getWorldPointAsync(x * pickerScale, y * pickerScale).then((worldPoint) => {
+        picker.getWorldPointAsync(px, py).then((worldPoint) => {
             if (worldPoint) {
                 // get the meshInstance of the picked object
-                picker.getSelectionAsync(x * pickerScale, y * pickerScale, 1, 1).then((meshInstances) => {
+                picker.getSelectionAsync(px, py, 1, 1).then((meshInstances) => {
 
                     if (meshInstances.length > 0) {
                         const meshInstance = meshInstances[0];
@@ -216,5 +228,3 @@ assetListLoader.load(() => {
         handlePointer(touch.x, touch.y);
     });
 });
-
-export { app };

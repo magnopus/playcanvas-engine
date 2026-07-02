@@ -14,10 +14,11 @@ import {
 import {
     LIGHTSHAPE_PUNCTUAL,
     LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI, LIGHTTYPE_SPOT,
-    SHADER_PICK,
+    SHADER_PICK, SHADER_NORMAL_PICK,
     SPRITE_RENDERMODE_SLICED, SPRITE_RENDERMODE_TILED, shadowTypeInfo, SHADER_PREPASS,
     lightTypeNames, lightShapeNames, spriteRenderModeNames, fresnelNames, blendNames, lightFalloffNames,
     cubemaProjectionNames, specularOcclusionNames, reflectionSrcNames, ambientSrcNames,
+    ditherNames,
     REFLECTIONSRC_NONE
 } from '../../constants.js';
 import { ChunkUtils } from '../chunk-utils.js';
@@ -48,8 +49,6 @@ const builtinAttributes = {
 class LitShader {
     /**
      * Shader code representing varyings.
-     *
-     * @type {string}
      */
     varyingsCode = '';
 
@@ -179,6 +178,9 @@ class LitShader {
       (options.clusteredLightingEnabled && !this.shadowPass) ||
       options.useClearCoatNormals;
         this.needsNormal = this.needsNormal && !this.shadowPass;
+        // the normal-pick pass writes the world-space surface normal (dNormalW) to an MRT target,
+        // so the frontend must compute it even though this pass does no lighting
+        this.needsNormal = this.needsNormal || options.pass === SHADER_NORMAL_PICK;
         this.needsSceneColor = options.useDynamicRefraction;
         this.needsScreenSize = options.useDynamicRefraction;
         this.needsTransforms = options.useDynamicRefraction;
@@ -612,6 +614,12 @@ class LitShader {
         this._setupLightingDefines(hasAreaLights, options.clusteredLightingEnabled);
     }
 
+    preparePrepassPass() {
+        const { options } = this;
+        this.fDefineSet(options.alphaTest, 'LIT_ALPHA_TEST');
+        this.fDefineSet(true, 'STD_OPACITY_DITHER', ditherNames[options.opacityShadowDither]);
+    }
+
     prepareShadowPass() {
         const { options } = this;
         const lightType = this.shaderPassInfo.lightType;
@@ -648,8 +656,10 @@ class LitShader {
         this.includes.set('frontendDeclPS', frontendDecl ?? '');
         this.includes.set('frontendCodePS', frontendCode ?? '');
 
-        if (options.pass === SHADER_PICK || options.pass === SHADER_PREPASS) {
+        if (options.pass === SHADER_PICK) {
             // nothing to prepare currently
+        } else if (options.pass === SHADER_PREPASS) {
+            this.preparePrepassPass();
         } else if (this.shadowPass) {
             this.prepareShadowPass();
         } else {

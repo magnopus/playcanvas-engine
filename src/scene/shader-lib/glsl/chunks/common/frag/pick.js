@@ -16,9 +16,28 @@ vec4 encodePickOutput(uint id) {
 
 #ifdef DEPTH_PICK_PASS
     #include "floatAsUintPS"
-
+    #ifndef CAMERAPLANES
+        #define CAMERAPLANES
+        uniform vec4 camera_params; // x: 1/far, y: far, z: near, w: isOrtho
+    #endif
     vec4 getPickDepth() {
-        return float2uint(gl_FragCoord.z);
+        float linearDepth;
+        if (camera_params.w > 0.5) {
+            linearDepth = gl_FragCoord.z;
+        } else {
+            float viewDist = 1.0 / gl_FragCoord.w;
+            linearDepth = (viewDist - camera_params.z) / (camera_params.y - camera_params.z);
+        }
+        return float2uint(linearDepth);
+    }
+#endif
+
+#ifdef NORMAL_PICK_PASS
+    // Encode a world-space surface normal ([-1, 1]) into RGBA8 ([0, 1]). Alpha is set to 1 as a
+    // hit marker, though readback should gate on the depth attachment (the buffer is cleared to
+    // white, so alpha alone can't distinguish a hit from the cleared background).
+    vec4 getPickNormal(vec3 worldNormal) {
+        return vec4(normalize(worldNormal) * 0.5 + 0.5, 1.0);
     }
 #endif
 `;

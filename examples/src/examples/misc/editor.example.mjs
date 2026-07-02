@@ -1,17 +1,18 @@
-// @config DESCRIPTION <div style='text-align:center'><div>Translate (1), Rotate (2), Scale (3)</div><div>World/Local (X)</div><div>Perspective (P), Orthographic (O)</div><div>Snap (Hold Shift), Non-Uniform (Hold Ctrl)</div></div>
-import { data } from 'examples/observer';
-import { deviceType, rootPath, localImport, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// `1` Translate · `2` Rotate · `3` Scale · `X` Toggle world/local · `P` Perspective · `O` Orthographic · Hold `Shift` Snap · Hold `Ctrl` Non-uniform scale
 
-const { CameraControls } = await fileImport(`${rootPath}/static/scripts/esm/camera-controls.mjs`);
-const { Grid } = await fileImport(`${rootPath}/static/scripts/esm/grid.mjs`);
+import * as pc from 'playcanvas';
+import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
+import { Grid } from 'playcanvas/scripts/esm/grid.mjs';
+
+import { data, deviceType } from 'examples/context';
+
+import { GizmoHandler } from './gizmo-handler.mjs';
+import { Selector } from './selector.mjs';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
-
-// class for handling gizmo
-const { GizmoHandler } = await localImport('gizmo-handler.mjs');
-const { Selector } = await localImport('selector.mjs');
 
 const gfxOptions = {
     deviceTypes: [deviceType]
@@ -40,7 +41,7 @@ app.setCanvasResolution(pc.RESOLUTION_AUTO);
 
 // load assets
 const assets = {
-    font: new pc.Asset('font', 'font', { url: `${rootPath}/static/assets/fonts/courier.json` })
+    font: new pc.Asset('font', 'font', { url: './assets/fonts/courier.json' })
 };
 /**
  * @param {pc.Asset[] | number[]} assetList - The asset list.
@@ -183,6 +184,9 @@ setGizmoControls();
 // view cube
 const viewCube = new pc.ViewCube(new pc.Vec4(0, 1, 1, 0));
 viewCube.dom.style.margin = '20px';
+data.set('picking', {
+    showAxes: false
+});
 data.set('viewCube', {
     colorX: Object.values(viewCube.colorX),
     colorY: Object.values(viewCube.colorY),
@@ -206,6 +210,21 @@ app.on('prerender', () => {
     viewCube.update(camera.getWorldTransform());
 });
 
+// pick hit visualization — three orthogonal axes anchored at the clicked surface point.
+// PlayCanvas is Y-up, so the derived surface normal is the local +Y (green) axis.
+// Tangent and bitangent become local +X (red) and local +Z (blue) respectively.
+/** @type {{ point: pc.Vec3 | null, normal: pc.Vec3 }} */
+const pickHit = {
+    point: null,
+    normal: new pc.Vec3()
+};
+const pickTangent = new pc.Vec3();
+const pickBitangent = new pc.Vec3();
+const pickTip = new pc.Vec3();
+const worldUp = new pc.Vec3(0, 1, 0);
+const worldRight = new pc.Vec3(1, 0, 0);
+const AXIS_LEN = 1.0;
+
 // selector
 const layers = app.scene.layers;
 const selector = new Selector(app, camera.camera, [layers.getLayerByName('World')]);
@@ -224,6 +243,26 @@ selector.on('deselect', () => {
     }
     gizmoHandler.clear();
     outlineRenderer.removeAllEntities();
+    pickHit.point = null;
+});
+selector.on('pick', (/** @type {pc.Vec3} */ point, /** @type {pc.Vec3} */ normal) => {
+    pickHit.point = (pickHit.point ?? new pc.Vec3()).copy(point);
+    pickHit.normal.copy(normal);
+});
+app.on('prerender', () => {
+    if (!pickHit.point || !data.get('picking.showAxes')) return;
+    const p = pickHit.point;
+    const n = pickHit.normal;
+
+    // choose a reference vector not (anti)parallel to the normal, then build a right-handed
+    // orthonormal basis with X = tangent, Y = normal, Z = bitangent = cross(X, Y)
+    const ref = Math.abs(n.y) < 0.99 ? worldUp : worldRight;
+    pickTangent.cross(ref, n).normalize();
+    pickBitangent.cross(pickTangent, n).normalize();
+
+    app.drawLine(p, pickTip.copy(pickTangent).mulScalar(AXIS_LEN).add(p), pc.Color.RED);
+    app.drawLine(p, pickTip.copy(n).mulScalar(AXIS_LEN).add(p), pc.Color.GREEN);
+    app.drawLine(p, pickTip.copy(pickBitangent).mulScalar(AXIS_LEN).add(p), pc.Color.BLUE);
 });
 
 // ensure canvas is resized when window changes size + keep gizmo size consistent to canvas size
@@ -374,5 +413,3 @@ selector.fire('select', box, true);
 
 // focus canvas
 window.focus();
-
-export { app };

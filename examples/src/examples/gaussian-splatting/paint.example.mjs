@@ -1,7 +1,18 @@
-// @config DESCRIPTION <span style="color:yellow"><b>Controls:</b> Right Mouse Button - paint | Left Mouse Button - orbit </span><br>3D painting on gaussian splats using GSplatProcessor.
-import { data } from 'examples/observer';
-import { deviceType, rootPath } from 'examples/utils';
+// @config
+//
+// 3D painting on gaussian splats using GSplatProcessor.
+//
+// `RMB` Paint · `LMB` Orbit
+//
+// @credit
+// title: SA3D_R&D_XP47
+// author: Stephane Agullo
+// source: https://superspl.at/view?id=cdcec084
+// license: CC BY 4.0 (http://creativecommons.org/licenses/by/4.0/)
+
 import * as pc from 'playcanvas';
+
+import { data, deviceType } from 'examples/context';
 
 // Shader options for GSplatProcessor - paints splats inside brush sphere
 const shaderOptions = {
@@ -129,14 +140,23 @@ data.set('paintIntensity', 0.5);
 data.set('brushSize', 0.15);
 
 const assets = {
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` }),
-    biker: new pc.Asset('biker', 'gsplat', { url: `${rootPath}/static/assets/splats/biker.compressed.ply` }),
-    apartment: new pc.Asset('apartment', 'gsplat', { url: `${rootPath}/static/assets/splats/apartment.sog` })
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' }),
+    biker: new pc.Asset('biker', 'gsplat', { url: './assets/splats/biker.compressed.ply' }),
+    apartment: new pc.Asset('apartment', 'gsplat', { url: './assets/splats/apartment.sog' })
 };
 
 const assetListLoader = new pc.AssetListLoader(Object.values(assets), app.assets);
 assetListLoader.load(() => {
     app.start();
+
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
 
     // Store all paintable entities
     const paintables = [];
@@ -144,7 +164,7 @@ assetListLoader.load(() => {
     // Creates a paintable gsplat entity with position, rotation, scale, and sets up processing
     const createPaintableSplat = (name, asset, position, rotation, scale) => {
         const entity = new pc.Entity(name);
-        const gsplatComponent = entity.addComponent('gsplat', { asset, unified: true });
+        const gsplatComponent = entity.addComponent('gsplat', { asset });
         entity.setLocalPosition(...position);
         entity.setLocalEulerAngles(...rotation);
         entity.setLocalScale(...scale);
@@ -223,9 +243,6 @@ assetListLoader.load(() => {
     // Paint state
     let isPainting = false;
 
-    // Track if picker needs re-preparation (after camera moves)
-    let pickerDirty = true;
-
     // Disable context menu for RMB
     app.mouse.disableContextMenu();
 
@@ -250,13 +267,13 @@ assetListLoader.load(() => {
     const picker = new pc.Picker(app, 1, 1, true);
     const worldLayer = app.scene.layers.getLayerByName('World');
 
-    // Prepare picker (re-prepare when camera moves)
-    const preparePicker = () => {
-        if (pickerDirty) {
-            picker.resize(canvas.clientWidth, canvas.clientHeight);
-            picker.prepare(camera.camera, app.scene, [worldLayer]);
-            pickerDirty = false;
-        }
+    // Prepare picker for a single pixel at the brush position. Scissoring to 1x1 keeps the
+    // pick render trivially small even when called every mousemove during a paint drag.
+    const preparePicker = (x, y) => {
+        picker.resize(canvas.clientWidth, canvas.clientHeight);
+        picker.prepare(camera.camera, app.scene, [worldLayer], {
+            x: x, y: y, width: 1, height: 1
+        });
     };
 
     // Pending paint requests - processed in update loop for consistent frame timing
@@ -290,8 +307,8 @@ assetListLoader.load(() => {
 
     // Request paint at a specific screen position - queues for processing in update loop
     const paintAt = (x, y) => {
-        // Prepare picker if needed (after camera moved)
-        preparePicker();
+        // Re-prepare each call so the 1x1 scissor follows the brush
+        preparePicker(x, y);
 
         // Get world position for the paint brush
         picker.getWorldPointAsync(x, y).then((worldPoint) => {
@@ -308,7 +325,6 @@ assetListLoader.load(() => {
     app.mouse.on(pc.EVENT_MOUSEDOWN, (e) => {
         if (e.button === pc.MOUSEBUTTON_RIGHT) {
             isPainting = true;
-            pickerDirty = true;
             orbitInput.enabled = false;
             orbitInput.panButtonDown = false; // Cancel pan that orbit-camera started
             paintAt(e.x, e.y);
@@ -339,5 +355,3 @@ assetListLoader.load(() => {
         picker.destroy();
     });
 });
-
-export { app };

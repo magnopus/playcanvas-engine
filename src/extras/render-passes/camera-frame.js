@@ -3,7 +3,7 @@ import { Color } from '../../core/math/color.js';
 import { math } from '../../core/math/math.js';
 import { PIXELFORMAT_111110F, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F } from '../../platform/graphics/constants.js';
 import { SSAOTYPE_NONE } from './constants.js';
-import { CameraFrameOptions, RenderPassCameraFrame } from './render-pass-camera-frame.js';
+import { CameraFrameOptions, FramePassCameraFrame } from './frame-pass-camera-frame.js';
 
 /**
  * @import { AppBase } from '../../framework/app-base.js'
@@ -102,15 +102,28 @@ import { CameraFrameOptions, RenderPassCameraFrame } from './render-pass-camera-
 /**
  * @typedef {Object} ColorLUT
  * Properties related to the color lookup table (LUT) effect, a postprocessing technique used to
- * apply a color transformation to the image.
- * @property {Texture|null} texture - The LUT texture. This must be a 2D "horizontal strip" texture
- * representing an unwrapped 3D LUT (the same format used by Unreal Engine). For an N×N×N 3D LUT,
- * the texture dimensions are N² × N pixels (width × height). For example, a 16×16×16 LUT uses a
- * 256×16 texture, and a 32×32×32 LUT uses a 1024×32 texture. The texture contains N horizontal
- * slices representing the blue channel, with each slice mapping red to the X-axis and green to
- * the Y-axis. Note that HALD LUTs (e.g. from ImageMagick) and Unity LUTs use different layouts
- * and are not compatible. Defaults to null.
- * @property {number} intensity - The intensity of the color LUT effect. Defaults to 1.
+ * apply a color transformation to the image. Two LUT slots are supported, which makes it easy to
+ * crossfade between two graded looks.
+ * @property {Texture|null} texture - The primary LUT texture. This must be a 256×16 2D "horizontal
+ * strip" texture representing an unwrapped 16×16×16 3D LUT in Unreal Engine layout: 16 horizontal
+ * slices along the blue axis, with each slice mapping red to the X-axis and green to the Y-axis.
+ * Note that HALD LUTs (e.g. from ImageMagick) and Unity LUTs use different layouts and are not
+ * compatible. The texture must be loaded with `srgb: true` (LUTs are authored in sRGB display
+ * space — the Unreal / Photoshop workflow stores sRGB-encoded values indexed by sRGB-encoded
+ * coordinates), `mipmaps: false` (sampled at LOD 0 only), and `minFilter: FILTER_LINEAR` /
+ * `magFilter: FILTER_LINEAR` (bilinear filtering between LUT entries is required to avoid
+ * visible banding). The engine emits a debug-build warning if any of these are misconfigured.
+ * Defaults to null.
+ * @property {number} intensity - The strength of the primary LUT, blended against the original
+ * color, 0-1 range. Defaults to 1.
+ * @property {Texture|null} texture2 - The optional secondary LUT texture, same format and
+ * requirements as `texture`. When set, both LUTs are sampled and the two graded results are
+ * crossfaded according to `blend`. Defaults to null.
+ * @property {number} intensity2 - The strength of the secondary LUT, blended against the original
+ * color, 0-1 range. Only used when `texture2` is set. Defaults to 1.
+ * @property {number} blend - Crossfade between the two graded results, 0-1 range. 0 shows only the
+ * primary LUT, 1 shows only the secondary LUT, intermediate values produce a linear-space mix.
+ * Only used when `texture2` is set. Defaults to 0.
  */
 
 /**
@@ -289,7 +302,10 @@ class CameraFrame {
      */
     colorLUT = {
         texture: null,
-        intensity: 1
+        intensity: 1,
+        texture2: null,
+        intensity2: 1,
+        blend: 0
     };
 
     /**
@@ -364,7 +380,7 @@ class CameraFrame {
     options = new CameraFrameOptions();
 
     /**
-     * @type {RenderPassCameraFrame|null}
+     * @type {FramePassCameraFrame|null}
      * @private
      */
     renderPassCamera = null;
@@ -402,15 +418,15 @@ class CameraFrame {
 
     enable() {
         this.renderPassCamera = this.createRenderPass();
-        this.cameraComponent.renderPasses = [this.renderPassCamera];
+        this.cameraComponent.framePasses = [this.renderPassCamera];
     }
 
     disable() {
         const cameraComponent = this.cameraComponent;
-        cameraComponent.renderPasses?.forEach((renderPass) => {
+        cameraComponent.framePasses?.forEach((renderPass) => {
             renderPass.destroy();
         });
-        cameraComponent.renderPasses = [];
+        cameraComponent.framePasses = [];
         cameraComponent.rendering = null;
 
         cameraComponent.jitter = 0;
@@ -422,13 +438,13 @@ class CameraFrame {
     }
 
     /**
-     * Creates a render pass for the camera frame. Override this method to utilize a custom render
-     * pass, typically one that extends {@link RenderPassCameraFrame}.
+     * Creates a frame pass for the camera frame. Override this method to utilize a custom frame
+     * pass, typically one that extends {@link FramePassCameraFrame}.
      *
-     * @returns {RenderPassCameraFrame} - The render pass.
+     * @returns {FramePassCameraFrame} - The frame pass.
      */
     createRenderPass() {
-        return new RenderPassCameraFrame(this.app, this, this.cameraComponent, this.options);
+        return new FramePassCameraFrame(this.app, this, this.cameraComponent, this.options);
     }
 
     /**
@@ -527,6 +543,9 @@ class CameraFrame {
 
         composePass.colorLUT = this.colorLUT.texture;
         composePass.colorLUTIntensity = this.colorLUT.intensity;
+        composePass.colorLUT2 = this.colorLUT.texture2;
+        composePass.colorLUT2Intensity = this.colorLUT.intensity2;
+        composePass.colorLUTBlend = this.colorLUT.blend;
 
         composePass.vignetteEnabled = vignette.intensity > 0;
         if (composePass.vignetteEnabled) {
