@@ -5,7 +5,7 @@ import * as pc from 'playcanvas';
  * @returns {JSX.Element} The returned JSX Element.
  */
 export const controls = ({ observer, ReactPCUI, React, jsx, fragment }) => {
-    const { BindingTwoWay, LabelGroup, Panel, SliderInput, SelectInput, ColorPicker } = ReactPCUI;
+    const { BindingTwoWay, BooleanInput, LabelGroup, Panel, SliderInput, SelectInput, ColorPicker } = ReactPCUI;
     const { useState } = React;
 
     const [type, setType] = useState('translate');
@@ -213,6 +213,19 @@ export const controls = ({ observer, ReactPCUI, React, jsx, fragment }) => {
                     link: { observer, path: 'viewCube.lineLength' },
                     min: 10,
                     max: 200
+                })
+            )
+        ),
+        jsx(
+            Panel,
+            { headerText: 'Picking' },
+            jsx(
+                LabelGroup,
+                { text: 'Show Pick Point' },
+                jsx(BooleanInput, {
+                    type: 'toggle',
+                    binding: new BindingTwoWay(),
+                    link: { observer, path: 'picking.showAxes' }
                 })
             )
         )
