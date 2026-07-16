@@ -141,13 +141,12 @@ assetListLoader.load(() => {
     const preset = pc.platform.mobile ? 'mobile' : 'desktop';
     const presetData = LOD_PRESETS[preset];
 
-    app.scene.gsplat.lodRangeMin = presetData.range[0];
-    app.scene.gsplat.lodRangeMax = presetData.range[1];
-
     // Create skatepark entity
     const skatepark = new pc.Entity('Skatepark');
     skatepark.addComponent('gsplat', {
-        asset: assets.skatepark
+        asset: assets.skatepark,
+        lodRangeMin: presetData.range[0],
+        lodRangeMax: presetData.range[1]
     });
     skatepark.setLocalPosition(0, 0, 0);
     const [rotX, rotY, rotZ] = /** @type {[number, number, number]} */ (config.eulerAngles);

@@ -62,12 +62,21 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     _loadQueue = [];
 
     /**
-     * Map tracking retry attempts per URL.
+     * Map tracking retry attempts per URL, for genuine load errors only.
      *
      * @type {Map<string, number>}
      * @private
      */
     _retryCount = new Map();
+
+    /**
+     * Set of URLs whose load has genuinely, permanently failed: a real error (not a
+     * cancellation) was reported and retries are exhausted.
+     *
+     * @type {Set<string>}
+     * @private
+     */
+    _failed = new Set();
 
     /**
      * Whether this asset loader has been destroyed.
@@ -133,6 +142,7 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
         this._loadQueue.length = 0;
         this._currentlyLoading.clear();
         this._retryCount.clear();
+        this._failed.clear();
     }
 
     /**
@@ -157,11 +167,6 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
         Debug.assert(!!url);
         // magnopus patched
         const { key } = this._normalizeUrl(url);
-
-<<<<<<< Updated upstream
-        // Skip if already loading or loaded
-        const asset = this._urlToAsset.get(key);
-=======
         const asset = this._urlToAsset.get(key);
 
         // A previous attempt resolved successfully but produced no usable resource - most
@@ -174,7 +179,6 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
         }
 
         // Skip if already loading or loaded
->>>>>>> Stashed changes
         if (asset?.loaded || this._currentlyLoading.has(key)) {
             return;
         }
@@ -284,8 +288,14 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
             asset.loaded = false;
             asset.loading = false;
 
-            // Retry loading
+            // Retry loading. Re-attach only the 'error' listener - it was consumed by the
+            // once() that just fired, and a second consecutive failure would otherwise have
+            // nothing left to catch it. Don't touch 'load': the original listener from
+            // _startLoading() is still pending (it never fired) and re-adding it would leave
+            // two 'load' listeners on this asset, double-invoking _onAssetLoadSuccess on the
+            // eventual success.
             Debug.warn(`GSplatAssetLoader: Retrying load for ${url} (attempt ${retryCount + 1}/${this.maxRetries})`);
+            asset.once('error', retryErr => this._onAssetLoadError(url, asset, retryErr));
             this._registry.load(asset);
         } else {
             // Max retries exceeded
@@ -296,6 +306,9 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
 
             // Clear retry count
             this._retryCount.delete(url);
+
+            // Mark as genuinely, permanently failed
+            this._failed.add(url);
 
             // Process next item in queue
             this._processQueue();
@@ -340,6 +353,7 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
 
         // Clear retry count
         this._retryCount.delete(url);
+        this._failed.delete(url);
 
         // Unload the asset
         const asset = this._urlToAsset.get(url);
@@ -373,6 +387,17 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     getResource(url) {
         const asset = this._urlToAsset.get(url);
         return asset?.resource;
+    }
+
+    /**
+     * Checks whether loading a URL has genuinely, permanently failed (a real error, not a
+     * cancellation, with retries exhausted).
+     *
+     * @param {string} url - The URL to check.
+     * @returns {boolean} True if the load has permanently failed.
+     */
+    hasFailed(url) {
+        return this._failed.has(url);
     }
 }
 
