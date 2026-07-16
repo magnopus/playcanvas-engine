@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Setup Node.js 22.x
         uses: actions/setup-node@v6
@@ -39,13 +39,16 @@ jobs:
     # - name: Run Publint
     #   run: npm run publint
 
+      - name: Run Post-build tests
+        run: npm run test:build
+
   docs:
     name: Docs
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Setup Node.js 22.x
         uses: actions/setup-node@v6
@@ -65,7 +68,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Setup Node.js 22.x
         uses: actions/setup-node@v6
@@ -91,7 +94,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Setup Node.js 22.x
         uses: actions/setup-node@v6
@@ -114,7 +117,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Setup Node.js 22.x
         uses: actions/setup-node@v6
@@ -134,7 +137,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.0
 
       - name: Setup Node.js 22.x
         uses: actions/setup-node@v6

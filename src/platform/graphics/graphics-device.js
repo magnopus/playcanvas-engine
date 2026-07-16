@@ -441,6 +441,18 @@ class GraphicsDevice extends EventHandler {
     supportsClipDistances = false;
 
     /**
+     * True if the device supports transient ("memoryless") render target attachments (WebGPU only).
+     * When supported, attachments that are only used within a single render pass (cleared on load
+     * and discarded on store) can be allocated as memoryless, allowing tile-based GPUs to keep their
+     * contents in on-chip memory and avoid VRAM allocation. See the `transientColor` /
+     * `transientDepth` options of {@link RenderTarget} and {@link createGraphicsDevice}.
+     *
+     * @type {boolean}
+     * @readonly
+     */
+    supportsTransientAttachments = false;
+
+    /**
      * True if the device supports WebGPU texture format tier 1 capabilities. When enabled, a wider
      * set of normalized texture formats can be used as render targets and storage textures.
      *
@@ -652,6 +664,8 @@ class GraphicsDevice extends EventHandler {
         this.initOptions.antialias ??= true;
         this.initOptions.powerPreference ??= 'high-performance';
         this.initOptions.displayFormat ??= DISPLAYFORMAT_LDR;
+        this.initOptions.transientColor ??= false;
+        this.initOptions.transientDepth ??= false;
 
         // If WebXR is exposed, default to an XR-suitable GPU
         this.initOptions.xrCompatible ??= platform.browser && !!navigator.xr;
@@ -700,6 +714,12 @@ class GraphicsDevice extends EventHandler {
 
         this.textureBias = this.scope.resolve('textureBias');
         this.textureBias.setValue(0.0);
+
+        // initialize the client rect from the canvas, so that it is valid before the first frame
+        // update. This allows functions like CameraComponent#screenToWorld to work correctly when
+        // called from a script's initialize / postInitialize, which run before the first device
+        // update (see https://github.com/playcanvas/engine/issues/8932).
+        this.updateClientRect();
     }
 
     /**
@@ -1236,14 +1256,16 @@ class GraphicsDevice extends EventHandler {
     }
 
     updateClientRect() {
-        if (platform.worker) {
-            // Web Workers don't do page layout, so getBoundingClientRect is not available
-            this.clientRect.width = this.canvas.width;
-            this.clientRect.height = this.canvas.height;
-        } else {
+        if (typeof this.canvas.getBoundingClientRect === 'function') {
             const rect = this.canvas.getBoundingClientRect();
             this.clientRect.width = rect.width;
             this.clientRect.height = rect.height;
+        } else {
+            // getBoundingClientRect is not available on OffscreenCanvas (Web Workers don't do
+            // page layout) or on mock canvases used with NullGraphicsDevice in headless
+            // environments
+            this.clientRect.width = this.canvas.width ?? 0;
+            this.clientRect.height = this.canvas.height ?? 0;
         }
     }
 

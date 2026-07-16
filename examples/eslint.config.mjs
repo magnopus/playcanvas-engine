@@ -19,6 +19,7 @@ const booleanFlags = new Set([
     'WEBGL_DISABLED'
 ]);
 const engineTypes = new Set(['development', 'performance', 'debug']);
+const preferredDeviceTypes = new Set(['webgpu', 'webgl2']);
 const creditFields = ['title', 'author', 'source', 'license'];
 const requiredCreditFields = ['title', 'author'];
 const creditFieldSet = new Set(creditFields);
@@ -171,6 +172,21 @@ const configBlockShape = {
                         return;
                     }
 
+                    if (name === 'PREFERRED_DEVICE') {
+                        if (flags.has(name)) {
+                            report(line, 'duplicateFlag', { name });
+                        } else {
+                            flags.add(name);
+                        }
+
+                        if (!value) {
+                            report(line, 'missingFlagValue', { name });
+                        } else if (!preferredDeviceTypes.has(value)) {
+                            report(line, 'invalidFlagValue', { name, value });
+                        }
+                        return;
+                    }
+
                     if (!booleanFlags.has(name)) {
                         report(line, 'unknownFlag', { name });
                         return;
@@ -294,15 +310,36 @@ const importOrder = ['error', {
         }
     ],
     pathGroupsExcludedImportTypes: ['builtin', 'object'],
-    'newlines-between': 'always',
-    alphabetize: { order: 'asc', caseInsensitive: true }
+    'newlines-between': 'always'
 }];
+
+// minimal jsx-uses-vars: mark JSX-referenced identifiers as used so no-unused-vars sees imported
+// components (e.g. <Panel/>) as used. Avoids pulling in eslint-plugin-react just for this.
+const jsxUsesVars = {
+    meta: { type: 'problem' },
+    create(context) {
+        return {
+            JSXOpeningElement(node) {
+                let name = node.name;
+                while (name.type === 'JSXMemberExpression') {
+                    name = name.object;
+                }
+                if (name.type === 'JSXIdentifier') {
+                    context.sourceCode.markVariableAsUsed(name.name, name);
+                }
+            }
+        };
+    }
+};
 
 export default [
     ...playcanvasConfig,
     {
-        files: ['**/*.js', '**/*.mjs'],
+        files: ['**/*.js', '**/*.mjs', '**/*.jsx'],
         languageOptions: {
+            parserOptions: {
+                ecmaFeatures: { jsx: true }
+            },
             globals: {
                 ...globals.browser,
                 ...globals.node,
@@ -313,6 +350,26 @@ export default [
         rules: {
             'import/order': importOrder,
             'import/no-unresolved': 'off'
+        }
+    },
+    {
+        files: ['**/*.jsx'],
+        plugins: {
+            jsx: {
+                rules: {
+                    'uses-vars': jsxUsesVars
+                }
+            }
+        },
+        rules: {
+            'jsx/uses-vars': 'error',
+            'max-len': ['error', {
+                code: 100,
+                ignoreUrls: true,
+                ignoreStrings: true,
+                ignoreTemplateLiterals: true,
+                ignoreRegExpLiterals: true
+            }]
         }
     },
     {
