@@ -130,10 +130,15 @@ class SogParser {
      * @private
      */
     _resolveTextureUrl(filename, url, asset) {
+        // a relative meta.json url must be resolved against the document base uri before it can
+        // serve as the base for texture filenames, otherwise a <base> tag is ignored
+        const documentBase = window.document?.baseURI ?? window.location.href;
+        const baseUrl = new URL(url.original, documentBase).toString();
+
         if (asset.options?.mapUrl) {
             const original = this.app.resolveUrl(filename, {
                 asset,
-                baseUrl: url.original
+                baseUrl
             }).original;
 
             return {
@@ -144,7 +149,7 @@ class SogParser {
 
         return this.app.resolveUrl(filename, {
             asset,
-            baseUrl: url.original
+            baseUrl
         });
     }
 
