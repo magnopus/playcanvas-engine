@@ -137,7 +137,9 @@ class ImgParser extends TextureParser {
             responseType: 'blob',
             retry: this.maxRetries > 0,
             maxRetries: this.maxRetries,
-            progress: asset
+            progress: asset,
+            // Magnopus patched - add withCredentials option
+            withCredentials: crossOrigin === 'use-credentials'
         };
         http.get(url, options, (err, blob) => {
             if (err) {
