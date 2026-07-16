@@ -154,12 +154,27 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
      * load.
      */
     load(url) {
-        Debug.assert(url);
+        Debug.assert(!!url);
         // magnopus patched
         const { key } = this._normalizeUrl(url);
 
+<<<<<<< Updated upstream
         // Skip if already loading or loaded
         const asset = this._urlToAsset.get(key);
+=======
+        const asset = this._urlToAsset.get(key);
+
+        // A previous attempt resolved successfully but produced no usable resource - most
+        // commonly because the load was cancelled (aborted) while still in flight, e.g. LOD
+        // requirements moved on before it finished. This is not a failure: retry unconditionally
+        // whenever something asks for this URL again (callers only poll while they still want
+        // it), unless the URL has genuinely, permanently failed via a real error.
+        if (asset && asset.loaded && !asset.resource && !this._currentlyLoading.has(key) && !this._failed.has(key)) {
+            asset.loaded = false;
+        }
+
+        // Skip if already loading or loaded
+>>>>>>> Stashed changes
         if (asset?.loaded || this._currentlyLoading.has(key)) {
             return;
         }
@@ -197,7 +212,8 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
 
         if (!asset) {
             // Create a new gsplat asset
-            asset = new Asset(url, 'gsplat', { url });
+            // magnopus patched
+            asset = new Asset(key, 'gsplat', { url: key, originalUrl });
 
             // Assert that registry doesn't already have an asset for this URL
             // If it does, there's a code ownership issue - GSplatAssetLoader should be the only
