@@ -31,8 +31,8 @@ import { CameraFrameOptions, FramePassCameraFrame } from './frame-pass-camera-fr
  * full resolution rendering.
  * @property {number} samples - The number of samples of the {@link RenderTarget} used for the scene
  * rendering, in 1-4 range. Value of 1 disables multisample anti-aliasing, other values enable
- * anti-aliasing, Typically set to 1 when TAA is used, even though both anti-aliasing options can be
- * used together at a higher cost. Defaults to 1.
+ * anti-aliasing. Typically set to 1 when post-process anti-aliasing such as TAA or SMAA is used,
+ * although these techniques can be combined with MSAA at a higher cost. Defaults to 1.
  * @property {boolean} sceneColorMap - Whether rendering generates a scene color map. Defaults to false.
  * @property {boolean} sceneDepthMap - Whether rendering generates a scene depth map. Defaults to false.
  * @property {number} toneMapping - The tone mapping. Can be:
@@ -191,6 +191,13 @@ import { CameraFrameOptions, FramePassCameraFrame } from './frame-pass-camera-fr
  */
 
 /**
+ * @typedef {Object} Smaa
+ * Properties related to Subpixel Morphological Anti-Aliasing (SMAA), a spatial post-processing
+ * technique that smooths geometric edges without using frame history.
+ * @property {boolean} enabled - Whether SMAA 1x is enabled. Defaults to false.
+ */
+
+/**
  * @typedef {Object} Dof
  * Properties related to Depth of Field (DOF), a technique used to simulate the optical effect where
  * objects at certain distances appear sharp while others are blurred, enhancing the perception of
@@ -329,6 +336,15 @@ class CameraFrame {
     taa = {
         enabled: false,
         jitter: 1
+    };
+
+    /**
+     * SMAA settings.
+     *
+     * @type {Smaa}
+     */
+    smaa = {
+        enabled: false
     };
 
     /**
@@ -474,13 +490,14 @@ class CameraFrame {
 
     updateOptions() {
 
-        const { options, rendering, bloom, taa, ssao } = this;
+        const { options, rendering, bloom, taa, smaa, ssao } = this;
         options.stencil = rendering.stencil;
         options.samples = rendering.samples;
         options.sceneColorMap = rendering.sceneColorMap;
         options.prepassEnabled = rendering.sceneDepthMap;
         options.bloomEnabled = bloom.intensity > 0;
         options.taaEnabled = taa.enabled;
+        options.smaaEnabled = smaa.enabled;
         options.ssaoType = ssao.type;
         options.ssaoBlurEnabled = ssao.blurEnabled;
         options.formats = rendering.renderFormats.slice();
