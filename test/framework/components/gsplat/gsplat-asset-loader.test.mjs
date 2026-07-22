@@ -70,6 +70,37 @@ describe('GSplatAssetLoader', function () {
 
     describe('#load', function () {
 
+        it('creates a string-url asset file when loading a { url, originalUrl } request', function () {
+            const request = {
+                url: 'http://example.com/detail/abc',
+                originalUrl: 'http://example.com/package/chunk.json',
+                lodLevel: 2
+            };
+
+            loader.load(request);
+
+            const asset = lastAsset();
+            expect(asset.file.url).to.equal(request.url);
+            expect(asset.file.originalUrl).to.equal(request.originalUrl);
+            expect(asset.getFileOriginalUrl()).to.equal(request.originalUrl);
+            expect(loader._urlToAsset.has(request.url)).to.equal(true);
+        });
+
+        it('deduplicates repeated { url, originalUrl } requests by load url', function () {
+            const request = {
+                url: 'http://example.com/detail/abc',
+                originalUrl: 'http://example.com/package/chunk.json',
+                lodLevel: 2
+            };
+
+            loader.load(request);
+            loader.load({ ...request });
+            loader.load(request.url);
+
+            expect(loadCalls).to.equal(1);
+            expect(loader._urlToAsset.size).to.equal(1);
+        });
+
         it('retries indefinitely when a previous load was cancelled with no resource', function () {
             const url = 'http://example.com/chunk.json';
 
