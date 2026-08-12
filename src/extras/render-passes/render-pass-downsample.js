@@ -26,23 +26,30 @@ class RenderPassDownsample extends RenderPassShaderQuad {
      * with. Only supported when boxFilter is true.
      * @param {string} [options.premultiplySrcChannel] - The source channel to premultiply.
      * @param {boolean} [options.removeInvalid] - Whether to remove invalid pixels from the output.
+     * @param {boolean} [options.prefilter] - Whether to apply a soft-knee high-pass prefilter to
+     * the output, controlled by the `prefilterThreshold` and `prefilterKnee` properties. Used by
+     * the first bloom downsample pass. A threshold of 0 leaves the output unchanged.
      */
     constructor(device, sourceTexture, options = {}) {
         super(device);
         this.sourceTexture = sourceTexture;
         this.premultiplyTexture = options.premultiplyTexture;
+        this.prefilter = options.prefilter ?? false;
+        this.prefilterThreshold = 0;
+        this.prefilterKnee = 0;
 
         // register shader chunks
         ShaderChunks.get(device, SHADERLANGUAGE_GLSL).set('downsamplePS', glslDownsamplePS);
         ShaderChunks.get(device, SHADERLANGUAGE_WGSL).set('downsamplePS', wgslDownsamplePS);
 
         const boxFilter = options.boxFilter ?? false;
-        const key = `${boxFilter ? 'Box' : ''}-${options.premultiplyTexture ? 'Premultiply' : ''}-${options.premultiplySrcChannel ?? ''}-${options.removeInvalid ? 'RemoveInvalid' : ''}`;
+        const key = `${boxFilter ? 'Box' : ''}-${options.premultiplyTexture ? 'Premultiply' : ''}-${options.premultiplySrcChannel ?? ''}-${options.removeInvalid ? 'RemoveInvalid' : ''}-${this.prefilter ? 'Prefilter' : ''}`;
 
         const defines = new Map();
         if (boxFilter) defines.set('BOXFILTER', '');
         if (options.premultiplyTexture) defines.set('PREMULTIPLY', '');
         if (options.removeInvalid) defines.set('REMOVE_INVALID', '');
+        if (this.prefilter) defines.set('PREFILTER', '');
         defines.set('{PREMULTIPLY_SRC_CHANNEL}', options.premultiplySrcChannel ?? 'x');
 
         this.shader = ShaderUtils.createShader(device, {
@@ -57,6 +64,8 @@ class RenderPassDownsample extends RenderPassShaderQuad {
         this.premultiplyTextureId = device.scope.resolve('premultiplyTexture');
         this.sourceInvResolutionId = device.scope.resolve('sourceInvResolution');
         this.sourceInvResolutionValue = new Float32Array(2);
+        this.bloomThresholdKneeId = device.scope.resolve('bloomThresholdKnee');
+        this.bloomThresholdKneeValue = new Float32Array(2);
     }
 
     setSourceTexture(value) {
@@ -75,6 +84,12 @@ class RenderPassDownsample extends RenderPassShaderQuad {
         this.sourceInvResolutionValue[0] = 1.0 / this.sourceTexture.width;
         this.sourceInvResolutionValue[1] = 1.0 / this.sourceTexture.height;
         this.sourceInvResolutionId.setValue(this.sourceInvResolutionValue);
+
+        if (this.prefilter) {
+            this.bloomThresholdKneeValue[0] = this.prefilterThreshold;
+            this.bloomThresholdKneeValue[1] = this.prefilterKnee;
+            this.bloomThresholdKneeId.setValue(this.bloomThresholdKneeValue);
+        }
 
         super.execute();
     }

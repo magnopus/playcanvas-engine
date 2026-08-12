@@ -186,6 +186,17 @@ class Bloom {
      * @step 0
      */
     blurLevel = 16;
+
+    /**
+     * Soft-knee high-pass threshold in scene-referred units. 0 keeps the
+     * physically-based whole-scene bloom.
+     *
+     * @visibleif {enabled}
+     * @range [0, 4]
+     * @precision 2
+     * @step 0.01
+     */
+    threshold = 0;
 }
 
 /** @interface */
@@ -557,6 +568,7 @@ class CameraFrame extends Script {
         dstBloom.intensity = bloom.enabled ? bloom.intensity : 0;
         if (bloom.enabled) {
             dstBloom.blurLevel = bloom.blurLevel;
+            dstBloom.threshold = bloom.threshold;
         }
 
         // grading

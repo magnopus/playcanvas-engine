@@ -85,6 +85,10 @@ import { CameraFrameOptions, FramePassCameraFrame } from './frame-pass-camera-fr
  * @property {number} blurLevel - The number of iterations for blurring the bloom effect, with each
  * level doubling the blur size. Once the blur size matches the dimensions of the render target,
  * further blur passes are skipped. The default value is 16.
+ * @property {number} threshold - Soft-knee high-pass threshold in scene-referred (post-exposure)
+ * units. Only pixels brighter than this contribute to bloom, with a quadratic knee (half the
+ * threshold wide) smoothing the transition. Defaults to 0, which keeps the physically-based
+ * whole-scene bloom.
  */
 
 /**
@@ -279,7 +283,8 @@ class CameraFrame {
      */
     bloom = {
         intensity: 0,
-        blurLevel: 16
+        blurLevel: 16,
+        threshold: 0
     };
 
     /**
@@ -513,6 +518,7 @@ class CameraFrame {
         if (options.bloomEnabled && bloomPass) {
             composePass.bloomIntensity = bloom.intensity;
             bloomPass.blurLevel = bloom.blurLevel;
+            bloomPass.threshold = bloom.threshold ?? 0;
         }
 
         if (options.dofEnabled) {

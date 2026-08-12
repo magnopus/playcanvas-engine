@@ -9,6 +9,11 @@ varying uv0: vec2f;
     var premultiplyTextureSampler: sampler;
 #endif
 
+#ifdef PREFILTER
+    // x: threshold, y: knee
+    uniform bloomThresholdKnee: vec2f;
+#endif
+
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     var output: FragmentOutput;
@@ -51,6 +56,20 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
     #ifdef REMOVE_INVALID
         value = max(value, half3(0.0));
+    #endif
+
+    #ifdef PREFILTER
+        // Soft-knee high-pass (Unity URP style): scales the contribution by how
+        // far the pixel's luminance sits above the threshold, with a quadratic
+        // knee region for a smooth transition. threshold = 0 is an identity.
+        // Computed in f32 — half precision is too coarse around the knee.
+        let fullValue: vec3f = vec3f(value);
+        let luma: f32 = max(fullValue.r, max(fullValue.g, fullValue.b));
+        let knee: f32 = uniform.bloomThresholdKnee.y;
+        var soft: f32 = clamp(luma - uniform.bloomThresholdKnee.x + knee, 0.0, 2.0 * knee);
+        soft = soft * soft / max(4.0 * knee, 1e-4);
+        let contribution: f32 = max(soft, luma - uniform.bloomThresholdKnee.x) / max(luma, 1e-4);
+        value *= half3(vec3f(clamp(contribution, 0.0, 1.0)));
     #endif
 
     output.color = vec4f(vec3f(value), 1.0);

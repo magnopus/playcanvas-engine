@@ -25,6 +25,19 @@ class FramePassBloom extends FramePass {
 
     blurLevel = 16;
 
+    /**
+     * Soft-knee high-pass threshold applied on the first downsample pass, in scene-referred
+     * (post-exposure) units. 0 disables the prefilter, keeping the physically-based
+     * whole-scene bloom.
+     */
+    threshold = 0;
+
+    /**
+     * Width of the quadratic transition region below the threshold. Defaults to half the
+     * threshold when negative.
+     */
+    knee = -1;
+
     bloomRenderTarget;
 
     textureFormat;
@@ -105,7 +118,8 @@ class FramePassBloom extends FramePass {
         let passSourceTexture = this._sourceTexture;
         for (let i = 0; i < numPasses; i++) {
 
-            const pass = new RenderPassDownsample(device, passSourceTexture);
+            // the first pass applies the (optional) high-pass prefilter
+            const pass = new RenderPassDownsample(device, passSourceTexture, { prefilter: i === 0 });
             const rt = this.renderTargets[i];
             pass.init(rt, {
                 resizeSource: passSourceTexture,
@@ -152,6 +166,13 @@ class FramePassBloom extends FramePass {
             this.destroyRenderTargets(1);
             this.createRenderTargets(numPasses);
             this.createRenderPasses(numPasses);
+        }
+
+        // keep the first downsample pass' prefilter uniforms in sync
+        const firstPass = this.beforePasses[0];
+        if (firstPass) {
+            firstPass.prefilterThreshold = this.threshold;
+            firstPass.prefilterKnee = this.knee < 0 ? this.threshold * 0.5 : this.knee;
         }
     }
 }

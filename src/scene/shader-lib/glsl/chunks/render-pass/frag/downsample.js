@@ -7,6 +7,11 @@ varying vec2 uv0;
     uniform sampler2D premultiplyTexture;
 #endif
 
+#ifdef PREFILTER
+    // x: threshold, y: knee
+    uniform vec2 bloomThresholdKnee;
+#endif
+
 void main()
 {
     vec3 e = texture2D (sourceTexture, uv0).rgb;
@@ -48,6 +53,18 @@ void main()
 
     #ifdef REMOVE_INVALID
         value = max(value, vec3(0.0));
+    #endif
+
+    #ifdef PREFILTER
+        // Soft-knee high-pass (Unity URP style): scales the contribution by how
+        // far the pixel's luminance sits above the threshold, with a quadratic
+        // knee region for a smooth transition. threshold = 0 is an identity.
+        float luma = max(value.r, max(value.g, value.b));
+        float knee = bloomThresholdKnee.y;
+        float soft = clamp(luma - bloomThresholdKnee.x + knee, 0.0, 2.0 * knee);
+        soft = soft * soft / max(4.0 * knee, 1e-4);
+        float contribution = max(soft, luma - bloomThresholdKnee.x) / max(luma, 1e-4);
+        value *= clamp(contribution, 0.0, 1.0);
     #endif
 
     gl_FragColor = vec4(value, 1.0);
