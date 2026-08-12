@@ -10,6 +10,7 @@ import { FramePassBloom } from './frame-pass-bloom.js';
 import { RenderPassCompose } from './render-pass-compose.js';
 import { RenderPassTAA } from './render-pass-taa.js';
 import { FramePassDof } from './frame-pass-dof.js';
+import { FramePassSmaa } from './frame-pass-smaa.js';
 import { RenderPassPrepass } from './render-pass-prepass.js';
 import { RenderPassSsao } from './render-pass-ssao.js';
 import { SSAOTYPE_COMBINE, SSAOTYPE_LIGHTING, SSAOTYPE_NONE } from './constants.js';
@@ -48,6 +49,9 @@ class CameraFrameOptions {
 
     // TAA
     taaEnabled = false;
+
+    // SMAA
+    smaaEnabled = false;
 
     // Bloom
     bloomEnabled = false;
@@ -90,6 +94,8 @@ class FramePassCameraFrame extends FramePass {
     ssaoPass;
 
     taaPass;
+
+    smaaPass;
 
     scenePassHalf;
 
@@ -149,6 +155,12 @@ class FramePassCameraFrame extends FramePass {
             this.rtHalf = null;
         }
 
+        if (this.rtSmaa) {
+            this.rtSmaa.destroyTextureBuffers();
+            this.rtSmaa.destroy();
+            this.rtSmaa = null;
+        }
+
         // destroy all passes we created
         this.beforePasses.forEach(pass => pass.destroy());
         this.beforePasses.length = 0;
@@ -161,6 +173,7 @@ class FramePassCameraFrame extends FramePass {
         this.bloomPass = null;
         this.ssaoPass = null;
         this.taaPass = null;
+        this.smaaPass = null;
         this.afterPass = null;
         this.scenePassHalf = null;
         this.dofPass = null;
@@ -201,6 +214,7 @@ class FramePassCameraFrame extends FramePass {
         return options.ssaoType !== currentOptions.ssaoType ||
             options.ssaoBlurEnabled !== currentOptions.ssaoBlurEnabled ||
             options.taaEnabled !== currentOptions.taaEnabled ||
+            options.smaaEnabled !== currentOptions.smaaEnabled ||
             options.samples !== currentOptions.samples ||
             options.stencil !== currentOptions.stencil ||
             options.bloomEnabled !== currentOptions.bloomEnabled ||
@@ -337,7 +351,7 @@ class FramePassCameraFrame extends FramePass {
     collectPasses() {
 
         // use these prepared render passes in the order they should be executed
-        return [this.prePass, this.ssaoPass, this.scenePass, this.colorGrabPass, this.scenePassTransparent, this.taaPass, this.scenePassHalf, this.bloomPass, this.dofPass, this.composePass, this.afterPass];
+        return [this.prePass, this.ssaoPass, this.scenePass, this.colorGrabPass, this.scenePassTransparent, this.taaPass, this.scenePassHalf, this.bloomPass, this.dofPass, this.composePass, this.smaaPass, this.afterPass];
     }
 
     createPasses(options) {
@@ -364,6 +378,9 @@ class FramePassCameraFrame extends FramePass {
 
         // compose
         this.setupComposePass(options);
+
+        // SMAA
+        this.setupSmaaPass(options);
 
         // after pass
         this.setupAfterPass(options, scenePassesInfo);
@@ -499,13 +516,49 @@ class FramePassCameraFrame extends FramePass {
         this.composePass.blurTexture = this.dofPass?.blurTexture;
         this.composePass.blurTextureUpscale = !this.dofPass?.highQuality;
 
-        // compose pass renders directly to target renderTarget
+        // With SMAA, compose writes a gamma-encoded LDR image into a non-sRGB intermediate target.
+        // This is the representation expected by the SMAA edge detection pass.
         const cameraComponent = this.cameraComponent;
         const targetRenderTarget = cameraComponent.renderTarget;
-        this.composePass.init(targetRenderTarget);
+        let composeRenderTarget = targetRenderTarget;
+        if (options.smaaEnabled) {
+            const texture = new Texture(this.device, {
+                name: 'SmaaColor',
+                width: 4,
+                height: 4,
+                format: PIXELFORMAT_RGBA8,
+                mipmaps: false,
+                minFilter: FILTER_LINEAR,
+                magFilter: FILTER_LINEAR,
+                addressU: ADDRESS_CLAMP_TO_EDGE,
+                addressV: ADDRESS_CLAMP_TO_EDGE
+            });
+            this.rtSmaa = new RenderTarget({
+                colorBuffer: texture,
+                depth: false,
+                flipY: !!targetRenderTarget?.flipY
+            });
+            composeRenderTarget = this.rtSmaa;
+        }
+        this.composePass.init(composeRenderTarget, options.smaaEnabled ? {
+            // Keep compose and the SMAA edge / weight passes at the scene render resolution.
+            // The neighborhood pass then resolves directly to the final target, combining SMAA
+            // with the upscale instead of trying to detect edges after a bilinear upscale.
+            resizeSource: this.sceneTexture
+        } : undefined);
 
         // ssao texture as needed
         this.composePass.ssaoTexture = options.ssaoType === SSAOTYPE_COMBINE ? this.ssaoPass.ssaoTexture : null;
+    }
+
+    setupSmaaPass(options) {
+        if (options.smaaEnabled) {
+            this.smaaPass = new FramePassSmaa(
+                this.device,
+                this.rtSmaa.colorBuffer,
+                this.cameraComponent.renderTarget
+            );
+        }
     }
 
     setupAfterPass(options, scenePassesInfo) {

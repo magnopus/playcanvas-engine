@@ -332,6 +332,9 @@ class RenderPassCompose extends RenderPassShaderQuad {
 
     frameUpdate() {
 
+        // Apply automatic render-target sizing configured by RenderPass.init().
+        super.frameUpdate();
+
         // detect if the render target is srgb vs execute manual srgb conversion
         const rt = this.renderTarget ?? this.device.backBuffer;
         const srgb = rt.isColorBufferSrgb(0);
