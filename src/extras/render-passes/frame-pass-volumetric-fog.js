@@ -114,8 +114,8 @@ class RenderPassVolumetricFog extends RenderPassShaderQuad {
      */
     updateShaderVariant(shadows, pcf) {
 
-        const depthMapLinear = this.cameraComponent.shaderParams.sceneDepthMapLinear;
-        const key = `${shadows}-${pcf}-${depthMapLinear}`;
+        const depthKey = ShaderUtils.getScreenDepthChunkKey(this.cameraComponent.shaderParams);
+        const key = `${shadows}-${pcf}${depthKey}`;
         if (this._variantKey !== key) {
             this._variantKey = key;
 
@@ -240,10 +240,10 @@ class RenderPassVolumetricFogCombine extends RenderPassShaderQuad {
         this.fogTexture = fogTexture;
 
         const defines = new Map();
-        ShaderUtils.addScreenDepthChunkDefines(cameraComponent.shaderParams, defines);
+        const depthKey = ShaderUtils.addScreenDepthChunkDefines(cameraComponent.shaderParams, defines);
 
         this.shader = ShaderUtils.createShader(device, {
-            uniqueName: `VolumetricFogCombineShader-${cameraComponent.shaderParams.sceneDepthMapLinear}`,
+            uniqueName: `VolumetricFogCombineShader${depthKey}`,
             attributes: { aPosition: SEMANTIC_POSITION },
             vertexChunk: 'quadVS',
             fragmentChunk: 'volumetricFogCombinePS',
