@@ -593,7 +593,8 @@ class PlyParser {
 
         try {
             // either use the fetch request passed in by the application or initiate it ourselves
-            const response = await (asset.file?.contents ?? fetch(url.load));
+            // Magnopus patched - added crossOrigin option
+            const response = await (asset.file?.contents ?? fetch(url.load, asset.options?.crossOrigin === 'use-credentials' ? { credentials: 'include' } : undefined));
             if (!response || !response.body) {
                 callback('Error loading resource', null);
             } else {
