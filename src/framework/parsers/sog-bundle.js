@@ -99,6 +99,7 @@ const inflate = async (compressed) => {
 };
 
 const downloadArrayBuffer = async (url, asset) => {
+    // Magnopus patched - added crossOrigin option
     const response = await (asset.file?.contents ?? fetch(url.load, asset.options?.crossOrigin === 'use-credentials' ? { credentials: 'include' } : undefined));
     if (!response) {
         throw new Error('Error loading resource');
