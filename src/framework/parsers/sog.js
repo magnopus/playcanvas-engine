@@ -181,7 +181,7 @@ class SogParser {
                 }, {
                     mipmaps: false
                 }, {
-                    crossOrigin: 'anonymous'
+                    crossOrigin: asset.options?.crossOrigin ?? 'anonymous' // Magnopus patched - add crossOrigin opts check
                 });
 
                 const promise = new Promise((resolve, reject) => {
