@@ -407,6 +407,40 @@ class GraphNode extends EventHandler {
         return this._children;
     }
 
+    // ---- deprecated block start ----
+
+    getChildren() {
+        Debug.deprecated('GraphNode#getChildren is deprecated. Use GraphNode#children instead.');
+        return this.children;
+    }
+
+    getName() {
+        Debug.deprecated('GraphNode#getName is deprecated. Use GraphNode#name instead.');
+        return this.name;
+    }
+
+    getPath() {
+        Debug.deprecated('GraphNode#getPath is deprecated. Use GraphNode#path instead.');
+        return this.path;
+    }
+
+    getRoot() {
+        Debug.deprecated('GraphNode#getRoot is deprecated. Use GraphNode#root instead.');
+        return this.root;
+    }
+
+    getParent() {
+        Debug.deprecated('GraphNode#getParent is deprecated. Use GraphNode#parent instead.');
+        return this.parent;
+    }
+
+    setName(name) {
+        Debug.deprecated('GraphNode#setName is deprecated. Use GraphNode#name instead.');
+        this.name = name;
+    }
+
+    // ---- deprecated block end ----
+
     /**
      * Gets the depth of this child within the graph. Note that for performance reasons this is
      * only recalculated when a node is added to a new parent. In other words, it is not
@@ -976,7 +1010,7 @@ class GraphNode extends EventHandler {
      * @returns {void}
      * @example
      * // Set rotation of 90 degrees around y-axis via a vector
-     * const angles = new pc.Vec3(0, 90, 0);
+     * const angles = new Vec3(0, 90, 0);
      * this.entity.setLocalEulerAngles(angles);
      */
     /**
@@ -1010,7 +1044,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} position - Vector holding local space position.
      * @returns {void}
      * @example
-     * const pos = new pc.Vec3(0, 10, 0);
+     * const pos = new Vec3(0, 10, 0);
      * this.entity.setLocalPosition(pos);
      */
     /**
@@ -1049,7 +1083,7 @@ class GraphNode extends EventHandler {
      * @param {Quat} rotation - Quaternion holding local space rotation.
      * @returns {void}
      * @example
-     * const q = new pc.Quat();
+     * const q = new Quat();
      * this.entity.setLocalRotation(q);
      */
     /**
@@ -1088,7 +1122,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} scale - Vector holding local space scale.
      * @returns {void}
      * @example
-     * const scale = new pc.Vec3(10, 10, 10);
+     * const scale = new Vec3(10, 10, 10);
      * this.entity.setLocalScale(scale);
      */
     /**
@@ -1173,7 +1207,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} position - Vector holding world space position.
      * @returns {void}
      * @example
-     * const position = new pc.Vec3(0, 10, 0);
+     * const position = new Vec3(0, 10, 0);
      * this.entity.setPosition(position);
      */
     /**
@@ -1219,7 +1253,7 @@ class GraphNode extends EventHandler {
      * @param {Quat} rotation - Quaternion holding world space rotation.
      * @returns {void}
      * @example
-     * const rotation = new pc.Quat();
+     * const rotation = new Quat();
      * this.entity.setRotation(rotation);
      */
     /**
@@ -1255,8 +1289,8 @@ class GraphNode extends EventHandler {
      * @param {Vec3} position - The world space position to set.
      * @param {Quat} rotation - The world space rotation to set.
      * @example
-     * const position = new pc.Vec3(0, 10, 0);
-     * const rotation = new pc.Quat().setFromEulerAngles(0, 90, 0);
+     * const position = new Vec3(0, 10, 0);
+     * const rotation = new Quat().setFromEulerAngles(0, 90, 0);
      * this.entity.setPositionAndRotation(position, rotation);
      */
     setPositionAndRotation(position, rotation) {
@@ -1295,7 +1329,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} angles - Vector holding rotations around world space axes in degrees.
      * @returns {void}
      * @example
-     * const angles = new pc.Vec3(0, 90, 0);
+     * const angles = new Vec3(0, 90, 0);
      * this.entity.setEulerAngles(angles);
      */
     /**
@@ -1323,7 +1357,7 @@ class GraphNode extends EventHandler {
      *
      * @param {GraphNode} node - The new child to add.
      * @example
-     * const e = new pc.Entity(app);
+     * const e = new Entity(app);
      * this.entity.addChild(e);
      */
     addChild(node) {
@@ -1338,7 +1372,7 @@ class GraphNode extends EventHandler {
      *
      * @param {GraphNode} node - The child to add.
      * @example
-     * const e = new pc.Entity(app);
+     * const e = new Entity(app);
      * this.entity.addChildAndSaveTransform(e);
      * @ignore
      */
@@ -1363,7 +1397,7 @@ class GraphNode extends EventHandler {
      * @param {number} index - The index in the child list of the parent where the new node will be
      * inserted.
      * @example
-     * const e = new pc.Entity(app);
+     * const e = new Entity(app);
      * this.entity.insertChild(e, 1);
      */
     insertChild(node, index) {
@@ -1604,7 +1638,7 @@ class GraphNode extends EventHandler {
      * @example
      * // Look at another entity, using the negative world y-axis for up
      * const target = otherEntity.getPosition();
-     * this.entity.lookAt(target, pc.Vec3.DOWN);
+     * this.entity.lookAt(target, Vec3.DOWN);
      */
     /**
      * @param {number|Vec3} x - If passing a 3D vector, this is the world space coordinate to look at.
@@ -1655,7 +1689,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} translation - Vector holding world space translation.
      * @returns {void}
      * @example
-     * const translation = new pc.Vec3(10, 0, 0);
+     * const translation = new Vec3(10, 0, 0);
      * this.entity.translate(translation);
      */
     /**
@@ -1692,7 +1726,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} translation - Vector holding local space translation.
      * @returns {void}
      * @example
-     * const t = new pc.Vec3(10, 0, 0);
+     * const t = new Vec3(10, 0, 0);
      * this.entity.translateLocal(t);
      */
     /**
@@ -1735,7 +1769,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} rotation - Vector holding world space rotation.
      * @returns {void}
      * @example
-     * const rotation = new pc.Vec3(0, 90, 0);
+     * const rotation = new Vec3(0, 90, 0);
      * this.entity.rotate(rotation);
      */
     /**
@@ -1782,7 +1816,7 @@ class GraphNode extends EventHandler {
      * @param {Vec3} rotation - Vector holding local space rotation.
      * @returns {void}
      * @example
-     * const rotation = new pc.Vec3(0, 90, 0);
+     * const rotation = new Vec3(0, 90, 0);
      * this.entity.rotateLocal(rotation);
      */
     /**
