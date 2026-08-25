@@ -2256,7 +2256,7 @@ const createImages = (gltf, bufferViews, loadUrlBase, originalUrlBase, registry,
                 // magnopus patched
                 const resolvedLoadUrl = ABSOLUTE_URL.test(gltfImage.uri) ? gltfImage.uri : path.join(loadUrlBase, gltfImage.uri);
                 const resolvedOriginalUrl = ABSOLUTE_URL.test(gltfImage.uri) ? gltfImage.uri : path.join(originalUrlBase, gltfImage.uri);
-                return loadTexture(gltfImage, resolvedLoadUrl, resolvedOriginalUrl, null, null, { crossOrigin: 'anonymous' }, srgb);
+                return loadTexture(gltfImage, resolvedLoadUrl, resolvedOriginalUrl, null, null, { crossOrigin: options?.crossOrigin ?? 'anonymous' }, srgb);
             } else if (gltfImage.hasOwnProperty('bufferView') && gltfImage.hasOwnProperty('mimeType')) {
                 // bufferview
                 return loadTexture(gltfImage, null, null, bufferViews[gltfImage.bufferView], gltfImage.mimeType, null, srgb);

@@ -288,7 +288,7 @@ class SogBundleParser {
                     }, {
                         mipmaps: false
                     }, {
-                        crossOrigin: 'anonymous'
+                        crossOrigin: asset.options.crossOrigin ?? 'anonymous'
                     });
                 } else {
                     // file doesn't exist in bundle, treat it as a url
@@ -299,7 +299,7 @@ class SogBundleParser {
                     }, {
                         mipmaps: false
                     }, {
-                        crossOrigin: 'anonymous'
+                        crossOrigin: asset.options.crossOrigin ?? 'anonymous'
                     });
                 }
 
