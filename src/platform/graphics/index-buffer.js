@@ -70,10 +70,17 @@ class IndexBuffer {
         this.bytesPerIndex = bytesPerIndex;
         this.numBytes = this.numIndices * bytesPerIndex;
 
+        // The CPU-side copy is allocated LAZILY, by lock(). A buffer whose contents are
+        // written on the GPU never needs one, and at meshlet scale that shadow copy is
+        // hundreds of megabytes of pure waste - large enough to fail outright and take the
+        // frame's encoding down with it.
+        this.storage = null;
         if (initialData) {
             this.setData(initialData);
         } else {
-            this.storage = new ArrayBuffer(this.numBytes);
+            // still create the GPU buffer - unlock() allocates from numBytes and uploads
+            // nothing when there is no CPU copy to upload
+            this.unlock();
         }
 
         this.adjustVramSizeTracking(graphicsDevice._vram, this.numBytes);
@@ -96,7 +103,9 @@ class IndexBuffer {
 
         if (this.impl.initialized) {
             this.impl.destroy(device);
-            this.adjustVramSizeTracking(device._vram, -this.storage.byteLength);
+            // numBytes, not storage.byteLength: they are equal by construction (setData
+            // rejects a mismatch) and storage may never have been allocated
+            this.adjustVramSizeTracking(device._vram, -this.numBytes);
         }
     }
 
@@ -121,7 +130,10 @@ class IndexBuffer {
      * @ignore
      */
     restoreContext() {
-        this.unlock();
+        // nothing to restore from when the contents only ever existed on the GPU
+        if (this.storage) {
+            this.unlock();
+        }
     }
 
     /**
@@ -151,10 +163,12 @@ class IndexBuffer {
      *
      * @returns {ArrayBuffer|ArrayBufferView} The memory that stores the buffer's indices. This
      * matches whatever was supplied as the initial data: an {@link ArrayBuffer} when none was
-     * provided, otherwise the {@link ArrayBuffer} or typed array that was passed in. Use
-     * {@link ArrayBuffer.isView} to distinguish the two before accessing it.
+     * provided (allocated on the first call), otherwise the {@link ArrayBuffer} or typed array
+     * that was passed in. Use {@link ArrayBuffer.isView} to distinguish the two before
+     * accessing it.
      */
     lock() {
+        this.storage ??= new ArrayBuffer(this.numBytes);
         return this.storage;
     }
 
@@ -165,7 +179,8 @@ class IndexBuffer {
      */
     unlock() {
 
-        // Upload the new index data
+        // Allocate the GPU buffer if needed and upload the CPU copy. With no CPU copy (the
+        // contents are written on the GPU) this allocates and uploads nothing.
         this.impl.unlock(this);
     }
 

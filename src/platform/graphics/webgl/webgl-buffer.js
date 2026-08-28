@@ -23,7 +23,15 @@ class WebglBuffer {
         this.bufferId = null;
     }
 
-    unlock(device, usage, target, storage) {
+    /**
+     * @param {object} device - Graphics device.
+     * @param {number} usage - BUFFER_* usage hint.
+     * @param {number} target - GL buffer target.
+     * @param {ArrayBuffer|ArrayBufferView|null} storage - The CPU copy to upload, or null to
+     * allocate an empty buffer of byteSize (contents written elsewhere).
+     * @param {number} [byteSize] - Size to allocate when there is no storage to size it from.
+     */
+    unlock(device, usage, target, storage, byteSize) {
         const gl = device.gl;
 
         if (!this.bufferId) {
@@ -45,8 +53,9 @@ class WebglBuffer {
 
             this.bufferId = gl.createBuffer();
             gl.bindBuffer(target, this.bufferId);
-            gl.bufferData(target, storage, glUsage);
-        } else {
+            // the size overload allocates without uploading
+            gl.bufferData(target, storage ?? byteSize, glUsage);
+        } else if (storage) {
             gl.bindBuffer(target, this.bufferId);
             gl.bufferSubData(target, 0, storage);
         }
