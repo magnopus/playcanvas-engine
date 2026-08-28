@@ -231,6 +231,7 @@ export { GSplatResource } from './scene/gsplat/gsplat-resource.js';
 export { GSplatVaryings } from './scene/gsplat-unified/gsplat-varyings.js';
 export { GSplatResourceBase } from './scene/gsplat/gsplat-resource-base.js';
 export { GSplatSogData } from './scene/gsplat/gsplat-sog-data.js';
+export { MeshletResource } from './scene/meshlet/meshlet-resource.js';
 export { GSplatSogResource } from './scene/gsplat/gsplat-sog-resource.js';
 
 // FRAMEWORK
