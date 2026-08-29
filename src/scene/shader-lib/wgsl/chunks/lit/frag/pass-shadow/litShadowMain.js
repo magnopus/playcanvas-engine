@@ -13,6 +13,7 @@ export default /* wgsl */`
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
+    #include "litEngineMainStartPS"
     #include "litUserMainStartPS"
 
     var output: FragmentOutput;
@@ -71,6 +72,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         #endif
     #endif
 
+    #include "litEngineMainEndPS"
     #include "litUserMainEndPS"
     
     return output;

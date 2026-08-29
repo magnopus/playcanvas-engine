@@ -4,6 +4,7 @@ export default /* wgsl */`
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
+    #include "litEngineMainStartPS"
     #include "litUserMainStartPS"
 
     dReflection = vec4f(0.0);
@@ -47,6 +48,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
     var output: FragmentOutput = evaluateBackend();
 
+    #include "litEngineMainEndPS"
     #include "litUserMainEndPS"
 
     return output;
