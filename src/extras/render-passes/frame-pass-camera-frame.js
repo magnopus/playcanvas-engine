@@ -20,6 +20,7 @@ import { RenderPassDownsample } from './render-pass-downsample.js';
 import { Color } from '../../core/math/color.js';
 
 /**
+ * @import { FramePass } from '../../platform/graphics/frame-pass.js'
  * @import { CameraFrame } from './camera-frame.js'
  */
 
@@ -106,6 +107,18 @@ class FramePassCameraFrame extends FramePass {
     dofPass;
 
     volumetricFogPass;
+
+    /**
+     * Meshlet passes spliced into the scene chain when the meshlet director is driving this
+     * camera: the phase-1 draw (which owns the clear), and the HZB + phase-2 group that has to
+     * land between the opaque and transparent scene layers. Owned by the director, not here.
+     *
+     * @type {{ before: FramePass[], middle: FramePass[] }|null}
+     */
+    meshletPasses = null;
+
+    /** @type {RenderPassForward|null} - the transparent half when meshlets split the scene pass. */
+    scenePassAfterMeshlets = null;
 
     _renderTargetScale = 1;
 
@@ -359,7 +372,16 @@ class FramePassCameraFrame extends FramePass {
     collectPasses() {
 
         // use these prepared render passes in the order they should be executed
-        return [this.prePass, this.ssaoPass, this.scenePass, this.colorGrabPass, this.scenePassTransparent, this.volumetricFogPass, this.taaPass, this.scenePassHalf, this.bloomPass, this.dofPass, this.composePass, this.smaaPass, this.afterPass];
+        return [
+            this.prePass,
+            this.ssaoPass,
+            ...(this.meshletPasses?.before ?? []),
+            this.scenePass,
+            ...(this.meshletPasses?.middle ?? []),
+            this.scenePassAfterMeshlets,
+            this.colorGrabPass, this.scenePassTransparent,
+            this.volumetricFogPass, this.taaPass, this.scenePassHalf, this.bloomPass, this.dofPass, this.composePass, this.smaaPass, this.afterPass
+        ];
     }
 
     createPasses(options) {
@@ -424,9 +446,12 @@ class FramePassCameraFrame extends FramePass {
      * layers till the end of the layer list are added.
      * @param {boolean} [lastLayerIsTransparent] - True if the last layer to be added is transparent.
      * Defaults to true.
+     * @param {boolean} [stopBeforeTransparent] - Stop at the first transparent sub-layer the
+     * camera renders, WITHOUT adding it. Used to split the scene pass so the meshlet HZB and
+     * phase-2 draw can run once opaque depth is complete but before anything blends over it.
      * @returns {number} Returns the index of last layer added.
      */
-    addCameraLayers(renderPass, startIndex, firstLayerClears, lastLayerId, lastLayerIsTransparent = true) {
+    addCameraLayers(renderPass, startIndex, firstLayerClears, lastLayerId, lastLayerIsTransparent = true, stopBeforeTransparent = false) {
 
         const cameraComponent = this.cameraComponent;
         const { layerList, subLayerList } = renderPass.layerComposition;
@@ -437,6 +462,10 @@ class FramePassCameraFrame extends FramePass {
 
             const layer = layerList[index];
             const isTransparent = subLayerList[index];
+
+            if (stopBeforeTransparent && isTransparent && cameraComponent.camera.layersSet.has(layer.id)) {
+                break;
+            }
 
             // add it for rendering if the camera renders it
             if (cameraComponent.camera.layersSet.has(layer.id)) {
@@ -478,8 +507,33 @@ class FramePassCameraFrame extends FramePass {
             clearRenderTarget: true     // true if the render target should be cleared
         };
 
-        ret.lastAddedIndex = this.addCameraLayers(this.scenePass, ret.lastAddedIndex, ret.clearRenderTarget, lastLayerId, lastLayerIsTransparent);
+        // Meshlets, when the director is driving this camera. They need the same ordering the
+        // non-CameraFrame path builds: the phase-1 draw first, owning the clear, so the scene's
+        // opaque layers depth-test against meshlet depth; then the HZB and the phase-2
+        // disocclusion draw once opaque depth is complete but before anything blends over it.
+        // That means splitting this pass in two at the first transparent layer.
+        this.meshletPasses = renderer.meshletDirector?.buildCameraFramePasses(
+            this.cameraComponent, this.rt, ret.clearRenderTarget) ?? null;
+        if (this.meshletPasses) {
+            ret.clearRenderTarget = false;      // the meshlet phase-1 pass cleared
+        }
+
+        ret.lastAddedIndex = this.addCameraLayers(this.scenePass, ret.lastAddedIndex, ret.clearRenderTarget,
+            lastLayerId, lastLayerIsTransparent, !!this.meshletPasses?.middle.length);
         ret.clearRenderTarget = false;
+
+        if (this.meshletPasses?.middle.length) {
+            // the transparent half, picking up where the opaque half stopped
+            this.scenePassAfterMeshlets = new RenderPassForward(device, composition, scene, renderer);
+            this.setupScenePassSettings(this.scenePassAfterMeshlets);
+            this.scenePassAfterMeshlets.init(this.rt, this.sceneOptions);
+            ret.lastAddedIndex = this.addCameraLayers(this.scenePassAfterMeshlets, ret.lastAddedIndex, false,
+                lastLayerId, lastLayerIsTransparent);
+            if (!this.scenePassAfterMeshlets.rendersAnything) {
+                this.scenePassAfterMeshlets.destroy();
+                this.scenePassAfterMeshlets = null;
+            }
+        }
 
         // grab pass allowing us to copy the render scene into a texture and use for refraction
         // the source for the copy is the texture we render the scene to
@@ -505,6 +559,12 @@ class FramePassCameraFrame extends FramePass {
                     this.scenePassTransparent.depthStencilOps.storeDepth = true;
                 }
             }
+        }
+
+        // depth is discarded at the end of a pass by default; the HZB, the phase-2 draw and the
+        // transparent half all still need it
+        if (this.scenePassAfterMeshlets) {
+            this.scenePass.depthStencilOps.storeDepth = true;
         }
 
         return ret;

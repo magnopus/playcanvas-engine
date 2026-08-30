@@ -182,6 +182,13 @@ class Renderer {
     gsplatDirector = null;
 
     /**
+     * A meshlet director for GPU-driven meshlet rendering.
+     *
+     * @type {import('../meshlet/meshlet-director.js').MeshletDirector|null}
+     */
+    meshletDirector = null;
+
+    /**
      * Create a new instance.
      *
      * @param {GraphicsDevice} graphicsDevice - The graphics device used by the renderer.
@@ -945,6 +952,18 @@ class Renderer {
         // #if _PROFILER
         scene._stats.meshInstances = totalMeshInstances;
         // #endif
+
+        // meshlet mesh instances live outside the layer system (GPU-driven culling), but their
+        // materials are engine-lit and must react to scene shader invalidation (envAtlas,
+        // lighting settings) like any other
+        if (updateShaders) {
+            const meshletMIs = this.meshletDirector?.allMeshInstances;
+            if (meshletMIs) {
+                for (let i = 0; i < meshletMIs.length; i++) {
+                    _tempMeshInstances.push(meshletMIs[i]);
+                }
+            }
+        }
 
         // update shaders if needed
         if (updateShaders) {
