@@ -781,6 +781,9 @@ class ForwardRenderer extends Renderer {
      * @param {MeshInstance[]} [options.meshInstances] - The mesh instances to be rendered. Use
      * when layer is not provided.
      * @param {object} [options.splitLights] - The split lights to be used for clustered lighting.
+     * @param {Layer} [options.lightLayer] - When rendering options.meshInstances (no layer), a
+     * layer whose lights (splitLights default) and light hash shade the draws - borrowing the
+     * layer's lighting without its visibility or sorting.
      * @param {Function} [options.drawCallback] - Function called before each mesh instance is
      * rendered, with the mesh instance as the argument.
      * @param {UniformBufferFormat} [options.viewUniformFormat] - A custom view uniform buffer
@@ -823,7 +826,9 @@ class ForwardRenderer extends Renderer {
 
         } else {
             visible = options.meshInstances;
-            splitLights = options.splitLights ?? _noLights;
+            // options.lightLayer borrows a layer's lights (and its light hash for shader
+            // variants) without its visibility/sorting - used by the meshlet draw passes
+            splitLights = options.splitLights ?? options.lightLayer?.splitLights ?? _noLights;
         }
 
         Debug.assert(visible, 'Either layer or options.meshInstances must be provided');
@@ -878,7 +883,7 @@ class ForwardRenderer extends Renderer {
             splitLights,
             shaderPass,
             options.drawCallback ?? null,
-            layer,
+            layer ?? options.lightLayer ?? null,
             flipFaces,
             viewUniformFormat);
 
