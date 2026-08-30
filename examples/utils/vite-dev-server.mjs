@@ -217,12 +217,55 @@ const sendText = (res, text, type = TEXT) => {
 };
 
 /**
+ * Parses a single byte range. Multi-range requests and unknown units are reported as absent, which
+ * is a valid response - the whole file is sent instead.
+ *
+ * @param {string | string[] | undefined} header - range header.
+ * @param {number} size - file size.
+ * @returns {{ start: number, end: number } | null | false} range, null when the whole file should
+ * be sent, false when the range cannot be satisfied.
+ */
+const parseRange = (header, size) => {
+    if (typeof header !== 'string') {
+        return null;
+    }
+
+    const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+    if (!match) {
+        return null;
+    }
+
+    const [, from, to] = match;
+    if (!from && !to) {
+        return null;
+    }
+
+    let start;
+    let end;
+    if (from) {
+        start = Number(from);
+        end = to ? Math.min(Number(to), size - 1) : size - 1;
+    } else {
+
+        // suffix range - the last N bytes
+        const count = Number(to);
+        start = Math.max(size - count, 0);
+        end = size - 1;
+    }
+    if (start > end || start >= size) {
+        return false;
+    }
+    return { start, end };
+};
+
+/**
+ * @param {HttpRequest} req - http request.
  * @param {HttpResponse} res - http response.
  * @param {string} file - file path.
  * @param {string} [root] - allowed root.
  * @returns {Promise<boolean>} true if handled.
  */
-const sendFile = async (res, file, root = '') => {
+const sendFile = async (req, res, file, root = '') => {
     const abs = path.resolve(file);
     const base = root ? path.resolve(root) : '';
     if (base && !isInside(abs, base)) {
@@ -236,10 +279,34 @@ const sendFile = async (res, file, root = '') => {
         return false;
     }
 
-    res.statusCode = 200;
     res.setHeader('Content-Type', mime(abs));
     res.setHeader('Cache-Control', 'no-cache');
-    fs.createReadStream(abs).on('error', () => {
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    // streamed assets - gsplat and meshlet data, video - fetch slices of a file, and answering a
+    // range request with the whole body breaks them
+    const range = parseRange(req.headers.range, stat.size);
+    if (range === false) {
+        res.statusCode = 416;
+        res.setHeader('Content-Range', `bytes */${stat.size}`);
+        res.end();
+        return true;
+    }
+
+    const start = range ? range.start : 0;
+    const end = range ? range.end : stat.size - 1;
+    res.statusCode = range ? 206 : 200;
+    if (range) {
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+    }
+    res.setHeader('Content-Length', `${stat.size === 0 ? 0 : end - start + 1}`);
+
+    if (req.method === 'HEAD') {
+        res.end();
+        return true;
+    }
+
+    fs.createReadStream(abs, range ? { start, end } : undefined).on('error', () => {
         if (!res.headersSent) {
             res.statusCode = 500;
         }
@@ -380,28 +447,30 @@ const createTypesBuilder = (logger) => {
 
 /**
  * @param {string} url - request url.
+ * @param {HttpRequest} req - http request.
  * @param {HttpResponse} res - http response.
  * @param {EnginePathInfo} info - engine path info.
  * @returns {boolean | Promise<boolean>} true if handled.
  */
-const serveEngine = (url, res, info) => {
+const serveEngine = (url, req, res, info) => {
     if (!url.startsWith(ENGINE_PREFIX)) {
         return false;
     }
 
     const rel = url.slice(ENGINE_PREFIX.length);
     if (!info.unpacked) {
-        return rel === 'index.js' ? sendFile(res, info.src) : false;
+        return rel === 'index.js' ? sendFile(req, res, info.src) : false;
     }
-    return sendFile(res, path.join(info.root, rel), info.root);
+    return sendFile(req, res, path.join(info.root, rel), info.root);
 };
 
 /**
  * @param {string} url - request url.
+ * @param {HttpRequest} req - http request.
  * @param {HttpResponse} res - http response.
  * @returns {Promise<boolean>} true if handled.
  */
-const serveExampleFile = async (url, res) => {
+const serveExampleFile = async (url, req, res) => {
     const name = url.slice(IFRAME_PREFIX.length);
     const dot = name.indexOf('.');
     const target = dot === -1 ? '' : name.slice(0, dot);
@@ -417,7 +486,7 @@ const serveExampleFile = async (url, res) => {
 
     const src = getExamplePath(item, file);
     if (!/\.(?:mjs|js)$/.test(file)) {
-        return sendFile(res, src, path.dirname(src));
+        return sendFile(req, res, src, path.dirname(src));
     }
 
     const source = await fs.promises.readFile(src, 'utf8').then(value => value, () => null);
@@ -473,19 +542,19 @@ const handle = async (server, req, res, engineInfo, engineStamp) => {
     }
 
     if (ROOT_FILES[url]) {
-        const found = await sendFile(res, ROOT_FILES[url]);
+        const found = await sendFile(req, res, ROOT_FILES[url]);
         return found || notFound(res);
     }
     if (IFRAME_FILES[url]) {
-        const found = await sendFile(res, IFRAME_FILES[url]);
+        const found = await sendFile(req, res, IFRAME_FILES[url]);
         return found || notFound(res);
     }
     const route = STATIC_ROUTES.find(item => url.startsWith(item.url));
     if (route) {
-        const found = await sendFile(res, path.join(route.root, url.slice(route.url.length)), route.root);
+        const found = await sendFile(req, res, path.join(route.root, url.slice(route.url.length)), route.root);
         return found || notFound(res);
     }
-    if (await serveEngine(url, res, engineInfo)) {
+    if (await serveEngine(url, req, res, engineInfo)) {
         return true;
     }
 
@@ -504,7 +573,7 @@ const handle = async (server, req, res, engineInfo, engineStamp) => {
     }
 
     if (url.startsWith(IFRAME_PREFIX)) {
-        return serveExampleFile(url, res);
+        return serveExampleFile(url, req, res);
     }
 
     return false;
