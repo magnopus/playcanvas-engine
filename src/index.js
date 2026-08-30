@@ -266,6 +266,8 @@ export { ElementDragHelper } from './framework/components/element/element-drag-h
 export { Entity } from './framework/entity.js';
 export { GSplatComponent } from './framework/components/gsplat/component.js';
 export { GSplatComponentSystem } from './framework/components/gsplat/system.js';
+export { MeshletComponent } from './framework/components/meshlet/component.js';
+export { MeshletComponentSystem } from './framework/components/meshlet/system.js';
 export { ImageElement } from './framework/components/element/image-element.js';
 export * from './framework/components/joint/constants.js';
 export { JointComponent } from './framework/components/joint/component.js';

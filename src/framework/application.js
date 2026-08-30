@@ -28,6 +28,7 @@ import { CameraComponentSystem } from './components/camera/system.js';
 import { LightComponentSystem } from './components/light/system.js';
 import { ScriptComponentSystem } from './components/script/system.js';
 import { GSplatComponentSystem } from './components/gsplat/system.js';
+import { MeshletComponentSystem } from './components/meshlet/system.js';
 import { RenderHandler } from './handlers/render.js';
 import { AnimationHandler } from './handlers/animation.js';
 import { AnimClipHandler } from './handlers/anim-clip.js';
@@ -187,7 +188,8 @@ class Application extends AppBase {
             LayoutGroupComponentSystem,
             LayoutChildComponentSystem,
             ZoneComponentSystem,
-            GSplatComponentSystem
+            GSplatComponentSystem,
+            MeshletComponentSystem
         ];
     }
 
