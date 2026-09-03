@@ -80,15 +80,26 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     _destroyed = false;
 
     /**
+     * // magnopus patched
+     * Options passed to any assets loaded by this.
+     *
+     * @type {object}
+     * @private
+     */
+    _assetOptions;
+
+    /**
      * Create a new GSplatAssetLoader.
      *
      * @param {AssetRegistry} registry - The asset registry to use for loading assets.
+     * @param {object} [assetOptions] - Options to apply to the assets this loader creates, // magnopus patched
      */
-    constructor(registry) {
+    constructor(registry, assetOptions = {}) {
         super();
         this._registry = registry;
+        this._assetOptions = assetOptions;
     }
-
+    
 
     /**
      * Destroys the asset loader and force-unloads all tracked assets, ignoring ref counts.
@@ -172,7 +183,7 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
         if (!asset) {
             // Create a new gsplat asset
             // @ts-ignore - minimalMemory is a custom option for gsplat assets
-            asset = new Asset(url, 'gsplat', { url }, {}, { minimalMemory: true });
+            asset = new Asset(url, 'gsplat', { url }, {}, { minimalMemory: true }, {}, this._assetOptions);
 
             // Assert that registry doesn't already have an asset for this URL
             // If it does, there's a code ownership issue - GSplatAssetLoader should be the only

@@ -44,13 +44,16 @@ class GSplatOctreeParser {
         const options = {
             retry: this.maxRetries > 0,
             maxRetries: this.maxRetries,
-            responseType: Http.ResponseType.JSON
+            responseType: Http.ResponseType.JSON,
+            // Magnopus patched - add withCredentials option
+            withCredentials: asset?.options?.crossOrigin === 'use-credentials'
         };
 
         http.get(url.load, options, (err, data) => {
             if (!err) {
                 // create a resource with the parsed data, passing the asset's file URL
-                const assetLoader = new GSplatAssetLoader(this.app.assets);
+                // magnopus patched - pass in the asset options.
+                const assetLoader = new GSplatAssetLoader(this.app.assets, asset?.options);
                 const resource = new GSplatOctreeResource(asset.file.url, data, assetLoader);
                 callback(null, resource);
             } else {
