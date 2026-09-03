@@ -374,10 +374,8 @@ if (params.get('cameraframe') !== '0') {
     cameraFrame = new CameraFrame(app, camera.camera);
     cameraFrame.rendering.toneMapping = TONEMAP_LINEAR;
     // off by default - even a subtle bloom reads as a washed-out veil over this bright scene
-    cameraFrame.bloom.intensity = parseFloat(params.get('bloom') ?? '0');
-    // two-phase occlusion needs a sampleable scene depth; ?scenedepth=1 asks the CameraFrame
-    // for one
-    if (params.get('scenedepth') === '1') cameraFrame.rendering.sceneDepthMap = true;
+    cameraFrame.bloom.enabled = false;
+    cameraFrame.rendering.sceneDepthMap = true;
     cameraFrame.update();
 }
 
