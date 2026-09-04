@@ -97,6 +97,7 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     constructor(registry, assetOptions = {}) {
         super();
         this._registry = registry;
+        // Magnopus patched
         this._assetOptions = assetOptions;
     }
     
