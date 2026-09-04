@@ -257,7 +257,7 @@ class Asset extends EventHandler {
      * For more details on crossOrigin and its use, see
      * https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement/crossOrigin.
      * @example
-     * const asset = new pc.Asset("a texture", "texture", {
+     * const asset = new Asset("a texture", "texture", {
      *     url: "http://example.com/my/assets/here/texture.png"
      * });
      */

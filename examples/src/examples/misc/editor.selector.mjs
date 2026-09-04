@@ -1,41 +1,45 @@
-import * as pc from 'playcanvas';
+import { EventHandler, Picker, Vec2 } from 'playcanvas';
+
+/**
+ * @import { AppBase, CameraComponent, Layer, Scene } from 'playcanvas'
+ */
 
 const EPSILON = 1;
-class Selector extends pc.EventHandler {
+class Selector extends EventHandler {
     /**
-     * @type {pc.CameraComponent}
+     * @type {CameraComponent}
      * @private
      */
     _camera;
 
     /**
-     * @type {pc.Scene}
+     * @type {Scene}
      * @private
      */
     _scene;
 
     /**
-     * @type {pc.Picker}
+     * @type {Picker}
      * @private
      */
     _picker;
 
     /**
-     * @type {pc.Layer[]}
+     * @type {Layer[]}
      * @private
      */
     _layers;
 
     /**
-     * @type {pc.Vec2}
+     * @type {Vec2}
      * @private
      */
-    _start = new pc.Vec2();
+    _start = new Vec2();
 
     /**
-     * @param {pc.AppBase} app - The app.
-     * @param {pc.CameraComponent} camera - The camera to pick from.
-     * @param {pc.Layer[]} [layers] - The layers to pick from.
+     * @param {AppBase} app - The app.
+     * @param {CameraComponent} camera - The camera to pick from.
+     * @param {Layer[]} [layers] - The layers to pick from.
      */
     constructor(app, camera, layers = []) {
         super();
