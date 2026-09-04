@@ -375,9 +375,16 @@ if (params.get('cameraframe') !== '0') {
     cameraFrame.rendering.toneMapping = TONEMAP_LINEAR;
     // off by default - even a subtle bloom reads as a washed-out veil over this bright scene
     cameraFrame.bloom.enabled = false;
-    cameraFrame.rendering.sceneDepthMap = true;
+    // No sceneDepthMap request: that forces the depth prepass, and a camera with a prepass
+    // cannot also render the scene depth from its scene pass - which is what the meshlet HZB
+    // reads under a CameraFrame. ?occlusion=1 below asks the frame for it through the director.
     cameraFrame.update();
 }
+
+// ?occlusion=1 turns on two-phase HZB occlusion. Under the CameraFrame the director asks the
+// frame to render the linear scene depth as an extra attachment and builds its pyramid from
+// that; without one it needs a render target with a depth texture.
+director.occlusionEnabled = params.get('occlusion') === '1';
 
 // SMAA is deliberately not offered: the engine's SMAA chain has a gamma handling bug
 // unrelated to meshlets (compose hands it a gamma-encoded intermediate whose round trip does

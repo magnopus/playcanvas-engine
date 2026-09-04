@@ -35,6 +35,32 @@ class RenderPassMeshletDraw extends RenderPass {
     meshInstances = [];
 
     /**
+     * The scene textures this pass writes alongside the scene colour, when it renders into a
+     * CameraFrame's scene target - the same setting the frame gives its own scene passes (see
+     * RenderPassForward#sceneTextures). Undefined leaves the camera's setting in place.
+     *
+     * @type {string[]|undefined}
+     */
+    sceneTextures;
+
+    /**
+     * Gamma correction override for the draws, applied for the duration of this pass the way
+     * RenderPassForward applies it: a CameraFrame renders its scene passes with none, as its
+     * compose pass applies gamma and tonemapping to the whole frame, and the meshlet draws
+     * sharing that target must match. Undefined leaves the camera's setting in place.
+     *
+     * @type {number|undefined}
+     */
+    gammaCorrection;
+
+    /**
+     * Tone mapping override for the draws - see {@link gammaCorrection}.
+     *
+     * @type {number|undefined}
+     */
+    toneMapping;
+
+    /**
      * Duck-typed {@link LayerRenderStep} list for WorldClustersAllocator._assignClustersForPass:
      * one entry pointing at the borrowed light layer; the allocator writes lightClusters.
      *
@@ -121,16 +147,32 @@ class RenderPassMeshletDraw extends RenderPass {
     }
 
     execute() {
-        const camera = this.cameraComponent?.camera;
+        const cameraComponent = this.cameraComponent;
+        const camera = cameraComponent?.camera;
         if (!camera || !this.meshInstances.length) {
             return;
         }
+
+        // the per-pass overrides a forward pass applies, so the draws match the scene passes
+        // rendering into the same target
+        const { shaderParams } = cameraComponent;
+        const originalGammaCorrection = cameraComponent.gammaCorrection;
+        const originalToneMapping = cameraComponent.toneMapping;
+        const originalSceneTextures = shaderParams.sceneTextures;
+        if (this.gammaCorrection !== undefined) cameraComponent.gammaCorrection = this.gammaCorrection;
+        if (this.toneMapping !== undefined) cameraComponent.toneMapping = this.toneMapping;
+        if (this.sceneTextures !== undefined) shaderParams.sceneTextures = this.sceneTextures;
+
         const step = this.layerRenderSteps[0];
         this.renderer.renderForwardLayer(camera, this.renderTarget, null, false, SHADER_FORWARD, {
             meshInstances: this.meshInstances,
             lightLayer: step.layer,
             lightClusters: step.lightClusters ?? undefined
         });
+
+        if (this.gammaCorrection !== undefined) cameraComponent.gammaCorrection = originalGammaCorrection;
+        if (this.toneMapping !== undefined) cameraComponent.toneMapping = originalToneMapping;
+        if (this.sceneTextures !== undefined) shaderParams.sceneTextures = originalSceneTextures;
     }
 }
 

@@ -11,8 +11,10 @@
  *   index buffer from it). Bucket order is opaque, opaque-two-sided, masked (MESHLET_BUCKET_*).
  * - cullParams: array<vec4f>, rows CULL_PARAMS.* (planes, camera, LOD, view-projection,
  *   streaming, view direction). orthoScale > 0 selects the orthographic LOD projection (shadow
- *   cascades); CULL_FLAG_NO_TEXEL_RATE suppresses the texture-mip feedback. Both are
- *   float-encoded and read back through u32() where integral, matching the mipCount convention.
+ *   cascades); CULL_FLAG_NO_TEXEL_RATE suppresses the texture-mip feedback; CULL_FLAG_HZB_LINEAR
+ *   says the HZB holds linear view depth (a CameraFrame's scene depth) rather than NDC depth.
+ *   All are float-encoded and read back through u32() where integral, matching the mipCount
+ *   convention.
  * - residency: page -> pool slot (PAGE_NOT_RESIDENT when absent); requests: page marks then
  *   texel-rate marks; claimBits / visBits: one bit per (instance, meshlet) pair.
  * - drawn index format: (recordIndex << 8) | meshletLocalVertexIndex
@@ -21,7 +23,7 @@
  */
 
 import {
-    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
+    CULL_FLAG_HZB_LINEAR, CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
     MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE,
     MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP,
     MESHLET_INSTANCE_CULL_WORKGROUP, MESHLET_NO_PARENT, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HIDDEN,
@@ -188,7 +190,14 @@ export const meshletCullWGSL = /* wgsl */ `
         if (nearestClip.w <= 1e-5) {
             return true; // crosses the near plane
         }
-        let sphereDepth = nearestClip.z / nearestClip.w;
+        // the pyramid holds NDC depth when built from a depth texture, or linear view depth when
+        // built from the scene depth a CameraFrame renders - the sphere is measured the same way,
+        // along the view direction for the linear case (which is what the scene depth stores)
+        let linearHzb = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_HZB_LINEAR}u) != 0u;
+        let sphereDepth = select(
+            nearestClip.z / nearestClip.w,
+            dot(nearestPoint - camPos, cullParams[${CULL_PARAMS.VIEW_DIR}u].xyz),
+            linearHzb);
 
         // screen rect from camera-facing billboard corners
         let right = normalize(vec3f(viewProjMatrix[0].x, viewProjMatrix[1].x, viewProjMatrix[2].x));
@@ -226,7 +235,9 @@ export const meshletCullWGSL = /* wgsl */ `
         let depth01 = textureLoad(hzbTexture, vec2i(i32(texelMin.x), i32(texelMax.y)), i32(mip)).x;
         let depth11 = textureLoad(hzbTexture, vec2i(i32(texelMax.x), i32(texelMax.y)), i32(mip)).x;
         let occluderDepth = max(max(depth00, depth10), max(depth01, depth11));
-        return sphereDepth <= occluderDepth + 1e-5;
+        // linear depth spans the whole view range, so its tolerance is relative to the occluder
+        let tolerance = select(1e-5, occluderDepth * 1e-4 + 1e-3, linearHzb);
+        return sphereDepth <= occluderDepth + tolerance;
     }
 
     @compute @workgroup_size(${MESHLET_CULL_SLICE})

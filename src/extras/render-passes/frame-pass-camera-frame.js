@@ -4,6 +4,7 @@ import { Texture } from '../../platform/graphics/texture.js';
 import { FramePass } from '../../platform/graphics/frame-pass.js';
 import { FramePassColorGrab } from '../../scene/graphics/frame-pass-color-grab.js';
 import { RenderPassForward } from '../../scene/renderer/render-pass-forward.js';
+import { RenderPassMeshletDraw } from '../../scene/meshlet/render-pass-meshlet-draw.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
 
 import { FramePassBloom } from './frame-pass-bloom.js';
@@ -299,8 +300,13 @@ class FramePassCameraFrame extends FramePass {
         // losslessly packed, and the effects consuming it are sensitive to that.
         const requiresSplatDepth = inSceneDepth || this.sceneDepthFormat !== PIXELFORMAT_R32F;
 
-        options.sceneTextureDepth = postProcessDepth && deviceSupported && !unsupportedReason &&
-            (!requiresSplatDepth || splatDepth);
+        // The meshlet director's two-phase occlusion builds its HZB from the scene depth when the
+        // scene target has no depth texture of its own - which a CameraFrame's never has. It asks
+        // for the depth here and marks this pass for rebuild whenever its answer changes.
+        const meshletDepth = !!this.app.renderer.meshletDirector?.wantsSceneDepth(this.cameraComponent);
+
+        options.sceneTextureDepth = (meshletDepth || (postProcessDepth && (!requiresSplatDepth || splatDepth))) &&
+            deviceSupported && !unsupportedReason;
 
         options.prepassEnabled = inSceneDepth || (postProcessDepth && !options.sceneTextureDepth);
 
@@ -812,6 +818,15 @@ class FramePassCameraFrame extends FramePass {
             this.cameraComponent, this.rt, ret.clearRenderTarget) ?? null;
         if (this.meshletPasses) {
             ret.clearRenderTarget = false;      // the meshlet phase-1 pass cleared
+
+            // the meshlet draws render into the scene target alongside the scene passes, so they
+            // take the same settings: HDR, with gamma and tonemapping left to the compose pass,
+            // and the scene textures the target carries
+            for (const pass of [...this.meshletPasses.before, ...this.meshletPasses.middle]) {
+                if (pass instanceof RenderPassMeshletDraw) {
+                    this.setupScenePassSettings(pass);
+                }
+            }
         }
 
         ret.lastAddedIndex = this.addCameraLayers(this.scenePass, ret.lastAddedIndex, ret.clearRenderTarget,
@@ -1054,7 +1069,10 @@ class FramePassCameraFrame extends FramePass {
             // transparent layers after the grab pass blends into what the first one accumulated.
             const clearValue = this._sceneDepthClearValue;
             clearValue.r = 1 / this.cameraComponent.camera.farClip;
-            this.scenePass.setClearColor(clearValue, this.sceneDepthSlot);
+            // the meshlet phase-1 pass owns the clear of the scene target when it is present -
+            // it renders before the scene pass, and its depth has to survive into the attachment
+            const firstPass = this.meshletPasses?.before[0] ?? this.scenePass;
+            firstPass.setClearColor(clearValue, this.sceneDepthSlot);
         }
 
         // scene texture is either output of taa pass or the scene render target

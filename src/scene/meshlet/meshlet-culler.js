@@ -1,6 +1,6 @@
 import { Compute } from '../../platform/graphics/compute.js';
 import {
-    CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_INSTANCE_CULL_WORKGROUP
+    CULL_FLAG_HZB_LINEAR, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_INSTANCE_CULL_WORKGROUP
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
 
@@ -68,6 +68,14 @@ class MeshletCuller {
 
     /** @type {boolean} - two-phase occlusion (requires an HZB). */
     twoPhase = false;
+
+    /**
+     * True when the HZB holds linear view depth (built from a CameraFrame's scene depth) rather
+     * than NDC depth from a depth texture - the occlusion test then compares along viewDir.
+     *
+     * @type {boolean}
+     */
+    hzbLinear = false;
 
 
     /**
@@ -235,7 +243,7 @@ class MeshletCuller {
         // base of the texture-mip feedback marks inside the requests buffer (= page count)
         params[row(CULL_PARAMS.STREAMING) + 0] = world.totalPages;
         params[row(CULL_PARAMS.STREAMING) + 1] = this.orthoScale;
-        params[row(CULL_PARAMS.STREAMING) + 2] = this.cullFlags;
+        params[row(CULL_PARAMS.STREAMING) + 2] = this.cullFlags | (this.hzbLinear ? CULL_FLAG_HZB_LINEAR : 0);
         params[row(CULL_PARAMS.VIEW_DIR) + 0] = this.viewDir?.x ?? 0;
         params[row(CULL_PARAMS.VIEW_DIR) + 1] = this.viewDir?.y ?? 0;
         params[row(CULL_PARAMS.VIEW_DIR) + 2] = this.viewDir?.z ?? 1;

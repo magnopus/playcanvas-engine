@@ -127,6 +127,13 @@ export const CULL_PARAMS_VEC4S = 16;
 /** cullFlags bit 0: suppress the texel-rate feedback marks (orthographic / shadow views). @type {number} */
 export const CULL_FLAG_NO_TEXEL_RATE = 1 << 0;
 
+/**
+ * cullFlags bit 1: the HZB holds linear view depth (built from the scene depth a CameraFrame
+ * renders) rather than NDC depth (built from a depth texture), so the occlusion test compares
+ * in view units. @type {number}
+ */
+export const CULL_FLAG_HZB_LINEAR = 1 << 1;
+
 /** Threads per workgroup of the instance cull (one thread per instance). @type {number} */
 export const MESHLET_INSTANCE_CULL_WORKGROUP = 64;
 

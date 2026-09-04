@@ -22,6 +22,7 @@ import { RenderPassMeshletDraw } from './render-pass-meshlet-draw.js';
  * @import { MeshletWorld } from './meshlet-world.js'
  * @import { MeshletCullShaders } from './meshlet-cull-shaders.js'
  * @import { MeshletHzb } from './meshlet-hzb.js'
+ * @import { Texture } from '../../platform/graphics/texture.js'
  */
 
 // the draw index buffer is never smaller than one triangle, so an empty view still binds a
@@ -52,6 +53,14 @@ class MeshletView {
 
     /** @type {MeshletHzb|null} */
     hzb = null;
+
+    /**
+     * Resolves the HZB's depth source as its mip 0 pass executes - see MeshletHzb#resize.
+     *
+     * @type {(() => Texture|null)|null}
+     * @ignore
+     */
+    _hzbSource = null;
 
     /** @type {boolean} - whether this view culls two-phase this frame. */
     useOcclusion = false;

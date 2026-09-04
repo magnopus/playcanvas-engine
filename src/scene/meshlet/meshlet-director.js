@@ -81,8 +81,8 @@ class MeshletDirector {
     /** @type {ForwardRenderer|null} */
     renderer = null;
 
-    /** @type {boolean} - two-phase HZB occlusion culling. */
-    occlusionEnabled = false;
+    /** @type {boolean} - two-phase HZB occlusion culling, see {@link occlusionEnabled}. */
+    _occlusionEnabled = false;
 
     /** @type {Float32Array} */
     _frustumPlanes = new Float32Array(24);
@@ -646,19 +646,45 @@ class MeshletDirector {
         const viewportHeight = rt?.height ?? this.device.height;
         const projScale = viewportHeight / (2 * Math.tan(0.5 * cameraComponent.fov * math.DEG_TO_RAD));
 
-        // two-phase occlusion needs a sampleable depth texture on the camera's render target
-        const depthTexture = rt?.depthBuffer ?? null;
-        const useOcclusion = this.occlusionEnabled && !!depthTexture;
+        // Two-phase occlusion needs a scene depth the HZB can sample. A render target with a
+        // depth texture supplies hardware (NDC) depth. A CameraFrame keeps its scene depth as a
+        // renderbuffer, but renders the linear scene depth as an extra attachment when asked
+        // (wantsSceneDepth -> sceneTextureDepth), and the HZB reads that in view units instead.
+        // Either way the pyramid is built mid-frame, after phase 1 and the scene's opaque
+        // layers, so meshlet and scene geometry both occlude.
+        const framePass = cameraComponent.framePasses?.[0];
+        let depthTexture = rt?.depthBuffer ?? null;
+        let hzbLinear = false;
+        if (!depthTexture && framePass?.sceneDepthTexture) {
+            depthTexture = framePass.sceneDepthTexture;
+            hzbLinear = true;
+        }
+        const useOcclusion = this._occlusionEnabled && !!depthTexture;
         Debug.call(() => {
-            if (this.occlusionEnabled && !depthTexture) {
-                Debug.warnOnce('MeshletDirector: occlusion requires the camera to render into a render target with a depth texture; falling back to single-phase culling.');
+            if (this._occlusionEnabled && !depthTexture) {
+                Debug.warnOnce('MeshletDirector: occlusion requires the camera to render into a render target with a depth texture, or a CameraFrame able to render the scene depth (no multi-sampling, no depth prepass); falling back to single-phase culling.');
             }
         });
         if (useOcclusion) {
             view.hzb ??= new MeshletHzb(this.device);
-            view.hzb.resize(depthTexture, rt.width, rt.height);
+            // the frame's scene textures are replaced when it rebuilds, which can happen between
+            // this update and the pass executing - so the pass resolves its source as it runs
+            view._hzbSource ??= () => {
+                const passes = cameraComponent.framePasses;
+                const target = passes?.[0]?.rt ?? cameraComponent.renderTarget;
+                return target?.depthBuffer ?? passes?.[0]?.sceneDepthTexture ?? null;
+            };
+            view.hzb.resize(depthTexture, rt.width, rt.height, hzbLinear, view._hzbSource);
+        }
+        // a CameraFrame caches its pass chain, and the HZB and phase-2 passes are only spliced
+        // in (or dropped) when it rebuilds - so tell it when the occlusion state flips
+        if (framePass && view.useOcclusion !== useOcclusion) {
+            this._invalidateCameraFrame(cameraComponent);
         }
         view.culler.twoPhase = useOcclusion;
+        view.culler.hzbLinear = hzbLinear;
+        // the linear occlusion test measures depth along the view direction, as the scene depth does
+        view.culler.viewDir = cameraComponent.entity.forward;
         view.useOcclusion = useOcclusion;
 
         view.culler.beginFrame(planes, cameraComponent.entity.getPosition(), projScale, _viewProj.data,
@@ -995,6 +1021,42 @@ class MeshletDirector {
                 if ('layersDirty' in pass) pass.layersDirty = true;
             }
         }
+    }
+
+    /**
+     * Sets whether two-phase HZB occlusion culling is enabled: phase 1 draws last frame's visible
+     * set, an HZB is built from the depth so far, and phase 2 draws only what the HZB proves
+     * newly visible. Needs a scene depth the HZB can sample - a depth texture on the camera's
+     * render target, or a CameraFrame rendering the scene depth (which it does on request, see
+     * {@link wantsSceneDepth}). Falls back to single-phase culling when neither is available.
+     * Defaults to false.
+     *
+     * @type {boolean}
+     */
+    set occlusionEnabled(value) {
+        value = !!value;
+        if (this._occlusionEnabled === value) return;
+        this._occlusionEnabled = value;
+        // a CameraFrame decides whether to render the scene depth from wantsSceneDepth, and caches
+        // its chain - so every driven camera's frame has to rebuild
+        this.views.forEach((view, cameraComponent) => this._invalidateCameraFrame(cameraComponent));
+    }
+
+    get occlusionEnabled() {
+        return this._occlusionEnabled;
+    }
+
+    /**
+     * Whether a camera's CameraFrame should render the scene depth for the meshlet HZB: occlusion
+     * is enabled and the director has a view for the camera. FramePassCameraFrame asks when it
+     * decides its scene textures; the director marks the frame for rebuild whenever the answer
+     * changes (the view appearing or leaving, the flag flipping).
+     *
+     * @param {CameraComponent} cameraComponent - The camera.
+     * @returns {boolean} True when the frame should render the scene depth.
+     */
+    wantsSceneDepth(cameraComponent) {
+        return this._occlusionEnabled && this.views.has(cameraComponent);
     }
 
     /**
