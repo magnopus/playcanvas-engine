@@ -324,7 +324,9 @@ class SogParser {
             const options = {
                 retry: this.handler.maxRetries > 0,
                 maxRetries: this.handler.maxRetries,
-                responseType: Http.ResponseType.JSON
+                responseType: Http.ResponseType.JSON,
+                // Magnopus patched - add withCredentials option
+                withCredentials: asset?.options?.crossOrigin === 'use-credentials'
             };
 
             http.get(url.load, options, (err, meta) => {
