@@ -2,7 +2,7 @@ import { Debug } from '../../core/debug.js';
 import { Vec4 } from '../../core/math/vec4.js';
 import {
     ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST, PIXELFORMAT_R16F, PIXELFORMAT_RGBA8,
-    RENDERTARGET_ORIGIN_BOTTOM, SEMANTIC_POSITION, SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL
+    SEMANTIC_POSITION, SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL
 } from '../../platform/graphics/constants.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
 import { Texture } from '../../platform/graphics/texture.js';
@@ -461,12 +461,13 @@ class SceneDepthReader {
         // The target is only ever grown, so a read is generally smaller than it. The rendered region
         // and the region read back therefore have to be the same rows, which they are not by default:
         // the viewport is placed from the bottom on WebGL and from the top on WebGPU, while the readback
-        // addresses texels natively on both. Asking for the WebGL row order on every API settles it.
+        // addresses texels natively on both. Asking for the WebGL row order on every API settles it -
+        // which, on this engine's render targets, is flipY on WebGPU (the origin option of newer engines).
         this.renderTarget = new RenderTarget({
             name: 'SceneDepthRead',
             colorBuffer: texture,
             depth: false,
-            origin: RENDERTARGET_ORIGIN_BOTTOM
+            flipY: this.device.isWebGPU
         });
         this.pass.init(this.renderTarget);
     }
