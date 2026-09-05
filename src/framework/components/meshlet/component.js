@@ -192,21 +192,26 @@ class MeshletComponent extends Component {
     }
 
     /**
-     * How the effective resource's sidecar URIs (geometry shards, texture containers) map to
-     * fetch URLs. With an asset, each URI resolves through the application's URL resolver
-     * relative to the asset's file URL - the same route the asset itself loaded by - so a host
-     * that rewrites or signs a package's URLs serves the sidecars too. A direct resource with an
-     * explicit {@link baseUrl} appends the URI to it (null).
+     * How the effective resource's sidecars (geometry shards, texture containers) are fetched.
+     * With an asset, each URI resolves through the application's URL resolver relative to the
+     * asset's file URL - the same route the asset itself loaded by - so a host that rewrites or
+     * signs a package's URLs serves the sidecars too, and requests carry cookies when the asset
+     * was loaded with `crossOrigin: 'use-credentials'`. A direct resource with an explicit
+     * {@link baseUrl} appends the URI to it and sends no credentials (null).
      *
-     * @type {((uri: string) => string)|null}
+     * @type {import('../../../scene/meshlet/meshlet-world.js').MeshletFetchOptions|null}
      * @ignore
      */
-    get _effectiveResolveUrl() {
+    get _effectiveFetchOptions() {
         if (this._baseUrl !== null) return null;
+        const asset = this._assetReference.asset;
+        const fileUrl = asset?.file?.url;
+        if (!fileUrl) return null;
         const app = this.system.app;
-        const fileUrl = this._assetReference.asset?.file?.url;
-        if (!fileUrl || typeof app.resolveUrl !== 'function') return null;
-        return uri => app.resolveUrl(uri, { baseUrl: fileUrl }).load;
+        return {
+            resolveUrl: typeof app.resolveUrl === 'function' ? uri => app.resolveUrl(uri, { baseUrl: fileUrl }).load : null,
+            credentials: asset.options?.crossOrigin === 'use-credentials' ? 'include' : null
+        };
     }
 
     _onAssetAdded(asset) {

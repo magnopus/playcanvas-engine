@@ -18,14 +18,17 @@ class MeshletPageFetcher {
     /**
      * @param {object} manifest - The resource's stream manifest.
      * @param {string} baseUrl - URL directory the manifest's blob URIs are relative to.
-     * @param {((uri: string) => string)|null} [resolveUrl] - Maps a manifest URI to the URL to
-     * fetch, in place of appending it to the base URL - the application's URL resolver, so hosts
-     * that store a package's files behind rewritten or signed URLs can serve the shards.
+     * @param {import('../meshlet-world.js').MeshletFetchOptions|null} [fetchOptions] - How the
+     * sidecars are fetched: `resolveUrl` maps a manifest URI to the URL to fetch in place of
+     * appending it to the base URL (the application's URL resolver, so hosts that store a
+     * package's files behind rewritten or signed URLs can serve them), `credentials` is the fetch
+     * credentials mode (cookies for hosts that need them).
      */
-    constructor(manifest, baseUrl, resolveUrl = null) {
+    constructor(manifest, baseUrl, fetchOptions = null) {
         this.manifest = manifest;
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
-        this.resolveUrl = resolveUrl;
+        this.resolveUrl = fetchOptions?.resolveUrl ?? null;
+        this.credentials = fetchOptions?.credentials ?? null;
 
         /** @type {string[]} - per-blob fetch URLs, resolved once. */
         this._urls = [];
@@ -42,6 +45,19 @@ class MeshletPageFetcher {
     }
 
     /**
+     * Fetch init for a sidecar request.
+     *
+     * @param {Record<string, string>} [headers] - Request headers.
+     * @returns {RequestInit} The init.
+     * @private
+     */
+    _init(headers) {
+        const init = headers ? { headers } : {};
+        if (this.credentials) init.credentials = this.credentials;
+        return init;
+    }
+
+    /**
      * Fetches one byte range of a shard.
      *
      * @param {number} blobIndex - Index into the manifest's blobs.
@@ -50,9 +66,9 @@ class MeshletPageFetcher {
      * @returns {Promise<ArrayBuffer>} The bytes.
      */
     async fetchRange(blobIndex, offset, length) {
-        const response = await fetch(this._blobUrl(blobIndex), {
-            headers: { Range: `bytes=${offset}-${offset + length - 1}` }
-        });
+        const response = await fetch(this._blobUrl(blobIndex), this._init({
+            Range: `bytes=${offset}-${offset + length - 1}`
+        }));
         if (!response.ok && response.status !== 206) {
             throw new Error(`meshlet shard fetch failed (${response.status}): ${this._blobUrl(blobIndex)}`);
         }
@@ -71,7 +87,7 @@ class MeshletPageFetcher {
      * @returns {Promise<ArrayBuffer>} The bytes.
      */
     async fetchBlob(blobIndex) {
-        const response = await fetch(this._blobUrl(blobIndex));
+        const response = await fetch(this._blobUrl(blobIndex), this._init());
         if (!response.ok) {
             throw new Error(`meshlet shard fetch failed (${response.status}): ${this._blobUrl(blobIndex)}`);
         }

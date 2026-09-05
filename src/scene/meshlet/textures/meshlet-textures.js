@@ -134,13 +134,13 @@ class MeshletTextures {
      *
      * @param {object} textureManifest - The parsed MAG_texture_streaming manifest ({ arrays }).
      * @param {string} baseUrl - Directory the manifest's container URIs are relative to.
-     * @param {((uri: string) => string)|null} [resolveUrl] - Maps a container URI to its fetch
-     * URL in place of the base URL (see MeshletWorld#addStreamedResource).
+     * @param {import('../meshlet-world.js').MeshletFetchOptions|null} [fetchOptions] - How the
+     * containers are fetched (see MeshletWorld#addStreamedResource).
      * @returns {number} The resource's texture base index.
      */
-    addResource(textureManifest, baseUrl, resolveUrl = null) {
+    addResource(textureManifest, baseUrl, fetchOptions = null) {
         const base = this.textures.length;
-        const source = new MeshletTextureSource(baseUrl, resolveUrl);
+        const source = new MeshletTextureSource(baseUrl, fetchOptions);
         this._sources.push(source);
         for (const array of textureManifest.arrays ?? []) {
             if (array.containerVersion !== 2) {

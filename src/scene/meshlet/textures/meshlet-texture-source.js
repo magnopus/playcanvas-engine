@@ -16,12 +16,13 @@ class MeshletTextureSource {
 
     /**
      * @param {string} baseUrl - Directory the manifest's container URIs are relative to.
-     * @param {((uri: string) => string)|null} [resolveUrl] - Maps a container URI to the URL to
-     * fetch, in place of appending it to the base URL (see MeshletPageFetcher).
+     * @param {import('../meshlet-world.js').MeshletFetchOptions|null} [fetchOptions] - How the
+     * containers are fetched - see MeshletPageFetcher.
      */
-    constructor(baseUrl, resolveUrl = null) {
+    constructor(baseUrl, fetchOptions = null) {
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
-        this.resolveUrl = resolveUrl;
+        this.resolveUrl = fetchOptions?.resolveUrl ?? null;
+        this.credentials = fetchOptions?.credentials ?? null;
     }
 
     /**
@@ -54,9 +55,10 @@ class MeshletTextureSource {
         const key = `${url}@${byteOffset}+${byteLength}`;
         let promise = this._regions.get(key);
         if (!promise) {
-            promise = fetch(url, {
-                headers: { Range: `bytes=${byteOffset}-${byteOffset + byteLength - 1}` }
-            }).then((response) => {
+            /** @type {RequestInit} */
+            const init = { headers: { Range: `bytes=${byteOffset}-${byteOffset + byteLength - 1}` } };
+            if (this.credentials) init.credentials = this.credentials;
+            promise = fetch(url, init).then((response) => {
                 if (!response.ok && response.status !== 206) {
                     throw new Error(`MeshletTextureSource: ${response.status} fetching ${url}`);
                 }

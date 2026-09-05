@@ -24,6 +24,15 @@ import { MeshletTextures, MESHLET_TEX_FAMILIES } from './textures/meshlet-textur
  * @import { MeshletResource } from './meshlet-resource.js'
  */
 
+/**
+ * How a streamed resource's sidecars (geometry shards, texture containers) are fetched.
+ *
+ * @typedef {object} MeshletFetchOptions
+ * @property {((uri: string) => string)|null} [resolveUrl] - Maps a manifest URI to the URL it
+ * is fetched from, in place of appending it to the resource's base URL.
+ * @property {RequestCredentials|null} [credentials] - Fetch credentials mode for the requests.
+ */
+
 const _tmpMat = new Mat4();
 const _tmpBox = new BoundingBox();
 const _tmpLocalBox = new BoundingBox();
@@ -261,7 +270,7 @@ class MeshletWorld {
     streamed = false;
 
     /**
-     * Per-resource streaming info: { resource, pageBase, baseUrl, resolveUrl }.
+     * Per-resource streaming info: { resource, pageBase, baseUrl, fetchOptions }.
      *
      * @type {Array<object>}
      */
@@ -331,15 +340,17 @@ class MeshletWorld {
      * @param {string} baseUrl - URL directory the manifest's blob URIs are relative to.
      * @param {Array<{ primIndex: number, matrix: Float32Array }>|null} [instances] - Optional
      * placement list replacing the resource's own - many instances share one set of pages.
-     * @param {((uri: string) => string)|null} [resolveUrl] - Maps a manifest URI (geometry
-     * shard or texture container) to the URL it is fetched from, in place of appending it to
-     * the base URL. The component system passes the application's URL resolver, so a host
-     * storing a package's files behind rewritten or signed URLs can serve them; null appends.
+     * @param {MeshletFetchOptions|null} [fetchOptions] - How the resource's sidecars (geometry
+     * shards, texture containers) are fetched. `resolveUrl` maps a manifest URI to the URL it is
+     * fetched from in place of appending it to the base URL - the component system passes the
+     * application's URL resolver, so a host storing a package's files behind rewritten or signed
+     * URLs can serve them; `credentials` is the fetch credentials mode for hosts that need
+     * cookies. Null appends the URI to the base URL and sends no credentials.
      */
-    addStreamedResource(resource, transform, baseUrl, instances = null, resolveUrl = null) {
+    addStreamedResource(resource, transform, baseUrl, instances = null, fetchOptions = null) {
         Debug.assert(!this.finalized, 'MeshletWorld: addStreamedResource after finalize');
         this.streamed = true;
-        this._pending.push({ resource, transform, baseUrl, instances, resolveUrl });
+        this._pending.push({ resource, transform, baseUrl, instances, fetchOptions });
     }
 
     /**
@@ -558,7 +569,7 @@ class MeshletWorld {
         this.pickIdBase = PickerId.reserve(totalInstances);
         this._pickRecords = null;
 
-        for (const { resource, transform, shardBuffers, baseUrl, instances, resolveUrl } of pending) {
+        for (const { resource, transform, shardBuffers, baseUrl, instances, fetchOptions } of pending) {
             const manifest = resource.manifest;
             const grid = manifest.positionGrid;
             const uvFloats = (manifest.attributeLayout.uvComponents ?? 0) * 2;
@@ -591,7 +602,7 @@ class MeshletWorld {
                         new Uint32Array(shardBuffers[blob], offset, this.pageSizeBytes / 4));
                 }
             } else {
-                this.streamInfo.push({ resource, pageBase, baseUrl, resolveUrl: resolveUrl ?? null });
+                this.streamInfo.push({ resource, pageBase, baseUrl, fetchOptions: fetchOptions ?? null });
             }
 
             // material rows: baked table verbatim, or one synthesized row per primitive
@@ -622,7 +633,7 @@ class MeshletWorld {
                         runningTexBase += Array.isArray(arr.layers) ? arr.layers.length : 0;
                     }
                     if (!texturesAdopted) {
-                        this.textures.addResource(resource.textureManifest, baseUrl, resolveUrl ?? null);
+                        this.textures.addResource(resource.textureManifest, baseUrl, fetchOptions ?? null);
                     }
                     if (baked && textureBase > 0) {
                         for (let row = 0; row < resource.materialCount; row++) {
