@@ -145,7 +145,7 @@ class MeshletResidency {
         // per-resource fetchers
         this._streams = world.streamInfo.map(info => ({
             ...info,
-            fetcher: new MeshletPageFetcher(info.resource.manifest, info.baseUrl, info.fetchOptions ?? null)
+            fetcher: new MeshletPageFetcher(info.resource.manifest, info.baseUrl, info.fetchOptions ?? null, this.world.fetchScheduler)
         }));
     }
 
@@ -179,6 +179,7 @@ class MeshletResidency {
                 return;
             }
             const bytes = await stream.fetcher.fetchBlob(0);
+            if (!bytes) return; // scheduler cleared (director destroyed)
             const table = manifest.pageTable;
             for (const localPage of manifest.rootPages) {
                 const entry = localPage * PAGE_TABLE_FIELDS;
@@ -291,6 +292,11 @@ class MeshletResidency {
                 for (const run of runs) {
                     this._activeRuns++;
                     stream.fetcher.fetchRange(run.blob, run.offset, run.length).then((bytes) => {
+                        if (!bytes) {
+                            // scheduler cleared (director destroyed): nothing arrives
+                            for (const { localPage } of run.pages) this.inFlight.delete(stream.pageBase + localPage);
+                            return;
+                        }
                         const pageWordsSize = stream.resource.manifest.pageSizeBytes / 4;
                         // Queue the arrivals; the frame tick installs them against a byte
                         // budget. Runs coalesce contiguous pages, so a single completion can

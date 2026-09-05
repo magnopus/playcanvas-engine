@@ -220,6 +220,14 @@ class MeshletWorld {
     transcode = null;
 
     /**
+     * The scheduler the world's sidecar fetches (geometry shards, texture containers) go
+     * through; the director shares one across its worlds. Null selects the page-wide default.
+     *
+     * @type {import('./streaming/meshlet-fetch-scheduler.js').MeshletFetchScheduler|null}
+     */
+    fetchScheduler = null;
+
+    /**
      * Upload budget per frame for freshly streamed pages (see
      * {@link MeshletResidency#maxInstallBytesPerFrame}). Streamed arrivals are lumpy, so they
      * install over several frames rather than spiking one. Raise to fill faster, lower for
@@ -475,7 +483,7 @@ class MeshletWorld {
         // Retention: when the director determined the streamed texture set is unchanged, the
         // previous world's system - tails, fine pools, residency - is adopted wholesale.
         const texturesAdopted = !!this.adoptTextures;
-        this.textures = this.adoptTextures ?? (anyTextures ? new MeshletTextures(device, this.transcode) : null);
+        this.textures = this.adoptTextures ?? (anyTextures ? new MeshletTextures(device, this.transcode, this.fetchScheduler) : null);
         this.adoptTextures = null;
         if (this.textures && !texturesAdopted) this.textures.poolBytes = this.texturePoolBytes;
 

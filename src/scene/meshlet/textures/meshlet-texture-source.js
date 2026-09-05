@@ -1,8 +1,11 @@
+import { FETCH_PRIORITY_FINE, FETCH_PRIORITY_TAILS, defaultFetchScheduler } from '../streaming/meshlet-fetch-scheduler.js';
+
 /**
  * HTTP byte-range access to a MAG_texture_streaming v2 container (see the gltf-tools spec):
  * one packed file per texture array, addressed by the manifest's absolute per-(layer, mip)
  * byte ranges. The shared tail region (every layer's coarse mips) is one request; each finer
- * mip band is one more. Region fetches are promise-cached by (url, offset) so concurrent
+ * mip band is one more, all through the world's fetch scheduler (which caps concurrency and
+ * merges neighbouring bands). Region fetches are promise-cached by (url, offset) so concurrent
  * consumers of one region share a single request.
  *
  * @ignore
@@ -18,11 +21,14 @@ class MeshletTextureSource {
      * @param {string} baseUrl - Directory the manifest's container URIs are relative to.
      * @param {import('../meshlet-world.js').MeshletFetchOptions|null} [fetchOptions] - How the
      * containers are fetched - see MeshletPageFetcher.
+     * @param {import('../streaming/meshlet-fetch-scheduler.js').MeshletFetchScheduler|null} [scheduler] - The
+     * scheduler requests go through; null selects the page-wide default.
      */
-    constructor(baseUrl, fetchOptions = null) {
+    constructor(baseUrl, fetchOptions = null, scheduler = null) {
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
         this.resolveUrl = fetchOptions?.resolveUrl ?? null;
         this.credentials = fetchOptions?.credentials ?? null;
+        this.scheduler = scheduler ?? defaultFetchScheduler();
     }
 
     /**
@@ -48,27 +54,27 @@ class MeshletTextureSource {
      * @param {string} uri - Container URI relative to the base URL.
      * @param {number} byteOffset - Absolute offset into the container.
      * @param {number} byteLength - Length of the region.
-     * @returns {Promise<ArrayBuffer>} The region's bytes.
+     * @param {number} [priority] - Scheduler priority (FETCH_PRIORITY_*).
+     * @param {(() => boolean)|null} [stillWanted] - Polled before the request is sent; false
+     * drops it (the promise resolves null).
+     * @returns {Promise<ArrayBuffer|null>} The region's bytes, or null when dropped.
      */
-    fetchRegion(uri, byteOffset, byteLength) {
+    fetchRegion(uri, byteOffset, byteLength, priority = FETCH_PRIORITY_FINE, stillWanted = null) {
         const url = this._url(uri);
         const key = `${url}@${byteOffset}+${byteLength}`;
         let promise = this._regions.get(key);
         if (!promise) {
-            /** @type {RequestInit} */
-            const init = { headers: { Range: `bytes=${byteOffset}-${byteOffset + byteLength - 1}` } };
-            if (this.credentials) init.credentials = this.credentials;
-            promise = fetch(url, init).then((response) => {
-                if (!response.ok && response.status !== 206) {
-                    throw new Error(`MeshletTextureSource: ${response.status} fetching ${url}`);
-                }
-                return response.arrayBuffer().then((buffer) => {
-                    // status 200 = host ignored the Range header and sent the whole file
-                    if (response.status === 200 && buffer.byteLength > byteLength) {
-                        return buffer.slice(byteOffset, byteOffset + byteLength);
-                    }
-                    return buffer;
-                });
+            promise = this.scheduler.fetchRange(url, byteOffset, byteLength, {
+                credentials: this.credentials,
+                priority,
+                stillWanted
+            }).then((bytes) => {
+                // a dropped or failed request must not stand in for a later, wanted one
+                if (!bytes) this._regions.delete(key);
+                return bytes;
+            }, (err) => {
+                this._regions.delete(key);
+                throw err;
             });
             this._regions.set(key, promise);
         }
@@ -79,10 +85,10 @@ class MeshletTextureSource {
      * Fetches a manifest array's shared tail region.
      *
      * @param {object} array - The manifest array (containerVersion 2).
-     * @returns {Promise<ArrayBuffer>} The tail region's bytes.
+     * @returns {Promise<ArrayBuffer|null>} The tail region's bytes, or null when dropped.
      */
     fetchTail(array) {
-        return this.fetchRegion(array.container.uri, array.tail.byteOffset, array.tail.byteLength);
+        return this.fetchRegion(array.container.uri, array.tail.byteOffset, array.tail.byteLength, FETCH_PRIORITY_TAILS);
     }
 
     /**

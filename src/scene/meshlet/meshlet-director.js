@@ -11,6 +11,7 @@ import { MeshletHzb } from './meshlet-hzb.js';
 import { MeshletView } from './meshlet-view.js';
 import { MeshletWorld } from './meshlet-world.js';
 import { MeshletResidency } from './streaming/meshlet-residency.js';
+import { MeshletFetchScheduler } from './streaming/meshlet-fetch-scheduler.js';
 
 /**
  * @import { CameraComponent } from '../../framework/components/camera/component.js'
@@ -146,6 +147,15 @@ class MeshletDirector {
     _transcode = null;
 
     /**
+     * The scheduler every sidecar fetch of this director's worlds goes through: a priority
+     * queue capped at {@link maxConcurrentFetches} requests in flight that merges queued byte
+     * ranges on one file. Shared across rebuilds, so a rebuild never doubles the traffic.
+     *
+     * @type {MeshletFetchScheduler}
+     */
+    fetchScheduler = new MeshletFetchScheduler();
+
+    /**
      * The KTX2 transcoder used for streamed textures - a `basisTranscode`-compatible function.
      * Scene code cannot import the framework's Basis handler, so the transcoder is injected:
      * {@link MeshletComponentSystem} sets it to the engine's `basisTranscode`; a director
@@ -160,6 +170,22 @@ class MeshletDirector {
 
     get transcode() {
         return this._transcode;
+    }
+
+    /**
+     * Cap on sidecar requests in flight - geometry shards and texture containers across every
+     * streamed resource. Defaults to 16. Requests beyond it wait in priority order (root shards,
+     * pages, texture tails, fine mips) instead of piling into the browser's request pool, which
+     * fails them outright once it overflows.
+     *
+     * @type {number}
+     */
+    set maxConcurrentFetches(value) {
+        this.fetchScheduler.maxConcurrent = Math.max(1, value | 0);
+    }
+
+    get maxConcurrentFetches() {
+        return this.fetchScheduler.maxConcurrent;
     }
 
     /**
@@ -258,6 +284,7 @@ class MeshletDirector {
     constructor(device) {
         this.device = device;
         this.world = new MeshletWorld(device);
+        this.world.fetchScheduler = this.fetchScheduler;
         this.cullShaders = new MeshletCullShaders(device);
         this.shadowRenderer = new MeshletShadowRenderer(device, this);
     }
@@ -269,6 +296,7 @@ class MeshletDirector {
         this._destroyViews();
         this._dropVisCarry();
         this.residency?.destroy();
+        this.fetchScheduler.clear();
         this.world.destroy();
         this.shadowRenderer?.destroy();
         this.shadowRenderer = null;
@@ -363,6 +391,7 @@ class MeshletDirector {
         this.world.indexBudgetFraction = indexBudgetFraction;
         this.world.initialRecords = initialRecords;
         this.world.transcode = this._transcode;
+        this.world.fetchScheduler = this.fetchScheduler;
         this.budget._lastDropped = 0;
         this.budget._lastEvicted = 0;
         this.budget._lastFetched = 0;

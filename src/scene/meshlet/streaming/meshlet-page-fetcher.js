@@ -1,9 +1,10 @@
 import { PAGE_TABLE, PAGE_TABLE_FIELDS } from '../constants.js';
+import { FETCH_PRIORITY_PAGES, FETCH_PRIORITY_ROOTS, defaultFetchScheduler } from './meshlet-fetch-scheduler.js';
 
 /**
  * HTTP Range fetching of meshlet pages with run coalescing: wanted pages are sorted by shard
  * offset and merged into contiguous byte runs (small gaps fetched and discarded are cheaper
- * than extra requests), each run one Range request.
+ * than extra requests), each run one Range request through the world's fetch scheduler.
  *
  * @ignore
  */
@@ -23,12 +24,15 @@ class MeshletPageFetcher {
      * appending it to the base URL (the application's URL resolver, so hosts that store a
      * package's files behind rewritten or signed URLs can serve them), `credentials` is the fetch
      * credentials mode (cookies for hosts that need them).
+     * @param {import('./meshlet-fetch-scheduler.js').MeshletFetchScheduler|null} [scheduler] - The
+     * scheduler requests go through; null selects the page-wide default.
      */
-    constructor(manifest, baseUrl, fetchOptions = null) {
+    constructor(manifest, baseUrl, fetchOptions = null, scheduler = null) {
         this.manifest = manifest;
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
         this.resolveUrl = fetchOptions?.resolveUrl ?? null;
         this.credentials = fetchOptions?.credentials ?? null;
+        this.scheduler = scheduler ?? defaultFetchScheduler();
 
         /** @type {string[]} - per-blob fetch URLs, resolved once. */
         this._urls = [];
@@ -45,53 +49,31 @@ class MeshletPageFetcher {
     }
 
     /**
-     * Fetch init for a sidecar request.
-     *
-     * @param {Record<string, string>} [headers] - Request headers.
-     * @returns {RequestInit} The init.
-     * @private
-     */
-    _init(headers) {
-        const init = headers ? { headers } : {};
-        if (this.credentials) init.credentials = this.credentials;
-        return init;
-    }
-
-    /**
      * Fetches one byte range of a shard.
      *
      * @param {number} blobIndex - Index into the manifest's blobs.
      * @param {number} offset - Byte offset.
      * @param {number} length - Byte length.
-     * @returns {Promise<ArrayBuffer>} The bytes.
+     * @returns {Promise<ArrayBuffer|null>} The bytes, or null when the scheduler dropped the request.
      */
-    async fetchRange(blobIndex, offset, length) {
-        const response = await fetch(this._blobUrl(blobIndex), this._init({
-            Range: `bytes=${offset}-${offset + length - 1}`
-        }));
-        if (!response.ok && response.status !== 206) {
-            throw new Error(`meshlet shard fetch failed (${response.status}): ${this._blobUrl(blobIndex)}`);
-        }
-        const buffer = await response.arrayBuffer();
-        if (response.status === 200 && buffer.byteLength > length) {
-            // server ignored the Range header and returned the whole shard
-            return buffer.slice(offset, offset + length);
-        }
-        return buffer;
+    fetchRange(blobIndex, offset, length) {
+        return this.scheduler.fetchRange(this._blobUrl(blobIndex), offset, length, {
+            credentials: this.credentials,
+            priority: FETCH_PRIORITY_PAGES
+        });
     }
 
     /**
      * Fetches the whole shard (used for the eager roots blob).
      *
      * @param {number} blobIndex - Index into the manifest's blobs.
-     * @returns {Promise<ArrayBuffer>} The bytes.
+     * @returns {Promise<ArrayBuffer|null>} The bytes, or null when the scheduler dropped the request.
      */
-    async fetchBlob(blobIndex) {
-        const response = await fetch(this._blobUrl(blobIndex), this._init());
-        if (!response.ok) {
-            throw new Error(`meshlet shard fetch failed (${response.status}): ${this._blobUrl(blobIndex)}`);
-        }
-        return response.arrayBuffer();
+    fetchBlob(blobIndex) {
+        return this.scheduler.fetchAll(this._blobUrl(blobIndex), {
+            credentials: this.credentials,
+            priority: FETCH_PRIORITY_ROOTS
+        });
     }
 
     /**

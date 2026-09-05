@@ -9,6 +9,7 @@ import {
     MATERIAL_SLOT_ABSENT, MATERIAL_TEXTURE_SLOTS, MESHLET_TEX_NO_MINLOD, TEXEL_RATE_PER_MIP, TEX_RESIDENCY_U32S
 } from '../constants.js';
 import { transcodeKtx2 } from './meshlet-ktx2.js';
+import { FETCH_PRIORITY_FINE } from '../streaming/meshlet-fetch-scheduler.js';
 import { MeshletTextureSource } from './meshlet-texture-source.js';
 
 /**
@@ -116,10 +117,13 @@ class MeshletTextures {
      * @param {import('../../../platform/graphics/graphics-device.js').GraphicsDevice} device - The device.
      * @param {import('./meshlet-ktx2.js').MeshletTranscodeFn|null} [transcode] - The KTX2
      * transcoder (see {@link transcodeKtx2}); required before any texture can be uploaded.
+     * @param {import('../streaming/meshlet-fetch-scheduler.js').MeshletFetchScheduler|null} [scheduler] - The
+     * scheduler container fetches go through; null selects the page-wide default.
      */
-    constructor(device, transcode = null) {
+    constructor(device, transcode = null, scheduler = null) {
         this.device = device;
         this.transcode = transcode;
+        this.scheduler = scheduler;
         this._sources = [];
         this._arrays = []; // { array, source, firstTexIndex }
         this._rowTex = null; // Int32Array rows*4, -1 = slot absent
@@ -140,7 +144,7 @@ class MeshletTextures {
      */
     addResource(textureManifest, baseUrl, fetchOptions = null) {
         const base = this.textures.length;
-        const source = new MeshletTextureSource(baseUrl, fetchOptions);
+        const source = new MeshletTextureSource(baseUrl, fetchOptions, this.scheduler);
         this._sources.push(source);
         for (const array of textureManifest.arrays ?? []) {
             if (array.containerVersion !== 2) {
@@ -493,13 +497,15 @@ class MeshletTextures {
             this._inFlight.delete(key);
             return;
         }
-        tex.source.fetchRegion(tex.array.container.uri, r[0], r[1]).then((bytes) => {
-            if (this._destroyed) return null;
+        const fam = this.families[tex.family];
+        // a request still queued when its slot goes away is dropped unsent
+        const stillWanted = () => !this._destroyed && tex.slot >= 0 && fam.slotTex[tex.slot] === texIndex;
+        tex.source.fetchRegion(tex.array.container.uri, r[0], r[1], FETCH_PRIORITY_FINE, stillWanted).then((bytes) => {
+            if (!bytes || this._destroyed) return null;
             return transcodeKtx2(this.transcode, this.device, bytes.slice(0));
         }).then((result) => {
             this._inFlight.delete(key);
             if (!result || this._destroyed) return;
-            const fam = this.families[tex.family];
             // the slot may have been evicted while the fetch was in flight
             if (tex.slot < 0 || fam.slotTex[tex.slot] !== texIndex || !fam.fine) return;
             const level = sourceMip + tex.sizeBias;
@@ -605,7 +611,7 @@ class MeshletTextures {
     _loadTails() {
         for (const { array, source, firstTexIndex } of this._arrays) {
             source.fetchTail(array).then((tailBuffer) => {
-                if (this._destroyed) return;
+                if (!tailBuffer || this._destroyed) return;
                 const mipCount = array.layers[0].length;
                 for (let layer = 0; layer < array.layers.length; layer++) {
                     const texIndex = firstTexIndex + layer;

@@ -148,6 +148,20 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
+     * Cap on sidecar requests (geometry shards, texture containers) in flight across every
+     * streamed asset; the rest wait in priority order. Defaults to 16.
+     *
+     * @type {number}
+     */
+    set maxConcurrentFetches(value) {
+        if (this.director) this.director.maxConcurrentFetches = value;
+    }
+
+    get maxConcurrentFetches() {
+        return this.director?.maxConcurrentFetches ?? 16;
+    }
+
+    /**
      * Sets the screen-space error threshold in pixels for the DAG LOD cut. Defaults to 1.
      *
      * @type {number}
