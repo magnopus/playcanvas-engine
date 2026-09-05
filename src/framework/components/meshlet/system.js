@@ -145,6 +145,25 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
+     * Largest texture size streamed at full resolution. A family's fine slots are sized to its
+     * largest texture, so one very large texture would make every slot that large; textures
+     * above this size stream down to it. Takes effect on the next world rebuild. Defaults to
+     * 2048.
+     *
+     * @type {number}
+     */
+    set maxFineTextureSize(value) {
+        if (this.director && this.director.world.maxFineTextureSize !== value) {
+            this.director.world.maxFineTextureSize = value;
+            this._markDirty();
+        }
+    }
+
+    get maxFineTextureSize() {
+        return this.director?.world.maxFineTextureSize ?? 2048;
+    }
+
+    /**
      * Sets an optional hard ceiling on the GPU-written draw index buffer, in indices (0 =
      * unbounded, the default). The buffer starts small and grows to the observed per-frame
      * demand, which the LOD cut bounds by screen area; set a ceiling to hard-cap that memory -

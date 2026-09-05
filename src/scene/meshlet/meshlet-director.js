@@ -382,13 +382,14 @@ class MeshletDirector {
             });
         });
         this.shadowRenderer?.reset();
-        const { poolBytes, texturePoolBytes, initialIndices, initialRecords, indexBudgetFraction } = prevWorld;
+        const { poolBytes, texturePoolBytes, maxFineTextureSize, initialIndices, initialRecords, indexBudgetFraction } = prevWorld;
         this.residency = null;
         this.rootsLoaded = null;
 
         this.world = new MeshletWorld(this.device);
         this.world.poolBytes = poolBytes;
         this.world.texturePoolBytes = texturePoolBytes;
+        this.world.maxFineTextureSize = maxFineTextureSize;
         this.world.maxInstallBytesPerFrame = prevWorld.maxInstallBytesPerFrame;
         this.world.initialIndices = initialIndices;
         this.world.indexBudgetFraction = indexBudgetFraction;
@@ -547,7 +548,8 @@ class MeshletDirector {
                 prevTex.every((e, i) => e.resource === newTex[i].resource && e.baseUrl === (newTex[i].baseUrl ?? null));
             const appendable = prefixSame &&
                 newTex.slice(prevTex.length).every(e => prevWorld.textures.canAppend(e.resource.textureManifest));
-            if (appendable && prevWorld.textures.poolBytes === texturePoolBytes) {
+            if (appendable && prevWorld.textures.poolBytes === texturePoolBytes &&
+                prevWorld.textures.maxFineSize === world.maxFineTextureSize) {
                 world.adoptTextures = prevWorld.textures;
                 world.adoptTexturesPrefix = prevTex.length;
                 prevWorld.textures = null;

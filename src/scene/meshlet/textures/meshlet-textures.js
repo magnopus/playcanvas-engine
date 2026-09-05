@@ -45,6 +45,8 @@ const MESHLET_TEX_FAMILIES = ['srgb', 'srgba', 'normal', 'linear'];
 const FAMILY_IS_SRGB = [true, true, false, false];
 const TAIL_MAX_SIZE = 256;
 const MIN_MIP_SIZE = 4;
+/** Largest fine-pool texture a family allocates, whatever the budget says (one GPU resource). */
+const MAX_FINE_TEXTURE_BYTES = 1024 * 1024 * 1024;
 
 const familyOfArray = (array) => {
     const prefix = String(array.name ?? '').split('_')[0];
@@ -73,8 +75,18 @@ const MIP_BIAS_DECAY = 0.05;  // mips per frame it relaxes once evictions stop -
 const MIP_BIAS_MAX = 8;       // 8 levels coarser than any top is already under every tail
 
 class MeshletTextures {
-    /** @type {Array<{ family: number, srcSize: number, array: object, layer: number, source: MeshletTextureSource, tailLayer: number, tailTop: number, tailStart: number, sizeBias: number, fineMask: number, slot: number }>} */
+    /** @type {Array<{ family: number, srcSize: number, topSize: number, array: object, layer: number, source: MeshletTextureSource, tailLayer: number, tailTop: number, tailStart: number, sizeBias: number, fineMask: number, slot: number }>} */
     textures = [];
+
+    /**
+     * Largest source size streamed into the fine pool. A family's slot is sized to its largest
+     * texture, so one 8192 texture would make every slot an 8192 mip chain (~90 MB) and a 2 GB
+     * budget would buy about twenty of them for a whole scene; textures above this size stream
+     * their mips down to it and no further. Defaults to 2048.
+     *
+     * @type {number}
+     */
+    maxFineSize = 2048;
 
     /**
      * Per family: tail + fine-pool state. size/levels describe the tail array; slotSize/
@@ -177,17 +189,21 @@ class MeshletTextures {
             const family = familyOfArray(array);
             const srcSize = Math.max(array.width ?? 1, array.height ?? 1);
             const tailTop = Math.min(srcSize >> array.tailMip, TAIL_MAX_SIZE);
+            // the finest size the fine pool holds for this texture; the source-mip space the
+            // residency, marks and shader work in starts at it (mip 0 = topSize)
+            const topSize = Math.max(Math.min(srcSize, this.maxFineSize), tailTop);
             this._arrays.push({ array, source, firstTexIndex: this.textures.length });
             for (let layer = 0; layer < array.layers.length; layer++) {
                 this.textures.push({
                     family,
                     srcSize,
+                    topSize,
                     array,
                     layer,
                     source,
                     tailLayer: 0,
                     tailTop,
-                    tailStart: log2i(srcSize / tailTop), // source mip where the tail begins
+                    tailStart: log2i(topSize / tailTop), // source mip where the tail begins
                     sizeBias: 0,                         // level offset in family arrays (finalize)
                     fineMask: 0,                         // bit per source mip resident in the slot
                     slot: -1
@@ -232,8 +248,8 @@ class MeshletTextures {
         for (const tex of this.textures) {
             tex.tailLayer = familyLayers[tex.family]++;
             familyTailSize[tex.family] = Math.max(familyTailSize[tex.family], tex.tailTop);
-            familySlotSize[tex.family] = Math.max(familySlotSize[tex.family], tex.srcSize);
-            if (tex.srcSize > tex.tailTop) familyFineTex[tex.family]++;
+            familySlotSize[tex.family] = Math.max(familySlotSize[tex.family], tex.topSize);
+            if (tex.topSize > tex.tailTop) familyFineTex[tex.family]++;
         }
 
         for (let f = 0; f < MESHLET_TEX_FAMILIES.length; f++) {
@@ -267,7 +283,7 @@ class MeshletTextures {
         }
 
         for (const tex of this.textures) {
-            tex.sizeBias = log2i(this.families[tex.family].slotSize / tex.srcSize);
+            tex.sizeBias = log2i(this.families[tex.family].slotSize / tex.topSize);
         }
 
         // residency: everything starts "nothing resident" - the shader uses factors only
@@ -293,7 +309,8 @@ class MeshletTextures {
             const fam = this.families[familyOfArray(array)];
             const srcSize = Math.max(array.width ?? 1, array.height ?? 1);
             const tailTop = Math.min(srcSize >> array.tailMip, TAIL_MAX_SIZE);
-            if (tailTop > fam.size || srcSize > fam.slotSize) return false;
+            const topSize = Math.max(Math.min(srcSize, this.maxFineSize), tailTop);
+            if (tailTop > fam.size || topSize > fam.slotSize) return false;
         }
         return true;
     }
@@ -317,8 +334,8 @@ class MeshletTextures {
             const tex = this.textures[i];
             const fam = this.families[tex.family];
             tex.tailLayer = fam.layerCount++;
-            tex.sizeBias = log2i(fam.slotSize / tex.srcSize);
-            if (tex.srcSize > tex.tailTop) fam.fineDemandTex++;
+            tex.sizeBias = log2i(fam.slotSize / tex.topSize);
+            if (tex.topSize > tex.tailTop) fam.fineDemandTex++;
         }
         return base;
     }
@@ -581,7 +598,7 @@ class MeshletTextures {
      * @private
      */
     _desiredMip(tex, texelRate) {
-        return Math.max(Math.floor(log2i(tex.srcSize) - texelRate / TEXEL_RATE_PER_MIP + this.mipBias), 0);
+        return Math.max(Math.floor(log2i(tex.topSize) - texelRate / TEXEL_RATE_PER_MIP + this.mipBias), 0);
     }
 
     /**
@@ -731,7 +748,7 @@ class MeshletTextures {
             }
             const totalDemand = this.families.reduce((n, f) => n + f.fineDemandTex, 0);
             const share = this.finePoolBytes * (info.fineDemandTex / Math.max(totalDemand, 1));
-            info.slotCount = Math.max(Math.min(Math.floor(share / slotBytes), info.fineDemandTex), 1);
+            info.slotCount = Math.max(Math.min(Math.floor(share / slotBytes), info.fineDemandTex, Math.floor(MAX_FINE_TEXTURE_BYTES / slotBytes)), 1);
             info.slotBytes = slotBytes;
             info.slotTex = new Int32Array(info.slotCount).fill(-1);
             info.slotLastUsed = new Uint32Array(info.slotCount);

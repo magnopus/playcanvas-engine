@@ -323,6 +323,14 @@ class MeshletWorld {
     /** @type {boolean} - texture-state debug view on the lit materials (MESHLET_COLOR_MODE.TEXTURES). @private */
     _texDebug = false;
 
+    /**
+     * Largest source size streamed into the fine texture pool (see
+     * {@link MeshletTextures#maxFineSize}). Applied to the texture system this world creates.
+     *
+     * @type {number}
+     */
+    maxFineTextureSize = 2048;
+
     /** @type {import('../../platform/graphics/storage-buffer.js').StorageBuffer|null} */
     adoptVisBits = null;
 
@@ -495,7 +503,10 @@ class MeshletWorld {
         this.textures = this.adoptTextures ?? (anyTextures ? new MeshletTextures(device, this.transcode, this.fetchScheduler) : null);
         this.adoptTextures = null;
         this.adoptTexturesPrefix = 0;
-        if (this.textures && !texturesAdopted) this.textures.poolBytes = this.texturePoolBytes;
+        if (this.textures && !texturesAdopted) {
+            this.textures.poolBytes = this.texturePoolBytes;
+            this.textures.maxFineSize = this.maxFineTextureSize;
+        }
 
         // page pool + residency map. Resident worlds: slot = rebased page index. Streamed
         // worlds: pool sized to the budget, everything starts non-resident (the residency
