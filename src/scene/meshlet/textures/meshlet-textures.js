@@ -109,6 +109,9 @@ class MeshletTextures {
 
     _destroyed = false;
 
+    /** @private */
+    _noFinePoolWarned = false;
+
     /** @type {boolean} - finalize has run; resources added since are appended. */
     finalized = false;
 
@@ -702,6 +705,11 @@ class MeshletTextures {
 
         this.tailBytes += info.tail.gpuSize;
 
+        if (info.slotLevels > 0 && info.fineDemandTex > 0 && this.finePoolBytes <= 0 && !this._noFinePoolWarned) {
+            // a configuration problem the application must act on, reported in every build
+            this._noFinePoolWarned = true;
+            console.warn(`MeshletTextures: the texture budget (${(this.poolBytes / 1048576).toFixed(0)} MB) is used up by the always-resident tails (${(this.tailBytes / 1048576).toFixed(0)} MB); no fine (high-resolution) mips will stream. Raise app.systems.meshlet.texturePoolBytes.`);
+        }
         if (info.slotLevels > 0 && info.fineDemandTex > 0 && this.finePoolBytes > 0) {
             // bytes of one slot = its above-tail mip chain in the transcoded block format
             const blockSize = pixelFormatInfo.get(format)?.blockSize ?? 16;

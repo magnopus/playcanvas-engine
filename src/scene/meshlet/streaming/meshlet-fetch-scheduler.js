@@ -17,6 +17,15 @@ export const COALESCE_GAP_BYTES = 256 * 1024;
 export const MAX_COALESCED_BYTES = 8 * 1024 * 1024;
 
 /**
+ * Share of the concurrency cap each priority may hold while something less urgent is waiting:
+ * root shards take whatever they need, pages half, texture tails and fine mips a quarter each.
+ * A priority only exceeds its share when no lower priority has anything queued, so a scene
+ * that streams pages continuously (a pool smaller than its working set) still lets its fine
+ * mips through instead of starving them behind the page traffic.
+ */
+const PRIORITY_SHARE = [1, 0.5, 0.25, 0.25];
+
+/**
  * @typedef {object} MeshletFetchRequestOptions
  * @property {string|null} [credentials] - Fetch credentials mode, or null for the default.
  * @property {number} [priority] - One of the FETCH_PRIORITY_* values; lower dispatches first.
@@ -33,7 +42,8 @@ export const MAX_COALESCED_BYTES = 8 * 1024 * 1024;
  * queueing them. Queued byte ranges on one URL that lie within {@link COALESCE_GAP_BYTES} of
  * each other go out as one Range request and are sliced apart on arrival, and a queued request
  * whose `stillWanted` callback has turned false by the time a slot frees is dropped instead of
- * fetched (a fine mip whose slot was evicted while it waited).
+ * fetched (a fine mip whose slot was evicted while it waited). Priority is by share, not
+ * strict: see {@link PRIORITY_SHARE}.
  *
  * @ignore
  */
@@ -57,13 +67,16 @@ class MeshletFetchScheduler {
     coalesced = 0;
 
     /**
-     * Pending requests in dispatch order. `offset` is -1 for a whole-file request.
+     * Pending requests, one FIFO per priority. `offset` is -1 for a whole-file request.
      *
-     * @type {Array<{ url: string, offset: number, length: number, credentials: string|null,
-     * priority: number, stillWanted: (() => boolean)|null, resolve: Function, reject: Function }>}
+     * @type {Array<Array<{ url: string, offset: number, length: number, credentials: string|null,
+     * priority: number, stillWanted: (() => boolean)|null, resolve: Function, reject: Function }>>}
      * @private
      */
-    _queue = [];
+    _queues = [[], [], [], []];
+
+    /** @type {number[]} - requests in flight per priority. @private */
+    _activeByPriority = [0, 0, 0, 0];
 
     /**
      * @param {number} [maxConcurrent] - Cap on requests in flight.
@@ -74,7 +87,7 @@ class MeshletFetchScheduler {
 
     /** @type {number} - requests waiting for a slot. */
     get queued() {
-        return this._queue.length;
+        return this._queues.reduce((n, q) => n + q.length, 0);
     }
 
     /**
@@ -106,10 +119,12 @@ class MeshletFetchScheduler {
      * Drops every queued request (each resolves null). Requests in flight complete.
      */
     clear() {
-        const queue = this._queue;
-        this._queue = [];
-        this.dropped += queue.length;
-        for (const req of queue) req.resolve(null);
+        const queues = this._queues;
+        this._queues = [[], [], [], []];
+        for (const queue of queues) {
+            this.dropped += queue.length;
+            for (const req of queue) req.resolve(null);
+        }
     }
 
     /**
@@ -122,29 +137,47 @@ class MeshletFetchScheduler {
      */
     _enqueue(url, offset, length, { credentials = null, priority = FETCH_PRIORITY_FINE, stillWanted = null }) {
         return new Promise((resolve, reject) => {
-            const req = { url, offset, length, credentials, priority, stillWanted, resolve, reject };
-            // stable priority order: behind every queued request of equal or higher priority
-            const queue = this._queue;
-            let i = queue.length;
-            while (i > 0 && queue[i - 1].priority > priority) i--;
-            queue.splice(i, 0, req);
+            const p = Math.min(Math.max(priority | 0, 0), this._queues.length - 1);
+            this._queues[p].push({ url, offset, length, credentials, priority: p, stillWanted, resolve, reject });
             this._pump();
         });
     }
 
     /** @private */
     _pump() {
-        while (this.active < this.maxConcurrent && this._queue.length) {
-            const head = this._queue.shift();
+        while (this.active < this.maxConcurrent) {
+            const p = this._next();
+            if (p < 0) break;
+            const queue = this._queues[p];
+            const head = queue.shift();
             if (head.stillWanted && !head.stillWanted()) {
                 this.dropped++;
                 head.resolve(null);
                 continue;
             }
             const batch = [head];
-            if (head.offset >= 0) this._gather(head, batch);
+            if (head.offset >= 0) this._gather(head, batch, queue);
             this._dispatch(batch);
         }
+    }
+
+    /**
+     * The priority to dispatch from next: the most urgent non-empty queue still under its share
+     * of the cap; when every waiting priority is at its share, the most urgent one takes the
+     * spare slot.
+     *
+     * @returns {number} The priority, or -1 when nothing is queued.
+     * @private
+     */
+    _next() {
+        let first = -1;
+        for (let p = 0; p < this._queues.length; p++) {
+            if (!this._queues[p].length) continue;
+            if (first < 0) first = p;
+            const share = Math.max(1, Math.ceil(this.maxConcurrent * PRIORITY_SHARE[p]));
+            if (this._activeByPriority[p] < share) return p;
+        }
+        return first;
     }
 
     /**
@@ -154,12 +187,12 @@ class MeshletFetchScheduler {
      *
      * @param {object} head - The request being dispatched.
      * @param {object[]} batch - Its batch, extended in place.
+     * @param {object[]} queue - The head's priority queue.
      * @private
      */
-    _gather(head, batch) {
+    _gather(head, batch, queue) {
         let start = head.offset;
         let end = head.offset + head.length;
-        const queue = this._queue;
         for (let i = 0; i < queue.length;) {
             const req = queue[i];
             if (req.offset < 0 || req.url !== head.url || req.credentials !== head.credentials) {
@@ -198,7 +231,8 @@ class MeshletFetchScheduler {
         this.active++;
         this.sent++;
         const head = batch[0];
-        this.sentByPriority[head.priority] = (this.sentByPriority[head.priority] ?? 0) + 1;
+        this.sentByPriority[head.priority]++;
+        this._activeByPriority[head.priority]++;
         const ranged = head.offset >= 0;
         let start = 0;
         let end = 0;
@@ -241,6 +275,7 @@ class MeshletFetchScheduler {
             for (const req of batch) req.reject(err);
         }).finally(() => {
             this.active--;
+            this._activeByPriority[head.priority]--;
             this._pump();
         });
     }

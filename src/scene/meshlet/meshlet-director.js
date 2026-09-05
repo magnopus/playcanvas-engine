@@ -146,6 +146,9 @@ class MeshletDirector {
     /** @private */
     _transcode = null;
 
+    /** @type {number} - the budget value the shortfall warning was last printed for. @private */
+    _budgetWarnedAt = -1;
+
     /**
      * The scheduler every sidecar fetch of this director's worlds goes through: a priority
      * queue capped at {@link maxConcurrentFetches} requests in flight that merges queued byte
@@ -815,7 +818,14 @@ class MeshletDirector {
             poolPages: res ? res.slotPage.length : 0,
             totalPages: world.totalPages
         };
-        Debug.warnOnce(`MeshletDirector: the geometry budget (${(world.poolBytes / BYTES_PER_MB).toFixed(0)} MB) cannot render this scene even at the coarsest LOD - ${pagesShort} page(s) short, index demand ${indexRatio.toFixed(2)}x the share. Raising the index ceiling; expect gaps until the budget is increased (about ${(suggested / BYTES_PER_MB).toFixed(0)} MB would cover it).`);
+        const message = `MeshletDirector: the geometry budget (${(world.poolBytes / BYTES_PER_MB).toFixed(0)} MB) cannot render this scene even at the coarsest LOD - ${pagesShort} page(s) short, index demand ${indexRatio.toFixed(2)}x the share. Raising the index ceiling; expect gaps until the budget is increased (about ${(suggested / BYTES_PER_MB).toFixed(0)} MB would cover it).`;
+        Debug.warnOnce(message);
+        // a configuration problem the application must act on, so it is reported in every
+        // build (the Debug channel is stripped from release builds), once per budget value
+        if (this._budgetWarnedAt !== world.poolBytes) {
+            this._budgetWarnedAt = world.poolBytes;
+            console.warn(message);
+        }
         this.onBudgetExceeded?.(info);
     }
 

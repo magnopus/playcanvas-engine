@@ -197,7 +197,8 @@ class MeshletResidency {
         if (this._destroyed) return;
         results.forEach((result, i) => {
             if (result.status === 'rejected') {
-                Debug.error(`MeshletResidency: root pages failed to load for ${this._streams[i].resource.manifest.blobs[0]?.uri ?? 'a resource'}: ${result.reason?.message ?? result.reason}`);
+                // reported in every build: the resource renders nothing until this is fixed
+                console.error(`MeshletResidency: root pages failed to load for ${this._streams[i].resource.manifest.blobs[0]?.uri ?? 'a resource'}: ${result.reason?.message ?? result.reason}`);
             }
         });
         this._flushResidency();
