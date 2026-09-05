@@ -297,7 +297,7 @@ class MeshletComponentSystem extends ComponentSystem {
             const component = this.store[guid].entity.meshlet;
             if (!component?._effectiveResource) continue;
             if (!component._effectiveBaseUrl) {
-                Debug.warnOnce('MeshletComponent: no stream base URL - assign an asset with a file URL, or set baseUrl with the resource.');
+                Debug.warnOnce('MeshletComponent: no stream base URL - assign an asset with an http(s) file URL (not a blob: or data: URL), or set baseUrl with the resource.');
                 continue;
             }
             const resource = component._effectiveResource;

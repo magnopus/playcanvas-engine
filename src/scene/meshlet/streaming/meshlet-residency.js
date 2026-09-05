@@ -166,12 +166,14 @@ class MeshletResidency {
 
     /**
      * Fetches every root page (blob 0 of each resource) and pins it. Resolves when the coarse
-     * fallback set is resident and the world can render.
+     * fallback set is resident and the world can render. A stream whose roots fail to load
+     * (unreachable shard, unresolvable URL) is reported and left non-resident - its instances
+     * draw nothing - rather than holding up streaming for every other resource.
      *
      * @returns {Promise<void>} Resolves when roots are resident.
      */
     async loadRoots() {
-        await Promise.all(this._streams.map(async (stream) => {
+        const results = await Promise.allSettled(this._streams.map(async (stream) => {
             const manifest = stream.resource.manifest;
             // carried across a rebuild: skip streams whose roots are all still resident
             const world = this.world;
@@ -190,6 +192,11 @@ class MeshletResidency {
             }
         }));
         if (this._destroyed) return;
+        results.forEach((result, i) => {
+            if (result.status === 'rejected') {
+                Debug.error(`MeshletResidency: root pages failed to load for ${this._streams[i].resource.manifest.blobs[0]?.uri ?? 'a resource'}: ${result.reason?.message ?? result.reason}`);
+            }
+        });
         this._flushResidency();
         this.rootsResident = true;
     }

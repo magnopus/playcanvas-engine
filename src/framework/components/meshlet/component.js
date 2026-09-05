@@ -178,7 +178,10 @@ class MeshletComponent extends Component {
     }
 
     /**
-     * The stream base URL for the effective resource.
+     * The stream base URL for the effective resource. Null when there is none to stream from:
+     * no asset URL, or an asset loaded from a `blob:` or `data:` URL - those cannot be a base
+     * for the package's relative sidecar URIs, so such a component stays inert rather than
+     * failing every URL it resolves.
      *
      * @type {string|null}
      * @ignore
@@ -186,7 +189,7 @@ class MeshletComponent extends Component {
     get _effectiveBaseUrl() {
         if (this._baseUrl !== null) return this._baseUrl;
         const url = this._assetReference.asset?.file?.url;
-        if (!url) return null;
+        if (!url || /^(?:blob|data):/i.test(url)) return null;
         const slash = url.lastIndexOf('/');
         return slash >= 0 ? url.substring(0, slash) : '.';
     }
