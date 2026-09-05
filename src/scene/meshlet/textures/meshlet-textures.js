@@ -1,7 +1,7 @@
 import { Debug } from '../../../core/debug.js';
 import {
     ADDRESS_REPEAT, BUFFERUSAGE_COPY_DST, FILTER_LINEAR, FILTER_LINEAR_MIPMAP_LINEAR,
-    PIXELFORMAT_RGBA8, pixelFormatInfo
+    PIXELFORMAT_RGBA8, isCompressedPixelFormat, pixelFormatInfo
 } from '../../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../../platform/graphics/storage-buffer.js';
 import { Texture } from '../../../platform/graphics/texture.js';
@@ -376,8 +376,12 @@ class MeshletTextures {
         });
         const wgpu = this.device.wgpu;
         const encoder = wgpu.createCommandEncoder();
+        // a block-compressed level smaller than a block (the 2x2 and 1x1 mips) is copied at its
+        // physical, block-rounded size: the copy must cover whole blocks, and a 2-texel extent
+        // fails validation and takes the entire command buffer with it
+        const block = isCompressedPixelFormat(old.format) ? 4 : 1;
         for (let level = 0; level < old.numLevels; level++) {
-            const size = Math.max(info.size >> level, 1);
+            const size = Math.ceil(Math.max(info.size >> level, 1) / block) * block;
             encoder.copyTextureToTexture(
                 { texture: old.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
                 { texture: tail.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
