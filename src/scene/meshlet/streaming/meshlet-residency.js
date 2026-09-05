@@ -104,7 +104,7 @@ class MeshletResidency {
      * @param {MeshletWorld} world - The finalized streamed world.
      * @param {object|null} [carry] - A previous residency's slot state ({ slotPage, slotPinned,
      * slotLastUsed }), adopted when the world carried its page pool across a rebuild. Slots
-     * referencing pages the new world no longer has are freed.
+     * referencing pages the new world no longer has are freed; slots the pool grew by start free.
      */
     constructor(device, world, carry = null) {
         this.maxInstallBytesPerFrame = world.maxInstallBytesPerFrame ?? this.maxInstallBytesPerFrame;
@@ -113,10 +113,13 @@ class MeshletResidency {
         this.readbackPool = new WebgpuReadbackPool(device);
 
         const slots = world.poolSlots;
-        if (carry && carry.slotPage.length === slots) {
-            this.slotPage = carry.slotPage;
-            this.slotPinned = carry.slotPinned;
-            this.slotLastUsed = carry.slotLastUsed;
+        if (carry && carry.slotPage.length <= slots) {
+            this.slotPage = new Uint32Array(slots).fill(PAGE_NOT_RESIDENT);
+            this.slotPage.set(carry.slotPage);
+            this.slotPinned = new Uint8Array(slots);
+            this.slotPinned.set(carry.slotPinned);
+            this.slotLastUsed = new Uint32Array(slots);
+            this.slotLastUsed.set(carry.slotLastUsed);
             // the LRU compares against slotLastUsed - restarting the frame counter at 0 would
             // make every carried slot look ancient and the freshly touched ones look oldest
             this.frame = carry.frame;

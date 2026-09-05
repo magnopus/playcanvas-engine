@@ -491,7 +491,9 @@ class MeshletDirector {
             prefix++;
         }
 
-        // the pool buffer is reusable only when its slot count is unchanged
+        // the pool buffer carries whenever the budget is unchanged (the world keeps a pool
+        // that is large enough and copies the old slots into one that grew) and, under a
+        // changed budget, when the pool would not shrink - a budget cut starts cold
         let newTotalPages = 0;
         for (const { resource } of pending) newTotalPages += resource.manifest.pageCount;
         // predict the new pool's slot count the way finalize will: the budget covers more
@@ -503,7 +505,7 @@ class MeshletDirector {
         newPoolSlots = Math.min(newPoolSlots, newTotalPages);
 
         let carriedSlots = null;
-        if (prefix > 0 && newPoolSlots === prevWorld.poolSlots &&
+        if (prefix > 0 && (poolBytes === prevWorld.poolBytes || newPoolSlots >= prevWorld.poolSlots) &&
             pending[0].resource.manifest.pageSizeBytes === prevWorld.pageSizeBytes) {
             world.adoptPagePool = prevWorld.pagePool;
             prevWorld.pagePool = null;
@@ -531,12 +533,20 @@ class MeshletDirector {
 
         // the texture budget compares against what the live system was built with
         // (prevWorld.texturePoolBytes may already hold the caller's new value)
+        // the system carries when its textured resources are an unchanged PREFIX of the new
+        // build's and every resource after that prefix fits its family arrays as sized: those
+        // are appended in place, so a scene whose assets arrive one by one keeps every tail
+        // it has already loaded instead of re-downloading them all per arrival
         if (prevWorld.textures) {
             const prevTex = prevEntries.filter(e => e.resource.textureManifest);
             const newTex = pending.filter(e => e.resource.textureManifest);
-            const same = prevTex.length === newTex.length && prevTex.every((e, i) => e.resource === newTex[i].resource && e.baseUrl === (newTex[i].baseUrl ?? null));
-            if (same && prevWorld.textures.poolBytes === texturePoolBytes) {
+            const prefixSame = prevTex.length <= newTex.length &&
+                prevTex.every((e, i) => e.resource === newTex[i].resource && e.baseUrl === (newTex[i].baseUrl ?? null));
+            const appendable = prefixSame &&
+                newTex.slice(prevTex.length).every(e => prevWorld.textures.canAppend(e.resource.textureManifest));
+            if (appendable && prevWorld.textures.poolBytes === texturePoolBytes) {
                 world.adoptTextures = prevWorld.textures;
+                world.adoptTexturesPrefix = prevTex.length;
                 prevWorld.textures = null;
             }
         }

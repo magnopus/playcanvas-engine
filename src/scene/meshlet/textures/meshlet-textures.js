@@ -109,6 +109,15 @@ class MeshletTextures {
 
     _destroyed = false;
 
+    /** @type {boolean} - finalize has run; resources added since are appended. */
+    finalized = false;
+
+    /** @type {number} - arrays whose tail load has started (the rest were appended and wait). @private */
+    _tailsStarted = 0;
+
+    /** @type {number} - textures with residency entries and family layers assigned. @private */
+    _assigned = 0;
+
     _frame = 0;
 
     _lastEvictions = 0;
@@ -248,17 +257,138 @@ class MeshletTextures {
         }
 
         // residency: everything starts "nothing resident" - the shader uses factors only
-        const residency = new Uint32Array(Math.max(this.textures.length, 1) * TEX_RESIDENCY_U32S);
-        for (let i = 0; i < this.textures.length; i++) {
+        this.residencyCpu = new Uint32Array(0);
+        this._rebuildResidency();
+        this.finalized = true;
+        this._loadTails();
+    }
+
+    /**
+     * Whether a resource's textures can join this system after finalize without a cold
+     * rebuild. The family arrays' size, level count and slot size are fixed at finalize, so a
+     * texture whose tail top exceeds its family's tail size or whose source size exceeds the
+     * family's slot size needs a fresh system; the layer counts can grow.
+     *
+     * @param {object} textureManifest - The resource's MAG_texture_streaming manifest.
+     * @returns {boolean} True when {@link appendResource} can take it.
+     */
+    canAppend(textureManifest) {
+        if (!this.finalized || this._destroyed) return false;
+        for (const array of textureManifest.arrays ?? []) {
+            if (array.containerVersion !== 2) continue;
+            const fam = this.families[familyOfArray(array)];
+            const srcSize = Math.max(array.width ?? 1, array.height ?? 1);
+            const tailTop = Math.min(srcSize >> array.tailMip, TAIL_MAX_SIZE);
+            if (tailTop > fam.size || srcSize > fam.slotSize) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Registers a resource's texture manifest after finalize - the retained system of a
+     * previous world taking the resources a rebuild appended - assigning each new texture a
+     * new layer of its family tail. Call {@link appendFinalize} once every appended resource is
+     * registered. Requires {@link canAppend}.
+     *
+     * @param {object} textureManifest - The parsed MAG_texture_streaming manifest ({ arrays }).
+     * @param {string} baseUrl - URL directory the manifest's container URIs are relative to.
+     * @param {import('../meshlet-world.js').MeshletFetchOptions|null} [fetchOptions] - How the
+     * containers are fetched.
+     * @returns {number} The flat texture index of the resource's first texture.
+     */
+    appendResource(textureManifest, baseUrl, fetchOptions = null) {
+        Debug.assert(this.finalized, 'MeshletTextures: appendResource before finalize');
+        const base = this.addResource(textureManifest, baseUrl, fetchOptions);
+        for (let i = base; i < this.textures.length; i++) {
+            const tex = this.textures[i];
+            const fam = this.families[tex.family];
+            tex.tailLayer = fam.layerCount++;
+            tex.sizeBias = log2i(fam.slotSize / tex.srcSize);
+            if (tex.srcSize > tex.tailTop) fam.fineDemandTex++;
+        }
+        return base;
+    }
+
+    /**
+     * Completes a round of {@link appendResource}: extends the residency buffer, grows the tail
+     * arrays that ran out of layers and starts the new tails loading. Everything already
+     * resident stays resident.
+     */
+    appendFinalize() {
+        if (this._destroyed || this._assigned === this.textures.length) return;
+        this._rebuildResidency();
+        for (let f = 0; f < this.families.length; f++) {
+            const fam = this.families[f];
+            if (fam.tail && fam.layerCount > fam.tail.arrayLength) this._growTail(f);
+        }
+        this._loadTails();
+    }
+
+    /**
+     * (Re)creates the residency buffer for the current texture count, keeping the entries of
+     * textures already assigned and initialising the rest to "nothing resident".
+     *
+     * @private
+     */
+    _rebuildResidency() {
+        const count = this.textures.length;
+        const residency = new Uint32Array(Math.max(count, 1) * TEX_RESIDENCY_U32S);
+        residency.set(this.residencyCpu.subarray(0, Math.min(this.residencyCpu.length, residency.length)));
+        for (let i = this._assigned; i < count; i++) {
             const tex = this.textures[i];
             residency[i * TEX_RESIDENCY_U32S] = MATERIAL_SLOT_ABSENT | (tex.family << 16) | (tex.sizeBias << 24);
             residency[i * TEX_RESIDENCY_U32S + 1] = MESHLET_TEX_NO_MINLOD | (tex.tailLayer << 16);
         }
+        this._assigned = count;
         this.residencyCpu = residency;
-        this.residencyBuffer = new StorageBuffer(device, residency.byteLength, BUFFERUSAGE_COPY_DST);
+        this.residencyBuffer?.destroy();
+        this.residencyBuffer = new StorageBuffer(this.device, residency.byteLength, BUFFERUSAGE_COPY_DST);
         this.residencyBuffer.write(0, residency);
+        this._dirty = false;
+        this._desiredTexelRate = null;
+    }
 
-        this._loadTails();
+    /**
+     * Replaces a family's tail array with one holding at least its current layer count (grown
+     * geometrically so appends amortise), copying every existing layer across on the queue -
+     * ordered before any upload that follows, so a tail landing right after the growth cannot
+     * be overwritten by the copy of its old, empty layer.
+     *
+     * @param {number} family - Family index.
+     * @private
+     */
+    _growTail(family) {
+        const info = this.families[family];
+        const old = info.tail;
+        const layers = Math.max(info.layerCount, Math.ceil(old.arrayLength * 1.5));
+        const tail = new Texture(this.device, {
+            name: old.name,
+            width: info.size,
+            height: info.size,
+            arrayLength: layers,
+            format: old.format,
+            srgb: FAMILY_IS_SRGB[family],
+            mipmaps: true,
+            addressU: ADDRESS_REPEAT,
+            addressV: ADDRESS_REPEAT,
+            minFilter: FILTER_LINEAR_MIPMAP_LINEAR,
+            magFilter: FILTER_LINEAR
+        });
+        const wgpu = this.device.wgpu;
+        const encoder = wgpu.createCommandEncoder();
+        for (let level = 0; level < old.numLevels; level++) {
+            const size = Math.max(info.size >> level, 1);
+            encoder.copyTextureToTexture(
+                { texture: old.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
+                { texture: tail.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
+                { width: size, height: size, depthOrArrayLayers: old.arrayLength }
+            );
+        }
+        wgpu.queue.submit([encoder.finish()]);
+        this.tailBytes += tail.gpuSize - old.gpuSize;
+        old.destroy();
+        info.tail = tail;
+        this.onFamilyTexturesReady?.(family, tail, info.fine);
     }
 
     /**
@@ -609,7 +739,10 @@ class MeshletTextures {
      * @private
      */
     _loadTails() {
-        for (const { array, source, firstTexIndex } of this._arrays) {
+        const from = this._tailsStarted;
+        this._tailsStarted = this._arrays.length;
+        for (let a = from; a < this._arrays.length; a++) {
+            const { array, source, firstTexIndex } = this._arrays[a];
             source.fetchTail(array).then((tailBuffer) => {
                 if (!tailBuffer || this._destroyed) return;
                 const mipCount = array.layers[0].length;

@@ -25,8 +25,10 @@ const _properties = ['asset', 'resource', 'baseUrl'];
  * ```
  *
  * Adding or removing meshlet components (or changing their assets) rebuilds the meshlet world
- * at the start of the next rendered frame - and the rebuild RETAINS streaming state for
- * resources that persist across it, so unchanged assets do not re-download. Components sharing
+ * at the start of a following frame - once the changes go quiet for {@link rebuildQuietMs}, or
+ * after {@link rebuildMaxWaitMs} at the latest, so a scene whose assets arrive over a few
+ * seconds gets a handful of rebuilds rather than one per asset - and the rebuild RETAINS
+ * streaming state for resources that persist across it, so unchanged assets do not re-download. Components sharing
  * one asset are deduplicated into a single set of streamed pages. Enabling/disabling a
  * component (or its entity) and entity transform changes are cheap per-frame updates with no
  * rebuild at all.
@@ -43,6 +45,21 @@ class MeshletComponentSystem extends ComponentSystem {
 
     /** @private */
     _dirty = false;
+
+    /** @type {number} - ms timestamp of the first unserved dirty mark, 0 when clean. @private */
+    _dirtySince = 0;
+
+    /** @type {number} - ms timestamp of the latest dirty mark. @private */
+    _dirtyLast = 0;
+
+    /** @type {number} - world rebuilds performed so far (a load-pattern statistic). */
+    rebuildCount = 0;
+
+    /** @private */
+    _rebuildQuietMs = 250;
+
+    /** @private */
+    _rebuildMaxWaitMs = 2000;
 
     /**
      * Components contributing to the current world, in placement order.
@@ -270,16 +287,63 @@ class MeshletComponentSystem extends ComponentSystem {
         component.onBeforeRemove();
     }
 
+    /**
+     * How long component changes must go quiet before the world rebuilds, in milliseconds.
+     * Assets loading in a burst then cost a few rebuilds instead of one each (every rebuild
+     * re-finalizes the whole world and re-streams what it cannot carry over). Defaults to 250.
+     *
+     * @type {number}
+     */
+    set rebuildQuietMs(value) {
+        this._rebuildQuietMs = Math.max(0, value);
+    }
+
+    get rebuildQuietMs() {
+        return this._rebuildQuietMs;
+    }
+
+    /**
+     * Longest a pending rebuild waits for the changes to go quiet, in milliseconds, so a steady
+     * trickle of assets still shows up. Defaults to 2000.
+     *
+     * @type {number}
+     */
+    set rebuildMaxWaitMs(value) {
+        this._rebuildMaxWaitMs = Math.max(0, value);
+    }
+
+    get rebuildMaxWaitMs() {
+        return this._rebuildMaxWaitMs;
+    }
+
     /** @ignore */
     _markDirty() {
-        this._dirty = true;
+        const now = performance.now();
+        if (!this._dirty) {
+            this._dirty = true;
+            this._dirtySince = now;
+        }
+        this._dirtyLast = now;
+    }
+
+    /**
+     * Rebuilds the world now if changes are pending, regardless of the quiet window.
+     */
+    flushRebuild() {
+        if (this.director && this._dirty) this._rebuild();
     }
 
     /** @private */
     _onFrameRender() {
         if (!this.director) return;
         if (this._dirty) {
-            this._rebuild();
+            const now = performance.now();
+            const quiet = now - this._dirtyLast >= this._rebuildQuietMs;
+            const overdue = now - this._dirtySince >= this._rebuildMaxWaitMs;
+            // a world with nothing built yet has nothing to show either way: build at once
+            if (quiet || overdue || !this.director.world.finalized) {
+                this._rebuild();
+            }
         }
         this._syncTransforms();
     }
@@ -287,6 +351,9 @@ class MeshletComponentSystem extends ComponentSystem {
     /** @private */
     _rebuild() {
         this._dirty = false;
+        this._dirtySince = 0;
+        this._dirtyLast = 0;
+        this.rebuildCount++;
 
         // group components by (resource, baseUrl): each unique resource is added ONCE, with a
         // merged instance list - N components share one set of pages, records and textures.

@@ -47,6 +47,9 @@ class MeshletFetchScheduler {
     /** @type {number} - requests sent. */
     sent = 0;
 
+    /** @type {number[]} - requests sent per FETCH_PRIORITY_* value. */
+    sentByPriority = [0, 0, 0, 0];
+
     /** @type {number} - queued requests dropped as no longer wanted. */
     dropped = 0;
 
@@ -195,6 +198,7 @@ class MeshletFetchScheduler {
         this.active++;
         this.sent++;
         const head = batch[0];
+        this.sentByPriority[head.priority] = (this.sentByPriority[head.priority] ?? 0) + 1;
         const ranged = head.offset >= 0;
         let start = 0;
         let end = 0;

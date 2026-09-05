@@ -316,6 +316,9 @@ class MeshletWorld {
 
     adoptTextures = null;
 
+    /** @type {number} - textured resources (in add order) the adopted texture system already holds; the rest are appended to it. */
+    adoptTexturesPrefix = 0;
+
     /** @type {import('../../platform/graphics/storage-buffer.js').StorageBuffer|null} */
     adoptVisBits = null;
 
@@ -483,8 +486,11 @@ class MeshletWorld {
         // Retention: when the director determined the streamed texture set is unchanged, the
         // previous world's system - tails, fine pools, residency - is adopted wholesale.
         const texturesAdopted = !!this.adoptTextures;
+        const adoptedTexResources = texturesAdopted ? this.adoptTexturesPrefix : 0;
+        let texResourceIndex = 0;
         this.textures = this.adoptTextures ?? (anyTextures ? new MeshletTextures(device, this.transcode, this.fetchScheduler) : null);
         this.adoptTextures = null;
+        this.adoptTexturesPrefix = 0;
         if (this.textures && !texturesAdopted) this.textures.poolBytes = this.texturePoolBytes;
 
         // page pool + residency map. Resident worlds: slot = rebased page index. Streamed
@@ -523,13 +529,33 @@ class MeshletWorld {
         this.poolSlots = poolSlots;
         // retention: adopt a compatible previous world's page pool (its resident pages stay
         // valid because the carried resources keep their page-space prefix); otherwise create
-        if (this.adoptPagePool && this.adoptPagePool.byteSize === poolSlots * this.pageSizeBytes) {
+        const poolByteSize = poolSlots * this.pageSizeBytes;
+        if (this.adoptPagePool && this.adoptPagePool.byteSize >= poolByteSize &&
+            this.adoptPagePool.byteSize <= poolByteSize * 2) {
+            // the carried pool is large enough: keep it whole, extra slots included. The resolved
+            // pool drifts down a little from build to build once the budget caps it (the
+            // per-view reservation tracks the scene), and shrinking to match would mean
+            // starting streaming cold for a few slots' worth of budget. A pool more than twice
+            // what the scene wants (most of it removed) is let go instead
             this.pagePool = this.adoptPagePool;
+            poolSlots = this.adoptPagePool.byteSize / this.pageSizeBytes;
+            this.poolSlots = poolSlots;
+        } else if (this.adoptPagePool) {
+            // the scene outgrew the carried pool (its slot count tracks the page count until the
+            // budget caps it): allocate the larger pool and copy the old slots across on the
+            // queue, ordered before any install that follows, so every resident page stays
+            // resident at its slot instead of the whole world re-streaming from its roots
+            this.pagePool = new StorageBuffer(device, poolByteSize, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
+            const wgpu = device.wgpu;
+            const encoder = wgpu.createCommandEncoder();
+            encoder.copyBufferToBuffer(this.adoptPagePool.impl.buffer, 0, this.pagePool.impl.buffer, 0, this.adoptPagePool.byteSize);
+            wgpu.queue.submit([encoder.finish()]);
+            this.adoptPagePool.destroy();
         } else {
             this.adoptPagePool?.destroy();
             this.adoptResidency = null;
             this.adoptedPages = 0;
-            this.pagePool = new StorageBuffer(device, poolSlots * this.pageSizeBytes, BUFFERUSAGE_COPY_DST);
+            this.pagePool = new StorageBuffer(device, poolByteSize, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
         }
         this.adoptPagePool = null;
         this.residency = new Uint32Array(totalPages);
@@ -651,6 +677,9 @@ class MeshletWorld {
             // slot texture indices into the world-global flat index space (like pageBase for
             // pages).
             if (resource.textureManifest && this.textures) {
+                // position among the textured resources, in add order - the adopted system
+                // already holds the first adoptedTexResources of them
+                const texResource = texResourceIndex++;
                 if (!baseUrl) {
                     Debug.warnOnce('MeshletWorld: resource has a texture manifest but no base URL (resident add) - its textures are skipped.');
                 } else {
@@ -658,8 +687,12 @@ class MeshletWorld {
                     for (const arr of resource.textureManifest.arrays ?? []) {
                         runningTexBase += Array.isArray(arr.layers) ? arr.layers.length : 0;
                     }
+                    // an adopted system already holds the carried prefix; resources after it
+                    // join it in place (new tail layers, no re-download of what is resident)
                     if (!texturesAdopted) {
                         this.textures.addResource(resource.textureManifest, baseUrl, fetchOptions ?? null);
+                    } else if (texResource >= adoptedTexResources) {
+                        this.textures.appendResource(resource.textureManifest, baseUrl, fetchOptions ?? null);
                     }
                     if (baked && textureBase > 0) {
                         for (let row = 0; row < resource.materialCount; row++) {
@@ -837,7 +870,11 @@ class MeshletWorld {
 
         // streamed textures: tails + residency exist before the materials bind them (an
         // adopted system is already finalized and possibly fully loaded)
-        if (!texturesAdopted) this.textures?.finalize();
+        if (texturesAdopted) {
+            this.textures.appendFinalize();
+        } else {
+            this.textures?.finalize();
+        }
 
         // binds the world's storage buffers to a bucket material (lit or debug). The per-view
         // records buffer is NOT bound here - each view's mesh instances carry it as an
