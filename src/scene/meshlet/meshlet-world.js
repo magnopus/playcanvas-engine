@@ -418,6 +418,24 @@ class MeshletWorld {
     finalize() {
         Debug.assert(!this.finalized);
         this.finalized = true;
+        try {
+            this._build();
+        } catch (err) {
+            // a half-built world must not read as usable: the director and the component
+            // system gate on `finalized`, so leaving it set would crash every frame on the
+            // missing buffers and materials instead of surfacing the build error once
+            this.finalized = false;
+            throw err;
+        }
+    }
+
+    /**
+     * The finalize body: builds every GPU table and the bucket materials from the pending
+     * resources.
+     *
+     * @private
+     */
+    _build() {
         const device = this.device;
         const pending = this._pending;
         Debug.assert(pending.length, 'MeshletWorld: no resources added');
