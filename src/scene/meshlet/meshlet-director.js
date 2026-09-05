@@ -688,7 +688,16 @@ class MeshletDirector {
         // be measured against.
         const rt = cameraComponent.framePasses?.[0]?.rt ?? cameraComponent.renderTarget;
         const viewportHeight = rt?.height ?? this.device.height;
-        const projScale = viewportHeight / (2 * Math.tan(0.5 * cameraComponent.fov * math.DEG_TO_RAD));
+        const viewportWidth = rt?.width ?? this.device.width;
+        // the projection scale wants the VERTICAL field of view; a camera set up with a
+        // horizontal one (the wide-screen convention) reports that in `fov`, which would
+        // under-rate every cluster's screen size - and with it the LOD cut and the texture
+        // demand - by up to the aspect ratio
+        let halfFov = 0.5 * cameraComponent.fov * math.DEG_TO_RAD;
+        if (cameraComponent.horizontalFov) {
+            halfFov = Math.atan(Math.tan(halfFov) * viewportHeight / Math.max(viewportWidth, 1));
+        }
+        const projScale = viewportHeight / (2 * Math.tan(halfFov));
 
         // Two-phase occlusion needs a scene depth the HZB can sample. A render target with a
         // depth texture supplies hardware (NDC) depth. A CameraFrame keeps its scene depth as a
