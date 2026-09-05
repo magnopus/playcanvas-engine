@@ -28,9 +28,10 @@ import { MeshletTextureSource } from './meshlet-texture-source.js';
  *   textures under the tail top, which frees slots (same convergence as the geometry cut).
  *
  * Per-texture GPU state lives in the texResidency buffer, 2 u32 per flat texture index:
- * - word0: fineSlotLayer:16 (0xFFFF = tail-only) | familyIndex:8 | sizeBias:8
+ * - word0: fineSlotLayer:16 (0xFFFF = tail-only) | familyIndex:2 | tailStart:6 | sizeBias:8
  *   (sizeBias = log2(familySlotSize / srcSize) - the level offset of a smaller texture
- *   inside its family arrays)
+ *   inside its family arrays; tailStart = the texture's own fine/tail boundary in source
+ *   mips, since its tail top may sit below the family's tail size)
  * - word1: minLod:16 (finest resident mip in SOURCE-mip space; 0x7FFF = nothing resident
  *   yet - the shader falls back to material factors) | tailLayer:16
  *
@@ -53,6 +54,16 @@ const familyOfArray = (array) => {
 };
 
 const log2i = v => Math.round(Math.log2(v));
+
+/**
+ * Packs a texture's residency word0: slot layer (0xFFFF = none), family, its own fine/tail
+ * boundary and its level offset inside the family arrays - see the class comment.
+ *
+ * @param {object} tex - The texture entry.
+ * @param {number} slot - Fine slot layer, or MATERIAL_SLOT_ABSENT.
+ * @returns {number} The packed word.
+ */
+const texResidencyWord0 = (tex, slot) => (slot & 0xFFFF) | (tex.family << 16) | ((tex.tailStart & 0x3F) << 18) | (tex.sizeBias << 24);
 
 // processMarks bookkeeping and tunables
 const MAX_SOURCE_MIPS = 32;   // fineMask is one bit per source mip; also the (texture, mip) key stride
@@ -339,7 +350,7 @@ class MeshletTextures {
         residency.set(this.residencyCpu.subarray(0, Math.min(this.residencyCpu.length, residency.length)));
         for (let i = this._assigned; i < count; i++) {
             const tex = this.textures[i];
-            residency[i * TEX_RESIDENCY_U32S] = MATERIAL_SLOT_ABSENT | (tex.family << 16) | (tex.sizeBias << 24);
+            residency[i * TEX_RESIDENCY_U32S] = texResidencyWord0(tex, MATERIAL_SLOT_ABSENT);
             residency[i * TEX_RESIDENCY_U32S + 1] = MESHLET_TEX_NO_MINLOD | (tex.tailLayer << 16);
         }
         this._assigned = count;
@@ -529,7 +540,7 @@ class MeshletTextures {
                 }
                 tex.slot = slot;
                 fam.slotTex[slot] = i;
-                this.residencyCpu[i * TEX_RESIDENCY_U32S] = (slot & 0xFFFF) | (tex.family << 16) | (tex.sizeBias << 24);
+                this.residencyCpu[i * TEX_RESIDENCY_U32S] = texResidencyWord0(tex, slot);
                 this._dirty = true;
             }
             fam.slotLastUsed[tex.slot] = this._frame;
@@ -597,7 +608,7 @@ class MeshletTextures {
             const tex = this.textures[victim];
             tex.slot = -1;
             tex.fineMask = 0;
-            this.residencyCpu[victim * TEX_RESIDENCY_U32S] = MATERIAL_SLOT_ABSENT | (tex.family << 16) | (tex.sizeBias << 24);
+            this.residencyCpu[victim * TEX_RESIDENCY_U32S] = texResidencyWord0(tex, MATERIAL_SLOT_ABSENT);
             const tailMin = this.residencyCpu[victim * TEX_RESIDENCY_U32S + 1] & 0xFFFF;
             if (tailMin !== MESHLET_TEX_NO_MINLOD) {
                 this.residencyCpu[victim * TEX_RESIDENCY_U32S + 1] = (tex.tailStart & 0xFFFF) | (tex.tailLayer << 16);

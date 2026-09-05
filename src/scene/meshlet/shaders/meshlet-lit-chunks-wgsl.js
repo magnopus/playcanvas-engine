@@ -215,11 +215,20 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
                 let comb = lod + sizeBias;
                 // debug view: magenta tint where the surface wants a finer mip than is resident
                 let starved = select(0.0, 0.6, wanted < minLod - 0.5);
-                if (slotLayer != 0xFFFFu && comb < ${slotLevels}) {
-                    dMeshletTexDebug = mix(mix(vec3f(0.2, 1.0, 0.2), vec3f(0.0, 0.3, 0.0), comb / max(${slotLevels}, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
-                    // clamp keeps trilinear off the unwritten level below the finest chain
-                    return textureSampleLevel(meshletFine${n}, meshletFine${n}Sampler, uv, i32(slotLayer), min(comb, ${slotLevels} - 1.0));
+                // The fine/tail boundary is the TEXTURE's, not the family's: a texture whose tail
+                // top sits below the family tail size (a 512 texture tailing at 64 in a 256
+                // family) keeps the levels between the two in its fine slot, and its tail layer's
+                // first levels are never written - dispatching those lods to the tail would
+                // sample black there.
+                if (slotLayer != 0xFFFFu && lod < tailStart) {
+                    // the slot's coarsest written level for this texture; the clamp keeps
+                    // trilinear off the unwritten level below it
+                    let fineTop = tailStart + sizeBias - 1.0;
+                    dMeshletTexDebug = mix(mix(vec3f(0.2, 1.0, 0.2), vec3f(0.0, 0.3, 0.0), comb / max(fineTop + 1.0, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
+                    return textureSampleLevel(meshletFine${n}, meshletFine${n}Sampler, uv, i32(slotLayer), min(comb, fineTop));
                 }
+                // comb - slotLevels lands on the texture's tail top level whatever its tail size:
+                // comb - log2(slotSize / tailSize) = lod - tailStart + log2(tailSize / tailTop)
                 let tailLod = clamp(comb - ${slotLevels}, 0.0, ${tailMaxLod});
                 dMeshletTexDebug = mix(mix(vec3f(0.2, 0.4, 1.0), vec3f(0.0, 0.0, 0.25), tailLod / max(${tailMaxLod}, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
                 return textureSampleLevel(meshletTail${n}, meshletTail${n}Sampler, uv, tailLayer, tailLod);
@@ -278,6 +287,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             let minLod = f32(meshletTexMinLod(resident));
             let family = meshletTexFamily(resident);
             let sizeBias = f32(meshletTexSizeBias(resident));
+            let tailStart = f32(meshletTexTailStart(resident));
             let slotLayer = meshletTexSlotLayer(resident);
             let tailLayer = i32(meshletTexTailLayer(resident));
 

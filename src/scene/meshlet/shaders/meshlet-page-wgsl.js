@@ -121,7 +121,10 @@ export const meshletStructsWGSL = /* wgsl */ `
     ${structWGSL('MeshletTexResidency', MESHLET_TEX_RESIDENCY_STRUCT)}
 
     fn meshletTexSlotLayer(r : MeshletTexResidency) -> u32 { return r.slotFamilyBias & 0xFFFFu; }
-    fn meshletTexFamily(r : MeshletTexResidency) -> u32 { return (r.slotFamilyBias >> 16u) & 0xFFu; }
+    fn meshletTexFamily(r : MeshletTexResidency) -> u32 { return (r.slotFamilyBias >> 16u) & 0x3u; }
+    // the texture's own fine/tail boundary in source-mip space (its tail top can sit below the
+    // family's tail size)
+    fn meshletTexTailStart(r : MeshletTexResidency) -> u32 { return (r.slotFamilyBias >> 18u) & 0x3Fu; }
     fn meshletTexSizeBias(r : MeshletTexResidency) -> u32 { return (r.slotFamilyBias >> 24u) & 0xFFu; }
     fn meshletTexMinLod(r : MeshletTexResidency) -> u32 { return r.minLodTailLayer & 0xFFFFu; }
     fn meshletTexTailLayer(r : MeshletTexResidency) -> u32 { return r.minLodTailLayer >> 16u; }
