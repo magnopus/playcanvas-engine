@@ -290,7 +290,7 @@ class MeshletComponentSystem extends ComponentSystem {
             const baseUrl = component._effectiveBaseUrl;
             let group = groups.find(g => g.resource === resource && g.baseUrl === baseUrl);
             if (!group) {
-                group = { resource, baseUrl, components: [] };
+                group = { resource, baseUrl, resolveUrl: component._effectiveResolveUrl, components: [] };
                 groups.push(group);
             }
             group.components.push(component);
@@ -299,7 +299,7 @@ class MeshletComponentSystem extends ComponentSystem {
         const components = [];
         this.director.rebuild((world) => {
             for (let gi = 0; gi < groups.length; gi++) {
-                const { resource, baseUrl, components: members } = groups[gi];
+                const { resource, baseUrl, resolveUrl, components: members } = groups[gi];
                 const per = resource.instances.length;
 
                 // one placement per group; each member owns a sub-range of its instances
@@ -317,7 +317,7 @@ class MeshletComponentSystem extends ComponentSystem {
                     component._hiddenApplied = null;
                     components.push(component);
                 }
-                world.addStreamedResource(resource, null, baseUrl, merged);
+                world.addStreamedResource(resource, null, baseUrl, merged, resolveUrl);
             }
         });
         this._activeComponents = components;

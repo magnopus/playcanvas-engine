@@ -11,11 +11,33 @@ class MeshletTextureSource {
     /** @type {Map<string, Promise<ArrayBuffer>>} */
     _regions = new Map();
 
+    /** @type {Map<string, string>} - container URI -> fetch URL, resolved once. */
+    _urls = new Map();
+
     /**
      * @param {string} baseUrl - Directory the manifest's container URIs are relative to.
+     * @param {((uri: string) => string)|null} [resolveUrl] - Maps a container URI to the URL to
+     * fetch, in place of appending it to the base URL (see MeshletPageFetcher).
      */
-    constructor(baseUrl) {
+    constructor(baseUrl, resolveUrl = null) {
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+        this.resolveUrl = resolveUrl;
+    }
+
+    /**
+     * The URL a container URI is fetched from.
+     *
+     * @param {string} uri - Container URI relative to the base URL.
+     * @returns {string} The URL.
+     * @private
+     */
+    _url(uri) {
+        let url = this._urls.get(uri);
+        if (url === undefined) {
+            url = this.resolveUrl ? this.resolveUrl(uri) : this.baseUrl + uri;
+            this._urls.set(uri, url);
+        }
+        return url;
     }
 
     /**
@@ -28,7 +50,7 @@ class MeshletTextureSource {
      * @returns {Promise<ArrayBuffer>} The region's bytes.
      */
     fetchRegion(uri, byteOffset, byteLength) {
-        const url = this.baseUrl + uri;
+        const url = this._url(uri);
         const key = `${url}@${byteOffset}+${byteLength}`;
         let promise = this._regions.get(key);
         if (!promise) {

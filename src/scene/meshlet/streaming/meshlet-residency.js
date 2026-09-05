@@ -145,7 +145,7 @@ class MeshletResidency {
         // per-resource fetchers
         this._streams = world.streamInfo.map(info => ({
             ...info,
-            fetcher: new MeshletPageFetcher(info.resource.manifest, info.baseUrl)
+            fetcher: new MeshletPageFetcher(info.resource.manifest, info.baseUrl, info.resolveUrl ?? null)
         }));
     }
 

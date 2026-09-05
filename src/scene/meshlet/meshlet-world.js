@@ -261,7 +261,7 @@ class MeshletWorld {
     streamed = false;
 
     /**
-     * Per-resource streaming info: { resource, pageBase, baseUrl }.
+     * Per-resource streaming info: { resource, pageBase, baseUrl, resolveUrl }.
      *
      * @type {Array<object>}
      */
@@ -331,11 +331,15 @@ class MeshletWorld {
      * @param {string} baseUrl - URL directory the manifest's blob URIs are relative to.
      * @param {Array<{ primIndex: number, matrix: Float32Array }>|null} [instances] - Optional
      * placement list replacing the resource's own - many instances share one set of pages.
+     * @param {((uri: string) => string)|null} [resolveUrl] - Maps a manifest URI (geometry
+     * shard or texture container) to the URL it is fetched from, in place of appending it to
+     * the base URL. The component system passes the application's URL resolver, so a host
+     * storing a package's files behind rewritten or signed URLs can serve them; null appends.
      */
-    addStreamedResource(resource, transform, baseUrl, instances = null) {
+    addStreamedResource(resource, transform, baseUrl, instances = null, resolveUrl = null) {
         Debug.assert(!this.finalized, 'MeshletWorld: addStreamedResource after finalize');
         this.streamed = true;
-        this._pending.push({ resource, transform, baseUrl, instances });
+        this._pending.push({ resource, transform, baseUrl, instances, resolveUrl });
     }
 
     /**
@@ -554,7 +558,7 @@ class MeshletWorld {
         this.pickIdBase = PickerId.reserve(totalInstances);
         this._pickRecords = null;
 
-        for (const { resource, transform, shardBuffers, baseUrl, instances } of pending) {
+        for (const { resource, transform, shardBuffers, baseUrl, instances, resolveUrl } of pending) {
             const manifest = resource.manifest;
             const grid = manifest.positionGrid;
             const uvFloats = (manifest.attributeLayout.uvComponents ?? 0) * 2;
@@ -587,7 +591,7 @@ class MeshletWorld {
                         new Uint32Array(shardBuffers[blob], offset, this.pageSizeBytes / 4));
                 }
             } else {
-                this.streamInfo.push({ resource, pageBase, baseUrl });
+                this.streamInfo.push({ resource, pageBase, baseUrl, resolveUrl: resolveUrl ?? null });
             }
 
             // material rows: baked table verbatim, or one synthesized row per primitive
@@ -618,7 +622,7 @@ class MeshletWorld {
                         runningTexBase += Array.isArray(arr.layers) ? arr.layers.length : 0;
                     }
                     if (!texturesAdopted) {
-                        this.textures.addResource(resource.textureManifest, baseUrl);
+                        this.textures.addResource(resource.textureManifest, baseUrl, resolveUrl ?? null);
                     }
                     if (baked && textureBase > 0) {
                         for (let row = 0; row < resource.materialCount; row++) {

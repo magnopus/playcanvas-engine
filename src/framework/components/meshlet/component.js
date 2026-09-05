@@ -191,6 +191,24 @@ class MeshletComponent extends Component {
         return slash >= 0 ? url.substring(0, slash) : '.';
     }
 
+    /**
+     * How the effective resource's sidecar URIs (geometry shards, texture containers) map to
+     * fetch URLs. With an asset, each URI resolves through the application's URL resolver
+     * relative to the asset's file URL - the same route the asset itself loaded by - so a host
+     * that rewrites or signs a package's URLs serves the sidecars too. A direct resource with an
+     * explicit {@link baseUrl} appends the URI to it (null).
+     *
+     * @type {((uri: string) => string)|null}
+     * @ignore
+     */
+    get _effectiveResolveUrl() {
+        if (this._baseUrl !== null) return null;
+        const app = this.system.app;
+        const fileUrl = this._assetReference.asset?.file?.url;
+        if (!fileUrl || typeof app.resolveUrl !== 'function') return null;
+        return uri => app.resolveUrl(uri, { baseUrl: fileUrl }).load;
+    }
+
     _onAssetAdded(asset) {
         if (!asset.resource && this.enabled && this.entity.enabled) {
             this.system.app.assets.load(asset);

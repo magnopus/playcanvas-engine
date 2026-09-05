@@ -18,14 +18,27 @@ class MeshletPageFetcher {
     /**
      * @param {object} manifest - The resource's stream manifest.
      * @param {string} baseUrl - URL directory the manifest's blob URIs are relative to.
+     * @param {((uri: string) => string)|null} [resolveUrl] - Maps a manifest URI to the URL to
+     * fetch, in place of appending it to the base URL - the application's URL resolver, so hosts
+     * that store a package's files behind rewritten or signed URLs can serve the shards.
      */
-    constructor(manifest, baseUrl) {
+    constructor(manifest, baseUrl, resolveUrl = null) {
         this.manifest = manifest;
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+        this.resolveUrl = resolveUrl;
+
+        /** @type {string[]} - per-blob fetch URLs, resolved once. */
+        this._urls = [];
     }
 
     _blobUrl(blobIndex) {
-        return this.baseUrl + this.manifest.blobs[blobIndex].uri;
+        let url = this._urls[blobIndex];
+        if (url === undefined) {
+            const uri = this.manifest.blobs[blobIndex].uri;
+            url = this.resolveUrl ? this.resolveUrl(uri) : this.baseUrl + uri;
+            this._urls[blobIndex] = url;
+        }
+        return url;
     }
 
     /**
