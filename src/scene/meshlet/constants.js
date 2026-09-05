@@ -339,7 +339,9 @@ export const TEX_RESIDENCY_U32S = 2;
 export const MESHLET_COLOR_MODE = {
     LIT: 0,
     LOD_TIER: 1,
-    MESHLET: 2
+    MESHLET: 2,
+    /** Lit materials, painted with the state of each pixel's base-colour texture sample. */
+    TEXTURES: 3
 };
 
 // ---------------------------------------------------------------------------

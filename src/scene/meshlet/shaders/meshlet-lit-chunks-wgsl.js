@@ -210,13 +210,18 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         return /* wgsl */ `
             if (family == ${f}u) {
                 let srcSize = ${slotSize} / exp2(sizeBias);
-                let lod = clamp(meshletTexLod(ddx, ddy, srcSize), minLod, 30.0);
+                let wanted = meshletTexLod(ddx, ddy, srcSize);
+                let lod = clamp(wanted, minLod, 30.0);
                 let comb = lod + sizeBias;
+                // debug view: magenta tint where the surface wants a finer mip than is resident
+                let starved = select(0.0, 0.6, wanted < minLod - 0.5);
                 if (slotLayer != 0xFFFFu && comb < ${slotLevels}) {
+                    dMeshletTexDebug = mix(mix(vec3f(0.2, 1.0, 0.2), vec3f(0.0, 0.3, 0.0), comb / max(${slotLevels}, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
                     // clamp keeps trilinear off the unwritten level below the finest chain
                     return textureSampleLevel(meshletFine${n}, meshletFine${n}Sampler, uv, i32(slotLayer), min(comb, ${slotLevels} - 1.0));
                 }
                 let tailLod = clamp(comb - ${slotLevels}, 0.0, ${tailMaxLod});
+                dMeshletTexDebug = mix(mix(vec3f(0.2, 0.4, 1.0), vec3f(0.0, 0.0, 0.25), tailLod / max(${tailMaxLod}, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
                 return textureSampleLevel(meshletTail${n}, meshletTail${n}Sampler, uv, tailLayer, tailLod);
             }`;
     }).join('') : '';
@@ -248,6 +253,12 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         ${meshletTexResidencyWGSL}
         ${texDecls}
 
+        // texture-state debug view (MESHLET_COLOR_MODE.TEXTURES): every slot sample records
+        // what it sampled, getAlbedo keeps the base-colour slot's record, outputPS shows it
+        uniform meshletTexDebug: u32;
+        var<private> dMeshletTexDebug: vec3f;
+        var<private> dMeshletTexDebugBase: vec3f;
+
         fn meshletTexLod(ddx: vec2f, ddy: vec2f, size: f32) -> f32 {
             let dx = ddx * size;
             let dy = ddy * size;
@@ -261,9 +272,9 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         fn meshletSampleSlot(slot: u32, fallback: vec4f) -> vec4f {
             let slotWord = materialTable[vMeshletMatRow].slotWords[slot];
             let texIndex = slotWord & 0xFFFFu;
-            if (texIndex == ${MATERIAL_SLOT_ABSENT}u) { return fallback; }
+            if (texIndex == ${MATERIAL_SLOT_ABSENT}u) { dMeshletTexDebug = vec3f(0.15); return fallback; }
             let resident = texResidency[texIndex];
-            if (meshletTexMinLod(resident) == ${MESHLET_TEX_NO_MINLOD}u) { return fallback; }  // nothing resident yet
+            if (meshletTexMinLod(resident) == ${MESHLET_TEX_NO_MINLOD}u) { dMeshletTexDebug = vec3f(1.0, 0.1, 0.1); return fallback; }  // nothing resident yet
             let minLod = f32(meshletTexMinLod(resident));
             let family = meshletTexFamily(resident);
             let sizeBias = f32(meshletTexSizeBias(resident));
@@ -289,6 +300,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
                 ddy = ddy * transformScale;
             }
             ${texDispatch}
+            dMeshletTexDebug = vec3f(0.6, 0.6, 0.0);
             return fallback;
         }` : ''}
     `;
@@ -304,6 +316,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     const diffusePS = /* wgsl */ `
         fn getAlbedo() {
             dAlbedo = ${material}.baseColor.rgb * ${sample(MATERIAL_SLOT.BASE_COLOR, 'vec4f(1.0)')}.rgb;
+            ${textures ? 'dMeshletTexDebugBase = dMeshletTexDebug;' : ''}
         }
     `;
 
@@ -351,9 +364,13 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             var n = select(-dVertexNormalW, dVertexNormalW, pcFrontFacing);
             ${tan ? /* wgsl */ `
             let normalSlotWord = ${material}.slotWords[${MATERIAL_SLOT.NORMAL}u];
-            if ((normalSlotWord & 0xFFFFu) != ${MATERIAL_SLOT_ABSENT}u) {
+            // a degenerate tangent frame (zero, or parallel to the normal - a coarse DAG level
+            // can carry either) keeps the geometric normal: normalising it would give NaN and
+            // shade the whole cluster black
+            let tangentProjected = vMeshletTangentW - n * dot(vMeshletTangentW, n);
+            if ((normalSlotWord & 0xFFFFu) != ${MATERIAL_SLOT_ABSENT}u && dot(tangentProjected, tangentProjected) > 1e-6) {
                 let normalSample = ${sample(MATERIAL_SLOT.NORMAL, 'vec4f(0.5, 0.5, 1.0, 1.0)')}.xyz * 2.0 - 1.0;
-                let T = normalize(vMeshletTangentW - n * dot(vMeshletTangentW, n));
+                let T = normalize(tangentProjected);
                 let B = cross(n, T) * vMeshletBtSign;
                 // max(z, 0.05) softens a degenerate (flat or inverted) normal-map texel
                 n = normalize(T * normalSample.x + B * normalSample.y + n * max(normalSample.z, 0.05));
@@ -371,6 +388,13 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         output.color = vec4f(gammaCorrectOutput(meshletOutlineRgb), output.color.a);
         #endif
     `;
+
+    // texture-state debug view: the base-colour sample's state replaces the shaded colour
+    const outputPS = textures ? /* wgsl */ `
+        if (uniform.meshletTexDebug != 0u) {
+            output.color = vec4f(gammaCorrectOutput(dMeshletTexDebugBase), output.color.a);
+        }
+    ` : null;
 
     const chunks = {
         outlineOutputPS,
@@ -391,6 +415,9 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     };
     if (litEngineMainStartPS) {
         chunks.litEngineMainStartPS = litEngineMainStartPS;
+    }
+    if (outputPS) {
+        chunks.outputPS = outputPS;
     }
     return chunks;
 }

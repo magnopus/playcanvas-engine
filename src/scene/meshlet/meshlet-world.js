@@ -12,7 +12,8 @@ import {
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
     MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
-    RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S
+    RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S,
+    MESHLET_COLOR_MODE
 } from './constants.js';
 import { createMeshletLitMaterial } from './meshlet-lit-material.js';
 import { createMeshletMaterial } from './meshlet-material.js';
@@ -318,6 +319,9 @@ class MeshletWorld {
 
     /** @type {number} - textured resources (in add order) the adopted texture system already holds; the rest are appended to it. */
     adoptTexturesPrefix = 0;
+
+    /** @type {boolean} - texture-state debug view on the lit materials (MESHLET_COLOR_MODE.TEXTURES). @private */
+    _texDebug = false;
 
     /** @type {import('../../platform/graphics/storage-buffer.js').StorageBuffer|null} */
     adoptVisBits = null;
@@ -889,6 +893,7 @@ class MeshletWorld {
         };
         const bindTextureParams = (material) => {
             if (!this.textures) return;
+            material.setParameter('meshletTexDebug', this._texDebug ? 1 : 0);
             material.setParameter('texResidency', this.textures.residencyBuffer);
             for (let f = 0; f < MESHLET_TEX_FAMILIES.length; f++) {
                 const { tail, fine } = this.textures.familyTextures(f);
@@ -970,7 +975,7 @@ class MeshletWorld {
      * @type {Array<object>}
      */
     get bucketMaterials() {
-        return this._colorMode > 0 ? this._debugMaterials : this._litMaterials;
+        return this._colorMode > 0 && this._colorMode !== MESHLET_COLOR_MODE.TEXTURES ? this._debugMaterials : this._litMaterials;
     }
 
     /**
@@ -1031,13 +1036,15 @@ class MeshletWorld {
 
     /**
      * Sets the debug color mode on the bucket materials (0 = engine-lit material shading,
-     * 1 = LOD tint, 2 = per-meshlet colour) - modes > 0 swap in the unlit debug materials
-     * (applied to each view's mesh instances via {@link MeshletView#syncMaterials}).
+     * 1 = LOD tint, 2 = per-meshlet colour, 3 = lit materials painted with each pixel's
+     * texture-sample state) - modes 1 and 2 swap in the unlit debug materials (applied to each
+     * view's mesh instances via {@link MeshletView#syncMaterials}), mode 3 keeps the lit ones.
      *
      * @param {number} mode - The color mode.
      */
     setColorMode(mode) {
-        if (mode > 0 && !this._debugMaterials) {
+        const texDebug = mode === MESHLET_COLOR_MODE.TEXTURES;
+        if (mode > 0 && !texDebug && !this._debugMaterials) {
             this._debugMaterials = [];
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
                 this._debugMaterials.push(createMeshletMaterial(b));
@@ -1045,7 +1052,9 @@ class MeshletWorld {
             this._debugMaterials.forEach(this._bindWorldParams);
         }
         this._colorMode = mode;
-        if (mode > 0) this._debugMaterials.forEach(m => m.setParameter('colorMode', mode));
+        this._texDebug = texDebug;
+        this._litMaterials?.forEach(m => m.setParameter('meshletTexDebug', texDebug ? 1 : 0));
+        if (mode > 0 && !texDebug) this._debugMaterials.forEach(m => m.setParameter('colorMode', mode));
     }
 
     /**
