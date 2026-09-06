@@ -613,15 +613,20 @@ class MeshletTextures {
         let bestUsed = 0xFFFFFFFF;
         for (let s = 0; s < fam.slotCount; s++) {
             const holder = fam.slotTex[s];
-            if (holder >= 0 && desiredTexelRate[holder] > 0) continue; // wanted this frame
+            // a slot with no holder that is not on the free list was evicted earlier this frame
+            // and sits in pendingFree: handing it out now AND from the free list next frame
+            // would give two textures the same slot, each uploading over the other's mips
+            if (holder < 0) continue;
+            if (desiredTexelRate[holder] > 0) continue; // wanted this frame
             if (fam.slotLastUsed[s] < bestUsed) {
                 bestUsed = fam.slotLastUsed[s];
                 best = s;
             }
         }
         if (best < 0) return -1;
+        // evict the least recently wanted holder; the slot itself is handed out next frame
         const victim = fam.slotTex[best];
-        if (victim >= 0) {
+        {
             const tex = this.textures[victim];
             tex.slot = -1;
             tex.fineMask = 0;
@@ -640,7 +645,6 @@ class MeshletTextures {
             fam.pendingFree.push(best);
             return -1;
         }
-        return best;
     }
 
     /**
