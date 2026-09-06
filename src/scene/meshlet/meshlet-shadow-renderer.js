@@ -1,4 +1,5 @@
 import { Debug } from '../../core/debug.js';
+import { SHADOWUPDATE_NONE, SHADOWUPDATE_THISFRAME } from '../constants.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { BoundingBox } from '../../core/shape/bounding-box.js';
@@ -173,16 +174,29 @@ class MeshletShadowRenderer {
         // of views (see the multi-camera note in the README).
         const desired = this._desired;
         desired.clear();
-        let sceneCamera = null;
         const byCamera = director.renderer?.culler?.cameraDirShadowLights;
-        byCamera?.forEach((lightList, camera) => {
-            if (sceneCamera && camera !== sceneCamera) return;
-            sceneCamera = camera;
+        // Serve the camera the meshlets are culled and drawn for. The map's first entry is
+        // whichever camera the composition renders first, and in an application with several
+        // (a first-person rig, an overlay, a picker) that is not always the scene camera: the
+        // views then fit the wrong camera's cascades and the meshlets cast nothing where the
+        // player looks. Fall back to the first entry only when the director's camera has no
+        // shadowed directional light of its own.
+        let sceneCamera = null;
+        const preferred = director.cameraComponent?.camera ?? null;
+        if (preferred && byCamera?.has(preferred)) {
+            sceneCamera = preferred;
+        } else {
+            byCamera?.forEach((lightList, camera) => {
+                if (!sceneCamera) sceneCamera = camera;
+            });
+        }
+        if (sceneCamera) {
+            const lightList = byCamera.get(sceneCamera);
             for (let i = 0; i < lightList.length; i++) {
                 const light = lightList[i];
                 if (light.enabled && light.castShadows) desired.add(light);
             }
-        });
+        }
 
         // Local lights, if enabled. Their shadow render data is camera-independent
         // (getRenderData(null, face)), so unlike directional they need no per-camera keying -
@@ -222,6 +236,17 @@ class MeshletShadowRenderer {
 
         this.entries.forEach((entry) => {
             entry.views.forEach(view => view.setCasterBounds(this._casterBounds(entry, view)));
+            // A light with a static shadow map renders it once and then only on request. Its
+            // request came before any page was resident, so meshlets would never cast into it:
+            // ask for a re-render whenever the streamed content changed since the last one.
+            const world = director.world;
+            if (entry.contentWorld !== world || entry.contentVersion !== world.contentVersion) {
+                entry.contentWorld = world;
+                entry.contentVersion = world.contentVersion;
+                if (entry.light.shadowUpdateMode === SHADOWUPDATE_NONE) {
+                    entry.light.shadowUpdateMode = SHADOWUPDATE_THISFRAME;
+                }
+            }
         });
     }
 

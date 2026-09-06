@@ -230,6 +230,7 @@ class MeshletResidency {
         if (best >= 0) {
             const page = this.slotPage[best];
             this.world.residency[page] = PAGE_NOT_RESIDENT;
+            this.world.contentVersion++;
             this.slotPage[best] = PAGE_NOT_RESIDENT;
             this.residentPages--;
             this.evictedPages++;
@@ -251,6 +252,7 @@ class MeshletResidency {
         }
         world.pagePool.write(slot * world.pageSizeBytes, pageWords);
         world.residency[globalPage] = slot;
+        world.contentVersion++;
         this.slotPage[slot] = globalPage;
         this.slotPinned[slot] = pinned ? 1 : 0;
         this.slotLastUsed[slot] = this.frame;

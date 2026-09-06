@@ -131,6 +131,15 @@ class MeshletWorld {
     worldBounds = new BoundingBox();
 
     /**
+     * Bumped whenever what the world would draw changes without a rebuild: a page installed or
+     * evicted, an instance moved, hidden or its shadow casting toggled. Consumers that render on
+     * demand (a light with a static shadow map) compare it to know a re-render is due.
+     *
+     * @type {number}
+     */
+    contentVersion = 0;
+
+    /**
      * @param {GraphicsDevice} device - The graphics device.
      */
     constructor(device) {
@@ -1213,6 +1222,7 @@ class MeshletWorld {
      * @private
      */
     _uploadObjectRows(first, count) {
+        this.contentVersion++;
         const rowBytes = OBJECT_DATA_U32S * 4;
         this.objectDataBuffer.write(first * rowBytes,
             this.objectDataCpu.subarray(first * OBJECT_DATA_U32S, (first + count) * OBJECT_DATA_U32S));

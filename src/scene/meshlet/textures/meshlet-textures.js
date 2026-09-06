@@ -694,7 +694,13 @@ class MeshletTextures {
             }
         }).catch((err) => {
             this._inFlight.delete(key);
-            Debug.warnOnce(`MeshletTextures: fine mip fetch failed (${tex.array.name} layer ${tex.layer} mip ${sourceMip}): ${err.message}`);
+            // console, not Debug: a profile build strips Debug, and a silent failure here is a
+            // texture that stays on its tail with no clue why
+            if (!this._warnedFineFailure) {
+                this._warnedFineFailure = true;
+                console.warn(`MeshletTextures: fine mip fetch failed (${tex.array.name} layer ${tex.layer} mip ${sourceMip}): ${err.message}`);
+            }
+            this.fineFailures = (this.fineFailures ?? 0) + 1;
         });
     }
 
