@@ -359,7 +359,10 @@ export const meshletCullWGSL = /* wgsl */ `
         if (uvExtentWord != 0u) {
             let uvExtent = unpack2x16float(uvExtentWord);
             let uvSpan = max(max(uvExtent.x, uvExtent.y), 1e-4);
-            let dist = max(distance(center, camPos), 1e-5);
+            // measured from the cluster's NEAR edge, not its centre: a large cluster the camera
+            // stands at (a roof, a floor) is far larger on screen than its centre distance says,
+            // and rating it by the centre starved its texture right where it is looked at closest
+            let dist = max(distance(center, camPos) - radius, 0.05);
             let screenPx = 2.0 * radius * projScale / dist;
             // +1 so a mark of 0 means "not seen this frame"; 4095 caps the mark at 12 bits
             let texelRate = clamp(u32(${TEXEL_RATE_PER_MIP}.0 * log2(max(screenPx / uvSpan, 1.0))) + 1u, 1u, 4095u);

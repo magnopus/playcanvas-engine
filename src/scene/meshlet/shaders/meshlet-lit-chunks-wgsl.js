@@ -220,18 +220,27 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
                 // family) keeps the levels between the two in its fine slot, and its tail layer's
                 // first levels are never written - dispatching those lods to the tail would
                 // sample black there.
+                // Sampling goes through explicit gradients rather than an explicit level: the
+                // hardware then filters anisotropically (a floor at a grazing angle keeps its
+                // detail instead of smearing along the view), and the gradients are scaled so
+                // the level it lands on is exactly the clamped one - finest resident at the
+                // near end, this texture's coarsest written level at the far end. The hardware's
+                // own level for a size-N array is meshletTexLod(ddx, ddy, N), so the scale is
+                // exp2(target - natural).
                 if (slotLayer != 0xFFFFu && lod < tailStart) {
-                    // the slot's coarsest written level for this texture; the clamp keeps
-                    // trilinear off the unwritten level below it
+                    // the slot's coarsest written level for this texture
                     let fineTop = tailStart + sizeBias - 1.0;
+                    let fineScale = exp2(min(comb, fineTop) - (wanted + sizeBias));
                     dMeshletTexDebug = mix(mix(vec3f(0.2, 1.0, 0.2), vec3f(0.0, 0.3, 0.0), comb / max(fineTop + 1.0, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
-                    return textureSampleLevel(meshletFine${n}, meshletFine${n}Sampler, uv, i32(slotLayer), min(comb, fineTop));
+                    return textureSampleGrad(meshletFine${n}, meshletFine${n}Sampler, uv, i32(slotLayer), ddx * fineScale, ddy * fineScale);
                 }
                 // comb - slotLevels lands on the texture's tail top level whatever its tail size:
-                // comb - log2(slotSize / tailSize) = lod - tailStart + log2(tailSize / tailTop)
+                // comb - log2(slotSize / tailSize) = lod - tailStart + log2(tailSize / tailTop);
+                // the tail array's natural level is wanted + sizeBias - slotLevels
                 let tailLod = clamp(comb - ${slotLevels}, 0.0, ${tailMaxLod});
+                let tailScale = exp2(tailLod - (wanted + sizeBias - ${slotLevels}));
                 dMeshletTexDebug = mix(mix(vec3f(0.2, 0.4, 1.0), vec3f(0.0, 0.0, 0.25), tailLod / max(${tailMaxLod}, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
-                return textureSampleLevel(meshletTail${n}, meshletTail${n}Sampler, uv, tailLayer, tailLod);
+                return textureSampleGrad(meshletTail${n}, meshletTail${n}Sampler, uv, tailLayer, ddx * tailScale, ddy * tailScale);
             }`;
     }).join('') : '';
 
