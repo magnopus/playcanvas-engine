@@ -148,7 +148,13 @@ class MeshletResidency {
         // per-resource fetchers
         this._streams = world.streamInfo.map(info => ({
             ...info,
-            fetcher: new MeshletPageFetcher(info.resource.manifest, info.baseUrl, info.fetchOptions ?? null, this.world.fetchScheduler)
+            fetcher: new MeshletPageFetcher(info.resource.manifest, info.baseUrl, info.fetchOptions ?? null, this.world.fetchScheduler),
+            // fetch failure state: a stream whose shard is gone for good (404-class) or keeps
+            // failing is dead - its pages are never requested again, so a broken package costs
+            // one error line instead of a request per readback for the rest of the session
+            failures: 0,
+            retryAfterFrame: 0,
+            dead: false
         }));
     }
 
@@ -199,6 +205,7 @@ class MeshletResidency {
             if (result.status === 'rejected') {
                 // reported in every build: the resource renders nothing until this is fixed
                 console.error(`MeshletResidency: root pages failed to load for ${this._streams[i].resource.manifest.blobs[0]?.uri ?? 'a resource'}: ${result.reason?.message ?? result.reason}`);
+                this._streams[i].dead = true;
             }
         });
         this._flushResidency();
@@ -322,6 +329,7 @@ class MeshletResidency {
                         }
                     }).catch((err) => {
                         Debug.error(`MeshletResidency: run fetch failed: ${err.message}`);
+                        this._failStream(stream, err);
                         for (const { localPage } of run.pages) {
                             this.inFlight.delete(stream.pageBase + localPage);
                         }
@@ -370,6 +378,32 @@ class MeshletResidency {
         }
     }
 
+    /**
+     * Records a failed fetch on a stream: a 404-class status kills it outright, anything else
+     * backs it off exponentially and kills it after repeated failures.
+     *
+     * @param {object} stream - The stream.
+     * @param {Error} err - The failure.
+     * @private
+     */
+    _failStream(stream, err) {
+        const status = /\((\d{3})\)/.exec(err?.message ?? '')?.[1];
+        stream.failures++;
+        if (status === '404' || status === '403' || status === '410' || stream.failures >= 4) {
+            if (!stream.dead) {
+                stream.dead = true;
+                console.error(`MeshletResidency: giving up on ${stream.resource.manifest.blobs[0]?.uri ?? 'a resource'} after ${stream.failures} failed fetch(es): ${err?.message ?? err}`);
+            }
+            return;
+        }
+        stream.retryAfterFrame = this.frame + 60 * (1 << stream.failures);
+    }
+
+    /** @type {number} - streams given up on after fetch failures. */
+    get deadStreams() {
+        return this._streams.reduce((n, s) => n + (s.dead ? 1 : 0), 0);
+    }
+
     _processRequests(marks) {
         if (this._destroyed) return;
         const world = this.world;
@@ -380,6 +414,8 @@ class MeshletResidency {
         // PAGE_REQUEST.MISSING = missing page the cut wanted (fetch candidate)
         const missing = [];
         let usedResident = 0;
+        const streams = this._streams;
+        let si = 0; // streams are ordered by pageBase, pages ascend: one pass tracks the stream
         for (let p = 0; p < world.totalPages; p++) {
             const mark = marks[p];
             if (mark === PAGE_REQUEST.NONE) continue;
@@ -393,6 +429,9 @@ class MeshletResidency {
             } else if (world.residency[p] === PAGE_NOT_RESIDENT && !this.inFlight.has(p)) {
                 // in flight = queued, being fetched, or arrived and awaiting install: the GPU may
                 // keep marking such a page every frame, and it is never requested twice
+                while (si + 1 < streams.length && p >= streams[si + 1].pageBase) si++;
+                const stream = streams[si];
+                if (stream.dead || stream.retryAfterFrame > this.frame) continue;
                 missing.push(p);
             }
         }
