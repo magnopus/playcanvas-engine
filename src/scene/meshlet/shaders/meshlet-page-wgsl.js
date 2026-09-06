@@ -231,8 +231,8 @@ export const meshletDecodeTangentWGSL = /* wgsl */ `
  * The SoA layout of one resident page and the vertex decode over it. Requires
  * `pagePool : array<u32>`. A page is: header (PAGE_HEADER_BYTES) | positions (u16x4 anchor-
  * relative, or i32x3 when PAGE_FLAG_WIDE_POSITIONS) | oct16 normals | oct16_sign tangents when
- * the resource has them | UV floats | the meshlet-vertex remap table | the u8 triangle corner
- * stream. The attribute layout is per resource, so the two per-instance parameters come from
+ * the resource has them | UV floats | rgba8 vertex colours when the resource has them | the
+ * meshlet-vertex remap table | the u8 triangle corner stream. The attribute layout is per resource, so the two per-instance parameters come from
  * objectData.
  */
 export const meshletPageLayoutWGSL = /* wgsl */ `
@@ -241,13 +241,14 @@ export const meshletPageLayoutWGSL = /* wgsl */ `
         normalBase : u32,
         tangentBase : u32,        // equals uvBase when the page carries no tangents
         uvBase : u32,
+        colorBase : u32,          // equals meshletVertexBase when the page carries no colours
         meshletVertexBase : u32,  // the per-meshlet vertex remap table
         meshletVertexCount : u32,
         anchor : vec3i,           // grid anchor the compact u16 positions are relative to
         widePositions : bool
     };
 
-    fn meshletPageLayout(pageBase : u32, hasTangents : bool, uvFloatsPerVertex : u32) -> MeshletPageLayout {
+    fn meshletPageLayout(pageBase : u32, hasTangents : bool, uvFloatsPerVertex : u32, hasColors : bool) -> MeshletPageLayout {
         var pageLayout : MeshletPageLayout;
         let vertexCount = pagePool[pageBase + ${PAGE_HEADER.VERTEX_COUNT}u];
         let flags = pagePool[pageBase + ${PAGE_HEADER.FLAGS}u];
@@ -257,7 +258,8 @@ export const meshletPageLayoutWGSL = /* wgsl */ `
         pageLayout.normalBase = pageLayout.positionBase + select(vertexCount * 2u, vertexCount * 3u, pageLayout.widePositions);
         pageLayout.tangentBase = pageLayout.normalBase + vertexCount;
         pageLayout.uvBase = pageLayout.tangentBase + select(0u, vertexCount, hasTangents);
-        pageLayout.meshletVertexBase = pageLayout.uvBase + vertexCount * uvFloatsPerVertex;
+        pageLayout.colorBase = pageLayout.uvBase + vertexCount * uvFloatsPerVertex;
+        pageLayout.meshletVertexBase = pageLayout.colorBase + select(0u, vertexCount, hasColors);
         pageLayout.meshletVertexCount = pagePool[pageBase + ${PAGE_HEADER.MV_COUNT}u];
         return pageLayout;
     }
@@ -275,5 +277,11 @@ export const meshletPageLayoutWGSL = /* wgsl */ `
             coord = pageLayout.anchor + vec3i(i32(word0 & 0xFFFFu), i32(word0 >> 16u), i32(word1 & 0xFFFFu));
         }
         return vec3f(coord) * gridStep + gridOrigin;
+    }
+
+    // COLOR_0 of one page vertex (rgba8 unorm, r in the low byte); only meaningful when the
+    // instance's resource carries colours
+    fn meshletPageColor(pageLayout : MeshletPageLayout, vertex : u32) -> vec4f {
+        return unpack4x8unorm(pagePool[pageLayout.colorBase + vertex]);
     }
 `;

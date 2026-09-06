@@ -1,6 +1,6 @@
 import { CULLFACE_NONE } from '../../platform/graphics/constants.js';
 import { ShaderMaterial } from '../materials/shader-material.js';
-import { MESHLET_COLOR_MODE, OBJECT_FLAG_HAS_TANGENTS } from './constants.js';
+import { MESHLET_COLOR_MODE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS } from './constants.js';
 import {
     meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL, meshletMaterialTableWGSL,
     meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL
@@ -65,8 +65,9 @@ const vertexWGSL = /* wgsl */ `
         // per-instance page attribute layout (resources may differ)
         let uvFloatsPerVertex = objectData[instance].uvFloatsPerVertex;
         let hasTangents = (objectData[instance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
+        let hasColors = (objectData[instance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
 
-        let pageLayout = meshletPageLayout(residency[meshletData[meshlet].page] * uniform.pageSizeWords, hasTangents, uvFloatsPerVertex);
+        let pageLayout = meshletPageLayout(residency[meshletData[meshlet].page] * uniform.pageSizeWords, hasTangents, uvFloatsPerVertex, hasColors);
         let vertex = pagePool[pageLayout.meshletVertexBase + meshletData[meshlet].verticesOffset + localVert];
 
         // per-instance position grid (resources may be baked on different grids)

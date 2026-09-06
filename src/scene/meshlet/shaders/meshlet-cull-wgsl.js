@@ -26,7 +26,7 @@ import {
     CULL_FLAG_HZB_LINEAR, CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
     MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE,
     MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP,
-    MESHLET_INSTANCE_CULL_WORKGROUP, MESHLET_NO_PARENT, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HIDDEN,
+    MESHLET_INSTANCE_CULL_WORKGROUP, MESHLET_NO_PARENT, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HIDDEN,
     PAGE_NOT_RESIDENT, PAGE_REQUEST, TEXEL_RATE_PER_MIP
 } from '../constants.js';
 import {
@@ -509,11 +509,12 @@ export const indexWriteWGSL = /* wgsl */ `
         // per-instance page attribute layout (resources may differ)
         let uvFloatsPerVertex = objectData[instance].uvFloatsPerVertex;
         let hasTangents = (objectData[instance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
+        let hasColors = (objectData[instance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
 
         // the u8 triangle corner stream follows the page's meshlet-vertex table (shared layout
         // in meshlet-page-wgsl.js)
         let pageBase = residency[page] * uniform.pageSizeWords;
-        let pageLayout = meshletPageLayout(pageBase, hasTangents, uvFloatsPerVertex);
+        let pageLayout = meshletPageLayout(pageBase, hasTangents, uvFloatsPerVertex, hasColors);
         let triangleStreamByte = (pageLayout.meshletVertexBase + pageLayout.meshletVertexCount) * 4u + triangleOffset;
 
         for (var corner = localId.x; corner < cornerCount; corner += ${MESHLET_INDEX_WRITE_WORKGROUP}u) {

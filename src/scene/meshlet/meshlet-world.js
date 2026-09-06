@@ -10,7 +10,7 @@ import {
     MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
-    MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS,
+    MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
     RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S,
     MESHLET_COLOR_MODE
@@ -19,6 +19,9 @@ import { createMeshletLitMaterial } from './meshlet-lit-material.js';
 import { createMeshletMaterial } from './meshlet-material.js';
 import { buildMeshletLitChunks } from './shaders/meshlet-lit-chunks-wgsl.js';
 import { MeshletTextures, MESHLET_TEX_FAMILIES } from './textures/meshlet-textures.js';
+
+/** Page attribute streams this build can place (see meshletPageLayoutWGSL). */
+const KNOWN_LAYOUT_KEYS = new Set(['positions', 'normals', 'tangents', 'uvComponents', 'colors']);
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
@@ -478,6 +481,7 @@ class MeshletWorld {
         let anyTextures = false;
         let uvChannels = 0;
         let anyTangents = false;
+        let anyColors = false;
         for (const { resource, instances } of pending) {
             totalPages += resource.manifest.pageCount;
             totalMeshlets += resource.totalMeshlets;
@@ -491,6 +495,11 @@ class MeshletWorld {
             if (resource.textureManifest) anyTextures = true;
             uvChannels = Math.max(uvChannels, resource.manifest.attributeLayout.uvComponents ?? 0);
             if (resource.manifest.attributeLayout.tangents) anyTangents = true;
+            if (resource.manifest.attributeLayout.colors) anyColors = true;
+            for (const key of Object.keys(resource.manifest.attributeLayout)) {
+                // a stream this build cannot place would shift every block after it
+                if (!KNOWN_LAYOUT_KEYS.has(key)) console.warn(`MeshletWorld: unknown page attribute '${key}' in a streamed asset's attributeLayout - its pages will decode wrongly; update the engine.`);
+            }
         }
 
         // streamed-texture state (resident coarse tails + demand-streamed fine pools); the
@@ -641,6 +650,7 @@ class MeshletWorld {
             const grid = manifest.positionGrid;
             const uvFloats = (manifest.attributeLayout.uvComponents ?? 0) * 2;
             const hasTangents = manifest.attributeLayout.tangents ? 1 : 0;
+            const hasColors = manifest.attributeLayout.colors ? 1 : 0;
             const instList = instances ?? resource.instances;
             this.placements.push({
                 resource,
@@ -798,7 +808,7 @@ class MeshletWorld {
                 objectData[row + OBJECT_DATA.FIRST_MESHLET] = primBases[inst.primIndex];
                 objectData[row + OBJECT_DATA.MESHLET_COUNT] = prim.meshletCount;
                 objectData[row + OBJECT_DATA.MATERIAL] = materialBase + primMatRows[inst.primIndex];
-                objectData[row + OBJECT_DATA.FLAGS] = hasTangents ? OBJECT_FLAG_HAS_TANGENTS : 0;
+                objectData[row + OBJECT_DATA.FLAGS] = (hasTangents ? OBJECT_FLAG_HAS_TANGENTS : 0) | (hasColors ? OBJECT_FLAG_HAS_COLORS : 0);
                 objectDataF[row + OBJECT_DATA.MAX_SCALE] = maxAxisScale(matrix);
                 objectData[row + OBJECT_DATA.FIRST_PAIR_BIT] = this.totalPairs;
                 for (let c = 0; c < 3; c++) objectDataF[row + OBJECT_DATA.GRID_ORIGIN + c] = grid.origin[c];
@@ -919,6 +929,7 @@ class MeshletWorld {
             textures: !!this.textures,
             uvChannels: Math.min(uvChannels, MESHLET_MAX_UV_CHANNELS),
             tangents: anyTangents,
+            colors: anyColors,
             familySizes: this.textures?.families.map(fam => fam.slotSize),
             familyLevels: this.textures?.families.map(fam => ({ slotLevels: fam.slotLevels, tailLevels: fam.levels }))
         });

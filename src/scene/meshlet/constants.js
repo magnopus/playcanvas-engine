@@ -244,6 +244,14 @@ export const OBJECT_FLAG_HIDDEN = 1 << 0;
 export const OBJECT_FLAG_HAS_TANGENTS = 1 << 1;
 
 /**
+ * objectData flags word (23), bit 2: pages carry rgba8 vertex colours (COLOR_0), which multiply
+ * the base colour as they do on the regular glTF path.
+ *
+ * @type {number}
+ */
+export const OBJECT_FLAG_HAS_COLORS = 1 << 2;
+
+/**
  * objectData flags word (23), bit 8: draw this instance in the outline pass. Selection is a
  * per-instance property because one indirect draw covers the whole world - there is no mesh
  * instance to add to an outline layer, and no per-object uniform to set.

@@ -1,5 +1,5 @@
 import {
-    MATERIAL_SLOT, MATERIAL_SLOT_ABSENT, MESHLET_MAX_UV_CHANNELS, MESHLET_TEX_NO_MINLOD, OBJECT_FLAG_HAS_TANGENTS,
+    MATERIAL_SLOT, MATERIAL_SLOT_ABSENT, MESHLET_MAX_UV_CHANNELS, MESHLET_TEX_NO_MINLOD, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
     OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED
 } from '../constants.js';
 import {
@@ -42,18 +42,21 @@ import {
  * @param {boolean} options.textures - True when streamed textures (tail arrays) exist.
  * @param {number} options.uvChannels - UV channels to thread through (0 to MESHLET_MAX_UV_CHANNELS).
  * @param {boolean} options.tangents - True when pages carry oct16+sign tangents.
+ * @param {boolean} [options.colors] - True when pages carry rgba8 vertex colours (COLOR_0), which
+ * multiply the base colour as on the regular glTF path.
  * @param {number[]} [options.familySizes] - Fine slot-pool base size per family (4 entries).
  * @param {Array<{ slotLevels: number, tailLevels: number }>} [options.familyLevels] - Fine
  * levels above the tail and populated tail levels, per family.
  * @returns {object} The chunk override map for StandardMaterial.getShaderChunks('wgsl').add().
  * @ignore
  */
-function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = false, familySizes = [], familyLevels = [] } = {}) {
+function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = false, colors = false, familySizes = [], familyLevels = [] } = {}) {
 
     // one varying + cached derivatives per channel; a slot picks its channel from its slot word
     const uvs = Array.from({ length: Math.min(uvChannels, MESHLET_MAX_UV_CHANNELS) }, (_, n) => n);
     const uv0 = uvs.length > 0;
     const tan = tangents && textures;
+    const col = colors;
 
     // ------------------------------------------------------------------ vertex stage
 
@@ -112,6 +115,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         ${uvs.map(n => `varying vMeshletUv${n}: vec2f; var<private> dMeshletUv${n}: vec2f;`).join('\n        ')}
         ${tan ? `varying vMeshletTangentW: vec3f; var<private> dMeshletTangentW: vec3f;
         varying @interpolate(flat) vMeshletBtSign: f32; var<private> dMeshletBtSign: f32;` : ''}
+        ${col ? 'varying vMeshletColor: vec4f; var<private> dMeshletColor: vec4f;' : ''}
     `;
 
     const litEngineCodeVS = /* wgsl */ `
@@ -135,10 +139,11 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         // per-instance page attribute layout and position grid (resources may differ)
         let meshletUvFloats = objectData[meshletInstance].uvFloatsPerVertex;
         let meshletHasTangents = (objectData[meshletInstance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
+        let meshletHasColors = (objectData[meshletInstance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
         let meshletGridOrigin = meshletObjectGridOrigin(meshletInstance);
         let meshletGridStep = objectData[meshletInstance].gridStep;
 
-        let meshletLayout = meshletPageLayout(residency[meshletPage] * uniform.pageSizeWords, meshletHasTangents, meshletUvFloats);
+        let meshletLayout = meshletPageLayout(residency[meshletPage] * uniform.pageSizeWords, meshletHasTangents, meshletUvFloats, meshletHasColors);
         let meshletVert = pagePool[meshletLayout.meshletVertexBase + meshletVerticesOffset + meshletLocalVert];
 
         vertex_position = vec4f(meshletPagePosition(meshletLayout, meshletVert, meshletGridOrigin, meshletGridStep), 1.0);
@@ -175,6 +180,13 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             dMeshletTangentW = normalize((dMeshletModelMatrix * vec4f(meshletTangent.xyz, 0.0)).xyz);
             dMeshletBtSign = meshletTangent.w;
         }` : ''}
+        ${col ? /* wgsl */ `
+        // COLOR_0 multiplies the base colour (getAlbedo), as on the regular glTF path; a
+        // resource without colours reads white
+        dMeshletColor = vec4f(1.0);
+        if (meshletHasColors) {
+            dMeshletColor = meshletPageColor(meshletLayout, meshletVert);
+        }` : ''}
     `;
 
     const litEngineMainEndVS = /* wgsl */ `
@@ -185,6 +197,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         #endif
         ${uvs.map(n => `output.vMeshletUv${n} = dMeshletUv${n};`).join('\n        ')}
         ${tan ? 'output.vMeshletTangentW = dMeshletTangentW; output.vMeshletBtSign = dMeshletBtSign;' : ''}
+        ${col ? 'output.vMeshletColor = dMeshletColor;' : ''}
     `;
 
     // ------------------------------------------------------------------ fragment stage
@@ -266,6 +279,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
 
         ${uvs.map(n => `varying vMeshletUv${n}: vec2f; var<private> dMeshletUv${n}Dx: vec2f; var<private> dMeshletUv${n}Dy: vec2f;`).join('\n        ')}
         ${tan ? 'varying vMeshletTangentW: vec3f; varying @interpolate(flat) vMeshletBtSign: f32;' : ''}
+        ${col ? 'varying vMeshletColor: vec4f;' : ''}
 
         ${textures ? /* wgsl */ `
         ${meshletTexResidencyWGSL}
@@ -335,6 +349,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     const diffusePS = /* wgsl */ `
         fn getAlbedo() {
             dAlbedo = ${material}.baseColor.rgb * ${sample(MATERIAL_SLOT.BASE_COLOR, 'vec4f(1.0)')}.rgb;
+            ${col ? 'dAlbedo = dAlbedo * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));' : ''}
             ${textures ? 'dMeshletTexDebugBase = dMeshletTexDebug;' : ''}
         }
     `;
