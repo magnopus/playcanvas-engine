@@ -6,7 +6,7 @@ import {
     BUFFERUSAGE_COPY_DST, BUFFERUSAGE_COPY_SRC
 } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
-import {
+import { OBJECT_FLAG_NO_SHADOW,
     MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
@@ -1128,6 +1128,30 @@ class MeshletWorld {
         for (let i = start; i < start + count; i++) {
             const flagsWord = (instanceBase + i) * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS;
             objectData[flagsWord] = hidden ? (objectData[flagsWord] | OBJECT_FLAG_HIDDEN) : (objectData[flagsWord] & ~OBJECT_FLAG_HIDDEN);
+        }
+        this._uploadObjectRows(instanceBase + start, count);
+    }
+
+    /**
+     * Sets whether a placement's instances cast shadows. A buffer write, not a rebuild: shadow
+     * views skip flagged instances in their cull.
+     *
+     * @param {number} index - Placement index.
+     * @param {boolean} casts - True to cast shadows.
+     * @param {number} [subBase] - First instance of the placement to affect.
+     * @param {number} [subCount] - Instance count (default: the rest of the placement).
+     */
+    setPlacementCastShadows(index, casts, subBase = 0, subCount = -1) {
+        Debug.assert(this.finalized && this.placements[index], 'MeshletWorld: invalid placement');
+        const { instanceBase, instanceCount } = this.placements[index];
+        const start = Math.min(subBase, instanceCount);
+        const count = subCount < 0 ? instanceCount - start : Math.min(subCount, instanceCount - start);
+        if (count === 0) return;
+
+        const objectData = this.objectDataCpu;
+        for (let i = start; i < start + count; i++) {
+            const flagsWord = (instanceBase + i) * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS;
+            objectData[flagsWord] = casts ? (objectData[flagsWord] & ~OBJECT_FLAG_NO_SHADOW) : (objectData[flagsWord] | OBJECT_FLAG_NO_SHADOW);
         }
         this._uploadObjectRows(instanceBase + start, count);
     }

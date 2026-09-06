@@ -134,6 +134,13 @@ export const CULL_FLAG_NO_TEXEL_RATE = 1 << 0;
  */
 export const CULL_FLAG_HZB_LINEAR = 1 << 1;
 
+/**
+ * Cull flag: the view is a shadow face. Instances flagged OBJECT_FLAG_NO_SHADOW are skipped.
+ *
+ * @type {number}
+ */
+export const CULL_FLAG_SHADOW_VIEW = 1 << 2;
+
 /** Threads per workgroup of the instance cull (one thread per instance). @type {number} */
 export const MESHLET_INSTANCE_CULL_WORKGROUP = 64;
 
@@ -250,6 +257,14 @@ export const OBJECT_FLAG_HAS_TANGENTS = 1 << 1;
  * @type {number}
  */
 export const OBJECT_FLAG_HAS_COLORS = 1 << 2;
+
+/**
+ * objectData flags word (23), bit 3: the instance casts no shadow - shadow views skip it in the
+ * cull, so casting is per instance rather than per pipeline.
+ *
+ * @type {number}
+ */
+export const OBJECT_FLAG_NO_SHADOW = 1 << 3;
 
 /**
  * objectData flags word (23), bit 8: draw this instance in the outline pass. Selection is a

@@ -255,8 +255,9 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
-     * Whether meshlet geometry casts shadows - directional cascades and local (spot / omni)
-     * shadow faces. Off by default: every shadow face costs one extra cull pass per frame.
+     * Whether the pipeline runs shadow passes - directional cascades and local (spot / omni)
+     * shadow faces. Off by default: every shadow face costs one extra cull pass per frame. Which
+     * instances cast is per component ({@link MeshletComponent#castShadows}).
      *
      * @type {boolean}
      */
@@ -415,6 +416,7 @@ class MeshletComponentSystem extends ComponentSystem {
                     component._subCount = per;
                     component._transformDirty = true;
                     component._hiddenApplied = null;
+                    component._castShadowsApplied = null;
                     components.push(component);
                 }
                 world.addStreamedResource(resource, null, baseUrl, merged, fetchOptions);
@@ -440,6 +442,11 @@ class MeshletComponentSystem extends ComponentSystem {
             if (component._hiddenApplied !== hidden) {
                 component._hiddenApplied = hidden;
                 world.setPlacementHidden(component._placementIndex, hidden, component._subBase, component._subCount);
+            }
+            const casts = component.castShadows !== false;
+            if (component._castShadowsApplied !== casts) {
+                component._castShadowsApplied = casts;
+                world.setPlacementCastShadows(component._placementIndex, casts, component._subBase, component._subCount);
             }
         }
     }

@@ -22,7 +22,7 @@
  * @ignore
  */
 
-import {
+import { OBJECT_FLAG_NO_SHADOW, CULL_FLAG_SHADOW_VIEW,
     CULL_FLAG_HZB_LINEAR, CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
     MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE,
     MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP,
@@ -57,6 +57,11 @@ export const instanceCullWGSL = /* wgsl */ `
             return;
         }
         if ((objectData[instance].flags & ${OBJECT_FLAG_HIDDEN}u) != 0u) {
+            return;
+        }
+        // per-instance shadow casting: a shadow view drops the instances that opted out
+        let shadowView = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_SHADOW_VIEW}u) != 0u;
+        if (shadowView && (objectData[instance].flags & ${OBJECT_FLAG_NO_SHADOW}u) != 0u) {
             return;
         }
 

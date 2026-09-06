@@ -72,6 +72,23 @@ class MeshletComponent extends Component {
     _transformDirty = true;
 
     /**
+     * Whether this component's instances cast shadows. Per instance: applied by the system's
+     * per-frame sync as a buffer write, no rebuild. Shadow passes run only while the system's
+     * {@link MeshletComponentSystem#shadows} is on.
+     *
+     * @type {boolean}
+     */
+    castShadows = true;
+
+    /**
+     * Shadow-casting state currently baked into the world's objectData rows (null = unknown).
+     *
+     * @type {boolean|null}
+     * @ignore
+     */
+    _castShadowsApplied = null;
+
+    /**
      * Hidden state currently baked into the world's objectData rows (null = unknown).
      *
      * @type {boolean|null}

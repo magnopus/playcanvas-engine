@@ -7,7 +7,7 @@ import { Mat4 } from '../../core/math/mat4.js';
 import { math } from '../../core/math/math.js';
 import { Vec3 } from '../../core/math/vec3.js';
 import { LAYERID_WORLD, LIGHTTYPE_DIRECTIONAL } from '../constants.js';
-import { CULL_FLAG_NO_TEXEL_RATE, WORK_ITEM_U32S } from './constants.js';
+import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, WORK_ITEM_U32S } from './constants.js';
 import { MeshletShadowView } from './meshlet-shadow-view.js';
 
 /**
@@ -371,7 +371,7 @@ class MeshletShadowRenderer {
         // atomicMax'd into the WORLD-SHARED requests buffer, so a light-space rate would poison
         // the camera's texture streaming. Page-residency marks stay on, so off-screen casters
         // stream in.
-        culler.cullFlags = CULL_FLAG_NO_TEXEL_RATE;
+        culler.cullFlags = CULL_FLAG_NO_TEXEL_RATE | CULL_FLAG_SHADOW_VIEW;
         culler.viewDir = _viewDir.copy(node.forward);
         culler.dagPixelThreshold = director.dagPixelThreshold * director.shadowThresholdScale;
         culler.pressureScale = director.budget.pressureScale;
