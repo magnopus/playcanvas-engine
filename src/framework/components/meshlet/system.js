@@ -145,6 +145,24 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
+     * Maximum shader samples for streamed texture anisotropy: 1, 2, 4 or 8. Defaults to
+     * 1 (isotropic). Rounded down to a supported level and clamped; non-finite values
+     * select 1. Takes effect immediately without reloading assets or rebuilding pools.
+     * Higher values improve grazing-angle detail at additional texture-sampling cost.
+     *
+     * @type {number}
+     * @example
+     * app.systems.meshlet.textureAnisotropy = 4;
+     */
+    set textureAnisotropy(value) {
+        if (this.director) this.director.world.textureAnisotropy = value;
+    }
+
+    get textureAnisotropy() {
+        return this.director?.world.textureAnisotropy ?? 1;
+    }
+
+    /**
      * Largest texture size streamed at full resolution. A family's fine slots are sized to its
      * largest texture, so one very large texture would make every slot that large; textures
      * above this size stream down to it. Takes effect on the next world rebuild. Defaults to

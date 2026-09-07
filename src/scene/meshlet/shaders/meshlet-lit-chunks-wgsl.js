@@ -216,51 +216,58 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         `var meshletFine${n}: texture_2d_array<f32>;`,
         `var meshletFine${n}Sampler: sampler;`
     ].join('\n        ')).join('\n        ') : '';
-    const texDispatch = textures ? famNames.map((n, f) => {
-        const slotSize = (familySizes[f] ?? 4).toFixed(1);
+    const texFunctions = textures ? famNames.map((n, f) => {
         const slotLevels = (familyLevels[f]?.slotLevels ?? 0).toFixed(1);
         const tailMaxLod = ((familyLevels[f]?.tailLevels ?? 1) - 1).toFixed(1);
         return /* wgsl */ `
-            if (family == ${f}u) {
-                let srcSize = ${slotSize} / exp2(sizeBias);
-                let wanted = meshletTexLod(ddx, ddy, srcSize);
+            fn meshletSample${n}(uv: vec2f, wanted: f32, minLod: f32, sizeBias: f32, tailStart: f32, slotLayer: u32, tailLayer: i32) -> vec4f {
                 let lod = clamp(wanted, minLod, 30.0);
                 let comb = lod + sizeBias;
                 // debug view: magenta tint where the surface wants a finer mip than is resident
                 let starved = select(0.0, 0.6, wanted < minLod - 0.5);
-                // The fine/tail boundary is the TEXTURE's, not the family's: a texture whose tail
-                // top sits below the family tail size (a 512 texture tailing at 64 in a 256
-                // family) keeps the levels between the two in its fine slot, and its tail layer's
-                // first levels are never written - dispatching those lods to the tail would
-                // sample black there.
-                // Sampling goes through explicit gradients rather than an explicit level: the
-                // hardware then filters anisotropically (a floor at a grazing angle keeps its
-                // detail instead of smearing along the view), and the gradients are scaled so
-                // the level it lands on is exactly the clamped one - finest resident at the
-                // near end, this texture's coarsest written level at the far end. The hardware's
-                // own level for a size-N array is meshletTexLod(ddx, ddy, N), so the scale is
-                // exp2(target - natural).
+                let tailFloor = max(tailStart + sizeBias - ${slotLevels}, 0.0);
                 if (slotLayer != 0xFFFFu && lod < tailStart) {
-                    // the slot's coarsest written level for this texture
                     let fineTop = tailStart + sizeBias - 1.0;
-                    let fineScale = exp2(min(comb, fineTop) - (wanted + sizeBias));
+                    let fineLod = clamp(comb, minLod + sizeBias, fineTop);
                     dMeshletTexDebug = mix(mix(vec3f(0.2, 1.0, 0.2), vec3f(0.0, 0.3, 0.0), comb / max(fineTop + 1.0, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
-                    // resident floor of this slot: the finest fine level written, in slot levels
-                    let fineFloorLen = exp2(minLod + sizeBias) / ${slotSize};
-                    return textureSampleGrad(meshletFine${n}, meshletFine${n}Sampler, uv, i32(slotLayer), meshletFloorGrad(ddx * fineScale, fineFloorLen), meshletFloorGrad(ddy * fineScale, fineFloorLen));
+                    let fineColor = textureSampleLevel(meshletFine${n}, meshletFine${n}Sampler, uv, i32(slotLayer), fineLod);
+                    let tailWeight = clamp(lod - (tailStart - 1.0), 0.0, 1.0);
+                    if (tailWeight > 0.0) {
+                        let tailColor = textureSampleLevel(meshletTail${n}, meshletTail${n}Sampler, uv, tailLayer, tailFloor);
+                        return mix(fineColor, tailColor, tailWeight);
+                    }
+                    return fineColor;
                 }
-                // comb - slotLevels lands on the texture's tail top level whatever its tail size:
-                // comb - log2(slotSize / tailSize) = lod - tailStart + log2(tailSize / tailTop);
-                // the tail array's natural level is wanted + sizeBias - slotLevels
-                let tailLod = clamp(comb - ${slotLevels}, 0.0, ${tailMaxLod});
-                let tailScale = exp2(tailLod - (wanted + sizeBias - ${slotLevels}));
+                let tailLod = clamp(comb - ${slotLevels}, tailFloor, ${tailMaxLod});
                 dMeshletTexDebug = mix(mix(vec3f(0.2, 0.4, 1.0), vec3f(0.0, 0.0, 0.25), tailLod / max(${tailMaxLod}, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
-                // resident floor of this tail layer: the texture's own top tail level (levels
-                // above it belong to larger textures and are never written for this one)
-                let tailFloorLen = exp2(max(tailStart + sizeBias - ${slotLevels}, 0.0)) / (${slotSize} / exp2(${slotLevels}));
-                return textureSampleGrad(meshletTail${n}, meshletTail${n}Sampler, uv, tailLayer, meshletFloorGrad(ddx * tailScale, tailFloorLen), meshletFloorGrad(ddy * tailScale, tailFloorLen));
+                return textureSampleLevel(meshletTail${n}, meshletTail${n}Sampler, uv, tailLayer, tailLod);
             }`;
     }).join('') : '';
+
+    const texDispatch = textures ? famNames.map((name, family) => /* wgsl */ `
+            if (family == ${family}u) {
+                let srcSize = ${(familySizes[family] ?? 4).toFixed(1)} / exp2(sizeBias);
+                let isotropicLod = meshletTexLod(ddx, ddy, srcSize);
+                if (uniform.meshletTextureAnisotropy <= 1.0) {
+                    return meshletSample${name}(uv, isotropicLod, minLod, sizeBias, tailStart, slotLayer, tailLayer);
+                }
+                let footprint = meshletTexFootprint(ddx, ddy);
+                let major = footprint.w * srcSize;
+                let minor = footprint.z * srcSize;
+                let filterWidth = max(max(minor, major / uniform.meshletTextureAnisotropy), exp2(minLod));
+                let sampleCount = u32(clamp(ceil(major / filterWidth), 1.0, uniform.meshletTextureAnisotropy));
+                if (sampleCount == 1u) {
+                    return meshletSample${name}(uv, isotropicLod, minLod, sizeBias, tailStart, slotLayer, tailLayer);
+                }
+                let wanted = log2(filterWidth);
+                var color = vec4f(0.0);
+                for (var sampleIndex = 0u; sampleIndex < sampleCount; sampleIndex++) {
+                    let offset = (f32(sampleIndex) + 0.5) / f32(sampleCount) - 0.5;
+                    let sampleUv = uv + footprint.xy * footprint.w * offset;
+                    color += meshletSample${name}(sampleUv, wanted, minLod, sizeBias, tailStart, slotLayer, tailLayer);
+                }
+                return color / f32(sampleCount);
+            }`).join('') : '';
 
     const litEngineDeclarationPS = /* wgsl */ `
         ${meshletStructsWGSL}
@@ -293,21 +300,30 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         // texture-state debug view (MESHLET_COLOR_MODE.TEXTURES): every slot sample records
         // what it sampled, getAlbedo keeps the base-colour slot's record, outputPS shows it
         uniform meshletTexDebug: u32;
+        uniform meshletTextureAnisotropy: f32;
         var<private> dMeshletTexDebug: vec3f;
         var<private> dMeshletTexDebugBase: vec3f;
 
-        // Anisotropic filtering picks its level from the SHORTER gradient, up to log2(maxAnisotropy)
-        // levels finer than the isotropic estimate the dispatch clamps - and those finer levels
-        // may hold nothing (a slot whose fine mips are still in flight, a tail layer's unwritten
-        // top). Lengthening a gradient below minLen to minLen keeps the hardware at or above the
-        // resident floor while leaving all anisotropy above it intact. A zero gradient (a flat
-        // surface seen dead on at a constant uv) would otherwise mean "finest level".
-        fn meshletFloorGrad(g: vec2f, minLen: f32) -> vec2f {
-            let l = length(g);
-            if (l < 1e-12) {
-                return vec2f(minLen, 0.0);
+        ${texFunctions}
+
+        fn meshletTexFootprint(ddx: vec2f, ddy: vec2f) -> vec4f {
+            let covariance = vec3f(ddx.x * ddx.x + ddy.x * ddy.x,
+                                   ddx.x * ddx.y + ddy.x * ddy.y,
+                                   ddx.y * ddx.y + ddy.y * ddy.y);
+            let trace = covariance.x + covariance.z;
+            let difference = covariance.x - covariance.z;
+            let discriminant = length(vec2f(difference, 2.0 * covariance.y));
+            let majorSquared = max(0.5 * (trace + discriminant), 0.0);
+            let determinant = ddx.x * ddy.y - ddx.y * ddy.x;
+            let minorSquared = determinant * determinant / max(majorSquared, 1e-20);
+            var axis = vec2f(1.0, 0.0);
+            if (covariance.z > covariance.x) { axis = vec2f(0.0, 1.0); }
+            let eigenvector = select(vec2f(majorSquared - covariance.z, covariance.y),
+                                     vec2f(covariance.y, majorSquared - covariance.x), covariance.z > covariance.x);
+            if (dot(eigenvector, eigenvector) > 1e-30) {
+                axis = normalize(eigenvector);
             }
-            return select(g * (minLen / l), g, l >= minLen);
+            return vec4f(axis, sqrt(max(minorSquared, 0.0)), sqrt(majorSquared));
         }
 
         fn meshletTexLod(ddx: vec2f, ddy: vec2f, size: f32) -> f32 {
@@ -368,8 +384,8 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     const diffusePS = /* wgsl */ `
         fn getAlbedo() {
             dAlbedo = ${material}.baseColor.rgb * ${sample(MATERIAL_SLOT.BASE_COLOR, 'vec4f(1.0)')}.rgb;
-            ${col ? 'dAlbedo = dAlbedo * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));' : ''}
-            ${textures ? 'dMeshletTexDebugBase = dMeshletTexDebug;' : ''}
+           // ${col ? 'dAlbedo = dAlbedo * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));' : ''}
+            //${textures ? 'dMeshletTexDebugBase = dMeshletTexDebug;' : ''}
         }
     `;
 

@@ -368,6 +368,12 @@ describe('MeshletDirector', function () {
         expect(director._capCarry.get(cameraComponent), '120 pairs down to 30: scaled to a quarter').to.deep.equal([225, 15, 8]);
     });
 
+    it('preserves texture anisotropy across a world rebuild', function () {
+        director.world.textureAnisotropy = 8;
+        director.rebuild(() => {});
+        expect(director.world.textureAnisotropy).to.equal(8);
+    });
+
     it('goes idle on an empty rebuild', function () {
         finalizeStreamed();
         director.update(comp);

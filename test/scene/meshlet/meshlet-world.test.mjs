@@ -65,6 +65,21 @@ const makeResource = (device, { materialFlags = null, instances = 2, scale = 1 }
 
 describe('MeshletWorld', function () {
 
+    it('updates anisotropy uniforms without replacing world resources', function () {
+        const world = new MeshletWorld({});
+        expect(world.textureAnisotropy).to.equal(1);
+        const values = [];
+        const materials = [0, 1, 2].map(() => ({ setParameter: (name, value) => values.push([name, value]) }));
+        world._litMaterials = materials;
+        for (const [input, expected] of [[1, 1], [2, 2], [4, 4], [8, 8], [3, 2], [16, 8], [0, 1], [-1, 1], [NaN, 1], [Infinity, 1]]) {
+            values.length = 0;
+            world.textureAnisotropy = input;
+            expect(world.textureAnisotropy).to.equal(expected);
+            expect(values).to.deep.equal(materials.map(() => ['meshletTextureAnisotropy', expected]));
+            expect(world._litMaterials).to.equal(materials);
+        }
+    });
+
     /** @type {NullGraphicsDevice} */
     let device;
     let savedWarn;

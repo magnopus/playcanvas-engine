@@ -404,8 +404,7 @@ class MeshletTextures {
             addressV: ADDRESS_REPEAT,
             minFilter: FILTER_LINEAR_MIPMAP_LINEAR,
             magFilter: FILTER_LINEAR,
-            // the lit chunks sample with explicit gradients, so this is what keeps floors crisp at grazing angles
-            anisotropy: 16
+            anisotropy: 1
         });
         const wgpu = this.device.wgpu;
         const encoder = wgpu.createCommandEncoder();
@@ -741,8 +740,7 @@ class MeshletTextures {
             addressV: ADDRESS_REPEAT,
             minFilter: FILTER_LINEAR_MIPMAP_LINEAR,
             magFilter: FILTER_LINEAR,
-            // the lit chunks sample with explicit gradients, so this is what keeps floors crisp at grazing angles
-            anisotropy: 16
+            anisotropy: 1
         });
 
         this.tailBytes += info.tail.gpuSize;

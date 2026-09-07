@@ -343,6 +343,27 @@ class MeshletWorld {
      */
     maxFineTextureSize = 2048;
 
+    /** @private */
+    _textureAnisotropy = 1;
+
+    /**
+     * Maximum shader samples for streamed texture anisotropy: 1, 2, 4 or 8. Values are
+     * rounded down to a supported level and clamped; non-finite values select 1. Defaults
+     * to 1 (isotropic). Changes update material uniforms without rebuilding textures.
+     * Each sample remains clamped to resident mips. Higher values increase filtering cost.
+     *
+     * @type {number}
+     */
+    set textureAnisotropy(value) {
+        const level = Number.isFinite(value) ? Math.min(8, 2 ** Math.floor(Math.log2(Math.max(value, 1)))) : 1;
+        this._textureAnisotropy = level;
+        this._litMaterials?.forEach(material => material.setParameter('meshletTextureAnisotropy', level));
+    }
+
+    get textureAnisotropy() {
+        return this._textureAnisotropy;
+    }
+
     /** @type {import('../../platform/graphics/storage-buffer.js').StorageBuffer|null} */
     adoptVisBits = null;
 
@@ -924,6 +945,7 @@ class MeshletWorld {
         const bindTextureParams = (material) => {
             if (!this.textures) return;
             material.setParameter('meshletTexDebug', this._texDebug ? 1 : 0);
+            material.setParameter('meshletTextureAnisotropy', this.textureAnisotropy);
             material.setParameter('texResidency', this.textures.residencyBuffer);
             for (let f = 0; f < MESHLET_TEX_FAMILIES.length; f++) {
                 const { tail, fine } = this.textures.familyTextures(f);

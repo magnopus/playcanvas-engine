@@ -390,6 +390,7 @@ class MeshletDirector {
         this.world.poolBytes = poolBytes;
         this.world.texturePoolBytes = texturePoolBytes;
         this.world.maxFineTextureSize = maxFineTextureSize;
+        this.world.textureAnisotropy = prevWorld.textureAnisotropy;
         this.world.maxInstallBytesPerFrame = prevWorld.maxInstallBytesPerFrame;
         this.world.initialIndices = initialIndices;
         this.world.indexBudgetFraction = indexBudgetFraction;

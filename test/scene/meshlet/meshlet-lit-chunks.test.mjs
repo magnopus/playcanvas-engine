@@ -69,8 +69,34 @@ describe('buildMeshletLitChunks', function () {
         for (const options of [{}, { textures: true, uvChannels: 1 }, textured]) {
             const chunks = buildMeshletLitChunks(options);
             for (const [name, text] of Object.entries(chunks)) {
-                expect(text, `${JSON.stringify(options)} ${name}`).to.not.match(/\$\{|undefined|NaN/);
+                expect(text.replace(/\/\/[^\n]*/g, ''), `${JSON.stringify(options)} ${name}`).to.not.match(/\$\{|undefined|NaN/);
             }
+        }
+    });
+
+    it('samples explicit resident levels and blends across the fine-tail boundary', function () {
+        const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
+        expect(source).not.to.include('textureSampleGrad');
+        expect(source).to.include('clamp(comb, minLod + sizeBias, fineTop)');
+        expect(source).to.include('clamp(lod - (tailStart - 1.0), 0.0, 1.0)');
+        expect(source).to.include('return mix(fineColor, tailColor, tailWeight)');
+        for (const family of ['Srgb', 'Srgba', 'Normal', 'Linear']) {
+            expect(source).to.include(`textureSampleLevel(meshletFine${family}, meshletFine${family}Sampler, uv, i32(slotLayer), fineLod)`);
+            expect(source).to.include(`textureSampleLevel(meshletTail${family}, meshletTail${family}Sampler, uv, tailLayer, tailFloor)`);
+            expect(source).to.include(`textureSampleLevel(meshletTail${family}, meshletTail${family}Sampler, uv, tailLayer, tailLod)`);
+        }
+    });
+
+    it('bounds anisotropic taps by the runtime limit and the resident footprint', function () {
+        const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
+        expect(source).to.include('uniform meshletTextureAnisotropy: f32');
+        expect(source).to.include('uniform.meshletTextureAnisotropy <= 1.0');
+        expect(source).to.include('max(max(minor, major / uniform.meshletTextureAnisotropy), exp2(minLod))');
+        expect(source).to.include('clamp(ceil(major / filterWidth), 1.0, uniform.meshletTextureAnisotropy)');
+        expect(source).to.include('sampleIndex < sampleCount');
+        expect(source).to.include('return color / f32(sampleCount)');
+        for (const family of ['Srgb', 'Srgba', 'Normal', 'Linear']) {
+            expect(source).to.include(`color += meshletSample${family}(sampleUv, wanted, minLod, sizeBias, tailStart, slotLayer, tailLayer)`);
         }
     });
 
