@@ -71,7 +71,14 @@ describe('meshlet cull shaders', function () {
         }
     });
 
-    it('reset everything but the demand block between the two cull phases', function () {
+    it('accumulates capacity-clamped rendered meshlets across both phases', function () {
+        expect(finalizeArgsWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.RENDERED}u], recordCount)`);
+        expect(finalizeArgsWGSL).to.include(`let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity)`);
+        expect(MESHLET_COUNTER.RENDERED).to.be.at.least(MESHLET_COUNTER.DEMAND_BASE + MESHLET_BUCKET_COUNT);
+        expect(resetPhase2WGSL).not.to.include(`atomicStore(&counters[${MESHLET_COUNTER.RENDERED}u]`);
+    });
+
+    it('preserves demand and rendered totals between the two cull phases', function () {
         expect(resetPhase2WGSL).to.include(`atomicStore(&counters[${MESHLET_COUNTER.RECORDS}u], 0u)`);
         expect(resetPhase2WGSL).to.include(`for (var i = ${MESHLET_COUNTER.CURSOR_BASE}u; i < ${MESHLET_COUNTER.DEMAND_BASE}u; i++)`);
     });

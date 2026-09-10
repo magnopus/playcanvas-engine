@@ -48,7 +48,9 @@ const vertexWGSL = /* wgsl */ `
         var h = id * 747796405u + 2891336453u;
         h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
         h = (h >> 22u) ^ h;
-        return vec3f(f32(h & 255u), f32((h >> 8u) & 255u), f32((h >> 16u) & 255u)) / 255.0 * 0.75 + 0.25;
+        let hue = f32(h & 65535u) / 65536.0;
+        let rgb = clamp(abs(fract(vec3f(hue) + vec3f(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, vec3f(0.0), vec3f(1.0));
+        return mix(vec3f(0.02), vec3f(0.8), rgb);
     }
 
     @vertex

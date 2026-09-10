@@ -469,6 +469,7 @@ export const finalizeArgsWGSL = /* wgsl */ `
 
         let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity);
         let base = uniform.dispatchSlot * ${INDIRECT_DISPATCH_U32S}u;
+        atomicAdd(&counters[${MESHLET_COUNTER.RENDERED}u], recordCount);
         indirectDispatch[base + 0u] = min(recordCount, ${MESHLET_DISPATCH_WIDTH}u);
         indirectDispatch[base + 1u] = (recordCount + ${MESHLET_DISPATCH_WIDTH - 1}u) / ${MESHLET_DISPATCH_WIDTH}u;
         indirectDispatch[base + 2u] = 1u;

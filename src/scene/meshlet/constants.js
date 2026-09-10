@@ -197,7 +197,8 @@ export const MESHLET_BUCKET_MASKED = 2;
 
 /**
  * Counter buffer words: [0] workItemCount, [1] recordCount, then three MESHLET_BUCKET_COUNT
- * blocks - index cursors, committed ends, unclamped index demand. Padded to a multiple of 4.
+ * blocks - index cursors, committed ends, unclamped index demand - then the frame's rendered
+ * meshlet count across both phases.
  *
  * @type {number}
  */
@@ -214,7 +215,8 @@ export const MESHLET_COUNTER = {
     RECORDS: 1,
     CURSOR_BASE: 2,     // index cursor per bucket (reservation)
     COMMITTED_BASE: 5,  // highest reservation that fit per bucket - the draw's index count
-    DEMAND_BASE: 8      // unclamped demand per bucket - survives the phase-2 reset
+    DEMAND_BASE: 8,     // unclamped demand per bucket - survives the phase-2 reset
+    RENDERED: 11
 };
 
 /** @type {number} - material record word 11, bit 0. */

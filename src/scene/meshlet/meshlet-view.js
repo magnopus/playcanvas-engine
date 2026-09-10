@@ -93,6 +93,9 @@ class MeshletView {
      */
     lastDemand = null;
 
+    /** @type {number} - Rendered meshlets across both phases from the last completed readback. */
+    renderedMeshlets = 0;
+
     /**
      * Occupancy at which a buffer grows. Demand is read back a frame or two late, so growth
      * must lead it: waiting for an actual overflow means a clamped frame, and a clamped frame
@@ -516,6 +519,7 @@ class MeshletView {
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) indices.push(data[MESHLET_COUNTER.DEMAND_BASE + b]);
             this._pendingDemand = { indices, records: data[MESHLET_COUNTER.RECORDS] };
             this.lastDemand = this._pendingDemand;
+            this.renderedMeshlets = data[MESHLET_COUNTER.RENDERED];
         }).catch(() => {
             this._countersReadBusy = false;
         });
