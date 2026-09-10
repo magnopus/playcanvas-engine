@@ -270,7 +270,7 @@ class MeshletHzb {
         }
         const pass = this.mip0Pass;
         pass.shader = this._mip0Shader(linear);
-        pass.init(this._mip0Target, {});
+        pass.init(this._mip0Target);
         // the quad writes every texel, so never load the previous contents
         pass.colorOps.clear = true;
         pass.colorOps.store = true;
