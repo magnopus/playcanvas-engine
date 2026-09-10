@@ -125,6 +125,23 @@ describe('buildMeshletLitChunks', function () {
         expect(chunks.diffusePS, 'no texture sampling without textures').to.not.include('meshletSampleSlot');
     });
 
+    it('applies vertex RGB to albedo only when the world carries colours', function () {
+        for (const options of [{}, textured]) {
+            const chunks = buildMeshletLitChunks({ ...options, colors: true });
+            const albedo = chunks.diffusePS.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+            expect(albedo).to.include('dAlbedo = dAlbedo * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));');
+            expect(chunks.litEngineMainStartVS).to.include('dMeshletColor = vec4f(1.0);');
+            expect(chunks.litEngineMainStartVS).to.include('if (meshletHasColors)');
+            expect(chunks.litEngineMainStartVS).to.include('dMeshletColor = meshletPageColor(meshletLayout, meshletVert);');
+            expect(chunks.litEngineMainEndVS).to.include('output.vMeshletColor = dMeshletColor;');
+
+            const uncolored = buildMeshletLitChunks(options);
+            expect(uncolored.diffusePS).to.not.include('vMeshletColor');
+            expect(uncolored.litEngineDeclarationVS).to.not.include('vMeshletColor');
+            expect(uncolored.litEngineDeclarationPS).to.not.include('vMeshletColor');
+        }
+    });
+
     it('compiles texture sampling, UV derivatives and normal mapping in only when the world has them', function () {
         const chunks = buildMeshletLitChunks(textured);
         expect(chunks.diffusePS).to.include(`meshletSampleSlot(${MATERIAL_SLOT.BASE_COLOR}u`);
@@ -208,6 +225,9 @@ describe('meshlet materials', function () {
         expect(vertex).to.include(`uniform.colorMode == ${MESHLET_COLOR_MODE.LOD_TIER}u`);
         expect(vertex).to.include(`uniform.colorMode == ${MESHLET_COLOR_MODE.MESHLET}u`);
         expect(vertex).to.include('struct MeshletPageLayout');
+        expect(vertex).to.include('let hue = f32(h & 65535u) / 65536.0;');
+        expect(vertex).to.include('return mix(vec3f(0.02), vec3f(0.8), rgb);');
+        expect(vertex).not.to.include('* 0.75 + 0.25');
         [opaque, masked].forEach(m => m.destroy());
     });
 });

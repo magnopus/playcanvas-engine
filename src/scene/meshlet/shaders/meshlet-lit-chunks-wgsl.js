@@ -384,7 +384,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     const diffusePS = /* wgsl */ `
         fn getAlbedo() {
             dAlbedo = ${material}.baseColor.rgb * ${sample(MATERIAL_SLOT.BASE_COLOR, 'vec4f(1.0)')}.rgb;
-           // ${col ? 'dAlbedo = dAlbedo * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));' : ''}
+            ${col ? 'dAlbedo = dAlbedo * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));' : ''}
             //${textures ? 'dMeshletTexDebugBase = dMeshletTexDebug;' : ''}
         }
     `;
