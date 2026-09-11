@@ -64,7 +64,8 @@ const makeWorld = (device, overrides = {}) => {
 
 const counters = (indices, records) => {
     const data = new Uint32Array(MESHLET_COUNTER_U32S);
-    data[MESHLET_COUNTER.RECORDS] = records;
+    data[MESHLET_COUNTER.RECORDS] = 0;
+    data[MESHLET_COUNTER.RECORD_DEMAND] = records;
     indices.forEach((n, b) => {
         data[MESHLET_COUNTER.DEMAND_BASE + b] = n;
     });

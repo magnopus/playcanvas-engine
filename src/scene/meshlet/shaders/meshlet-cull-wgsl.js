@@ -416,18 +416,19 @@ export const meshletCullWGSL = /* wgsl */ `
         // grows the index buffer when the cut wants more than the current allocation.
         let indexNeed = chosenTriangleCount * 3u;
         let capacity = bucketCapacity(bucket);
+        atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indexNeed);
+        let recordIndex = atomicAdd(&counters[${MESHLET_COUNTER.RECORDS}u], 1u);
+        if (recordIndex >= uniform.recordCapacity) {
+            return;
+        }
         let cursor = atomicAdd(&counters[${MESHLET_COUNTER.CURSOR_BASE}u + bucket], indexNeed);
-        atomicMax(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], cursor + indexNeed);
         if (cursor + indexNeed > capacity) {
+            records[recordIndex] = MeshletRecord(instance, chosen, 0xffffffffu, bucket);
             return;
         }
         atomicMax(&counters[${MESHLET_COUNTER.COMMITTED_BASE}u + bucket], cursor + indexNeed);
         let baseIndexOffset = bucketBase(bucket) + cursor;
 
-        let recordIndex = atomicAdd(&counters[${MESHLET_COUNTER.RECORDS}u], 1u);
-        if (recordIndex >= uniform.recordCapacity) {
-            return;
-        }
         records[recordIndex] = MeshletRecord(instance, chosen, baseIndexOffset, bucket);
     }
 `;
@@ -467,7 +468,9 @@ export const finalizeArgsWGSL = /* wgsl */ `
         writeDraw(uniform.drawSlot2, atomicLoad(&counters[${MESHLET_COUNTER.COMMITTED_BASE + 2}u]),
                   uniform.indexCapacity0 + uniform.indexCapacity1);
 
-        let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity);
+        let recordDemand = atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]);
+        atomicMax(&counters[${MESHLET_COUNTER.RECORD_DEMAND}u], recordDemand);
+        let recordCount = min(recordDemand, uniform.recordCapacity);
         let base = uniform.dispatchSlot * ${INDIRECT_DISPATCH_U32S}u;
         atomicAdd(&counters[${MESHLET_COUNTER.RENDERED}u], recordCount);
         indirectDispatch[base + 0u] = min(recordCount, ${MESHLET_DISPATCH_WIDTH}u);
@@ -508,6 +511,12 @@ export const indexWriteWGSL = /* wgsl */ `
         let instance = records[recordIndex].instance;
         let meshlet = records[recordIndex].meshlet;
         let baseIndexOffset = records[recordIndex].baseIndexOffset;
+        if (baseIndexOffset == 0xffffffffu) {
+            if (localId.x == 0u) {
+                atomicSub(&counters[${MESHLET_COUNTER.RENDERED}u], 1u);
+            }
+            return;
+        }
         let triangleOffset = meshletData[meshlet].triangleOffset;
         let cornerCount = meshletData[meshlet].triangleCount * 3u;
         let page = meshletData[meshlet].page;

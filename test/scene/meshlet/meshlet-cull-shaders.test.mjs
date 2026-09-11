@@ -51,12 +51,23 @@ describe('meshlet cull shaders', function () {
 
     it('reserve, commit and record demand in the three counter blocks, one word per bucket', function () {
         expect(meshletCullWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.CURSOR_BASE}u + bucket], indexNeed)`);
-        expect(meshletCullWGSL).to.include(`atomicMax(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], cursor + indexNeed)`);
+        expect(meshletCullWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indexNeed)`);
         expect(meshletCullWGSL).to.include(`atomicMax(&counters[${MESHLET_COUNTER.COMMITTED_BASE}u + bucket], cursor + indexNeed)`);
         // demand is recorded BEFORE the capacity check so an overflowing frame still reports it
         expect(meshletCullWGSL.indexOf(`counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket]`))
         .to.be.below(meshletCullWGSL.indexOf('if (cursor + indexNeed > capacity)'));
         expect(count(meshletCullWGSL, /uniform indexCapacity\d : u32;/g)).to.equal(MESHLET_BUCKET_COUNT);
+    });
+
+    it('requires record capacity before reserving indices and skips index-overflow records', function () {
+        const recordGuard = meshletCullWGSL.indexOf('if (recordIndex >= uniform.recordCapacity)');
+        const reserveIndices = meshletCullWGSL.indexOf(`atomicAdd(&counters[${MESHLET_COUNTER.CURSOR_BASE}u + bucket]`);
+        expect(recordGuard).to.be.at.least(0);
+        expect(recordGuard).to.be.below(reserveIndices);
+        expect(meshletCullWGSL).to.include('MeshletRecord(instance, chosen, 0xffffffffu, bucket)');
+        expect(indexWriteWGSL.indexOf('if (baseIndexOffset == 0xffffffffu)'))
+        .to.be.below(indexWriteWGSL.indexOf('let triangleOffset'));
+        expect(indexWriteWGSL).to.include(`atomicSub(&counters[${MESHLET_COUNTER.RENDERED}u], 1u)`);
     });
 
     it('derive the draw bucket from the meshlet flags in bucket order', function () {
@@ -73,9 +84,12 @@ describe('meshlet cull shaders', function () {
 
     it('accumulates capacity-clamped rendered meshlets across both phases', function () {
         expect(finalizeArgsWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.RENDERED}u], recordCount)`);
-        expect(finalizeArgsWGSL).to.include(`let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity)`);
+        expect(finalizeArgsWGSL).to.include('let recordCount = min(recordDemand, uniform.recordCapacity)');
+        expect(finalizeArgsWGSL).to.include(`atomicMax(&counters[${MESHLET_COUNTER.RECORD_DEMAND}u], recordDemand)`);
         expect(MESHLET_COUNTER.RENDERED).to.be.at.least(MESHLET_COUNTER.DEMAND_BASE + MESHLET_BUCKET_COUNT);
         expect(resetPhase2WGSL).not.to.include(`atomicStore(&counters[${MESHLET_COUNTER.RENDERED}u]`);
+        expect(MESHLET_COUNTER.RECORD_DEMAND).to.be.above(MESHLET_COUNTER.RENDERED);
+        expect(resetPhase2WGSL).not.to.include(`atomicStore(&counters[${MESHLET_COUNTER.RECORD_DEMAND}u]`);
     });
 
     it('preserves demand and rendered totals between the two cull phases', function () {

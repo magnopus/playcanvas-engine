@@ -517,7 +517,7 @@ class MeshletView {
             // triangles. {@link applyPendingGrowth} does the swap before anything is encoded.
             const indices = [];
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) indices.push(data[MESHLET_COUNTER.DEMAND_BASE + b]);
-            this._pendingDemand = { indices, records: data[MESHLET_COUNTER.RECORDS] };
+            this._pendingDemand = { indices, records: data[MESHLET_COUNTER.RECORD_DEMAND] };
             this.lastDemand = this._pendingDemand;
             this.renderedMeshlets = data[MESHLET_COUNTER.RENDERED];
         }).catch(() => {

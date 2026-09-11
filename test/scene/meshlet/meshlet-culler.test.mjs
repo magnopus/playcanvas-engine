@@ -3,7 +3,7 @@ import { expect } from 'chai';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import {
-    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, MESHLET_BUCKET_COUNT, MESHLET_INSTANCE_CULL_WORKGROUP
+    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER_U32S, MESHLET_INSTANCE_CULL_WORKGROUP
 } from '../../../src/scene/meshlet/constants.js';
 import { FramePassMeshletCompute } from '../../../src/scene/meshlet/frame-pass-meshlet-compute.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
@@ -60,7 +60,7 @@ const makeView = (singlePhase = false) => ({
     recordCapacity: 100,
     indexCapacity: [10, 20, 30],
     cullParamsBuffer: storage(256),
-    countersBuffer: storage(48),
+    countersBuffer: storage(MESHLET_COUNTER_U32S * 4),
     claimBitsBuffer: storage(64),
     workItemsBuffer: storage(),
     recordsBuffer: storage(),
@@ -138,7 +138,7 @@ describe('MeshletCuller', function () {
         const culler = new MeshletCuller(device, makeWorld(), view, shaders);
         culler.beginFrame(planes, camera, 640, viewProj, null);
 
-        expect(log.clears, 'counters then claim bits, never the requests buffer').to.deep.equal([48, 64]);
+        expect(log.clears, 'counters then claim bits, never the requests buffer').to.deep.equal([MESHLET_COUNTER_U32S * 4, 64]);
         expect(log.dispatches).to.have.lengthOf(1);
         expect(log.dispatches[0].name).to.equal('MeshletCullPhase1');
         expect(log.dispatches[0].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs', 'MeshletmeshletCull', 'MeshletfinalizeArgs', 'MeshletindexWrite']);

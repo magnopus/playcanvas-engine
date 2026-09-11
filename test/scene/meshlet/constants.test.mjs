@@ -28,7 +28,7 @@ describe('meshlet constants', function () {
 
     it('sizes the counter buffer for three blocks of one word per bucket, padded to 4', function () {
         // [0] workItems, [1] records, then cursors / committed ends / unclamped demand per bucket
-        const needed = 2 + 3 * MESHLET_BUCKET_COUNT;
+        const needed = MESHLET_COUNTER.RECORD_DEMAND + 1;
         expect(MESHLET_COUNTER_U32S).to.be.at.least(needed);
         expect(MESHLET_COUNTER_U32S % 4).to.equal(0);
         expect(MESHLET_COUNTER_U32S - needed).to.be.below(4);
