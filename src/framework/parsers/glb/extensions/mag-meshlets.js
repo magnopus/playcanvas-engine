@@ -215,6 +215,16 @@ const createMeshlets = (device, gltf, bufferViews) => {
         const list = primsByMesh.get(node.mesh);
         if (!list) return;
 
+        const lightmapIndex = node.extensions?.EPIC_lightmap_textures?.lightmap;
+        const lightmapDef = gltf.extensions?.EPIC_lightmap_textures?.lightmaps?.[lightmapIndex];
+        const lightmapTexture = node.extensions?.MAG_texture_streaming?.lightmapTexture;
+        const lightmap = lightmapDef && lightmapTexture ? {
+            texture: lightmapTexture,
+            coordinateScaleBias: lightmapDef.coordinateScaleBias,
+            lightmapScale: lightmapDef.lightmapScale,
+            lightmapAdd: lightmapDef.lightmapAdd
+        } : null;
+
         // EXT_mesh_gpu_instancing: the node carries a scatter of TRS attributes, each one a
         // placement of its mesh in the node's space. Scattered foliage arrives this way, and
         // one meshlet instance per scatter entry is exactly the world's instance model - the
@@ -237,14 +247,14 @@ const createMeshlets = (device, gltf, bufferViews) => {
                 _scatterMat.setTRS(_scatterPos, _scatterRot, _scatterScale);
                 _scatterMat.mul2(nodeWorld[nodeIndex], _scatterMat);
                 for (const primIndex of list) {
-                    instances.push({ primIndex, matrix: new Float32Array(_scatterMat.data) });
+                    instances.push({ primIndex, matrix: new Float32Array(_scatterMat.data), lightmap });
                 }
             }
             if (count > 0) return;
         }
 
         for (const primIndex of list) {
-            instances.push({ primIndex, matrix: new Float32Array(nodeWorld[nodeIndex].data) });
+            instances.push({ primIndex, matrix: new Float32Array(nodeWorld[nodeIndex].data), lightmap });
         }
     });
 

@@ -68,7 +68,7 @@ describe('meshlet constants', function () {
         expect(MATERIAL_RECORD.SLOT_TRANSFORMS + 2 * MATERIAL_TEXTURE_SLOTS).to.be.at.most(MATERIAL_RECORD_U32S);
         expect(Object.values(MATERIAL_SLOT).sort()).to.deep.equal([0, 1, 2, 3]);
         expect(TEX_RESIDENCY_U32S).to.equal(2);
-        expect(MESHLET_MAX_UV_CHANNELS, 'the slot word has a 2-bit texCoord field').to.equal(4);
+        expect(MESHLET_MAX_UV_CHANNELS, 'per-instance lightmaps address UV channels 0-4').to.equal(5);
         expect(new Set(Object.values(MESHLET_COLOR_MODE)).size).to.equal(3);
     });
 

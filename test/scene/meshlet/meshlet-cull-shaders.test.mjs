@@ -74,6 +74,16 @@ describe('meshlet cull shaders', function () {
         expect(meshletCullWGSL).to.include(`select(select(0u, ${MESHLET_BUCKET_OPAQUE_TWO_SIDED}u, twoSided), ${MESHLET_BUCKET_MASKED}u, alphaMasked)`);
     });
 
+    it('reverses triangle winding per mirrored instance without changing draw index destinations', function () {
+        expect(indexWriteWGSL).to.include('let worldMatrix = objectData[instance].worldMatrix;');
+        expect(indexWriteWGSL).to.include('dot(cross(worldMatrix[0].xyz, worldMatrix[1].xyz), worldMatrix[2].xyz) < 0.0');
+        expect(indexWriteWGSL).to.include('select(corner, corner - triangleCorner + (3u - triangleCorner) % 3u, mirrored)');
+        expect(indexWriteWGSL).to.include('let byteIndex = triangleStreamByte + sourceCorner;');
+        expect(indexWriteWGSL).to.include('drawIndices[baseIndexOffset + corner] = (recordIndex << 8u) | localVert;');
+        const sourceCorners = Array.from({ length: 6 }, (_, corner) => corner - corner % 3 + (3 - corner % 3) % 3);
+        expect(sourceCorners).to.deep.equal([0, 2, 1, 3, 5, 4]);
+    });
+
     it('write one indirect draw per bucket from the committed ends', function () {
         expect(count(finalizeArgsWGSL, /writeDraw\(uniform\.drawSlot\d/g)).to.equal(MESHLET_BUCKET_COUNT);
         expect(finalizeArgsWGSL).to.include(`let base = slot * ${INDIRECT_DRAW_U32S}u;`);

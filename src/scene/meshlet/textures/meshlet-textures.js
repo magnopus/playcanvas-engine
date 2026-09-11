@@ -1,10 +1,11 @@
 import { Debug } from '../../../core/debug.js';
 import {
     ADDRESS_REPEAT, BUFFERUSAGE_COPY_DST, FILTER_LINEAR, FILTER_LINEAR_MIPMAP_LINEAR,
-    PIXELFORMAT_RGBA8, isCompressedPixelFormat, pixelFormatInfo
+    PIXELFORMAT_RGBA8, isCompressedPixelFormat
 } from '../../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../../platform/graphics/storage-buffer.js';
 import { Texture } from '../../../platform/graphics/texture.js';
+import { TextureUtils } from '../../../platform/graphics/texture-utils.js';
 import {
     MATERIAL_SLOT_ABSENT, MATERIAL_TEXTURE_SLOTS, MESHLET_TEX_NO_MINLOD, TEXEL_RATE_PER_MIP, TEX_RESIDENCY_U32S
 } from '../constants.js';
@@ -232,6 +233,16 @@ class MeshletTextures {
     setMaterialSlotMap(rowTex, rowTilingBias = null) {
         this._rowTex = rowTex;
         this._rowTilingBias = rowTilingBias;
+    }
+
+    /**
+     * Registers per-instance lightmap references against material visibility feedback. Multiple
+     * instances can share a material while sampling different atlases or atlas regions.
+     *
+     * @param {Int32Array} slots - Triples of material row, flat texture index and atlas tiling bias.
+     */
+    setLightmapSlotMap(slots) {
+        this._lightmapSlots = slots;
     }
 
     /**
@@ -527,6 +538,17 @@ class MeshletTextures {
             }
         }
 
+        const lightmapSlots = this._lightmapSlots;
+        if (lightmapSlots) {
+            for (let offset = 0; offset < lightmapSlots.length; offset += 3) {
+                const mark = texelRateMarks[lightmapSlots[offset]];
+                if (!mark) continue;
+                const textureIndex = lightmapSlots[offset + 1];
+                const rate = Math.min(Math.max(mark - lightmapSlots[offset + 2], 0), 65535);
+                desiredTexelRate[textureIndex] = Math.max(desiredTexelRate[textureIndex], rate);
+            }
+        }
+
         // recycle last frame's evictions now - the residency rewrite has been on the GPU for
         // a frame, so nothing samples the recycled slot's old content any more
         for (const fam of this.families) {
@@ -752,11 +774,10 @@ class MeshletTextures {
         }
         if (info.slotLevels > 0 && info.fineDemandTex > 0 && this.finePoolBytes > 0) {
             // bytes of one slot = its above-tail mip chain in the transcoded block format
-            const blockSize = pixelFormatInfo.get(format)?.blockSize ?? 16;
             let slotBytes = 0;
             for (let l = 0; l < info.slotLevels; l++) {
                 const size = info.slotSize >> l;
-                slotBytes += Math.ceil(size / 4) * Math.ceil(size / 4) * blockSize;
+                slotBytes += TextureUtils.calcLevelGpuSize(size, size, 1, format);
             }
             const totalDemand = this.families.reduce((n, f) => n + f.fineDemandTex, 0);
             const share = this.finePoolBytes * (info.fineDemandTex / Math.max(totalDemand, 1));

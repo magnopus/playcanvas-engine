@@ -107,6 +107,25 @@ const buildAsset = ({ version = 2, materialCount = 1, textures = true } = {}) =>
     return { gltf, bufferViews };
 };
 
+describe('meshlet EPIC lightmap metadata', function () {
+    it('preserves per-node lightmaps for plain and scattered placements', function () {
+        const { gltf, bufferViews } = buildAsset();
+        const definition = {
+            coordinateScaleBias: [0.5, 0.5, 0.25, 0],
+            lightmapScale: [1, 2, 3, 4],
+            lightmapAdd: [0, 0, 0, -5.75]
+        };
+        gltf.extensions.EPIC_lightmap_textures = { lightmaps: [definition] };
+        gltf.nodes[1].extensions.EPIC_lightmap_textures = { lightmap: 0 };
+        gltf.nodes[1].extensions.MAG_texture_streaming = { lightmapTexture: { arrayId: 3, layer: 1, texCoord: 1 } };
+        const resource = createMeshlets({}, gltf, bufferViews);
+        expect(resource.instances[0].lightmap).to.equal(null);
+        for (const instance of resource.instances.slice(1)) {
+            expect(instance.lightmap).to.deep.equal({ ...definition, texture: { arrayId: 3, layer: 1, texCoord: 1 } });
+        }
+    });
+});
+
 // Debug.error is how the parser reports a rejected asset; keep it out of the test output
 const silenced = (fn) => {
     const original = console.error;

@@ -1,4 +1,5 @@
 import { expect } from 'chai';
+import { stub } from 'sinon';
 
 import { Mat4 } from '../../../src/core/math/mat4.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
@@ -10,6 +11,7 @@ import {
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletPrimitive, MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
 import { MeshletWorld } from '../../../src/scene/meshlet/meshlet-world.js';
+import { MeshletTextures } from '../../../src/scene/meshlet/textures/meshlet-textures.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
 const PAGE_BYTES = 256;
@@ -122,6 +124,40 @@ describe('MeshletWorld', function () {
         return world;
     };
     const uploaded = buffer => buffer.impl.writes.find(w => w.offset === 0).data;
+
+    it('uploads per-instance EPIC records with rebased textures and rejects missing UV channels', function () {
+        const tails = stub(MeshletTextures.prototype, '_loadTails');
+        const world = new MeshletWorld(device);
+        try {
+            const first = makeResource(device).resource;
+            const second = makeResource(device, { instances: 3 }).resource;
+            const array = { id: 7, name: 'linear_0', containerVersion: 2, width: 256, height: 256, tailMip: 0, layers: [[], []] };
+            first.textureManifest = { arrays: [array] };
+            second.textureManifest = { arrays: [array] };
+            second.instances[0].lightmap = {
+                texture: { arrayId: 7, layer: 1, texCoord: 0 },
+                coordinateScaleBias: [0.25, 0.5, 0.125, 0.25],
+                lightmapScale: [1, 2, 3, 4],
+                lightmapAdd: [0, 1, 0, -5.75]
+            };
+            second.instances[2].lightmap = { ...second.instances[0].lightmap, texture: { arrayId: 7, layer: 0, texCoord: 1 } };
+            world.addStreamedResource(first, null, 'https://example.test/first/');
+            world.addStreamedResource(second, null, 'https://example.test/second/');
+            world.finalize();
+            const data = uploaded(world.lightmapBuffer);
+            expect(Array.from(data.slice(32, 48))).to.deep.equal([0.25, 0.5, 0.125, 0.25, 1, 2, 3, 4, 0, 1, 0, -5.75, 3, 0, 1, 0]);
+            expect(data[14]).to.equal(0);
+            expect(data[3 * 16 + 14]).to.equal(0);
+            expect(data[4 * 16 + 14]).to.equal(0);
+            expect(Array.from(world.textures._lightmapSlots)).to.deep.equal([1, 3, -32]);
+            for (const material of world._litMaterials) {
+                expect(material.getParameter('meshletLightmaps').data).to.equal(world.lightmapBuffer);
+            }
+        } finally {
+            world.destroy();
+            tails.restore();
+        }
+    });
 
     it('refreshes and shrinks world bounds after partial placement transform updates', function () {
         const world = build(new MeshletWorld(device), makeResource(device, { instances: 2 }));

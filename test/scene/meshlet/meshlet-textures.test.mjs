@@ -159,6 +159,18 @@ describe('MeshletTextures', function () {
         const FINE = 160;
         const COARSE = 32;
 
+        it('streams different lightmap atlases sharing one visible material with atlas scale bias', function () {
+            const { textures } = setup();
+            textures.setMaterialSlotMap(new Int32Array(4).fill(-1));
+            textures.setLightmapSlotMap(new Int32Array([0, 1, -32, 0, 2, -32]));
+            textures.processMarks(new Uint32Array([FINE - 32]));
+            expect(Array.from(textures._desiredTexelRate)).to.deep.equal([0, FINE, FINE]);
+            expect(textures.textures.map(texture => texture.slot)).to.deep.equal([-1, 0, 1]);
+            textures.processMarks(new Uint32Array([0]));
+            expect(Array.from(textures._desiredTexelRate)).to.deep.equal([0, 0, 0]);
+            textures.destroy();
+        });
+
         it('acquires a free slot, points the residency at it and queues the missing fine mips', function () {
             const { textures, fam } = setup();
             textures.processMarks(new Uint32Array([FINE, 0, 0]));

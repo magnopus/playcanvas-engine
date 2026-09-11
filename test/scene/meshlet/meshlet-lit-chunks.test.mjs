@@ -87,6 +87,62 @@ describe('buildMeshletLitChunks', function () {
         }
     });
 
+    it('decodes per-instance EPIC lightmaps without changing unlightmapped lighting', function () {
+        const chunks = buildMeshletLitChunks({ ...textured, uvChannels: 5, lightmaps: true });
+        expect(chunks.litEngineMainEndVS).to.include('output.vMeshletInstance = meshletInstance;');
+        expect(chunks.litEngineDeclarationPS).to.include('meshletLightmaps[vMeshletInstance * 4u + 3u].z != 0.0');
+        expect(chunks.litEngineDeclarationPS).to.include('atlasUv + vec2f(0.0, 0.5)');
+        expect(chunks.litEngineDeclarationPS).to.include('upper.a + lower.a / 255.0 - 0.5 / 255.0');
+        expect(chunks.litEngineDeclarationPS).to.include('upper.rgb * upper.rgb * decodeScale.rgb + decodeAdd.rgb');
+        expect(chunks.litEngineDeclarationPS).to.include('uv = vMeshletUv1; ddx = dMeshletUv1Dx; ddy = dMeshletUv1Dy;');
+        expect(chunks.litEngineDeclarationPS).to.include('uv = vMeshletUv4; ddx = dMeshletUv4Dx; ddy = dMeshletUv4Dy;');
+        expect(chunks.litEngineDeclarationPS).to.include('meshletTexMinLod(texResidency[u32(textureInfo.x)])');
+        expect(chunks.litForwardBackendPS).to.include('if (meshletHasLightmap()) {\n        dDiffuseLight = meshletLightmapIrradiance();');
+        expect(chunks.litForwardBackendPS.indexOf('meshletLightmapIrradiance()')).to.be.above(chunks.litForwardBackendPS.indexOf('addAmbient('));
+        expect(buildMeshletLitChunks(textured)).not.to.have.property('litForwardBackendPS');
+        expect(buildMeshletLitChunks({ lightmaps: true }).litEngineDeclarationPS).not.to.include('meshletLightmaps');
+    });
+
+    it('preserves application reflection signatures when injecting lightmaps into a tab-indented backend', function () {
+        const forwardBackend = '\t#ifdef LIT_LIGHTMAP\n\t#endif\naddReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);\n\t#ifdef AREA_LIGHTS\n\t#endif';
+        const chunks = buildMeshletLitChunks({ ...textured, lightmaps: true, forwardBackend });
+        expect(chunks.litForwardBackendPS).to.include('dDiffuseLight = meshletLightmapIrradiance();');
+        expect(chunks.litForwardBackendPS).to.include('addReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);');
+        expect(chunks.litForwardBackendPS).not.to.include('addReflection(dReflDirW, litArgs_gloss);');
+        expect(chunks.litForwardBackendPS).not.to.include('meshletProbeWeight');
+    });
+
+    it('preserves probe reflections on lightmapped non-metals as well as metals', function () {
+        const backend = buildMeshletLitChunks({ ...textured, lightmaps: true }).litForwardBackendPS;
+        expect(backend).not.to.include('meshletProbeWeight');
+        expect(backend).to.include('addReflection(dReflDirW, litArgs_gloss);');
+        expect(backend).to.include('dDiffuseLight = meshletDiffuseBeforeProbes;');
+        expect(buildMeshletLitChunks(textured)).not.to.have.property('litForwardBackendPS');
+    });
+
+    it('removes probe ambient added by a custom reflection backend without removing direct lighting', function () {
+        const forwardBackend = `
+            #ifdef LIT_LIGHTMAP
+            #endif
+            #ifdef LIT_LIGHTING || LIT_REFLECTIONS
+                #ifdef LIT_REFLECTIONS
+                    addReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);
+                    dDiffuseLight += processEnvironment(probeAmbient);
+                #endif
+                #ifdef AREA_LIGHTS
+                #endif
+                addClusteredLights();
+            #endif`;
+        const backend = buildMeshletLitChunks({ ...textured, lightmaps: true, forwardBackend }).litForwardBackendPS;
+        const snapshot = backend.indexOf('let meshletDiffuseBeforeProbes = dDiffuseLight;');
+        const restore = backend.indexOf('dDiffuseLight = meshletDiffuseBeforeProbes;');
+        expect(snapshot).to.be.above(backend.indexOf('dDiffuseLight = meshletLightmapIrradiance();'));
+        expect(snapshot).to.be.below(backend.indexOf('addReflection('));
+        expect(restore).to.be.above(backend.indexOf('dDiffuseLight += processEnvironment(probeAmbient);'));
+        expect(restore).to.be.below(backend.indexOf('addClusteredLights();'));
+        expect(backend).to.include('if (meshletHasLightmap()) {\n                dDiffuseLight = meshletDiffuseBeforeProbes;');
+    });
+
     it('bounds anisotropic taps by the runtime limit and the resident footprint', function () {
         const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
         expect(source).to.include('uniform meshletTextureAnisotropy: f32');
@@ -98,6 +154,13 @@ describe('buildMeshletLitChunks', function () {
         for (const family of ['Srgb', 'Srgba', 'Normal', 'Linear']) {
             expect(source).to.include(`color += meshletSample${family}(sampleUv, wanted, minLod, sizeBias, tailStart, slotLayer, tailLayer)`);
         }
+    });
+
+    it('reverses tangent handedness for mirrored normal-mapped placements', function () {
+        const source = buildMeshletLitChunks(textured).litEngineMainStartVS;
+        expect(source).to.include('dot(cross(dMeshletModelMatrix[0].xyz, dMeshletModelMatrix[1].xyz), dMeshletModelMatrix[2].xyz) < 0.0');
+        expect(source).to.include('dMeshletBtSign = meshletTangent.w * select(1.0, -1.0, meshletMirrored);');
+        expect(buildMeshletLitChunks().litEngineMainStartVS).not.to.include('meshletMirrored');
     });
 
     it('replaces the vertex buffer with page-pool vertex pulling', function () {
@@ -166,9 +229,9 @@ describe('buildMeshletLitChunks', function () {
             expect(chunks.litEngineMainEndVS).to.include(`output.vMeshletUv${n} = dMeshletUv${n};`);
             expect(chunks.litEngineMainStartPS).to.include(`dpdx(vMeshletUv${n})`);
         }
-        expect(chunks.litEngineDeclarationVS, 'capped at the slot word field width').to.not.include(`vMeshletUv${MESHLET_MAX_UV_CHANNELS}`);
+        expect(chunks.litEngineDeclarationVS, 'capped at the supported channel count').to.not.include(`vMeshletUv${MESHLET_MAX_UV_CHANNELS}`);
         expect(chunks.litEngineDeclarationPS).to.include('let slotUvChannel = (slotWord >> 24u) & 3u;');
-        for (let n = 1; n < MESHLET_MAX_UV_CHANNELS; n++) {
+        for (let n = 1; n < 4; n++) {
             expect(chunks.litEngineDeclarationPS).to.include(`if (slotUvChannel == ${n}u)`);
         }
         const single = buildMeshletLitChunks({ textures: true, uvChannels: 1 });

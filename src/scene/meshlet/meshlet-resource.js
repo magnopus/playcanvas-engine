@@ -2,6 +2,14 @@ import { Debug } from '../../core/debug.js';
 import { MESHLET_DATA_U32S, PAGE_TABLE_FIELDS } from './constants.js';
 
 /**
+ * @typedef {object} MeshletLightmap
+ * @property {{ arrayId: number, layer: number, texCoord: number }} texture - Streamed lightmap reference.
+ * @property {number[]} coordinateScaleBias - Atlas UV scale and offset.
+ * @property {number[]} lightmapScale - EPIC irradiance decode scale.
+ * @property {number[]} lightmapAdd - EPIC irradiance decode offset.
+ */
+
+/**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  */
 
@@ -105,7 +113,7 @@ class MeshletResource {
     /**
      * Document-space placements: one entry per (gltf node, primitive) pair.
      *
-     * @type {Array<{ primIndex: number, matrix: Float32Array }>}
+     * @type {Array<{ primIndex: number, matrix: Float32Array, lightmap?: MeshletLightmap|null }>}
      */
     instances;
 
@@ -113,7 +121,7 @@ class MeshletResource {
      * @param {GraphicsDevice} device - The graphics device.
      * @param {MeshletPrimitive[]} primitives - Parsed primitives.
      * @param {object} manifest - The stream manifest.
-     * @param {Array<{ primIndex: number, matrix: Float32Array }>} [instances] - Placements.
+     * @param {Array<{ primIndex: number, matrix: Float32Array, lightmap?: MeshletLightmap|null }>} [instances] - Placements.
      */
     constructor(device, primitives, manifest, instances = []) {
         this.device = device;

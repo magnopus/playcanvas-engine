@@ -326,14 +326,12 @@ export const MATERIAL_RECORD = {
 };
 
 /**
- * UV channels a material slot can address: the slot word's texCoord field is 2 bits, so
- * channels 0-3. Pages may carry more (uvFloatsPerVertex is per resource); the shaders thread
- * through at most this many. Per-instance lightmaps would need per-instance texture state
- * (objectData is full) and are a separate part.
+ * UV channels threaded through meshlet shading (0-4). Per-instance lightmaps can select all
+ * five channels. Baked PBR slots retain their two-bit texCoord field and address channels 0-3.
  *
  * @type {number}
  */
-export const MESHLET_MAX_UV_CHANNELS = 4;
+export const MESHLET_MAX_UV_CHANNELS = 5;
 
 /**
  * Material texture slot indices, in slot-word order.

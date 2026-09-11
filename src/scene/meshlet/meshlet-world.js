@@ -6,6 +6,7 @@ import {
     BUFFERUSAGE_COPY_DST, BUFFERUSAGE_COPY_SRC
 } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
+import { ShaderChunks } from '../shader-lib/shader-chunks.js';
 import { OBJECT_FLAG_NO_SHADOW,
     MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
@@ -97,6 +98,9 @@ class MeshletWorld {
 
     materialTableBuffer = null;
 
+    /** @type {StorageBuffer|null} */
+    lightmapBuffer = null;
+
     /** @type {import('./textures/meshlet-textures.js').MeshletTextures|null} */
     textures = null;
 
@@ -183,6 +187,7 @@ class MeshletWorld {
         this.meshletDataBuffer?.destroy();
         this.objectDataBuffer?.destroy();
         this.materialTableBuffer?.destroy();
+        this.lightmapBuffer?.destroy();
         // bucket materials are shared across the views' mesh instances - destroy each set once
         this._litMaterials?.forEach(m => m.destroy());
         this._litMaterials = null;
@@ -452,7 +457,7 @@ class MeshletWorld {
      * @private
      */
     _resolveBudget(counts) {
-        const { totalPages, totalMeshlets, totalInstances, totalMaterialRows, pairs, workItems } = counts;
+        const { totalPages, totalMeshlets, totalInstances, totalMaterialRows, pairs, workItems, lightmapBytes = 0 } = counts;
         if (!(this.poolBytes > 0)) {
             this.budgetBreakdown = null;
             this.maxIndices = 0;
@@ -460,7 +465,7 @@ class MeshletWorld {
         }
 
         const pairWords = Math.max(Math.ceil(pairs / 32), 4);
-        const fixed = totalMeshlets * MESHLET_DATA_U32S * 4 +      // meshletData
+        const fixed = lightmapBytes + totalMeshlets * MESHLET_DATA_U32S * 4 +      // meshletData
             totalInstances * OBJECT_DATA_U32S * 4 +                // objectData
             totalPages * 4 +                                       // residency
             (totalPages + totalMaterialRows) * 4 +                 // requests + texel-rate marks
@@ -536,6 +541,7 @@ class MeshletWorld {
         let totalPages = 0;
         let totalMeshlets = 0;
         let totalInstances = 0;
+        let anyLightmaps = false;
         let totalMaterialRows = 0;
         let anyTextures = false;
         let uvChannels = 0;
@@ -545,6 +551,7 @@ class MeshletWorld {
             totalPages += resource.manifest.pageCount;
             totalMeshlets += resource.totalMeshlets;
             totalInstances += (instances ?? resource.instances).length;
+            anyLightmaps ||= (instances ?? resource.instances).some(instance => !!instance.lightmap);
             if (resource.materialTable) {
                 const unassigned = resource.primitives.some(p => p.materialIndex < 0) ? 1 : 0;
                 totalMaterialRows += resource.materialCount + unassigned;
@@ -598,6 +605,7 @@ class MeshletWorld {
             totalMeshlets,
             totalInstances,
             totalMaterialRows,
+            lightmapBytes: anyLightmaps ? totalInstances * 64 : 0,
             pairs: budgetPairs,
             workItems: budgetWorkItems
         });
@@ -660,6 +668,8 @@ class MeshletWorld {
         const meshletData = new Uint32Array(totalMeshlets * MESHLET_DATA_U32S);
         const objectData = new Uint32Array(totalInstances * OBJECT_DATA_U32S);
         const objectDataF = new Float32Array(objectData.buffer);
+        const lightmapData = anyLightmaps ? new Float32Array(totalInstances * 16) : null;
+        const lightmapSlots = [];
         const materialTable = new Uint32Array(Math.max(totalMaterialRows, 1) * MATERIAL_RECORD_U32S);
         const materialTableF = new Float32Array(materialTable.buffer);
 
@@ -712,6 +722,7 @@ class MeshletWorld {
             const hasTangents = manifest.attributeLayout.tangents ? 1 : 0;
             const hasColors = manifest.attributeLayout.colors ? 1 : 0;
             const instList = instances ?? resource.instances;
+            const resourceTextureBase = runningTexBase;
             this.placements.push({
                 resource,
                 instances: instList,
@@ -770,7 +781,7 @@ class MeshletWorld {
                 } else {
                     const textureBase = runningTexBase;
                     for (const arr of resource.textureManifest.arrays ?? []) {
-                        runningTexBase += Array.isArray(arr.layers) ? arr.layers.length : 0;
+                        if (arr.containerVersion === 2) runningTexBase += Array.isArray(arr.layers) ? arr.layers.length : 0;
                     }
                     // an adopted system already holds the carried prefix; resources after it
                     // join it in place (new tail layers, no re-download of what is resident)
@@ -868,6 +879,37 @@ class MeshletWorld {
                 objectData[row + OBJECT_DATA.FIRST_MESHLET] = primBases[inst.primIndex];
                 objectData[row + OBJECT_DATA.MESHLET_COUNT] = prim.meshletCount;
                 objectData[row + OBJECT_DATA.MATERIAL] = materialBase + primMatRows[inst.primIndex];
+                const lightmap = inst.lightmap;
+                if (lightmapData && lightmap && baseUrl) {
+                    const reference = lightmap.texture;
+                    const arrays = resource.textureManifest?.arrays ?? [];
+                    let textureIndex = resourceTextureBase;
+                    let textureArray = null;
+                    for (const array of arrays) {
+                        if (array.containerVersion !== 2) continue;
+                        if (array.id === reference.arrayId) {
+                            textureArray = array;
+                            break;
+                        }
+                        textureIndex += array.layers.length;
+                    }
+                    const channel = reference.texCoord ?? 0;
+                    const coefficients = [lightmap.coordinateScaleBias, lightmap.lightmapScale, lightmap.lightmapAdd];
+                    if (textureArray && Number.isInteger(reference.layer) && reference.layer >= 0 && reference.layer < textureArray.layers.length &&
+                        Number.isInteger(channel) && channel >= 0 && channel < MESHLET_MAX_UV_CHANNELS && (prim.uvChannelMask & (1 << channel)) &&
+                        coefficients.every(values => values?.length === 4 && values.every(Number.isFinite))) {
+                        textureIndex += reference.layer;
+                        const lightmapRow = instanceBase * 16;
+                        lightmapData.set(lightmap.coordinateScaleBias, lightmapRow);
+                        lightmapData.set(lightmap.lightmapScale, lightmapRow + 4);
+                        lightmapData.set(lightmap.lightmapAdd, lightmapRow + 8);
+                        lightmapData.set([textureIndex, channel, 1, 0], lightmapRow + 12);
+                        const scale = Math.max(Math.abs(lightmap.coordinateScaleBias[0]), Math.abs(lightmap.coordinateScaleBias[1]) * 0.5, 1e-8);
+                        lightmapSlots.push(objectData[row + OBJECT_DATA.MATERIAL], textureIndex, Math.round(TEXEL_RATE_PER_MIP * Math.log2(scale)));
+                    } else {
+                        Debug.warnOnce('MeshletWorld: invalid streamed EPIC lightmap reference, coefficients or UV channel; lightmap ignored.');
+                    }
+                }
                 objectData[row + OBJECT_DATA.FLAGS] = (hasTangents ? OBJECT_FLAG_HAS_TANGENTS : 0) | (hasColors ? OBJECT_FLAG_HAS_COLORS : 0);
                 objectDataF[row + OBJECT_DATA.MAX_SCALE] = maxAxisScale(matrix);
                 objectData[row + OBJECT_DATA.FIRST_PAIR_BIT] = this.totalPairs;
@@ -937,6 +979,10 @@ class MeshletWorld {
         this.objectDataCpuF = objectDataF;
         this.materialTableBuffer = new StorageBuffer(device, materialTable.byteLength, BUFFERUSAGE_COPY_DST);
         this.materialTableBuffer.write(0, materialTable);
+        if (lightmapData) {
+            this.lightmapBuffer = new StorageBuffer(device, lightmapData.byteLength, BUFFERUSAGE_COPY_DST);
+            this.lightmapBuffer.write(0, lightmapData, 0, lightmapData.length);
+        }
 
         // streaming request marks (u32 per page) followed by the texture-mip feedback marks
         // (u32 per material row, atomicMax'd texel rates) - shared by all views (marks union
@@ -970,6 +1016,7 @@ class MeshletWorld {
             material.setParameter('pagePool', this.pagePool);
             material.setParameter('residency', this.residencyBuffer);
             material.setParameter('materialTable', this.materialTableBuffer);
+            if (this.lightmapBuffer) material.setParameter('meshletLightmaps', this.lightmapBuffer);
             material.setParameter('pageSizeWords', this.pageSizeBytes / 4);
         };
         const bindTextureParams = (material) => {
@@ -991,6 +1038,8 @@ class MeshletWorld {
             uvChannels: Math.min(uvChannels, MESHLET_MAX_UV_CHANNELS),
             tangents: anyTangents,
             colors: anyColors,
+            lightmaps: anyLightmaps,
+            forwardBackend: ShaderChunks.get(device, 'wgsl').get('litForwardBackendPS'),
             familySizes: this.textures?.families.map(fam => fam.slotSize),
             familyLevels: this.textures?.families.map(fam => ({ slotLevels: fam.slotLevels, tailLevels: fam.levels }))
         });
@@ -1044,6 +1093,7 @@ class MeshletWorld {
                 }
             }
             this.textures.setMaterialSlotMap(rowTex, rowTilingBias);
+            this.textures.setLightmapSlotMap(new Int32Array(lightmapSlots));
         }
 
         this._colorMode = 0;

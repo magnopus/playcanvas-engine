@@ -531,9 +531,13 @@ export const indexWriteWGSL = /* wgsl */ `
         let pageBase = residency[page] * uniform.pageSizeWords;
         let pageLayout = meshletPageLayout(pageBase, hasTangents, uvFloatsPerVertex, hasColors);
         let triangleStreamByte = (pageLayout.meshletVertexBase + pageLayout.meshletVertexCount) * 4u + triangleOffset;
+        let worldMatrix = objectData[instance].worldMatrix;
+        let mirrored = dot(cross(worldMatrix[0].xyz, worldMatrix[1].xyz), worldMatrix[2].xyz) < 0.0;
 
         for (var corner = localId.x; corner < cornerCount; corner += ${MESHLET_INDEX_WRITE_WORKGROUP}u) {
-            let byteIndex = triangleStreamByte + corner;
+            let triangleCorner = corner % 3u;
+            let sourceCorner = select(corner, corner - triangleCorner + (3u - triangleCorner) % 3u, mirrored);
+            let byteIndex = triangleStreamByte + sourceCorner;
             let localVert = (pagePool[byteIndex >> 2u] >> ((byteIndex & 3u) * 8u)) & 0xFFu;
             drawIndices[baseIndexOffset + corner] = (recordIndex << 8u) | localVert;
         }

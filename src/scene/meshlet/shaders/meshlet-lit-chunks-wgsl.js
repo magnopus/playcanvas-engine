@@ -1,3 +1,4 @@
+import litForwardBackend from '../../shader-lib/wgsl/chunks/lit/frag/pass-forward/litForwardBackend.js';
 import {
     MATERIAL_SLOT, MATERIAL_SLOT_ABSENT, MESHLET_MAX_UV_CHANNELS, MESHLET_TEX_NO_MINLOD, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
     OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED
@@ -44,19 +45,22 @@ import {
  * @param {boolean} options.tangents - True when pages carry oct16+sign tangents.
  * @param {boolean} [options.colors] - True when pages carry rgba8 vertex colours (COLOR_0), which
  * multiply the base colour as on the regular glTF path.
+ * @param {boolean} [options.lightmaps] - True when placements carry streamed EPIC lightmaps.
+ * @param {string} [options.forwardBackend] - Active device backend, including application overrides.
  * @param {number[]} [options.familySizes] - Fine slot-pool base size per family (4 entries).
  * @param {Array<{ slotLevels: number, tailLevels: number }>} [options.familyLevels] - Fine
  * levels above the tail and populated tail levels, per family.
  * @returns {object} The chunk override map for StandardMaterial.getShaderChunks('wgsl').add().
  * @ignore
  */
-function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = false, colors = false, familySizes = [], familyLevels = [] } = {}) {
+function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = false, colors = false, lightmaps = false, forwardBackend = litForwardBackend, familySizes = [], familyLevels = [] } = {}) {
 
     // one varying + cached derivatives per channel; a slot picks its channel from its slot word
     const uvs = Array.from({ length: Math.min(uvChannels, MESHLET_MAX_UV_CHANNELS) }, (_, n) => n);
     const uv0 = uvs.length > 0;
     const tan = tangents && textures;
     const col = colors;
+    const lightmapped = lightmaps && textures && uv0;
 
     // ------------------------------------------------------------------ vertex stage
 
@@ -104,6 +108,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     // processor merges both stages' storage declarations, so both stages need all the structs
     const litEngineDeclarationVS = /* wgsl */ `
         ${meshletStructsWGSL}
+        ${lightmapped ? 'varying @interpolate(flat) vMeshletInstance: u32;' : ''}
         varying @interpolate(flat) vMeshletMatRow: u32;
         var<private> dMeshletMatRow: u32;
         varying @interpolate(flat) vMeshletPickId: u32;
@@ -178,7 +183,8 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         if (meshletHasTangents) {
             let meshletTangent = meshletDecodeTangent(pagePool[meshletLayout.tangentBase + meshletVert]);
             dMeshletTangentW = normalize((dMeshletModelMatrix * vec4f(meshletTangent.xyz, 0.0)).xyz);
-            dMeshletBtSign = meshletTangent.w;
+            let meshletMirrored = dot(cross(dMeshletModelMatrix[0].xyz, dMeshletModelMatrix[1].xyz), dMeshletModelMatrix[2].xyz) < 0.0;
+            dMeshletBtSign = meshletTangent.w * select(1.0, -1.0, meshletMirrored);
         }` : ''}
         ${col ? /* wgsl */ `
         // COLOR_0 multiplies the base colour (getAlbedo), as on the regular glTF path; a
@@ -190,6 +196,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     `;
 
     const litEngineMainEndVS = /* wgsl */ `
+        ${lightmapped ? 'output.vMeshletInstance = meshletInstance;' : ''}
         output.vMeshletMatRow = dMeshletMatRow;
         output.vMeshletPickId = dMeshletPickId;
         #ifdef PCOUTLINE_PASS
@@ -271,6 +278,8 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
 
     const litEngineDeclarationPS = /* wgsl */ `
         ${meshletStructsWGSL}
+        ${lightmapped ? `varying @interpolate(flat) vMeshletInstance: u32;
+        var<storage, read> meshletLightmaps: array<vec4f>;` : ''}
         varying @interpolate(flat) vMeshletMatRow: u32;
         varying @interpolate(flat) vMeshletPickId: u32;
         ${meshletMaterialTableWGSL}
@@ -336,9 +345,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         // (fine slot pool above the tail, resident tail below), or returns the fallback when
         // the slot is absent or nothing is resident yet. Derivatives are the cached
         // uniform-flow ones.
-        fn meshletSampleSlot(slot: u32, fallback: vec4f) -> vec4f {
-            let slotWord = materialTable[vMeshletMatRow].slotWords[slot];
-            let texIndex = slotWord & 0xFFFFu;
+        fn meshletSampleTexture(texIndex: u32, uv: vec2f, ddx: vec2f, ddy: vec2f, fallback: vec4f) -> vec4f {
             if (texIndex == ${MATERIAL_SLOT_ABSENT}u) { dMeshletTexDebug = vec3f(0.15); return fallback; }
             let resident = texResidency[texIndex];
             if (meshletTexMinLod(resident) == ${MESHLET_TEX_NO_MINLOD}u) { dMeshletTexDebug = vec3f(1.0, 0.1, 0.1); return fallback; }  // nothing resident yet
@@ -349,12 +356,21 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             let slotLayer = meshletTexSlotLayer(resident);
             let tailLayer = i32(meshletTexTailLayer(resident));
 
+            ${texDispatch}
+            dMeshletTexDebug = vec3f(0.6, 0.6, 0.0);
+            return fallback;
+        }
+
+        fn meshletSampleSlot(slot: u32, fallback: vec4f) -> vec4f {
+            let slotWord = materialTable[vMeshletMatRow].slotWords[slot];
+            let texIndex = slotWord & 0xFFFFu;
+
             var uv = ${uv0 ? 'vMeshletUv0' : 'vec2f(0.0)'};
             var ddx = ${uv0 ? 'dMeshletUv0Dx' : 'vec2f(0.0)'};
             var ddy = ${uv0 ? 'dMeshletUv0Dy' : 'vec2f(0.0)'};
             ${uvs.length > 1 ? /* wgsl */ `
             // slot word bits 24-25: the UV channel this slot samples (0-3)
-            let slotUvChannel = (slotWord >> 24u) & 3u;` : ''}${uvs.slice(1).map(n => /* wgsl */ `
+            let slotUvChannel = (slotWord >> 24u) & 3u;` : ''}${uvs.slice(1, 4).map(n => /* wgsl */ `
             if (slotUvChannel == ${n}u) {
                 uv = vMeshletUv${n}; ddx = dMeshletUv${n}Dx; ddy = dMeshletUv${n}Dy;
             }`).join('')}
@@ -367,9 +383,37 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
                 ddx = ddx * transformScale;
                 ddy = ddy * transformScale;
             }
-            ${texDispatch}
-            dMeshletTexDebug = vec3f(0.6, 0.6, 0.0);
-            return fallback;
+            return meshletSampleTexture(texIndex, uv, ddx, ddy, fallback);
+        }` : ''}
+        ${lightmapped ? /* wgsl */ `
+        fn meshletHasLightmap() -> bool {
+            return meshletLightmaps[vMeshletInstance * 4u + 3u].z != 0.0;
+        }
+
+        fn meshletLightmapIrradiance() -> vec3f {
+            let recordBase = vMeshletInstance * 4u;
+            let transform = meshletLightmaps[recordBase];
+            let decodeScale = meshletLightmaps[recordBase + 1u];
+            let decodeAdd = meshletLightmaps[recordBase + 2u];
+            let textureInfo = meshletLightmaps[recordBase + 3u];
+            if (meshletTexMinLod(texResidency[u32(textureInfo.x)]) == ${MESHLET_TEX_NO_MINLOD}u) {
+                return vec3f(0.0);
+            }
+            var uv = vMeshletUv0;
+            var ddx = dMeshletUv0Dx;
+            var ddy = dMeshletUv0Dy;
+            ${uvs.slice(1).map(channel => `if (textureInfo.y == ${channel}.0) {
+                uv = vMeshletUv${channel}; ddx = dMeshletUv${channel}Dx; ddy = dMeshletUv${channel}Dy;
+            }`).join('\n')}
+            let atlasScale = transform.xy * vec2f(1.0, 0.5);
+            let atlasUv = (uv * transform.xy + transform.zw) * vec2f(1.0, 0.5);
+            let atlasDx = ddx * atlasScale;
+            let atlasDy = ddy * atlasScale;
+            let upper = meshletSampleTexture(u32(textureInfo.x), atlasUv, atlasDx, atlasDy, vec4f(0.0));
+            let lower = meshletSampleTexture(u32(textureInfo.x), atlasUv + vec2f(0.0, 0.5), atlasDx, atlasDy, vec4f(0.0));
+            let logLuminance = (upper.a + lower.a / 255.0 - 0.5 / 255.0) * decodeScale.a + decodeAdd.a;
+            let chromaticity = upper.rgb * upper.rgb * decodeScale.rgb + decodeAdd.rgb;
+            return max(exp2(logLuminance) - 0.01858136, 0.0) * 0.6 * chromaticity;
         }` : ''}
     `;
 
@@ -487,6 +531,20 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     }
     if (outputPS) {
         chunks.outputPS = outputPS;
+    }
+    if (lightmapped) {
+        chunks.litForwardBackendPS = forwardBackend.replace('#ifdef LIT_LIGHTMAP', `
+    if (meshletHasLightmap()) {
+        dDiffuseLight = meshletLightmapIrradiance();
+    }
+    let meshletDiffuseBeforeProbes = dDiffuseLight;
+    #ifdef LIT_LIGHTMAP`).replace('#ifdef AREA_LIGHTS', `
+        #ifdef LIT_REFLECTIONS
+            if (meshletHasLightmap()) {
+                dDiffuseLight = meshletDiffuseBeforeProbes;
+            }
+        #endif
+        #ifdef AREA_LIGHTS`);
     }
     return chunks;
 }
