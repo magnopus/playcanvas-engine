@@ -128,7 +128,36 @@ class MeshletWorld {
     pageSizeBytes = 0;
 
     /** @type {BoundingBox} */
-    worldBounds = new BoundingBox();
+    _worldBounds = new BoundingBox();
+
+    _worldBoundsDirty = false;
+
+    /** @type {BoundingBox} - Current world-space bounds, refreshed after placement transforms change. */
+    get worldBounds() {
+        if (this._worldBoundsDirty) {
+            let initialized = false;
+            for (const placement of this.placements) {
+                for (let index = 0; index < placement.instanceCount; index++) {
+                    const prim = placement.resource.primitives[placement.instances[index].primIndex];
+                    const row = (placement.instanceBase + index) * OBJECT_DATA_U32S + OBJECT_DATA.MATRIX;
+                    for (let element = 0; element < 16; element++) {
+                        _tmpMat.data[element] = this.objectDataCpuF[row + element];
+                    }
+                    _tmpLocalBox.center.set(prim.aabbCenter[0], prim.aabbCenter[1], prim.aabbCenter[2]);
+                    _tmpLocalBox.halfExtents.set(prim.aabbHalfExtents[0], prim.aabbHalfExtents[1], prim.aabbHalfExtents[2]);
+                    _tmpBox.setFromTransformedAabb(_tmpLocalBox, _tmpMat);
+                    if (initialized) {
+                        this._worldBounds.add(_tmpBox);
+                    } else {
+                        this._worldBounds.copy(_tmpBox);
+                        initialized = true;
+                    }
+                }
+            }
+            this._worldBoundsDirty = false;
+        }
+        return this._worldBounds;
+    }
 
     /**
      * Bumped whenever what the world would draw changes without a rebuild: a page installed or
@@ -658,6 +687,7 @@ class MeshletWorld {
         let instanceBase = 0;
         let materialBase = 0;
         let runningTexBase = 0;
+        this._worldBoundsDirty = false;
         this.worldBounds.center.set(0, 0, 0);
         this.worldBounds.halfExtents.set(0, 0, 0);
         let boundsInit = false;
@@ -1112,8 +1142,8 @@ class MeshletWorld {
 
     /**
      * Updates the root transform of an added resource (placement), rewriting its objectData rows.
-     * Only the transform-derived fields change; culling uses the new matrix next frame. Note that
-     * {@link worldBounds} keeps its finalize-time value.
+     * Only the transform-derived fields change; culling uses the new matrix next frame.
+     * Invalidates {@link worldBounds}, which is refreshed on its next access.
      *
      * @param {number} index - The placement index (resource add order).
      * @param {Mat4|null} transform - New root transform applied to the resource's placements.
@@ -1135,6 +1165,7 @@ class MeshletWorld {
             for (let k = 0; k < 16; k++) objectDataF[row + OBJECT_DATA.MATRIX + k] = matrix[k];
             objectDataF[row + OBJECT_DATA.MAX_SCALE] = maxAxisScale(matrix);
         }
+        this._worldBoundsDirty = true;
         this._uploadObjectRows(instanceBase + start, count);
     }
 

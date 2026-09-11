@@ -1,5 +1,6 @@
 import { expect } from 'chai';
 
+import { Mat4 } from '../../../src/core/math/mat4.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import {
     MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
@@ -121,6 +122,24 @@ describe('MeshletWorld', function () {
         return world;
     };
     const uploaded = buffer => buffer.impl.writes.find(w => w.offset === 0).data;
+
+    it('refreshes and shrinks world bounds after partial placement transform updates', function () {
+        const world = build(new MeshletWorld(device), makeResource(device, { instances: 2 }));
+        const bounds = world.worldBounds;
+        const transform = new Mat4().setScale(10, 2, 3);
+        transform.data[12] = 100;
+        transform.data[14] = 50;
+
+        world.setPlacementTransform(0, transform, 1, 1);
+        expect(world.worldBounds).to.equal(bounds);
+        expect(bounds.getMin().toArray()).to.deep.equal([0, 1, 2]);
+        expect(bounds.getMax().toArray()).to.deep.equal([220, 6, 62]);
+
+        world.setPlacementTransform(0, null, 1, 1);
+        expect(world.worldBounds.getMin().toArray()).to.deep.equal([0, 1, 2]);
+        expect(world.worldBounds.getMax().toArray()).to.deep.equal([12, 3, 4]);
+        world.destroy();
+    });
 
     describe('finalize', function () {
 
