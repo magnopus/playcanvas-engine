@@ -255,6 +255,7 @@ class GraphNode extends EventHandler {
     /** @ignore */
     scaleCompensation = false;
 
+    /** @type {AppBase|undefined} */
     _appRef = undefined;
 
     /**
@@ -1173,10 +1174,13 @@ class GraphNode extends EventHandler {
     _dirtifyWorldInternal() {
         if (!this._dirtyWorld) {
             this._frozen = false;
-            if (this._appRef) {
-                this._appRef._dirtyZoneEntities.push(this);
+            const appRef = this._appRef;
+            // magnopus patched
+            if (appRef?.systems.zone) {
+                // @ts-ignore
+                appRef._dirtyZoneEntities?.push(this);
+                this._dirtyZone = true;
             }
-            this._dirtyZone = true;
             this._dirtyWorld = true;
             for (let i = 0; i < this._children.length; i++) {
                 if (!this._children[i]._dirtyWorld) {
