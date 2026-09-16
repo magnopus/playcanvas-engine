@@ -4,7 +4,7 @@ import { stub } from 'sinon';
 import { Mat4 } from '../../../src/core/math/mat4.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import {
-    MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
+    MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_FLAG_UNLIT, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
     MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COLOR_MODE, MESHLET_DATA,
     MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA, OBJECT_DATA_U32S,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS
@@ -245,6 +245,13 @@ describe('MeshletWorld', function () {
             expect(twoSided.indexWorst[MESHLET_BUCKET_MASKED]).to.equal(0);
             expect(twoSided.indexWorst[MESHLET_BUCKET_OPAQUE]).to.equal(0);
             twoSided.destroy();
+
+            // unlit is a shading choice, not pipeline state: it stays in the opaque bucket and
+            // the flag reaches the GPU table untouched for the fragment shader to branch on
+            const unlit = build(new MeshletWorld(device), makeResource(device, { instances: 1, materialFlags: MATERIAL_FLAG_UNLIT }));
+            expect(unlit.indexWorst).to.deep.equal([MESHLETS * TRIANGLES * 3, 0, 0]);
+            expect(uploaded(unlit.materialTableBuffer)[MATERIAL_RECORD.FLAGS] & MATERIAL_FLAG_UNLIT).to.not.equal(0);
+            unlit.destroy();
         });
 
         it('splits a geometry budget between the page pool and the index buffers after the fixed costs', function () {

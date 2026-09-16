@@ -226,6 +226,15 @@ export const MATERIAL_FLAG_DOUBLE_SIDED = 1 << 0;
 /** @type {number} - material record word 11, bit 1. */
 export const MATERIAL_FLAG_ALPHA_MASK = 1 << 1;
 
+/**
+ * Material record word 11, bit 2: KHR_materials_unlit. The forward shader outputs the base
+ * colour (factor x texture x vertex colour) as-is and skips the lighting backend entirely; it
+ * selects no draw bucket because nothing about the pipeline state differs.
+ *
+ * @type {number}
+ */
+export const MATERIAL_FLAG_UNLIT = 1 << 2;
+
 /** @type {number} */
 export const MESHLET_NO_PARENT = 0xFFFFFFFF;
 
@@ -295,7 +304,7 @@ export const OBJECT_FLAG_HOVERED = 1 << 9;
  * - [4-6] f32 emissive RGB, [7] f32 emissiveStrength
  * - [8] f32 metallic, [9] f32 roughness (stored as roughness, never gloss)
  * - [10] f32 alphaCutoff
- * - [11] u32 flags: bit0 doubleSided, bit1 alpha MASK, bits 8-11 slot-present (bit 8+s).
+ * - [11] u32 flags: bit0 doubleSided, bit1 alpha MASK, bit2 unlit, bits 8-11 slot-present (bit 8+s).
  *   These two are the authority for the draw bucket - unlike the meshlet flag, the bake keeps
  *   them apart (see MESHLET_FLAG_ALPHA_MASKED).
  * - [12-15] u32 slot words (s = 0 baseColor / 1 normal / 2 ORM / 3 emissive):

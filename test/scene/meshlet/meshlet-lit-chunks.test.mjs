@@ -3,7 +3,7 @@ import { expect } from 'chai';
 import { CULLFACE_BACK, CULLFACE_NONE } from '../../../src/platform/graphics/constants.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import {
-    MATERIAL_SLOT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED,
+    MATERIAL_FLAG_UNLIT, MATERIAL_SLOT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED,
     MESHLET_COLOR_MODE, MESHLET_MAX_UV_CHANNELS
 } from '../../../src/scene/meshlet/constants.js';
 import { createMeshletLitMaterial } from '../../../src/scene/meshlet/meshlet-lit-material.js';
@@ -99,12 +99,12 @@ describe('buildMeshletLitChunks', function () {
         expect(chunks.litEngineDeclarationPS).to.include('meshletTexMinLod(texResidency[u32(textureInfo.x)])');
         expect(chunks.litForwardBackendPS).to.include('if (meshletHasLightmap()) {\n        dDiffuseLight = meshletLightmapIrradiance();');
         expect(chunks.litForwardBackendPS.indexOf('meshletLightmapIrradiance()')).to.be.above(chunks.litForwardBackendPS.indexOf('addAmbient('));
-        expect(buildMeshletLitChunks(textured)).not.to.have.property('litForwardBackendPS');
+        expect(buildMeshletLitChunks(textured).litForwardBackendPS).not.to.include('meshletHasLightmap');
         expect(buildMeshletLitChunks({ lightmaps: true }).litEngineDeclarationPS).not.to.include('meshletLightmaps');
     });
 
     it('preserves application reflection signatures when injecting lightmaps into a tab-indented backend', function () {
-        const forwardBackend = '\t#ifdef LIT_LIGHTMAP\n\t#endif\naddReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);\n\t#ifdef AREA_LIGHTS\n\t#endif';
+        const forwardBackend = '\tvar output : FragmentOutput;\n\t#ifdef LIT_LIGHTMAP\n\t#endif\naddReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);\n\t#ifdef AREA_LIGHTS\n\t#endif';
         const chunks = buildMeshletLitChunks({ ...textured, lightmaps: true, forwardBackend });
         expect(chunks.litForwardBackendPS).to.include('dDiffuseLight = meshletLightmapIrradiance();');
         expect(chunks.litForwardBackendPS).to.include('addReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);');
@@ -117,11 +117,12 @@ describe('buildMeshletLitChunks', function () {
         expect(backend).not.to.include('meshletProbeWeight');
         expect(backend).to.include('addReflection(dReflDirW, litArgs_gloss);');
         expect(backend).to.include('dDiffuseLight = meshletDiffuseBeforeProbes;');
-        expect(buildMeshletLitChunks(textured)).not.to.have.property('litForwardBackendPS');
+        expect(buildMeshletLitChunks(textured).litForwardBackendPS).not.to.include('meshletDiffuseBeforeProbes');
     });
 
     it('removes probe ambient added by a custom reflection backend without removing direct lighting', function () {
         const forwardBackend = `
+            var output: FragmentOutput;
             #ifdef LIT_LIGHTMAP
             #endif
             #ifdef LIT_LIGHTING || LIT_REFLECTIONS
@@ -141,6 +142,30 @@ describe('buildMeshletLitChunks', function () {
         expect(restore).to.be.above(backend.indexOf('dDiffuseLight += processEnvironment(probeAmbient);'));
         expect(restore).to.be.below(backend.indexOf('addClusteredLights();'));
         expect(backend).to.include('if (meshletHasLightmap()) {\n                dDiffuseLight = meshletDiffuseBeforeProbes;');
+    });
+
+    it('emits unlit records as their base colour and returns before the lighting backend', function () {
+        for (const options of [{}, textured]) {
+            const chunks = buildMeshletLitChunks(options);
+            expect(chunks.litEngineDeclarationPS).to.include(`materialTable[vMeshletMatRow].flags & ${MATERIAL_FLAG_UNLIT}u`);
+            expect(chunks.diffusePS).to.include('dAlbedo = select(meshletSurfaceRgb(), vec3f(0.0), meshletUnlit());');
+            expect(chunks.emissivePS).to.include('if (meshletUnlit()) {\n                dEmission = meshletSurfaceRgb();');
+
+            const backend = chunks.litForwardBackendPS;
+            const earlyOut = backend.indexOf('if (meshletUnlit()) {');
+            expect(earlyOut).to.be.above(backend.indexOf('var output: FragmentOutput;'));
+            expect(earlyOut).to.be.below(backend.indexOf('addAmbient('));
+            const block = backend.slice(earlyOut, backend.indexOf('return output;', earlyOut));
+            expect(block).to.include('addFog(litArgs_emission)');
+            expect(block).to.include('#include "outputAlphaPS"');
+            expect(block).to.include('#include "outlineOutputPS"');
+            expect(block).not.to.include('addAmbient(');
+        }
+
+        // an application backend with its own whitespace is hooked the same way
+        const custom = buildMeshletLitChunks({ forwardBackend: '\tvar output : FragmentOutput;\n\taddAmbient();' }).litForwardBackendPS;
+        expect(custom.indexOf('if (meshletUnlit())')).to.be.above(custom.indexOf('var output : FragmentOutput;'));
+        expect(custom.indexOf('if (meshletUnlit())')).to.be.below(custom.indexOf('addAmbient();'));
     });
 
     it('bounds anisotropic taps by the runtime limit and the resident footprint', function () {
@@ -192,7 +217,7 @@ describe('buildMeshletLitChunks', function () {
         for (const options of [{}, textured]) {
             const chunks = buildMeshletLitChunks({ ...options, colors: true });
             const albedo = chunks.diffusePS.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-            expect(albedo).to.include('dAlbedo = dAlbedo * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));');
+            expect(albedo).to.include('rgb = rgb * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));');
             expect(chunks.litEngineMainStartVS).to.include('dMeshletColor = vec4f(1.0);');
             expect(chunks.litEngineMainStartVS).to.include('if (meshletHasColors)');
             expect(chunks.litEngineMainStartVS).to.include('dMeshletColor = meshletPageColor(meshletLayout, meshletVert);');

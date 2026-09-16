@@ -1,7 +1,8 @@
+import { Debug } from '../../../core/debug.js';
 import litForwardBackend from '../../shader-lib/wgsl/chunks/lit/frag/pass-forward/litForwardBackend.js';
 import {
-    MATERIAL_SLOT, MATERIAL_SLOT_ABSENT, MESHLET_MAX_UV_CHANNELS, MESHLET_TEX_NO_MINLOD, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
-    OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED
+    MATERIAL_FLAG_UNLIT, MATERIAL_SLOT, MATERIAL_SLOT_ABSENT, MESHLET_MAX_UV_CHANNELS, MESHLET_TEX_NO_MINLOD,
+    OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED
 } from '../constants.js';
 import {
     meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL, meshletDecodeTangentWGSL,
@@ -284,6 +285,12 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         varying @interpolate(flat) vMeshletPickId: u32;
         ${meshletMaterialTableWGSL}
 
+        // KHR_materials_unlit, per material record. The row is a flat varying, so the branches
+        // on this are uniform across each triangle.
+        fn meshletUnlit() -> bool {
+            return (materialTable[vMeshletMatRow].flags & ${MATERIAL_FLAG_UNLIT}u) != 0u;
+        }
+
         // One indirect draw covers every instance in the world, so the picker's per-mesh-instance
         // id uniform is meaningless here - the id has to travel with the geometry. PICK_CUSTOM_ID
         // (set on the bucket materials) suppresses that uniform so this takes over.
@@ -425,10 +432,18 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     // this fragment's material record
     const material = 'materialTable[vMeshletMatRow]';
 
+    // base colour: factor x texture x vertex colour. A lit record shades it as albedo; an unlit
+    // one emits it instead (emissivePS) and zeroes the albedo so the frontend contributes nothing
+    // else - the forward backend then returns before any lighting runs (see below)
     const diffusePS = /* wgsl */ `
+        fn meshletSurfaceRgb() -> vec3f {
+            var rgb = ${material}.baseColor.rgb * ${sample(MATERIAL_SLOT.BASE_COLOR, 'vec4f(1.0)')}.rgb;
+            ${col ? 'rgb = rgb * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));' : ''}
+            return rgb;
+        }
+
         fn getAlbedo() {
-            dAlbedo = ${material}.baseColor.rgb * ${sample(MATERIAL_SLOT.BASE_COLOR, 'vec4f(1.0)')}.rgb;
-            ${col ? 'dAlbedo = dAlbedo * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));' : ''}
+            dAlbedo = select(meshletSurfaceRgb(), vec3f(0.0), meshletUnlit());
             //${textures ? 'dMeshletTexDebugBase = dMeshletTexDebug;' : ''}
         }
     `;
@@ -454,9 +469,14 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         }
     `;
 
+    // an unlit record carries its colour here; the branch also spares it the emissive sample
     const emissivePS = /* wgsl */ `
         fn getEmission() {
-            dEmission = ${material}.emissive * ${material}.emissiveStrength * ${sample(MATERIAL_SLOT.EMISSIVE, 'vec4f(1.0)')}.rgb;
+            if (meshletUnlit()) {
+                dEmission = meshletSurfaceRgb();
+            } else {
+                dEmission = ${material}.emissive * ${material}.emissiveStrength * ${sample(MATERIAL_SLOT.EMISSIVE, 'vec4f(1.0)')}.rgb;
+            }
         }
     `;
 
@@ -532,8 +552,27 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     if (outputPS) {
         chunks.outputPS = outputPS;
     }
+    // Unlit early-out, hooked right after the backend declares its output: the surface colour
+    // already sits in litArgs_emission, so only fog / tonemap / gamma and the output chunks
+    // remain. Returning here skips ambient, IBL, the clustered light loop and reflections - on
+    // a skydome that is every fragment on screen.
+    const outputAnchor = /var output\s*:\s*FragmentOutput;/;
+    Debug.assert(outputAnchor.test(forwardBackend), 'meshlet lit chunks: the forward backend declares no FragmentOutput, unlit records will be shaded');
+    let backend = forwardBackend.replace(outputAnchor, `$&
+
+    if (meshletUnlit()) {
+        var meshletUnlitRgb = addFog(litArgs_emission);
+        meshletUnlitRgb = toneMap(meshletUnlitRgb);
+        meshletUnlitRgb = gammaCorrectOutput(meshletUnlitRgb);
+        output.color = vec4f(meshletUnlitRgb, 1.0);
+        #include "outputAlphaPS"
+        #include "outputPS"
+        #include "debugOutputPS"
+        #include "outlineOutputPS"
+        return output;
+    }`);
     if (lightmapped) {
-        chunks.litForwardBackendPS = forwardBackend.replace('#ifdef LIT_LIGHTMAP', `
+        backend = backend.replace('#ifdef LIT_LIGHTMAP', `
     if (meshletHasLightmap()) {
         dDiffuseLight = meshletLightmapIrradiance();
     }
@@ -546,6 +585,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         #endif
         #ifdef AREA_LIGHTS`);
     }
+    chunks.litForwardBackendPS = backend;
     return chunks;
 }
 
