@@ -7,7 +7,7 @@ import {
     MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
     MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COLOR_MODE, MESHLET_DATA,
     MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA, OBJECT_DATA_U32S,
-    OBJECT_FLAG_HIDDEN, OBJECT_FLAG_OUTLINED, PAGE_TABLE, PAGE_TABLE_FIELDS
+    OBJECT_FLAG_HIDDEN, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletPrimitive, MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
 import { MeshletWorld } from '../../../src/scene/meshlet/meshlet-world.js';
@@ -267,6 +267,61 @@ describe('MeshletWorld', function () {
             build(world, makeResource(device, { instances: 4 }));
             expect(world.pagePoolBytes, 'min(pages, 64) pages').to.be.above(0);
             expect(world.budgetBreakdown.pagePool + world.budgetBreakdown.indices).to.equal(2 * PAGE_BYTES);
+            world.destroy();
+        });
+    });
+
+    describe('page pool adoption', function () {
+
+        // a streamed world of `instances` placements over the two-page resource, with a carried
+        // pool of `carriedSlots` slots and a residency that pinned page 0 to its last slot
+        const setup = (carriedSlots, poolBytes = 0) => {
+            const world = new MeshletWorld(device);
+            world.poolBytes = poolBytes;
+            const copies = [];
+            device.wgpu = {
+                createCommandEncoder: () => ({ copyBufferToBuffer(src, so, dst, doff, size) {
+                    copies.push(size);
+                },
+                finish() {
+                    return {};
+                } }),
+                queue: { submit() {} }
+            };
+            const carried = { byteSize: carriedSlots * PAGE_BYTES,
+                impl: { buffer: {} },
+                destroyed: false,
+                destroy() {
+                    this.destroyed = true;
+                } };
+            world.adoptPagePool = carried;
+            world.adoptResidency = new Uint32Array([carriedSlots - 1, PAGE_NOT_RESIDENT]);
+            world.adoptedPages = 2;
+            const { resource } = makeResource(device, { instances: 2 });
+            world.addStreamedResource(resource, null, 'x/');
+            world.finalize();
+            return { world, carried, copies };
+        };
+
+        it('copies a carried pool the scene outgrew into the larger new pool, keeping residency', function () {
+            const { world, carried, copies } = setup(1);
+            expect(world.poolSlots).to.equal(2);
+            expect(copies, 'one copy of the old pool bytes').to.deep.equal([PAGE_BYTES]);
+            expect(carried.destroyed).to.equal(true);
+            expect(Array.from(world.residency), 'page 0 keeps its slot').to.deep.equal([0, PAGE_NOT_RESIDENT]);
+            world.destroy();
+        });
+
+        it('starts cold instead of copying a carried pool the new pool cannot hold', function () {
+            // a budget of a few bytes resolves to the minimum pool (min(pages, 64) pages less the
+            // index share = one slot); the carried pool has 4, as a budget cut leaves behind
+            const { world, carried, copies } = setup(4, 64);
+            expect(world.poolSlots).to.equal(1);
+            expect(copies, 'nothing is copied into a smaller buffer').to.deep.equal([]);
+            expect(carried.destroyed).to.equal(true);
+            expect(world.adoptedPages).to.equal(0);
+            expect(Array.from(world.residency), 'every page re-streams').to.deep.equal([PAGE_NOT_RESIDENT, PAGE_NOT_RESIDENT]);
+            expect(world.pagePool.byteSize).to.equal(PAGE_BYTES);
             world.destroy();
         });
     });

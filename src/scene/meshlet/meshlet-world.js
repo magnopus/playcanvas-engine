@@ -631,7 +631,7 @@ class MeshletWorld {
             this.pagePool = this.adoptPagePool;
             poolSlots = this.adoptPagePool.byteSize / this.pageSizeBytes;
             this.poolSlots = poolSlots;
-        } else if (this.adoptPagePool) {
+        } else if (this.adoptPagePool && this.adoptPagePool.byteSize < poolByteSize) {
             // the scene outgrew the carried pool (its slot count tracks the page count until the
             // budget caps it): allocate the larger pool and copy the old slots across on the
             // queue, ordered before any install that follows, so every resident page stays
@@ -643,6 +643,9 @@ class MeshletWorld {
             wgpu.queue.submit([encoder.finish()]);
             this.adoptPagePool.destroy();
         } else {
+            // no pool to carry, or one the new pool cannot hold (a budget cut, or a pool more
+            // than twice what the scene wants): its slots would not fit and their residency
+            // would point past the new pool, so streaming starts cold from the roots
             this.adoptPagePool?.destroy();
             this.adoptResidency = null;
             this.adoptedPages = 0;
