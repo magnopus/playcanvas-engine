@@ -25,7 +25,7 @@ let _jobId = 0;
  *
  * @typedef {(device: import('../../../platform/graphics/graphics-device.js').GraphicsDevice,
  *   url: string, data: ArrayBuffer, callback: (err: string|null, result: object|null) => void,
- *   options: { isKTX2: boolean }) => boolean} MeshletTranscodeFn
+ *   options: { isKTX2: boolean, isTextureArray?: boolean }) => boolean} MeshletTranscodeFn
  */
 
 /**
@@ -52,7 +52,7 @@ function transcodeKtx2(transcode, device, bytes) {
             } else {
                 resolve(result);
             }
-        }, { isKTX2: true });
+        }, { isKTX2: true, isTextureArray: true });
         if (!found) {
             reject(new Error('MeshletKtx2: Basis module not initialized - call basisInitialize() before loading textured meshlet assets.'));
         }

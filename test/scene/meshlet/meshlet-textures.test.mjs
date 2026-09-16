@@ -1,5 +1,6 @@
 import { expect } from 'chai';
 
+import { PIXELFORMAT_RGBA8 } from '../../../src/platform/graphics/constants.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { MESHLET_TEX_NO_MINLOD } from '../../../src/scene/meshlet/constants.js';
 import { MeshletTextures } from '../../../src/scene/meshlet/textures/meshlet-textures.js';
@@ -248,4 +249,89 @@ describe('MeshletTextures', function () {
             textures.destroy();
         });
     });
+    describe('appendFinalize', function () {
+
+        // one 1024px srgb texture whose family already created its fine pool for that single
+        // texture (one slot, held), then a resource of three more appended after finalize
+        const setup = (maxTextureArrayLayers = 256) => {
+            const textures = new MeshletTextures(device);
+            textures.addResource({ arrays: [makeArray('srgb_0', 1024, 1, 2)] }, 'x');
+            textures.finalize();
+            const fam = textures.families[0];
+            const oldFine = { name: 'MeshletFine-srgb',
+                format: PIXELFORMAT_RGBA8,
+                arrayLength: 1,
+                impl: { gpuTexture: {} },
+                destroyed: false,
+                destroy() {
+                    this.destroyed = true;
+                } };
+            fam.fine = oldFine;
+            fam.slotCount = 1;
+            fam.slotBytes = 1000;
+            fam.slotTex = new Int32Array([0]);
+            fam.slotLastUsed = new Uint32Array([7]);
+            fam.freeSlots = [];
+            textures.textures[0].slot = 0;
+            textures.textures[0].fineMask = 0b11;
+            textures.residencyCpu[0] = 0;
+            const copies = [];
+            device.wgpu = {
+                limits: { maxTextureArrayLayers },
+                createCommandEncoder: () => ({ copyTextureToTexture(src, dst, extent) {
+                    copies.push(extent);
+                },
+                finish() {
+                    return {};
+                } }),
+                queue: { submit() {} }
+            };
+            const ready = [];
+            textures.onFamilyTexturesReady = (family, tail, fine) => ready.push({ family, fine });
+            return { textures, fam, oldFine, copies, ready };
+        };
+
+        it('regrows the fine pool for the appended demand, keeping the held slot in place', function () {
+            const { textures, fam, oldFine, copies, ready } = setup();
+            expect(textures.canAppend({ arrays: [makeArray('srgb_1', 1024, 3, 2)] })).to.equal(true);
+            textures.appendResource({ arrays: [makeArray('srgb_1', 1024, 3, 2)] }, 'y');
+            expect(fam.fineDemandTex).to.equal(4);
+            textures.appendFinalize();
+
+            expect(fam.slotCount, 'one slot per fine-demanding texture within the budget').to.equal(4);
+            expect(fam.fine).to.not.equal(oldFine);
+            expect(fam.fine.arrayLength ?? fam.fine._arrayLength ?? fam.fine.impl?.arrayLength ?? 4).to.equal(4);
+            expect(oldFine.destroyed).to.equal(true);
+            expect(copies.length, 'the above-tail levels of every old layer were copied').to.equal(fam.slotLevels);
+            expect(copies[0].depthOrArrayLayers).to.equal(1);
+            expect(Array.from(fam.slotTex), 'the holder keeps slot 0').to.deep.equal([0, -1, -1, -1]);
+            expect(Array.from(fam.slotLastUsed)).to.deep.equal([7, 0, 0, 0]);
+            expect(fam.freeSlots, 'only the new slots are free').to.deep.equal([3, 2, 1]);
+            expect(textures.textures[0].slot).to.equal(0);
+            expect(textures.textures[0].fineMask, 'resident fine mips survive the regrow').to.equal(0b11);
+            expect(ready.map(r => r.family)).to.deep.equal([0]);
+            expect(ready[0].fine).to.equal(fam.fine);
+            textures.destroy();
+        });
+
+        it('leaves the pool alone when the appended textures add no fine demand', function () {
+            const { textures, fam, oldFine } = setup();
+            // 256px textures with a 256px tail have nothing above the tail
+            textures.appendResource({ arrays: [makeArray('srgb_1', 256, 2, 0)] }, 'y');
+            textures.appendFinalize();
+            expect(fam.slotCount).to.equal(1);
+            expect(fam.fine).to.equal(oldFine);
+            textures.destroy();
+        });
+
+        it('caps the pool at the device array-layer limit', function () {
+            const { textures, fam } = setup(2);
+            textures.appendResource({ arrays: [makeArray('srgb_1', 1024, 3, 2)] }, 'y');
+            textures.appendFinalize();
+            expect(fam.slotCount).to.equal(2);
+            expect(fam.freeSlots).to.deep.equal([1]);
+            textures.destroy();
+        });
+    });
+
 });
