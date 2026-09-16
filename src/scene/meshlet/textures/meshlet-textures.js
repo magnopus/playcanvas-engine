@@ -362,6 +362,9 @@ class MeshletTextures {
         for (let f = 0; f < this.families.length; f++) {
             const fam = this.families[f];
             if (fam.tail && fam.layerCount > fam.tail.arrayLength) this._growTail(f);
+            // the fine pool was sized for the demand at its creation; the appended textures
+            // raised it (a family created before their tails land sizes itself for them)
+            if (fam.fine && this._fineSlotCount(fam) > fam.slotCount) this._growFine(f);
         }
         this._loadTails();
     }
@@ -436,6 +439,78 @@ class MeshletTextures {
         old.destroy();
         info.tail = tail;
         this.onFamilyTexturesReady?.(family, tail, info.fine);
+    }
+
+    /**
+     * Fine slots a family is entitled to right now: its demand-weighted share of the fine
+     * pool bytes, never more slots than textures that can use one, capped by the largest
+     * array one GPU resource may be and by the device's array-layer limit. Re-derived when
+     * the pool is created and whenever appended resources raise the demand.
+     *
+     * @param {object} info - The family.
+     * @returns {number} The slot count, at least 1.
+     * @private
+     */
+    _fineSlotCount(info) {
+        const totalDemand = this.families.reduce((n, f) => n + f.fineDemandTex, 0);
+        const share = this.finePoolBytes * (info.fineDemandTex / Math.max(totalDemand, 1));
+        const maxLayers = this.device.wgpu?.limits?.maxTextureArrayLayers ?? 256;
+        return Math.max(Math.min(Math.floor(share / info.slotBytes), info.fineDemandTex, Math.floor(MAX_FINE_TEXTURE_BYTES / info.slotBytes), maxLayers), 1);
+    }
+
+    /**
+     * Regrows a family's fine slot pool to its current entitlement, keeping every resident
+     * slot: the occupied layers are copied GPU-side into the larger array at the same slot
+     * index, so texture residency words, in-flight fetches (they upload by slot index into
+     * whatever `fine` is when they land) and the LRU state all carry over unchanged. Only the
+     * new slots join the free list.
+     *
+     * @param {number} family - Family index.
+     * @private
+     */
+    _growFine(family) {
+        const info = this.families[family];
+        const old = info.fine;
+        const slotCount = this._fineSlotCount(info);
+        if (!old || slotCount <= info.slotCount) return;
+        const fine = new Texture(this.device, {
+            name: old.name,
+            width: info.slotSize,
+            height: info.slotSize,
+            arrayLength: slotCount,
+            format: old.format,
+            srgb: FAMILY_IS_SRGB[family],
+            mipmaps: true,
+            addressU: ADDRESS_REPEAT,
+            addressV: ADDRESS_REPEAT,
+            minFilter: FILTER_LINEAR_MIPMAP_LINEAR,
+            magFilter: FILTER_LINEAR
+        });
+        const wgpu = this.device.wgpu;
+        const encoder = wgpu.createCommandEncoder();
+        // only the above-tail levels are ever written; copies cover whole blocks (see _growTail)
+        const block = isCompressedPixelFormat(old.format) ? 4 : 1;
+        for (let level = 0; level < info.slotLevels; level++) {
+            const size = Math.ceil(Math.max(info.slotSize >> level, 1) / block) * block;
+            encoder.copyTextureToTexture(
+                { texture: old.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
+                { texture: fine.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
+                { width: size, height: size, depthOrArrayLayers: old.arrayLength }
+            );
+        }
+        wgpu.queue.submit([encoder.finish()]);
+
+        const slotTex = new Int32Array(slotCount).fill(-1);
+        slotTex.set(info.slotTex);
+        const slotLastUsed = new Uint32Array(slotCount);
+        slotLastUsed.set(info.slotLastUsed);
+        for (let s = slotCount - 1; s >= info.slotCount; s--) info.freeSlots.push(s);
+        info.slotTex = slotTex;
+        info.slotLastUsed = slotLastUsed;
+        info.slotCount = slotCount;
+        old.destroy();
+        info.fine = fine;
+        this.onFamilyTexturesReady?.(family, info.tail, fine);
     }
 
     /**
@@ -779,10 +854,8 @@ class MeshletTextures {
                 const size = info.slotSize >> l;
                 slotBytes += TextureUtils.calcLevelGpuSize(size, size, 1, format);
             }
-            const totalDemand = this.families.reduce((n, f) => n + f.fineDemandTex, 0);
-            const share = this.finePoolBytes * (info.fineDemandTex / Math.max(totalDemand, 1));
-            info.slotCount = Math.max(Math.min(Math.floor(share / slotBytes), info.fineDemandTex, Math.floor(MAX_FINE_TEXTURE_BYTES / slotBytes)), 1);
             info.slotBytes = slotBytes;
+            info.slotCount = this._fineSlotCount(info);
             info.slotTex = new Int32Array(info.slotCount).fill(-1);
             info.slotLastUsed = new Uint32Array(info.slotCount);
             for (let s = info.slotCount - 1; s >= 0; s--) info.freeSlots.push(s);
