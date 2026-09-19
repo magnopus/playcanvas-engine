@@ -57,7 +57,8 @@ export const MESHLET_DATA = {
     GROUP_SPHERE: 24,   // 4 f32: sharedSiblingsBounds
     PARENT: 28,
     FLAGS: 29,
-    UV_EXTENT: 30
+    UV_EXTENT: 30,
+    BIRTH_GROUP: 31     // runtime only: local replacement representative, stamped over reserved
 };
 
 /**

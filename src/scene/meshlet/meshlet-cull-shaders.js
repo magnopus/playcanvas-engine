@@ -1,3 +1,4 @@
+import { meshletCutWGSL } from './shaders/meshlet-cut-wgsl.js';
 import { PIXELFORMAT_R32F, SHADERLANGUAGE_WGSL } from '../../platform/graphics/constants.js';
 import { Shader } from '../../platform/graphics/shader.js';
 import { Texture } from '../../platform/graphics/texture.js';
@@ -29,6 +30,7 @@ class MeshletCullShaders {
             cshader: code
         });
 
+        this.cut = make('Cut', meshletCutWGSL);
         this.instanceCull = make('InstanceCull', instanceCullWGSL);
         this.dispatchArgs = make('DispatchArgs', dispatchArgsWGSL);
         this.meshletCull = make('MeshletCull', meshletCullWGSL);
@@ -43,6 +45,7 @@ class MeshletCullShaders {
     }
 
     destroy() {
+        this.cut?.destroy();
         this.instanceCull?.destroy();
         this.dispatchArgs?.destroy();
         this.meshletCull?.destroy();

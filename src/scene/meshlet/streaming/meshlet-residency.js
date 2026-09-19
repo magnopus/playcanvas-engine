@@ -1,6 +1,6 @@
 import { Debug } from '../../../core/debug.js';
 import { WebgpuReadbackPool } from '../../../platform/graphics/webgpu/webgpu-readback-pool.js';
-import { PAGE_FLAG_ROOT, PAGE_NOT_RESIDENT, PAGE_REQUEST, PAGE_TABLE, PAGE_TABLE_FIELDS } from '../constants.js';
+import { PAGE_NOT_RESIDENT, PAGE_REQUEST } from '../constants.js';
 import { MeshletPageFetcher } from './meshlet-page-fetcher.js';
 
 /**
@@ -19,8 +19,8 @@ export const MAX_IN_FLIGHT_RUNS = 8;
  * Streaming residency for a meshlet world: reads back the GPU's per-frame page request marks
  * (one to two frames latent), coalesces missing pages into HTTP Range runs, uploads arrived
  * pages into free or LRU-evicted pool slots and maintains the page-to-slot residency map. Root
- * pages are fetched eagerly and pinned, so the cull shader's ancestor fallback always
- * terminates on a resident cluster.
+ * pages are requested and pinned only for active instances, providing the complete coarse
+ * cut from which the GPU commits resident refinement groups.
  *
  * @ignore
  */
@@ -77,6 +77,7 @@ class MeshletResidency {
 
     _residencyDirty = false;
 
+    /** @type {boolean} - demand streaming initialized; individual coarse pages may still be absent. */
     rootsResident = false;
 
     // stats
@@ -110,6 +111,8 @@ class MeshletResidency {
         this.maxInstallBytesPerFrame = world.maxInstallBytesPerFrame ?? this.maxInstallBytesPerFrame;
         this.device = device;
         this.world = world;
+        this._rootWanted = new Uint8Array(world.totalPages);
+        this._compareRequests = (a, b) => this._rootWanted[b] - this._rootWanted[a];
         this.readbackPool = new WebgpuReadbackPool(device);
 
         const slots = world.poolSlots;
@@ -174,42 +177,24 @@ class MeshletResidency {
     }
 
     /**
-     * Fetches every root page (blob 0 of each resource) and pins it. Resolves when the coarse
-     * fallback set is resident and the world can render. A stream whose roots fail to load
-     * (unreachable shard, unresolvable URL) is reported and left non-resident - its instances
-     * draw nothing - rather than holding up streaming for every other resource.
-     *
-     * @returns {Promise<void>} Resolves when roots are resident.
+     * Starts demand streaming. Coarse pages are requested by active views, rather than
+     * downloading and permanently pinning every resource's entire root shard.
+     * @returns {Promise<void>} Resolves when request processing is enabled.
      */
-    async loadRoots() {
-        const results = await Promise.allSettled(this._streams.map(async (stream) => {
-            const manifest = stream.resource.manifest;
-            // carried across a rebuild: skip streams whose roots are all still resident
-            const world = this.world;
-            if (manifest.rootPages.every(p => world.residency[stream.pageBase + p] !== PAGE_NOT_RESIDENT)) {
-                return;
-            }
-            const bytes = await stream.fetcher.fetchBlob(0);
-            if (!bytes) return; // scheduler cleared (director destroyed)
-            const table = manifest.pageTable;
-            for (const localPage of manifest.rootPages) {
-                const entry = localPage * PAGE_TABLE_FIELDS;
-                Debug.assert(table[entry + PAGE_TABLE.BLOB] === 0 && (table[entry + PAGE_TABLE.FLAGS] & PAGE_FLAG_ROOT),
-                    'MeshletResidency: manifest rootPages entry is not in the roots blob');
-                const offset = table[entry + PAGE_TABLE.OFFSET_HI] * 0x100000000 + table[entry + PAGE_TABLE.OFFSET_LO];
-                this._installPage(stream.pageBase + localPage, new Uint32Array(bytes, offset, manifest.pageSizeBytes / 4), true);
-            }
-        }));
-        if (this._destroyed) return;
-        results.forEach((result, i) => {
-            if (result.status === 'rejected') {
-                // reported in every build: the resource renders nothing until this is fixed
-                console.error(`MeshletResidency: root pages failed to load for ${this._streams[i].resource.manifest.blobs[0]?.uri ?? 'a resource'}: ${result.reason?.message ?? result.reason}`);
-                this._streams[i].dead = true;
-            }
-        });
-        this._flushResidency();
+    loadRoots() {
         this.rootsResident = true;
+        return Promise.resolve();
+    }
+
+    _refreshRootPins() {
+        if (!this.world.rootSelections) return;
+        this._rootWanted.fill(0);
+        for (const selection of this.world.rootSelections) {
+            for (let p = 0; p < this._rootWanted.length; p++) this._rootWanted[p] |= selection.pages[p];
+        }
+        for (let s = 0; s < this.slotPage.length; s++) {
+            this.slotPinned[s] = this._rootWanted[this.slotPage[s]] ?? 0;
+        }
     }
 
     _allocSlot(protectedSet) {
@@ -243,6 +228,7 @@ class MeshletResidency {
         if (this._destroyed) return;
         const world = this.world;
         if (world.residency[globalPage] !== PAGE_NOT_RESIDENT) {
+            if (pinned) this.slotPinned[world.residency[globalPage]] = 1;
             return; // already resident (double fetch)
         }
         const slot = this._allocSlot(this._protected);
@@ -254,7 +240,7 @@ class MeshletResidency {
         world.residency[globalPage] = slot;
         world.contentVersion++;
         this.slotPage[slot] = globalPage;
-        this.slotPinned[slot] = pinned ? 1 : 0;
+        this.slotPinned[slot] = pinned || this._rootWanted[globalPage] ? 1 : 0;
         this.slotLastUsed[slot] = this.frame;
         this.residentPages++;
         if (!pinned) this.fetchedPages++;
@@ -351,6 +337,7 @@ class MeshletResidency {
         this.frame++;
         const world = this.world;
 
+        this._refreshRootPins();
         this._drainArrived();
         this._flushResidency();
 
@@ -415,18 +402,17 @@ class MeshletResidency {
         // PAGE_REQUEST.USED = resident page the GPU used this frame (touch + protect),
         // PAGE_REQUEST.MISSING = missing page the cut wanted (fetch candidate)
         const missing = [];
-        let usedResident = 0;
         const streams = this._streams;
         let si = 0; // streams are ordered by pageBase, pages ascend: one pass tracks the stream
         for (let p = 0; p < world.totalPages; p++) {
-            const mark = marks[p];
+            const mark = this._rootWanted[p] ?
+                (world.residency[p] === PAGE_NOT_RESIDENT ? PAGE_REQUEST.MISSING : PAGE_REQUEST.USED) : marks[p];
             if (mark === PAGE_REQUEST.NONE) continue;
             wanted.add(p);
             if (mark === PAGE_REQUEST.USED) {
                 const slot = world.residency[p];
                 if (slot !== PAGE_NOT_RESIDENT) {
                     this.slotLastUsed[slot] = this.frame;
-                    usedResident++;
                 }
             } else if (world.residency[p] === PAGE_NOT_RESIDENT && !this.inFlight.has(p)) {
                 // in flight = queued, being fetched, or arrived and awaiting install: the GPU may
@@ -439,13 +425,16 @@ class MeshletResidency {
         }
         this._protected = wanted;
         this.lastMissingWanted = missing.length;
+        missing.sort(this._compareRequests);
 
         // only fetch what can actually be installed: free slots plus cold (unpinned, unused)
         // slots. Fetching beyond that would evict hot pages or be dropped on arrival - the
         // starved-pool steady state is the coarser ancestor fallback, not fetch churn.
-        let pinnedCount = 0;
-        for (let s = 0; s < this.slotPinned.length; s++) pinnedCount += this.slotPinned[s];
-        const evictable = Math.max(this.slotPage.length - pinnedCount - usedResident, 0);
+        let evictable = 0;
+        for (let s = 0; s < this.slotPage.length; s++) {
+            const page = this.slotPage[s];
+            if (page !== PAGE_NOT_RESIDENT && !this.slotPinned[s] && !wanted.has(page)) evictable++;
+        }
         const budget = Math.max(this.freeSlots.length + evictable - this.inFlight.size, 0);
         for (let i = 0; i < Math.min(missing.length, budget); i++) {
             this.inFlight.add(missing[i]);

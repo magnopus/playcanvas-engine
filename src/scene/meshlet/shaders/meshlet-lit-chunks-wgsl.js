@@ -434,7 +434,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
 
     // base colour: factor x texture x vertex colour. A lit record shades it as albedo; an unlit
     // one emits it instead (emissivePS) and zeroes the albedo so the frontend contributes nothing
-    // else - the forward backend then returns before any lighting runs (see below)
+    // else - the forward backend selects the unlit output after lighting (see below)
     const diffusePS = /* wgsl */ `
         fn meshletSurfaceRgb() -> vec3f {
             var rgb = ${material}.baseColor.rgb * ${sample(MATERIAL_SLOT.BASE_COLOR, 'vec4f(1.0)')}.rgb;
@@ -552,24 +552,19 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     if (outputPS) {
         chunks.outputPS = outputPS;
     }
-    // Unlit early-out, hooked right after the backend declares its output: the surface colour
-    // already sits in litArgs_emission, so only fog / tonemap / gamma and the output chunks
-    // remain. Returning here skips ambient, IBL, the clustered light loop and reflections - on
-    // a skydome that is every fragment on screen.
-    const outputAnchor = /var output\s*:\s*FragmentOutput;/;
-    Debug.assert(outputAnchor.test(forwardBackend), 'meshlet lit chunks: the forward backend declares no FragmentOutput, unlit records will be shaded');
+    // Lit and unlit records share an indirect draw. A material-dependent early return makes
+    // later reflection derivatives and implicit texture samples non-uniform, which WGSL
+    // rejects. Let the backend reconverge and select the unlit colour before the common output
+    // processing; alpha, scene depth and application output chunks still run for both kinds.
+    const outputAnchor = /#include\s+"endPS"/;
+    Debug.assert(outputAnchor.test(forwardBackend), 'meshlet lit chunks: the forward backend has no endPS hook, unlit records will be shaded');
     let backend = forwardBackend.replace(outputAnchor, `$&
 
     if (meshletUnlit()) {
         var meshletUnlitRgb = addFog(litArgs_emission);
         meshletUnlitRgb = toneMap(meshletUnlitRgb);
         meshletUnlitRgb = gammaCorrectOutput(meshletUnlitRgb);
-        output.color = vec4f(meshletUnlitRgb, 1.0);
-        #include "outputAlphaPS"
-        #include "outputPS"
-        #include "debugOutputPS"
-        #include "outlineOutputPS"
-        return output;
+        output.color = vec4f(meshletUnlitRgb, output.color.a);
     }`);
     if (lightmapped) {
         backend = backend.replace('#ifdef LIT_LIGHTMAP', `

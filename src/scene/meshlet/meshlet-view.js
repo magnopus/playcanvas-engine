@@ -12,6 +12,7 @@ import { GraphNode } from '../graph-node.js';
 import { Mesh } from '../mesh.js';
 import { MeshInstance } from '../mesh-instance.js';
 import { FramePassMeshletCompute } from './frame-pass-meshlet-compute.js';
+import { MeshletRootSelection } from './meshlet-root-selection.js';
 import { MeshletCuller } from './meshlet-culler.js';
 import { RenderPassMeshletDraw } from './render-pass-meshlet-draw.js';
 
@@ -85,9 +86,10 @@ class MeshletView {
     _pendingDemand = null;
 
     /**
-     * Last unclamped demand read back from the counters - what the cull WANTED, before any
-     * capacity clamp. Kept after {@link applyPendingGrowth} consumes _pendingDemand, as the
-     * pipeline's numeric oracle: a view reporting zero emitted nothing.
+     * Last capacity demand of the complete selected cut plus attempted refinements, before
+     * visibility culling. Kept after {@link applyPendingGrowth} consumes _pendingDemand.
+     * Actual draw counts are reported separately by {@link renderedMeshlets}; occlusion can
+     * suppress drawing without reducing the capacity needed to select the same LOD next frame.
      *
      * @type {{ indices: number[], records: number }|null}
      */
@@ -119,8 +121,8 @@ class MeshletView {
     shrinkAt = 0.35;
 
     /**
-     * Consecutive frames demand must stay under {@link shrinkAt} before shrinking. Growth is
-     * urgent - a clamped frame is a visible glitch - but shrinking never is, so it waits long
+     * Consecutive frames demand must stay under {@link shrinkAt} before shrinking. Growth lets the cut refine
+     * sooner, while shrinking waits long
      * enough that a camera turning away from the dense part of a scene does not cost a
      * reallocation it will immediately undo.
      *
@@ -186,11 +188,12 @@ class MeshletView {
         this.world = world;
         this.cameraComponent = cameraComponent;
         this.singlePhase = singlePhase;
+        this.rootSelection = world.cut.instanceRoots ? new MeshletRootSelection(world) : null;
 
         // one bit per instance-meshlet pair, 32 to a word; a few words minimum so tiny scenes
         // still get a real buffer
-        const pairWords = Math.max(Math.ceil(world.totalPairs / 32), 4);
-        this.cullParamsBuffer = new StorageBuffer(device, CULL_PARAMS_VEC4S * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
+        const pairWords = Math.max(Math.ceil((world.totalPairs + world.instanceCount) / 32), 4);
+        this.cullParamsBuffer = new StorageBuffer(device, (CULL_PARAMS_VEC4S + (this.rootSelection ? Math.ceil(world.instanceCount / 4) : 0)) * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
         this.countersBuffer = new StorageBuffer(device, MESHLET_COUNTER_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
         // demand readbacks go through a pooled staging buffer, the same way the residency's
         // request-marks readback does, rather than allocating a staging buffer per read
@@ -207,6 +210,8 @@ class MeshletView {
         // LOD cut emits a few hundred thousand. counters[MESHLET_COUNTER.RECORDS] counts unclamped
         // demand, so the buffer starts small and grows to what frames actually ask for.
         this.recordCapacity = Math.min(world.recordCapacity, world.initialRecords || world.recordCapacity);
+        this.cutBudgetBuffer = new StorageBuffer(device, 20, BUFFERUSAGE_COPY_DST);
+        this.cutBudgetInitial = new Uint32Array(5);
         // persistent visibility bits for two-phase occlusion (never cleared - phase 2 maintains
         // them); carried across a rebuild for the unchanged-placement prefix, or the first
         // phase-2 pass re-discovers the whole frustum and its page-demand burst evicts the hot
@@ -294,6 +299,7 @@ class MeshletView {
     }
 
     destroy() {
+        this.rootSelection?.destroy();
         this.culler?.destroy();
         this.culler = null;
         this.hzb?.destroy();
@@ -301,6 +307,7 @@ class MeshletView {
         this.readbackPool?.destroy();
         this.cullParamsBuffer?.destroy();
         this.countersBuffer?.destroy();
+        this.cutBudgetBuffer?.destroy();
         if (this._ownsWorkItems) {
             this.workItemsBuffer?.destroy();
         }
@@ -347,11 +354,10 @@ class MeshletView {
      */
     _clampToCeiling(capacity) {
         const ceiling = this.indexShare > 0 ? this.indexShare : this.world.indexCeiling;
-        const total = capacity.reduce((a, b) => a + b, 0);
-        if (!(total > ceiling)) return false;
-        const s = ceiling / total;
-        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) capacity[b] = Math.floor(capacity[b] * s);
-        Debug.warnOnce(`MeshletView: index demand (${total}) exceeds the ${ceiling}-index ceiling; the cut will be clamped. Lower dagPixelThreshold pressure or set world.maxIndices.`);
+        const total = capacity[0] + capacity[1] + capacity[2];
+        if (total <= ceiling) return false;
+        const scale = ceiling / Math.max(total, 1);
+        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) capacity[b] = Math.floor(capacity[b] * scale);
         return true;
     }
 
@@ -370,10 +376,9 @@ class MeshletView {
     }
 
     /**
-     * This view's index demand as a fraction of what its budget can ever hold. Above 1 the cull
-     * clamps, and the clusters that survive are decided by an atomicAdd race - so they differ
-     * every frame, which is seen as wild flicker. The caller feeds this to the budget manager,
-     * which coarsens the DAG cut before it gets there.
+     * This view's index demand as a fraction of its budget. Rejected refinements contribute
+     * to demand while the complete coarse replacement remains visible. The budget manager
+     * adjusts the error threshold to reduce repeated capacity-limited refinement attempts.
      *
      * @returns {number} Demand / ceiling, or 0 when unbudgeted.
      */
@@ -440,9 +445,7 @@ class MeshletView {
         try {
             this._allocIndexBuffer();
         } catch (e) {
-            // out of memory despite the ceiling. Keep the buffer we have - a clamped cut is a
-            // visual glitch, whereas throwing here aborts the frame mid-encode and every pass
-            // after it fails validation
+            // Keep the previous allocation and its complete coarse cut if growth fails.
             Debug.error(`MeshletView: index buffer allocation failed at ${this.indexTotal()} indices; keeping the previous allocation.`, e);
             this.indexCapacity = previous;
             this.indexBuffer = old;
@@ -501,8 +504,8 @@ class MeshletView {
     }
 
     /**
-     * Reads back this view's unclamped index-demand counters (end-of-frame copy) and grows the
-     * index buffer when a frame wanted more than the current allocation.
+     * Reads back this view's cut-capacity demand (end-of-frame copy) and schedules growth when
+     * selection wanted more than the current allocation, independently of visibility culling.
      */
     monitorIndexDemand() {
         if (this._countersReadBusy) return;
@@ -516,8 +519,15 @@ class MeshletView {
             // never-written one - which rasterises garbage indices as stretched degenerate
             // triangles. {@link applyPendingGrowth} does the swap before anything is encoded.
             const indices = [];
-            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) indices.push(data[MESHLET_COUNTER.DEMAND_BASE + b]);
-            this._pendingDemand = { indices, records: data[MESHLET_COUNTER.RECORD_DEMAND] };
+            // CPU admission can defer every instance before the GPU sees it. Preserve that
+            // coarse demand so an initially small buffer can grow within its budget.
+            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
+                indices.push(Math.max(data[MESHLET_COUNTER.DEMAND_BASE + b], this.rootSelection?.requestedByBucket[b] ?? 0));
+            }
+            this._pendingDemand = {
+                indices,
+                records: Math.max(data[MESHLET_COUNTER.RECORD_DEMAND], this.rootSelection?.recordDemand ?? 0)
+            };
             this.lastDemand = this._pendingDemand;
             this.renderedMeshlets = data[MESHLET_COUNTER.RENDERED];
         }).catch(() => {

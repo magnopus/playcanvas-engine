@@ -27,8 +27,7 @@ import { OBJECT_FLAG_NO_SHADOW, CULL_FLAG_SHADOW_VIEW,
     MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE,
     MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP,
     MESHLET_INSTANCE_CULL_WORKGROUP, MESHLET_NO_PARENT, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HIDDEN,
-    PAGE_NOT_RESIDENT, PAGE_REQUEST, TEXEL_RATE_PER_MIP
-} from '../constants.js';
+    PAGE_REQUEST, TEXEL_RATE_PER_MIP } from '../constants.js';
 import {
     meshletDataWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL,
     meshletWorkItemsWGSL
@@ -42,18 +41,24 @@ export const instanceCullWGSL = /* wgsl */ `
     ${meshletStructsWGSL}
 
     uniform instanceCount : u32;
+    uniform totalPairs : u32;
     uniform workItemCapacity : u32;
 
     ${meshletObjectDataWGSL}
     ${meshletWorkItemsWGSL('read_write')}
 
     var<storage, read> cullParams : array<vec4f>;
+    var<storage, read> admittedBits : array<u32>;
     var<storage, read_write> counters : array<atomic<u32>>;
 
     @compute @workgroup_size(${MESHLET_INSTANCE_CULL_WORKGROUP})
     fn main(@builtin(global_invocation_id) gid : vec3u) {
         let instance = gid.x;
         if (instance >= uniform.instanceCount) {
+            return;
+        }
+        let admission = uniform.totalPairs + instance;
+        if ((admittedBits[admission >> 5u] & (1u << (admission & 31u))) == 0u) {
             return;
         }
         if ((objectData[instance].flags & ${OBJECT_FLAG_HIDDEN}u) != 0u) {
@@ -112,7 +117,7 @@ export const dispatchArgsWGSL = /* wgsl */ `
 
 /**
  * Meshlet culling: one workgroup per work item, one thread per meshlet in the slice. Frustum
- * sphere, DAG LOD cut (crack-free via group-shared bounds), cone backface. Survivors reserve an
+ * sphere, membership in the preselected resident cut, cone backface. Survivors reserve an
  * index range in their bucket and append a record.
  */
 export const meshletCullWGSL = /* wgsl */ `
@@ -123,6 +128,7 @@ export const meshletCullWGSL = /* wgsl */ `
     uniform indexCapacity0 : u32;
     uniform indexCapacity1 : u32;
     uniform indexCapacity2 : u32;
+    uniform totalPairs : u32;
     uniform phase : u32; // 0 = single-phase (no occlusion), 1 = draw prev-visible, 2 = newly-visible vs HZB
 
     // the buckets are contiguous ranges of one index buffer, in bucket order
@@ -154,25 +160,6 @@ export const meshletCullWGSL = /* wgsl */ `
     var<storage, read_write> claimBits : array<atomic<u32>>;
     var<storage, read_write> visBits : array<atomic<u32>>;
     var hzbTexture : texture_2d<f32>;
-
-    // Projected screen-space error in pixels of an error value over a bounding sphere.
-    //
-    // Under an orthographic projection there is no foreshortening, so the projected size is
-    // distance-independent and the whole cut degenerates to a plain error threshold scaled by
-    // the light-space texel rate. This branch is mandatory for shadow cascades, not an
-    // optimisation: the directional shadow camera sits ~1e6 units back, which drives the
-    // perspective form to ~0 for every cluster and silently culls the entire scene.
-    //
-    // BOTH call sites (parentTooCoarse, clusterFits) must pass the same orthoScale. That is
-    // what keeps the cut crack-free - siblings share group bounds and error, so as long as
-    // they evaluate the same monotonic function they agree on the cut.
-    fn projectError(error : f32, center : vec3f, radius : f32, camPos : vec3f, projScale : f32, orthoScale : f32) -> f32 {
-        if (orthoScale > 0.0) {
-            return error * orthoScale;
-        }
-        let dist = max(distance(camPos, center) - radius, 1e-5);
-        return error * projScale / dist;
-    }
 
     fn viewProj() -> mat4x4f {
         return mat4x4f(cullParams[${CULL_PARAMS.VIEW_PROJ}u], cullParams[${CULL_PARAMS.VIEW_PROJ + 1}u], cullParams[${CULL_PARAMS.VIEW_PROJ + 2}u], cullParams[${CULL_PARAMS.VIEW_PROJ + 3}u]);
@@ -269,7 +256,6 @@ export const meshletCullWGSL = /* wgsl */ `
         let maxScale = objectData[instance].maxScale;
         let camPos = cullParams[${CULL_PARAMS.CAMERA}u].xyz;
         let projScale = cullParams[${CULL_PARAMS.CAMERA}u].w;
-        let threshold = cullParams[${CULL_PARAMS.LOD}u].x;
         let orthoScale = cullParams[${CULL_PARAMS.STREAMING}u].y;
         let cullFlags = u32(cullParams[${CULL_PARAMS.STREAMING}u].z);
 
@@ -284,21 +270,19 @@ export const meshletCullWGSL = /* wgsl */ `
             }
         }
 
-        // DAG LOD cut: draw when the parent is too coarse and this cluster fits the target.
-        // Sibling groups share parent bounds/error and sharedSiblingsBounds, so all siblings
-        // agree on the decision - the cut is crack-free.
-        let parentSphere = meshletData[meshlet].parentSphere;
-        let parentCenter = (worldMatrix * vec4f(parentSphere.xyz, 1.0)).xyz;
-        let parentTooCoarse = projectError(meshletData[meshlet].parentError * maxScale, parentCenter, parentSphere.w * maxScale, camPos, projScale, orthoScale) > threshold;
-        if (!parentTooCoarse) {
-            return;
+        // The coarse-to-fine cut has already committed complete resident replacements.
+        let pairBase = objectData[instance].firstPairBit;
+        let admission = uniform.totalPairs + instance;
+        if ((atomicLoad(&claimBits[admission >> 5u]) & (1u << (admission & 31u))) == 0u) { return; }
+        let parent = meshletData[meshlet].parent;
+        if (parent != ${MESHLET_NO_PARENT}u) {
+            let bit = pairBase + parent;
+            if ((atomicLoad(&claimBits[bit >> 5u]) & (1u << (bit & 31u))) == 0u) { return; }
         }
-
-        let groupSphere = meshletData[meshlet].groupSphere;
-        let groupCenter = (worldMatrix * vec4f(groupSphere.xyz, 1.0)).xyz;
-        let clusterFits = projectError(meshletData[meshlet].clusterError * maxScale, groupCenter, groupSphere.w * maxScale, camPos, projScale, orthoScale) <= threshold;
-        if (!clusterFits) {
-            return;
+        let birth = meshletData[meshlet].reserved;
+        if (birth != ${MESHLET_NO_PARENT}u) {
+            let bit = pairBase + birth;
+            if ((atomicLoad(&claimBits[bit >> 5u]) & (1u << (bit & 31u))) != 0u) { return; }
         }
 
         let flags = meshletData[meshlet].flags;
@@ -375,48 +359,20 @@ export const meshletCullWGSL = /* wgsl */ `
             atomicMax(&requests[texelRateMarkBase + objectData[instance].material], texelRate);
         }
 
-        // residency resolve: when the desired cluster's page is not resident, mark it wanted and
-        // walk the DAG parent chain to the nearest resident ancestor - the surface renders
-        // momentarily coarser, never holed. Root pages are pinned, so the walk terminates.
-        var chosen = meshlet;
-        var page = meshletData[meshlet].page;
-        var walkDepth = 0u;
-        loop {
-            if (residency[page] != ${PAGE_NOT_RESIDENT}u) {
-                // mark the resident page as used this frame, so the CPU LRU sees hot pages.
-                // A page is either resident (USED) or missing (MISSING), never both.
-                atomicStore(&requests[page], ${PAGE_REQUEST.USED}u);
-                break;
-            }
-            atomicStore(&requests[page], ${PAGE_REQUEST.MISSING}u);
-            let parent = meshletData[chosen].parent;
-            if (parent == ${MESHLET_NO_PARENT}u || walkDepth >= 32u) {
-                return; // no resident ancestor (roots not yet loaded)
-            }
-            chosen = firstMeshlet + parent;
-            page = meshletData[chosen].page;
-            walkDepth++;
-        }
-        if (chosen != meshlet) {
-            // several missing siblings resolve to the same ancestor - claim it so one thread emits
-            let chosenPairBit = objectData[instance].firstPairBit + (chosen - firstMeshlet);
-            let mask = 1u << (chosenPairBit & 31u);
-            if ((atomicOr(&claimBits[chosenPairBit >> 5u], mask) & mask) != 0u) {
-                return;
-            }
-        }
+        // Residency was checked for the entire replacement before its cut bit was set.
+        let chosen = meshlet;
+        let page = meshletData[chosen].page;
+        atomicMax(&requests[page], ${PAGE_REQUEST.USED}u);
 
         let chosenTriangleCount = meshletData[chosen].triangleCount;
         if (chosenTriangleCount == 0u) {
             return;
         }
 
-        // reserve an index range in the bucket, then append the record. The demand block
-        // tracks unclamped demand (it survives phase-2 resets) - the CPU reads it back and
-        // grows the index buffer when the cut wants more than the current allocation.
+        // Reserve only the drawn range here. The selection pass already reported capacity
+        // demand for the complete cut, independently of either phase's occlusion results.
         let indexNeed = chosenTriangleCount * 3u;
         let capacity = bucketCapacity(bucket);
-        atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indexNeed);
         let recordIndex = atomicAdd(&counters[${MESHLET_COUNTER.RECORDS}u], 1u);
         if (recordIndex >= uniform.recordCapacity) {
             return;
@@ -446,6 +402,7 @@ export const finalizeArgsWGSL = /* wgsl */ `
     uniform indexCapacity0 : u32;
     uniform indexCapacity1 : u32;
 
+    var<storage, read_write> cutBudget : array<atomic<u32>>;
     var<storage, read_write> counters : array<atomic<u32>>;
     var<storage, read_write> indirectDraw : array<u32>;
     var<storage, read_write> indirectDispatch : array<u32>;
@@ -469,7 +426,7 @@ export const finalizeArgsWGSL = /* wgsl */ `
                   uniform.indexCapacity0 + uniform.indexCapacity1);
 
         let recordDemand = atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]);
-        atomicMax(&counters[${MESHLET_COUNTER.RECORD_DEMAND}u], recordDemand);
+        atomicMax(&counters[${MESHLET_COUNTER.RECORD_DEMAND}u], atomicLoad(&cutBudget[3u]) + atomicLoad(&cutBudget[4u]));
         let recordCount = min(recordDemand, uniform.recordCapacity);
         let base = uniform.dispatchSlot * ${INDIRECT_DISPATCH_U32S}u;
         atomicAdd(&counters[${MESHLET_COUNTER.RENDERED}u], recordCount);

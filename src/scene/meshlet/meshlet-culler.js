@@ -1,6 +1,6 @@
 import { Compute } from '../../platform/graphics/compute.js';
 import {
-    CULL_FLAG_HZB_LINEAR, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_INSTANCE_CULL_WORKGROUP
+    CULL_FLAG_HZB_LINEAR, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_INSTANCE_CULL_WORKGROUP
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
 
@@ -52,7 +52,7 @@ class MeshletCuller {
 
     /**
      * Light-space texel rate for an orthographic view, or 0 for a perspective one. Selects the
-     * distance-independent LOD projection in the cull shader - see projectError there. Shadow
+     * distance-independent LOD projection in the resident-cut shader. Shadow
      * cascades MUST set this: the directional shadow camera is pushed ~1e6 units back, which
      * collapses the perspective projection to zero error and culls everything.
      *
@@ -100,6 +100,9 @@ class MeshletCuller {
         this.device = device;
         this.world = world;
         this.view = view;
+        if (view.rootSelection) {
+            this.cullParams = new Float32Array((CULL_PARAMS_VEC4S + Math.ceil(world.instanceCount / 4)) * 4);
+        }
 
         this.shaders = cullShaders ?? new MeshletCullShaders(device);
         this._ownsShaders = !cullShaders;
@@ -107,6 +110,28 @@ class MeshletCuller {
 
         const makeCompute = name => new Compute(device, this.shaders[name], `Meshlet${name}`);
 
+        this.cutStages = world.cut.levels.map((level) => {
+            const compute = makeCompute('cut');
+            compute.setParameter('taskStart', level.start);
+            compute.setParameter('taskCount', level.count);
+            compute.setParameter('rootStage', level.root ? 1 : 0);
+            compute.setParameter('totalPairs', world.totalPairs);
+            compute.setParameter('recordCapacity', view.recordCapacity);
+            bindCapacities(compute, view);
+            compute.setParameter('cutGroups', world.cut.groups);
+            compute.setParameter('cutTasks', world.cut.tasks);
+            compute.setParameter('meshletData', world.meshletDataBuffer);
+            compute.setParameter('objectData', world.objectDataBuffer);
+            compute.setParameter('cullParams', view.cullParamsBuffer);
+            compute.setParameter('residency', world.residencyBuffer);
+            compute.setParameter('requests', world.requestsBuffer);
+            compute.setParameter('claimBits', view.claimBitsBuffer);
+            compute.setParameter('cutBudget', view.cutBudgetBuffer);
+            compute.setParameter('counters', view.countersBuffer);
+            const groups = Math.ceil(level.count / 64);
+            compute.setupDispatch(Math.min(groups, 65535), Math.ceil(groups / 65535));
+            return compute;
+        });
         this.instanceCull = makeCompute('instanceCull');
         this.dispatchArgs = makeCompute('dispatchArgs');
         this.meshletCull = makeCompute('meshletCull');
@@ -124,6 +149,8 @@ class MeshletCuller {
         // static parameters - the same bindings for a stage's phase-1 and phase-2 instances
         const instanceCull = this.instanceCull;
         instanceCull.setParameter('instanceCount', world.instanceCount);
+        instanceCull.setParameter('totalPairs', world.totalPairs);
+        instanceCull.setParameter('admittedBits', view.claimBitsBuffer);
         instanceCull.setParameter('workItemCapacity', world.workItemCapacity);
         instanceCull.setParameter('objectData', world.objectDataBuffer);
         instanceCull.setParameter('cullParams', view.cullParamsBuffer);
@@ -134,6 +161,7 @@ class MeshletCuller {
         this.dispatchArgs.setParameter('counters', view.countersBuffer);
 
         for (const meshletCull of [this.meshletCull, this.meshletCullPhase2]) {
+            meshletCull.setParameter('totalPairs', world.totalPairs);
             meshletCull.setParameter('workItemCapacity', world.workItemCapacity);
             meshletCull.setParameter('recordCapacity', view.recordCapacity);
             bindCapacities(meshletCull, view);
@@ -152,6 +180,7 @@ class MeshletCuller {
         this.meshletCullPhase2.setParameter('phase', 2);
 
         for (const finalizeArgs of [this.finalizeArgs, this.finalizeArgsPhase2]) {
+            finalizeArgs.setParameter('cutBudget', view.cutBudgetBuffer);
             finalizeArgs.setParameter('recordCapacity', view.recordCapacity);
             bindCapacities(finalizeArgs, view);
             finalizeArgs.setParameter('counters', view.countersBuffer);
@@ -179,7 +208,7 @@ class MeshletCuller {
      * @param {MeshletView} view - The view.
      */
     bindIndexState(view) {
-        for (const compute of [this.meshletCull, this.meshletCullPhase2, this.finalizeArgs, this.finalizeArgsPhase2]) {
+        for (const compute of [...this.cutStages, this.meshletCull, this.meshletCullPhase2, this.finalizeArgs, this.finalizeArgsPhase2]) {
             bindCapacities(compute, view);
         }
         for (const compute of [this.indexWrite, this.indexWritePhase2]) {
@@ -194,6 +223,7 @@ class MeshletCuller {
      * @param {MeshletView} view - The view.
      */
     bindRecordState(view) {
+        for (const compute of this.cutStages) compute.setParameter('recordCapacity', view.recordCapacity);
         for (const compute of [this.meshletCull, this.meshletCullPhase2, this.indexWrite, this.indexWritePhase2]) {
             compute.setParameter('records', view.recordsBuffer);
             compute.setParameter('recordCapacity', view.recordCapacity);
@@ -229,6 +259,18 @@ class MeshletCuller {
 
         // frame params, one vec4 row each (CULL_PARAMS.*)
         const params = this.cullParams;
+        if (view.rootSelection) {
+            view.rootSelection.update(frustumPlanes, cameraPos, view.indexCapacity, view.recordCapacity,
+                (this.cullFlags & CULL_FLAG_SHADOW_VIEW) !== 0);
+            let changed = false;
+            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
+                const capacity = view.rootSelection.capacity[b];
+                changed ||= view.indexCapacity[b] !== capacity;
+                view.indexCapacity[b] = capacity;
+            }
+            if (changed) this.bindIndexState(view);
+            params.set(view.rootSelection.wanted, CULL_PARAMS_VEC4S * 4);
+        }
         const row = index => index * 4;
         params.set(frustumPlanes, row(CULL_PARAMS.PLANES));
         params[row(CULL_PARAMS.CAMERA) + 0] = cameraPos.x;
@@ -254,6 +296,7 @@ class MeshletCuller {
         // The counters buffer clears in-encoder for the same reason: the director's index-demand
         // readback copy is encoded earlier this frame and must see last frame's values.
         view.cullParamsBuffer.write(0, params);
+        view.cutBudgetBuffer.write(0, view.cutBudgetInitial);
         const encoder = device.getCommandEncoder();
         encoder.clearBuffer(view.countersBuffer.impl.buffer, 0, view.countersBuffer.byteSize);
         // claim bits clear on the GPU: the CPU mirror is one bit per instance-meshlet pair,
@@ -291,6 +334,8 @@ class MeshletCuller {
         this.meshletCull.setupIndirectDispatch(this._dispatchSlotCull);
         this.finalizeArgs.setupDispatch(1);
         this.indexWrite.setupIndirectDispatch(this._dispatchSlotWrite);
+
+        device.computeDispatch(this.cutStages, 'MeshletResidentCut');
 
         if (this.forceSubmitBoundaries) {
             device.computeDispatch([this.instanceCull, this.dispatchArgs], 'MeshletCullPhase1a');

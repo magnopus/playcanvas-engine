@@ -1,3 +1,4 @@
+import { MeshletCutData } from './meshlet-cut-data.js';
 import { Debug } from '../../core/debug.js';
 import { PickerId } from '../picker-id.js';
 import { Mat4 } from '../../core/math/mat4.js';
@@ -14,8 +15,7 @@ import { OBJECT_FLAG_NO_SHADOW,
     MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
     RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S,
-    MESHLET_COLOR_MODE
-} from './constants.js';
+    MESHLET_COLOR_MODE } from './constants.js';
 import { createMeshletLitMaterial } from './meshlet-lit-material.js';
 import { createMeshletMaterial } from './meshlet-material.js';
 import { buildMeshletLitChunks } from './shaders/meshlet-lit-chunks-wgsl.js';
@@ -93,6 +93,12 @@ class MeshletWorld {
     _hovered = new Set();
 
     meshletDataBuffer = null;
+
+    /** @type {MeshletCutData|null} */
+    cut = null;
+
+    /** @type {Set<import('./meshlet-root-selection.js').MeshletRootSelection>} */
+    rootSelections = new Set();
 
     objectDataBuffer = null;
 
@@ -185,6 +191,7 @@ class MeshletWorld {
         this.requestsBuffer?.destroy();
         this.dummyBits?.destroy();
         this.meshletDataBuffer?.destroy();
+        this.cut?.destroy();
         this.objectDataBuffer?.destroy();
         this.materialTableBuffer?.destroy();
         this.lightmapBuffer?.destroy();
@@ -464,8 +471,10 @@ class MeshletWorld {
             return 0;
         }
 
-        const pairWords = Math.max(Math.ceil(pairs / 32), 4);
-        const fixed = lightmapBytes + totalMeshlets * MESHLET_DATA_U32S * 4 +      // meshletData
+        const pairWords = Math.max(Math.ceil((pairs + totalInstances) / 32), 4);
+        // Upper bound for group headers, membership lists and instance/group tasks.
+        const cutBytes = totalMeshlets * 40 + pairs * 8 + totalInstances * 40;
+        const fixed = cutBytes + lightmapBytes + totalMeshlets * MESHLET_DATA_U32S * 4 +      // meshletData
             totalInstances * OBJECT_DATA_U32S * 4 +                // objectData
             totalPages * 4 +                                       // residency
             (totalPages + totalMaterialRows) * 4 +                 // requests + texel-rate marks
@@ -973,6 +982,7 @@ class MeshletWorld {
             this.indexCapacity = this.indexCapacity.map(c => Math.floor(c * s));
         }
 
+        this.cut = new MeshletCutData(device, meshletData, objectData);
         this.meshletDataBuffer = new StorageBuffer(device, meshletData.byteLength, BUFFERUSAGE_COPY_DST);
         this.meshletDataBuffer.write(0, meshletData);
         this.objectDataBuffer = new StorageBuffer(device, objectData.byteLength, BUFFERUSAGE_COPY_DST);
@@ -999,7 +1009,7 @@ class MeshletWorld {
         // run phase 0 - so they bind this 16-byte buffer instead of allocating one bit per
         // instance-meshlet pair, which is tens of MB on a scattered scene.
         this.dummyBits = new StorageBuffer(device, 16, BUFFERUSAGE_COPY_DST);
-        this._claimClear = new Uint32Array(Math.max(Math.ceil(this.totalPairs / 32), 4));
+        this._claimClear = new Uint32Array(Math.max(Math.ceil((this.totalPairs + this.instanceCount) / 32), 4));
         this._requestClear = new Uint32Array(Math.max(totalPages, 4));
 
         // streamed textures: tails + residency exist before the materials bind them (an

@@ -223,11 +223,11 @@ class MeshletDirector {
     shadowBudgetCascades = 3;
 
     /**
-     * Called when the geometry budget is found to be unachievable - the cut is already at the
-     * DAG roots and the scene still does not fit. Receives a summary (budget, index demand
-     * ratio, pages missing, and a `suggestedBudgetBytes` that would cover the shortfall). The
-     * pipeline keeps rendering, with gaps, and raises the index ceiling; the application decides
-     * whether to raise the budget or shed content.
+     * Called when visible coarse instances are deferred, or sustained demand exceeds the
+     * budget at maximum LOD pressure. Receives budget, index demand and missing-page statistics;
+     * `suggestedBudgetBytes` estimates additional capacity and is not a coverage guarantee.
+     * The configured budget stays unchanged. Complete admitted instances continue rendering;
+     * displaying the entire visible set requires cheaper coarse geometry or more capacity.
      *
      * @type {((info: object) => void)|null}
      */
@@ -236,7 +236,7 @@ class MeshletDirector {
     /** @type {number} - consecutive infeasible frames before {@link onBudgetExceeded} fires. */
     budgetOverrunFrames = 120;
 
-    /** @type {number} - multiplier applied to the index ceiling on each overrun step. */
+    /** @type {number} - legacy overrun multiplier; automatic budget overruns are disabled. */
     budgetOverrunStep = 1.5;
 
     _infeasibleFrames = 0;
@@ -259,7 +259,7 @@ class MeshletDirector {
     /** @type {Layer|null} - the layer whose lights shade the meshlet draws, resolved each update. */
     _lightLayer = null;
 
-    /** @type {Promise<void>|null} - resolves when a streamed world's root pages are resident. */
+    /** @type {Promise<void>|null} - resolves when demand streaming is initialized. */
     rootsLoaded = null;
 
     /**
@@ -330,8 +330,8 @@ class MeshletDirector {
 
     /**
      * Finalizes the world and builds the culler. Call after all resources are added. For a
-     * streamed world this also starts the eager root-page load - await {@link rootsLoaded}
-     * (or just start rendering: nothing draws until the coarse fallback set is resident).
+     * streamed world this enables demand streaming. Root pages load for the active view; an instance becomes
+     * drawable once its complete coarse fallback is resident.
      *
      * @returns {MeshletWorld} The finalized world.
      */
@@ -743,6 +743,26 @@ class MeshletDirector {
 
         view.culler.beginFrame(planes, cameraComponent.entity.getPosition(), projScale, _viewProj.data,
             useOcclusion ? view.hzb : null);
+        const deferred = view.rootSelection?.deferred ?? 0;
+        if (deferred && !view._rootBudgetWarned) {
+            view._rootBudgetWarned = true;
+            Debug.warnOnce(`MeshletDirector: ${deferred} visible instances are deferred because their complete coarse geometry exceeds the current working-set capacity. No partial instances are emitted. This bake needs cheaper coarse levels to display the entire visible set within this budget.`);
+            this.onBudgetExceeded?.({
+                budgetBytes: this.world.poolBytes,
+                suggestedBudgetBytes: this.world.poolBytes +
+                    Math.max(view.rootSelection.requestedIndices - view.indexTotal(), 0) * 4 +
+                    Math.max(view.rootSelection.requestedRecords - view.recordCapacity, 0) * 16,
+                indexDemandRatio: view.rootSelection.requestedIndices / Math.max(view.indexTotal(), 1),
+                indexCeiling: this.world.indexCeiling,
+                indexOverrun: this.world.indexOverrun,
+                pagesMissing: this.residency?.lastMissingWanted ?? 0,
+                poolPages: this.world.poolSlots,
+                totalPages: this.world.totalPages,
+                rootInstancesDeferred: deferred
+            });
+        } else if (!deferred) {
+            view._rootBudgetWarned = false;
+        }
     }
 
     /**
@@ -768,17 +788,17 @@ class MeshletDirector {
         });
         if (!all.length) return 0;
 
-        let total = 0;
-        for (const v of all) total += v.indexDemand();
-
-        // Every view keeps a floor, so one that is momentarily empty (a cascade the camera has
-        // turned away from) can still grow back without waiting for a redistribution.
+        // Draw capacity belongs to the active working set, not all scene roots. Charge
+        // the growth floor before distributing the rest so shares stay inside the budget.
         const floor = Math.floor((ceiling / all.length) * SHARE_FLOOR_FRACTION);
+        const remaining = ceiling - floor * all.length;
+        let total = 0;
+        for (const v of all) total += Math.max(v.indexDemand() - floor, 0);
         let worst = 0;
         for (const v of all) {
-            v.indexShare = total > 0 ?
-                Math.max(Math.floor(ceiling * (v.indexDemand() / total)), floor) :
-                Math.floor(ceiling / all.length);
+            v.indexShare = floor + (total > 0 ?
+                Math.floor(remaining * (Math.max(v.indexDemand() - floor, 0) / total)) :
+                Math.floor(remaining / all.length));
             worst = Math.max(worst, v.indexPressure());
         }
         return worst;
@@ -787,12 +807,9 @@ class MeshletDirector {
     /**
      * Detects a budget the scene cannot meet, and says so.
      *
-     * LOD pressure has a floor: once the cut is at the DAG roots there is nothing coarser to
-     * fall back to. If the scene still does not fit at that point, holding the budget produces
-     * clamped draws and missing pages - gaps and flicker - forever. So when pressure is pinned
-     * at maximum and the scene is still short, the budget is treated as unachievable: the index
-     * ceiling is raised in steps (never past the device limit) and {@link onBudgetExceeded}
-     * fires so the application can react - raise the budget, drop content, or tell the user.
+     * At the DAG roots there is nothing coarser to select. Sustained unmet demand at maximum
+     * pressure triggers {@link onBudgetExceeded}, without increasing the configured ceiling.
+     * The application can supply cheaper coarse geometry or change its working-set budget.
      *
      * @param {number} indexRatio - Worst per-view demand/share ratio.
      * @private
@@ -809,16 +826,8 @@ class MeshletDirector {
         if (this._infeasibleFrames < this.budgetOverrunFrames) return;
         this._infeasibleFrames = 0;
 
-        const before = world.indexCeiling;
-        if (indexRatio > 1 && before < world.deviceIndexCeiling) {
-            world.indexOverrun = Math.min(
-                Math.ceil((world.indexBudgetTotal + world.indexOverrun) * this.budgetOverrunStep) - world.indexBudgetTotal,
-                world.deviceIndexCeiling - world.indexBudgetTotal
-            );
-        }
-
-        // what the budget would have to be for the pages the cut is actually asking for; the
-        // index side is already covered by the overrun above
+        // An infeasible working set is reported to the application; silently increasing
+        // the ceiling defeats a bounded streaming budget.
         const suggested = world.poolBytes + pagesShort * world.pageSizeBytes;
         const info = {
             budgetBytes: world.poolBytes,
@@ -830,7 +839,7 @@ class MeshletDirector {
             poolPages: res ? res.slotPage.length : 0,
             totalPages: world.totalPages
         };
-        const message = `MeshletDirector: the geometry budget (${(world.poolBytes / BYTES_PER_MB).toFixed(0)} MB) cannot render this scene even at the coarsest LOD - ${pagesShort} page(s) short, index demand ${indexRatio.toFixed(2)}x the share. Raising the index ceiling; expect gaps until the budget is increased (about ${(suggested / BYTES_PER_MB).toFixed(0)} MB would cover it).`;
+        const message = `MeshletDirector: the geometry budget (${(world.poolBytes / BYTES_PER_MB).toFixed(0)} MB) cannot render this scene even at the coarsest LOD - ${pagesShort} page(s) short, index demand ${indexRatio.toFixed(2)}x the share. The configured budget remains unchanged; cheaper coarse geometry or a smaller active working set is required.`;
         Debug.warnOnce(message);
         // a configuration problem the application must act on, so it is reported in every
         // build (the Debug channel is stripped from release builds), once per budget value

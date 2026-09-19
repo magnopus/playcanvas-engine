@@ -1,5 +1,5 @@
 import { Debug } from '../../core/debug.js';
-import { SHADOWUPDATE_NONE, SHADOWUPDATE_THISFRAME } from '../constants.js';
+import { SHADOWUPDATE_NONE, SHADOWUPDATE_THISFRAME, LAYERID_WORLD, LIGHTTYPE_DIRECTIONAL } from '../constants.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { BoundingBox } from '../../core/shape/bounding-box.js';
@@ -7,7 +7,6 @@ import { Frustum } from '../../core/shape/frustum.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { math } from '../../core/math/math.js';
 import { Vec3 } from '../../core/math/vec3.js';
-import { LAYERID_WORLD, LIGHTTYPE_DIRECTIONAL } from '../constants.js';
 import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, WORK_ITEM_U32S } from './constants.js';
 import { MeshletShadowView } from './meshlet-shadow-view.js';
 
@@ -466,7 +465,7 @@ class MeshletShadowRenderer {
         // sized exactly as a view sizes its own (one bit per instance-meshlet pair, 32 to a
         // word; one work item per WORK_ITEM_U32S words)
         if (this.shareClaimBits && !this._claimBits) {
-            const words = Math.max(Math.ceil(director.world.totalPairs / 32), 4);
+            const words = Math.max(Math.ceil((director.world.totalPairs + director.world.instanceCount) / 32), 4);
             this._claimBits = new StorageBuffer(this.device, words * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         }
         if (!this._workItems) {
