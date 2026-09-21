@@ -37,6 +37,7 @@ const makeWorld = () => {
         finalized: true,
         totalPairs: PAIRS,
         workItemCapacity: 50,
+        cut: { rootIndices: [0, 0, 0], rootRecords: 0, levels: [] },
         recordCapacity: 4000,
         initialRecords: 100,
         instanceCount: 7,

@@ -94,20 +94,87 @@ export const instanceCullWGSL = /* wgsl */ `
     }
 `;
 
+/** Compacts the committed LOD cut before bounds, cone and HZB tests. @ignore */
+export const compactMeshletsWGSL = /* wgsl */ `
+    ${meshletStructsWGSL}
+    ${meshletObjectDataWGSL}
+    ${meshletDataWGSL}
+    ${meshletWorkItemsWGSL('read')}
+    uniform totalPairs: u32;
+    uniform workItemCapacity: u32;
+    uniform recordCapacity: u32;
+    var<storage, read> selectionTopology: array<vec2u>;
+    var<storage, read> claimBits: array<u32>;
+    var<storage, read_write> counters: array<atomic<u32>>;
+    var<storage, read_write> selectedMeshlets: array<vec2u>;
+    var<workgroup> selectedCount: atomic<u32>;
+    var<workgroup> selectedBase: u32;
+
+    fn isSelected(instance: u32, localIndex: u32) -> bool {
+        if (localIndex >= objectData[instance].meshletCount) { return false; }
+        let admission = uniform.totalPairs + instance;
+        if ((claimBits[admission >> 5u] & (1u << (admission & 31u))) == 0u) { return false; }
+        let meshlet = objectData[instance].firstMeshlet + localIndex;
+        let pairBase = objectData[instance].firstPairBit;
+        let parent = selectionTopology[meshlet].x;
+        if (parent != ${MESHLET_NO_PARENT}u) {
+            let bit = pairBase + parent;
+            if ((claimBits[bit >> 5u] & (1u << (bit & 31u))) == 0u) { return false; }
+        }
+        let birth = selectionTopology[meshlet].y;
+        if (birth != ${MESHLET_NO_PARENT}u) {
+            let bit = pairBase + birth;
+            if ((claimBits[bit >> 5u] & (1u << (bit & 31u))) != 0u) { return false; }
+        }
+        // Only survivors need the larger geometry record, including legacy empty roots.
+        return meshletData[meshlet].triangleCount != 0u;
+    }
+
+    @compute @workgroup_size(${MESHLET_CULL_SLICE})
+    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+        let item = group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x;
+        // All lanes reach the barriers, including unused lanes in the final work item.
+        var instance = 0u;
+        var localIndex = 0u;
+        var selected = false;
+        if (item < min(atomicLoad(&counters[${MESHLET_COUNTER.WORK_ITEMS}u]), uniform.workItemCapacity)) {
+            instance = workItems[item].instance;
+            localIndex = workItems[item].sliceStart + lane.x;
+            selected = isSelected(instance, localIndex);
+        }
+        var rank = 0u;
+        if (selected) { rank = atomicAdd(&selectedCount, 1u); }
+        workgroupBarrier();
+        if (lane.x == 0u) {
+            let count = atomicLoad(&selectedCount);
+            if (count != 0u) {
+                selectedBase = atomicAdd(&counters[${MESHLET_COUNTER.SELECTED}u], count);
+            }
+        }
+        workgroupBarrier();
+        if (selected && selectedBase + rank < uniform.recordCapacity) {
+            selectedMeshlets[selectedBase + rank] = vec2u(instance, localIndex);
+        }
+    }
+`;
+
 /**
- * Writes the meshlet-cull pass's indirect dispatch args (2D grid to dodge the 65535 per-dimension
- * limit) from the work item counter. One thread.
+ * Writes indirect dispatch args from a counter and the number of items per workgroup.
+ * Uses a 2D grid to stay within the per-dimension limit. One thread.
  */
 export const dispatchArgsWGSL = /* wgsl */ `
     uniform dispatchSlot : u32;
     uniform workItemCapacity : u32;
+    uniform counterIndex : u32;
+    uniform groupSize : u32;
 
     var<storage, read_write> counters : array<atomic<u32>>;
     var<storage, read_write> indirectDispatch : array<u32>;
 
     @compute @workgroup_size(1)
     fn main() {
-        let count = min(atomicLoad(&counters[${MESHLET_COUNTER.WORK_ITEMS}u]), uniform.workItemCapacity);
+        let items = min(atomicLoad(&counters[uniform.counterIndex]), uniform.workItemCapacity);
+        let count = (items + uniform.groupSize - 1u) / uniform.groupSize;
         let base = uniform.dispatchSlot * ${INDIRECT_DISPATCH_U32S}u;
         indirectDispatch[base + 0u] = min(count, ${MESHLET_DISPATCH_WIDTH}u);
         indirectDispatch[base + 1u] = (count + ${MESHLET_DISPATCH_WIDTH - 1}u) / ${MESHLET_DISPATCH_WIDTH}u;
@@ -116,19 +183,17 @@ export const dispatchArgsWGSL = /* wgsl */ `
 `;
 
 /**
- * Meshlet culling: one workgroup per work item, one thread per meshlet in the slice. Frustum
- * sphere, membership in the preselected resident cut, cone backface. Survivors reserve an
- * index range in their bucket and append a record.
+ * Meshlet culling: one thread per meshlet in the compacted resident cut. Tests the frustum
+ * sphere, cone backface and occlusion. Survivors reserve an index range in their bucket and
+ * append a record.
  */
 export const meshletCullWGSL = /* wgsl */ `
     ${meshletStructsWGSL}
 
-    uniform workItemCapacity : u32;
     uniform recordCapacity : u32;
     uniform indexCapacity0 : u32;
     uniform indexCapacity1 : u32;
     uniform indexCapacity2 : u32;
-    uniform totalPairs : u32;
     uniform phase : u32; // 0 = single-phase (no occlusion), 1 = draw prev-visible, 2 = newly-visible vs HZB
 
     // the buckets are contiguous ranges of one index buffer, in bucket order
@@ -142,22 +207,16 @@ export const meshletCullWGSL = /* wgsl */ `
                       uniform.indexCapacity0 + uniform.indexCapacity1, bucket == 2u);
     }
 
-    // Ten storage buffers in total (objectData, meshletData, workItems and records come from
-    // the typed views): exactly WebGPU's default maxStorageBuffersPerShaderStage. An eleventh
-    // makes pipeline creation fail on adapters at the default limit, and the symptom is a blank
-    // meshlet layer with no error - fold new data into an existing buffer instead (the
-    // texel-rate marks live in requests for this reason). meshlet-cull-shaders.test.mjs pins
-    // the count.
+    // Keep storage bindings within the device limit; the shader layout tests check this.
     ${meshletObjectDataWGSL}
     ${meshletDataWGSL}
-    ${meshletWorkItemsWGSL('read')}
+    var<storage, read> selectedMeshlets : array<vec2u>;
     ${meshletRecordsWGSL('read_write')}
 
     var<storage, read> cullParams : array<vec4f>;
     var<storage, read_write> counters : array<atomic<u32>>;
     var<storage, read> residency : array<u32>;
     var<storage, read_write> requests : array<atomic<u32>>;
-    var<storage, read_write> claimBits : array<atomic<u32>>;
     var<storage, read_write> visBits : array<atomic<u32>>;
     var hzbTexture : texture_2d<f32>;
 
@@ -234,23 +293,12 @@ export const meshletCullWGSL = /* wgsl */ `
 
     @compute @workgroup_size(${MESHLET_CULL_SLICE})
     fn main(@builtin(workgroup_id) workgroupId : vec3u, @builtin(local_invocation_id) localId : vec3u) {
-        let itemIndex = workgroupId.y * ${MESHLET_DISPATCH_WIDTH}u + workgroupId.x;
-        let workItemCount = min(atomicLoad(&counters[${MESHLET_COUNTER.WORK_ITEMS}u]), uniform.workItemCapacity);
-        if (itemIndex >= workItemCount) {
-            return;
-        }
-
-        let instance = workItems[itemIndex].instance;
-        let localIndex = workItems[itemIndex].sliceStart + localId.x;
-        if (localIndex >= objectData[instance].meshletCount) {
-            return;
-        }
-
-        let firstMeshlet = objectData[instance].firstMeshlet;
-        let meshlet = firstMeshlet + localIndex;
-        if (meshletData[meshlet].triangleCount == 0u) {
-            return; // cull-to-empty synthetic root
-        }
+        let selectedIndex = (workgroupId.y * ${MESHLET_DISPATCH_WIDTH}u + workgroupId.x) * ${MESHLET_CULL_SLICE}u + localId.x;
+        if (selectedIndex >= min(atomicLoad(&counters[${MESHLET_COUNTER.SELECTED}u]), uniform.recordCapacity)) { return; }
+        let selected = selectedMeshlets[selectedIndex];
+        let instance = selected.x;
+        let localIndex = selected.y;
+        let meshlet = objectData[instance].firstMeshlet + localIndex;
 
         let worldMatrix = objectData[instance].worldMatrix;
         let maxScale = objectData[instance].maxScale;
@@ -268,21 +316,6 @@ export const meshletCullWGSL = /* wgsl */ `
             if (dot(plane.xyz, center) + plane.w < -radius) {
                 return;
             }
-        }
-
-        // The coarse-to-fine cut has already committed complete resident replacements.
-        let pairBase = objectData[instance].firstPairBit;
-        let admission = uniform.totalPairs + instance;
-        if ((atomicLoad(&claimBits[admission >> 5u]) & (1u << (admission & 31u))) == 0u) { return; }
-        let parent = meshletData[meshlet].parent;
-        if (parent != ${MESHLET_NO_PARENT}u) {
-            let bit = pairBase + parent;
-            if ((atomicLoad(&claimBits[bit >> 5u]) & (1u << (bit & 31u))) == 0u) { return; }
-        }
-        let birth = meshletData[meshlet].reserved;
-        if (birth != ${MESHLET_NO_PARENT}u) {
-            let bit = pairBase + birth;
-            if ((atomicLoad(&claimBits[bit >> 5u]) & (1u << (bit & 31u))) != 0u) { return; }
         }
 
         let flags = meshletData[meshlet].flags;

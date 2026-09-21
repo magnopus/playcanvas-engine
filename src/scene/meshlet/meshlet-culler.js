@@ -1,6 +1,6 @@
 import { Compute } from '../../platform/graphics/compute.js';
 import {
-    CULL_FLAG_HZB_LINEAR, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_INSTANCE_CULL_WORKGROUP
+    CULL_FLAG_HZB_LINEAR, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_INSTANCE_CULL_WORKGROUP
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
 
@@ -134,6 +134,8 @@ class MeshletCuller {
         });
         this.instanceCull = makeCompute('instanceCull');
         this.dispatchArgs = makeCompute('dispatchArgs');
+        this.compactMeshlets = makeCompute('compactMeshlets');
+        this.selectedArgs = makeCompute('dispatchArgs');
         this.meshletCull = makeCompute('meshletCull');
         this.finalizeArgs = makeCompute('finalizeArgs');
         this.indexWrite = makeCompute('indexWrite');
@@ -157,23 +159,36 @@ class MeshletCuller {
         instanceCull.setParameter('counters', view.countersBuffer);
         instanceCull.setParameter('workItems', view.workItemsBuffer);
 
+        this.compactMeshlets.setParameter('totalPairs', world.totalPairs);
+        this.compactMeshlets.setParameter('workItemCapacity', world.workItemCapacity);
+        this.compactMeshlets.setParameter('recordCapacity', view.recordCapacity);
+        this.compactMeshlets.setParameter('objectData', world.objectDataBuffer);
+        this.compactMeshlets.setParameter('meshletData', world.meshletDataBuffer);
+        this.compactMeshlets.setParameter('selectionTopology', world.cut.selectionTopology);
+        this.compactMeshlets.setParameter('workItems', view.workItemsBuffer);
+        this.compactMeshlets.setParameter('claimBits', view.claimBitsBuffer);
+        this.compactMeshlets.setParameter('counters', view.countersBuffer);
+        this.compactMeshlets.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
+        this.selectedArgs.setParameter('workItemCapacity', view.recordCapacity);
+        this.selectedArgs.setParameter('counterIndex', MESHLET_COUNTER.SELECTED);
+        this.selectedArgs.setParameter('groupSize', MESHLET_CULL_SLICE);
+        this.selectedArgs.setParameter('counters', view.countersBuffer);
+        this.dispatchArgs.setParameter('counterIndex', MESHLET_COUNTER.WORK_ITEMS);
+        this.dispatchArgs.setParameter('groupSize', 1);
         this.dispatchArgs.setParameter('workItemCapacity', world.workItemCapacity);
         this.dispatchArgs.setParameter('counters', view.countersBuffer);
 
         for (const meshletCull of [this.meshletCull, this.meshletCullPhase2]) {
-            meshletCull.setParameter('totalPairs', world.totalPairs);
-            meshletCull.setParameter('workItemCapacity', world.workItemCapacity);
             meshletCull.setParameter('recordCapacity', view.recordCapacity);
             bindCapacities(meshletCull, view);
             meshletCull.setParameter('objectData', world.objectDataBuffer);
             meshletCull.setParameter('meshletData', world.meshletDataBuffer);
             meshletCull.setParameter('cullParams', view.cullParamsBuffer);
-            meshletCull.setParameter('workItems', view.workItemsBuffer);
+            meshletCull.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
             meshletCull.setParameter('counters', view.countersBuffer);
             meshletCull.setParameter('records', view.recordsBuffer);
             meshletCull.setParameter('residency', world.residencyBuffer);
             meshletCull.setParameter('requests', world.requestsBuffer);
-            meshletCull.setParameter('claimBits', view.claimBitsBuffer);
             meshletCull.setParameter('visBits', view.visBitsBuffer);
             meshletCull.setParameter('hzbTexture', this.dummyHzb);
         }
@@ -223,6 +238,12 @@ class MeshletCuller {
      * @param {MeshletView} view - The view.
      */
     bindRecordState(view) {
+        this.compactMeshlets.setParameter('recordCapacity', view.recordCapacity);
+        this.compactMeshlets.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
+        this.selectedArgs.setParameter('workItemCapacity', view.recordCapacity);
+        for (const compute of [this.meshletCull, this.meshletCullPhase2]) {
+            compute.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
+        }
         for (const compute of this.cutStages) compute.setParameter('recordCapacity', view.recordCapacity);
         for (const compute of [this.meshletCull, this.meshletCullPhase2, this.indexWrite, this.indexWritePhase2]) {
             compute.setParameter('records', view.recordsBuffer);
@@ -311,6 +332,7 @@ class MeshletCuller {
             this._drawSlots.push(device.getIndirectDrawSlot());
         }
         this._dispatchSlotCull = device.getIndirectDispatchSlot();
+        this._dispatchSlotSelected = device.getIndirectDispatchSlot();
         this._dispatchSlotWrite = device.getIndirectDispatchSlot();
 
         this._hzbTexture = twoPhase ? hzb.texture : null;
@@ -318,6 +340,8 @@ class MeshletCuller {
 
         this.dispatchArgs.setParameter('dispatchSlot', this._dispatchSlotCull);
         this.dispatchArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
+        this.selectedArgs.setParameter('dispatchSlot', this._dispatchSlotSelected);
+        this.selectedArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
 
         this.finalizeArgs.setParameter('indirectDraw', device.indirectDrawBuffer);
         this.finalizeArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
@@ -331,21 +355,26 @@ class MeshletCuller {
 
         this.instanceCull.setupDispatch(Math.ceil(world.instanceCount / MESHLET_INSTANCE_CULL_WORKGROUP));
         this.dispatchArgs.setupDispatch(1);
-        this.meshletCull.setupIndirectDispatch(this._dispatchSlotCull);
+        this.compactMeshlets.setupIndirectDispatch(this._dispatchSlotCull);
+        this.selectedArgs.setupDispatch(1);
+        this.meshletCull.setupIndirectDispatch(this._dispatchSlotSelected);
         this.finalizeArgs.setupDispatch(1);
         this.indexWrite.setupIndirectDispatch(this._dispatchSlotWrite);
 
         device.computeDispatch(this.cutStages, 'MeshletResidentCut');
 
         if (this.forceSubmitBoundaries) {
-            device.computeDispatch([this.instanceCull, this.dispatchArgs], 'MeshletCullPhase1a');
+            device.computeDispatch([this.instanceCull, this.dispatchArgs], 'MeshletCompacta');
+            device.submit();
+            device.computeDispatch([this.compactMeshlets, this.selectedArgs], 'MeshletCompactb');
             device.submit();
             device.computeDispatch([this.meshletCull, this.finalizeArgs], 'MeshletCullPhase1b');
             device.submit();
             device.computeDispatch([this.indexWrite], 'MeshletCullPhase1c');
         } else {
+            device.computeDispatch([this.instanceCull, this.dispatchArgs, this.compactMeshlets, this.selectedArgs], 'MeshletCompact');
             device.computeDispatch([
-                this.instanceCull, this.dispatchArgs, this.meshletCull, this.finalizeArgs, this.indexWrite
+                this.meshletCull, this.finalizeArgs, this.indexWrite
             ], 'MeshletCullPhase1');
         }
 
@@ -371,7 +400,7 @@ class MeshletCuller {
         this.finalizeArgsPhase2.setParameter('dispatchSlot', this._dispatchSlotWrite);
 
         this.resetPhase2.setupDispatch(1);
-        this.meshletCullPhase2.setupIndirectDispatch(this._dispatchSlotCull);
+        this.meshletCullPhase2.setupIndirectDispatch(this._dispatchSlotSelected);
         this.finalizeArgsPhase2.setupDispatch(1);
         this.indexWritePhase2.setupIndirectDispatch(this._dispatchSlotWrite);
 

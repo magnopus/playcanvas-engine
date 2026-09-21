@@ -24,6 +24,7 @@ const makeResource = (device, { materialFlags = null, instances = 2, scale = 1 }
     const prim = new MeshletPrimitive();
     prim.meshletData = new Uint32Array(MESHLETS * MESHLET_DATA_U32S);
     for (let m = 0; m < MESHLETS; m++) {
+        prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.PARENT] = 0xFFFFFFFF;
         prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.TRIANGLE_COUNT] = TRIANGLES;
         prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.PAGE] = m % 2;
     }

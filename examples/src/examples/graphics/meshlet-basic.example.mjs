@@ -1,11 +1,12 @@
 // @config
 //
-// The smallest possible meshlet setup: load a baked GLB as a regular container asset, add a
-// meshlet component with that asset, done. The engine streams geometry pages on demand over
-// HTTP Range requests and culls / LOD-selects the clusters on the GPU every frame - there is
-// nothing else to wire up. A directional light and an orbit camera complete the scene.
+// Local Zorah streaming reproduction. Load a chunk as a container asset and stream its
+// geometry pages on demand. Orbit, pan and zoom into surfaces to inspect residency transitions;
+// toggle occlusion to exercise CameraFrame's scene-depth attachment and two-phase HZB path.
+// See assets/meshlets/README.md for the local asset setup.
 //
 // @flag WEBGL_DISABLED
+// @flag WEBGPU_BARE_DISABLED
 
 import {
     AppBase,
@@ -13,6 +14,7 @@ import {
     Asset,
     AssetListLoader,
     CameraComponentSystem,
+    CameraFrame,
     Color,
     ContainerHandler,
     Entity,
@@ -34,11 +36,13 @@ const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('applic
 window.focus();
 
 const assets = {
-    bunny: new Asset('bunny', 'container', { url: './assets/meshlets/bunny-v2.glb' }),
+    model: new Asset('Zorah chunk 001', 'container', {
+        url: './assets/meshlets/zorah/chunk_003.streamed.glb'
+    }),
     orbit: new Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' })
 };
 
-const device = await createGraphicsDevice(canvas, { deviceTypes: [deviceType] });
+const device = await createGraphicsDevice(canvas, { deviceTypes: [deviceType], antialias: false });
 device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
 const createOptions = new AppOptions();
@@ -70,12 +74,12 @@ await new Promise((resolve) => {
     assetListLoader.load(resolve);
 });
 
-app.start();
-
-// the bunny: a container asset baked with the meshlet extension, one component call
-const bunny = new Entity('Bunny');
-bunny.addComponent('meshlet', { asset: assets.bunny });
-app.root.addChild(bunny);
+// This chunk needs ~279 MiB of metadata, ~126 MiB of root pages and ~347 MiB of
+// root draw indices alone. Reserve room for the cut tables, records and streamed detail too.
+app.systems.meshlet.poolBytes = 2048 * 1024 * 1024;
+const model = new Entity('Zorah chunk 001');
+model.addComponent('meshlet', { asset: assets.model });
+app.root.addChild(model);
 
 const light = new Entity('Sun');
 light.addComponent('light', {
@@ -92,14 +96,14 @@ const camera = new Entity('Camera');
 camera.addComponent('camera', {
     clearColor: new Color(0.12, 0.14, 0.18),
     nearClip: 0.01,
-    farClip: 100
+    farClip: 1000
 });
 camera.addComponent('script');
 camera.script.create('orbitCamera', {
     attributes: {
         inertiaFactor: 0.2,
         distanceMin: 0.05,
-        distanceMax: 5,
+        distanceMax: 0,
         frameOnStart: false
     }
 });
@@ -107,14 +111,40 @@ camera.script.create('orbitCameraInputMouse');
 camera.script.create('orbitCameraInputTouch');
 app.root.addChild(camera);
 
-// pivot on the bunny's centre explicitly: the orbit script frames entities by walking their
-// render components, and a meshlet component does not expose one
-// @ts-ignore
-camera.script.orbitCamera.resetAndLookAtPoint(new Vec3(0.32, 0.28, 0.32), new Vec3(0, 0.12, 0));
+// CameraFrame supplies the scene-depth colour attachment when occlusion is enabled.
+// Single-sample rendering keeps that path available; no separate depth prepass is requested.
+const cameraFrame = new CameraFrame(app, camera.camera);
+cameraFrame.rendering.samples = 1;
+cameraFrame.bloom.enabled = false;
+cameraFrame.update();
+app.on('destroy', () => cameraFrame.destroy());
 
 // debug colour toggle: mode 2 tints every meshlet cluster its own colour, 0 restores the lit
 // material. Re-applied every frame so it also survives world rebuilds.
-data.set('data', { meshletColours: false });
-app.on('framerender', () => {
-    app.systems.meshlet.director?.world.setColorMode(data.get('data.meshletColours') ? 2 : 0);
+data.set('data', { meshletColours: false, occlusion: false });
+data.on('data.occlusion:set', (value) => {
+    app.systems.meshlet.occlusion = value;
 });
+
+// The orbit script only discovers render components. Frame the meshlet world's transformed
+// bounds once the component system has built it, so the camera fits the full chunk.
+let framed = false;
+app.on('framerender', () => {
+    const world = app.systems.meshlet.director?.world;
+    if (!world?.finalized) {
+        return;
+    }
+    world.setColorMode(data.get('data.meshletColours') ? 2 : 0);
+    if (!framed) {
+        const bounds = world.worldBounds;
+        const radius = bounds.halfExtents.length();
+        const distance = radius / Math.sin(camera.camera.fov * Math.PI / 360);
+        const position = new Vec3(0.5, 0.3, 1).normalize().mulScalar(distance).add(bounds.center);
+        camera.camera.farClip = Math.max(distance * 4, 100);
+        // @ts-ignore
+        camera.script.orbitCamera.resetAndLookAtPoint(position, bounds.center);
+        framed = true;
+    }
+});
+
+app.start();

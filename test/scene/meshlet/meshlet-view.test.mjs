@@ -41,6 +41,7 @@ const makeWorld = (device, overrides = {}) => {
     return {
         totalPairs: PAIRS,
         workItemCapacity: 50,
+        cut: { rootIndices: [0, 0, 0], rootRecords: 0, levels: [] },
         recordCapacity: 4000,
         initialRecords: 100,
         instanceCount: 7,
@@ -95,6 +96,16 @@ describe('MeshletView', function () {
 
     const makeView = (options = {}, w = world) => new MeshletView(device, w, null, null, { cullShaders: shaders, ...options });
 
+    it('keeps draw allocation bounded when the whole-scene root sum exceeds the budget', function () {
+        world.cut.rootIndices = [738324828, 120, 30];
+        world.cut.rootRecords = 200;
+        const view = makeView();
+        expect(view.indexCapacity).to.deep.equal([300, 60, 30]);
+        expect(view.recordCapacity).to.equal(100);
+        expect(Array.from(view.cutBudgetInitial)).to.deep.equal([0, 0, 0, 0, 0]);
+        view.destroy();
+    });
+
     it('sizes its frame buffers from the layout constants and the world', function () {
         const view = makeView();
         const pairWords = Math.ceil(PAIRS / 32);
@@ -103,6 +114,7 @@ describe('MeshletView', function () {
         expect(view.workItemsBuffer.byteSize).to.equal(50 * WORK_ITEM_U32S * 4);
         expect(view.recordCapacity, 'starts at the initial record count').to.equal(100);
         expect(view.recordsBuffer.byteSize).to.equal(100 * RECORD_U32S * 4);
+        expect(view.selectedMeshletsBuffer.byteSize).to.equal(100 * 8);
         expect(view.claimBitsBuffer.byteSize).to.equal(pairWords * 4);
         expect(view.visBitsBuffer.byteSize).to.equal(pairWords * 4);
         expect(view.indexCapacity).to.deep.equal([300, 60, 30]);
@@ -219,9 +231,28 @@ describe('MeshletView', function () {
         expect(view.indexCapacity, 'bucket 0 above growAt: grows to demand * growTo').to.deep.equal([400, 60, 30]);
         expect(bound.index).to.equal(1);
         expect(view.recordCapacity, 'records above growAt too').to.equal(144);
+        expect(view.selectedMeshletsBuffer.byteSize).to.equal(144 * 8);
         expect(bound.record).to.equal(1);
         view.applyPendingGrowth();
         expect(bound.index, 'demand consumed').to.equal(1);
+        view.destroy();
+    });
+
+    it('grows within the ceiling when CPU admission prevents any GPU draw demand', async function () {
+        const view = makeView();
+        view.indexShare = 1000;
+        view.rootSelection = {
+            requestedByBucket: [2000, 0, 0],
+            recordDemand: 200,
+            destroy() {}
+        };
+        view.readbackPool.read = () => Promise.resolve(counters([0, 0, 0], 0));
+        view.monitorIndexDemand();
+        await Promise.resolve();
+        expect(view.indexDemand()).to.equal(2000);
+        view.applyPendingGrowth();
+        expect(view.indexTotal()).to.be.greaterThan(390).and.at.most(1000);
+        expect(view.recordCapacity).to.equal(320);
         view.destroy();
     });
 

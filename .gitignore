@@ -13,6 +13,9 @@ docs-scripts
 examples/.cert
 examples/dist
 examples/node_modules
+examples/assets/meshlets/zorah-local
+examples/assets/meshlets/iss-group-comparison/
+examples/assets/meshlets/zorah-tiles/
 node_modules
 npm-debug.log
 types

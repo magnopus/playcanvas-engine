@@ -169,12 +169,22 @@ class MeshletCutData {
         };
         this.groups = create(words);
         this.tasks = create(tasks);
+        // Compaction scans every LOD. Keep its two links contiguous instead of fetching
+        // them from 128-byte geometry records for every instance of a primitive.
+        const topology = new Uint32Array(meshlets.length / MESHLET_DATA_U32S * 2);
+        for (let m = 0; m < topology.length / 2; m++) {
+            topology[m * 2] = meshlets[m * MESHLET_DATA_U32S + M.PARENT];
+            topology[m * 2 + 1] = meshlets[m * MESHLET_DATA_U32S + M.BIRTH_GROUP];
+        }
+        this.selectionTopology = new StorageBuffer(device, Math.max(topology.byteLength, 16), BUFFERUSAGE_COPY_DST);
+        if (topology.length) this.selectionTopology.write(0, topology);
         this.rootPages = Array.from(rootPages).sort((a, b) => a - b);
     }
 
     destroy() {
         this.groups.destroy();
         this.tasks.destroy();
+        this.selectionTopology.destroy();
     }
 }
 

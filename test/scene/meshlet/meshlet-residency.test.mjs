@@ -81,6 +81,40 @@ describe('MeshletResidency', function () {
         residency.destroy();
     });
 
+    it('enables demand streaming without fetching the whole root shard', async function () {
+        const world = makeWorld(1, 3);
+        world.cut = { rootPages: [0, 1, 2] };
+        const residency = new MeshletResidency(device, world);
+        let fetched = false;
+        residency._streams[0].fetcher.fetchBlob = () => {
+            fetched = true;
+            return Promise.resolve(new ArrayBuffer(PAGE));
+        };
+        await residency.loadRoots();
+        expect(fetched).to.equal(false);
+        expect(residency.rootsResident).to.equal(true);
+        expect(residency.residentPages).to.equal(0);
+        residency.destroy();
+    });
+
+    it('pins only active coarse pages and releases them when the view moves away', function () {
+        const world = makeWorld(2, 3);
+        const selection = { pages: new Uint8Array([1, 0, 0]) };
+        world.rootSelections = new Set([selection]);
+        const residency = new MeshletResidency(device, world);
+        residency._installPage(0, words(0), false);
+        residency._installPage(1, words(1), false);
+        residency._refreshRootPins();
+        expect(Array.from(residency.slotPinned)).to.deep.equal([1, 0]);
+        selection.pages.set([0, 1, 0]);
+        residency._refreshRootPins();
+        expect(Array.from(residency.slotPinned)).to.deep.equal([0, 1]);
+        residency._installPage(2, words(2), false);
+        expect(world.residency[0]).to.equal(PAGE_NOT_RESIDENT);
+        expect(world.residency[1]).not.to.equal(PAGE_NOT_RESIDENT);
+        residency.destroy();
+    });
+
     it('turns request marks into touches, protection and a bounded fetch queue', function () {
         const world = makeWorld(4, 10);
         const residency = new MeshletResidency(device, world);
@@ -107,13 +141,13 @@ describe('MeshletResidency', function () {
         expect(residency.slotLastUsed[world.residency[1]], 'used page touched').to.equal(20);
         expect(residency._protected.has(1)).to.equal(true);
         expect(residency.lastMissingWanted).to.equal(4);
-        // budget = free slots (2) + evictable (4 slots - 1 pinned - 1 used) - in flight (0) = 4
-        expect(residency.inFlight.size).to.equal(4);
-        expect(queued).to.deep.equal([4]);
+        // Two free slots; the occupied slots are pinned or used, so neither is evictable.
+        expect(residency.inFlight.size).to.equal(2);
+        expect(queued).to.deep.equal([2]);
 
         // a page already in flight is not requested again
         residency._processRequests(marks);
-        expect(residency.inFlight.size).to.equal(4);
+        expect(residency.inFlight.size).to.equal(2);
         residency.destroy();
     });
 

@@ -13,6 +13,13 @@ import { BindingTwoWay, BooleanInput, LabelGroup, Panel } from '@playcanvas/pcui
 export function Controls({ observer }) {
     return (
         <Panel headerText='Meshlet Basic'>
+            <LabelGroup text='Occlusion culling'>
+                <BooleanInput
+                    type='toggle'
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.occlusion' }}
+                />
+            </LabelGroup>
             <LabelGroup text='Meshlet colours'>
                 <BooleanInput
                     type='toggle'

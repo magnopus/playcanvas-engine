@@ -218,7 +218,8 @@ export const MESHLET_COUNTER = {
     COMMITTED_BASE: 5,  // highest reservation that fit per bucket - the draw's index count
     DEMAND_BASE: 8,     // unclamped demand per bucket - survives the phase-2 reset
     RENDERED: 11,
-    RECORD_DEMAND: 12
+    RECORD_DEMAND: 12,
+    SELECTED: 13       // compact cut count, retained across both occlusion phases
 };
 
 /** @type {number} - material record word 11, bit 0. */

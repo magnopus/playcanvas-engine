@@ -104,7 +104,7 @@ describe('buildMeshletLitChunks', function () {
     });
 
     it('preserves application reflection signatures when injecting lightmaps into a tab-indented backend', function () {
-        const forwardBackend = '\tvar output : FragmentOutput;\n\t#ifdef LIT_LIGHTMAP\n\t#endif\naddReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);\n\t#ifdef AREA_LIGHTS\n\t#endif';
+        const forwardBackend = '\tvar output : FragmentOutput;\n\t#ifdef LIT_LIGHTMAP\n\t#endif\naddReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);\n\t#ifdef AREA_LIGHTS\n\t#endif\n#include "endPS"';
         const chunks = buildMeshletLitChunks({ ...textured, lightmaps: true, forwardBackend });
         expect(chunks.litForwardBackendPS).to.include('dDiffuseLight = meshletLightmapIrradiance();');
         expect(chunks.litForwardBackendPS).to.include('addReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);');
@@ -133,7 +133,8 @@ describe('buildMeshletLitChunks', function () {
                 #ifdef AREA_LIGHTS
                 #endif
                 addClusteredLights();
-            #endif`;
+            #endif
+            #include "endPS"`;
         const backend = buildMeshletLitChunks({ ...textured, lightmaps: true, forwardBackend }).litForwardBackendPS;
         const snapshot = backend.indexOf('let meshletDiffuseBeforeProbes = dDiffuseLight;');
         const restore = backend.indexOf('dDiffuseLight = meshletDiffuseBeforeProbes;');
@@ -144,7 +145,7 @@ describe('buildMeshletLitChunks', function () {
         expect(backend).to.include('if (meshletHasLightmap()) {\n                dDiffuseLight = meshletDiffuseBeforeProbes;');
     });
 
-    it('emits unlit records as their base colour and returns before the lighting backend', function () {
+    it('keeps derivative-dependent lighting uniform and selects unlit colour before common outputs', function () {
         for (const options of [{}, textured]) {
             const chunks = buildMeshletLitChunks(options);
             expect(chunks.litEngineDeclarationPS).to.include(`materialTable[vMeshletMatRow].flags & ${MATERIAL_FLAG_UNLIT}u`);
@@ -152,20 +153,21 @@ describe('buildMeshletLitChunks', function () {
             expect(chunks.emissivePS).to.include('if (meshletUnlit()) {\n                dEmission = meshletSurfaceRgb();');
 
             const backend = chunks.litForwardBackendPS;
-            const earlyOut = backend.indexOf('if (meshletUnlit()) {');
-            expect(earlyOut).to.be.above(backend.indexOf('var output: FragmentOutput;'));
-            expect(earlyOut).to.be.below(backend.indexOf('addAmbient('));
-            const block = backend.slice(earlyOut, backend.indexOf('return output;', earlyOut));
+            const unlitOutput = backend.indexOf('if (meshletUnlit()) {');
+            expect(unlitOutput).to.be.above(backend.indexOf('addReflection('));
+            expect(unlitOutput).to.be.above(backend.indexOf('addClusteredLights('));
+            expect(unlitOutput).to.be.below(backend.indexOf('#include "outputAlphaPS"'));
+            const block = backend.slice(unlitOutput, backend.indexOf('}', unlitOutput));
             expect(block).to.include('addFog(litArgs_emission)');
-            expect(block).to.include('#include "outputAlphaPS"');
-            expect(block).to.include('#include "outlineOutputPS"');
-            expect(block).not.to.include('addAmbient(');
+            expect(block).not.to.include('return');
+            expect(backend.match(/return output;/g)).to.have.lengthOf(1);
+            expect(backend.indexOf('#include "outlineOutputPS"')).to.be.above(unlitOutput);
         }
 
         // an application backend with its own whitespace is hooked the same way
-        const custom = buildMeshletLitChunks({ forwardBackend: '\tvar output : FragmentOutput;\n\taddAmbient();' }).litForwardBackendPS;
-        expect(custom.indexOf('if (meshletUnlit())')).to.be.above(custom.indexOf('var output : FragmentOutput;'));
-        expect(custom.indexOf('if (meshletUnlit())')).to.be.below(custom.indexOf('addAmbient();'));
+        const custom = buildMeshletLitChunks({ forwardBackend: '\taddReflection();\n\t#include "endPS"\n\t#include "outputAlphaPS"' }).litForwardBackendPS;
+        expect(custom.indexOf('if (meshletUnlit())')).to.be.above(custom.indexOf('addReflection();'));
+        expect(custom.indexOf('if (meshletUnlit())')).to.be.below(custom.indexOf('#include "outputAlphaPS"'));
     });
 
     it('bounds anisotropic taps by the runtime limit and the resident footprint', function () {

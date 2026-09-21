@@ -3,7 +3,7 @@ import { PIXELFORMAT_R32F, SHADERLANGUAGE_WGSL } from '../../platform/graphics/c
 import { Shader } from '../../platform/graphics/shader.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import {
-    instanceCullWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL
+    instanceCullWGSL, compactMeshletsWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL
 } from './shaders/meshlet-cull-wgsl.js';
 
 /**
@@ -13,9 +13,7 @@ import {
 /**
  * The compiled cull compute shaders, plus the placeholder HZB texture bound when no HZB is
  * active. These are stateless - all per-view state rides on the {@link Compute} instances - so
- * one set is shared by every {@link MeshletCuller}. That matters once shadows land: a four
- * cascade CSM adds four more cullers per light, and compiling six compute shaders each would be
- * twenty-four redundant pipeline compiles.
+ * one set is shared by every {@link MeshletCuller}, including the cullers for shadow cascades.
  *
  * @ignore
  */
@@ -32,6 +30,7 @@ class MeshletCullShaders {
 
         this.cut = make('Cut', meshletCutWGSL);
         this.instanceCull = make('InstanceCull', instanceCullWGSL);
+        this.compactMeshlets = make('CompactMeshlets', compactMeshletsWGSL);
         this.dispatchArgs = make('DispatchArgs', dispatchArgsWGSL);
         this.meshletCull = make('MeshletCull', meshletCullWGSL);
         this.finalizeArgs = make('FinalizeArgs', finalizeArgsWGSL);
@@ -47,6 +46,7 @@ class MeshletCullShaders {
     destroy() {
         this.cut?.destroy();
         this.instanceCull?.destroy();
+        this.compactMeshlets?.destroy();
         this.dispatchArgs?.destroy();
         this.meshletCull?.destroy();
         this.finalizeArgs?.destroy();

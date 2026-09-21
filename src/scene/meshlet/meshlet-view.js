@@ -210,6 +210,7 @@ class MeshletView {
         // LOD cut emits a few hundred thousand. counters[MESHLET_COUNTER.RECORDS] counts unclamped
         // demand, so the buffer starts small and grows to what frames actually ask for.
         this.recordCapacity = Math.min(world.recordCapacity, world.initialRecords || world.recordCapacity);
+        this.selectedMeshletsBuffer = new StorageBuffer(device, Math.max(this.recordCapacity * 8, 16), BUFFERUSAGE_COPY_DST);
         this.cutBudgetBuffer = new StorageBuffer(device, 20, BUFFERUSAGE_COPY_DST);
         this.cutBudgetInitial = new Uint32Array(5);
         // persistent visibility bits for two-phase occlusion (never cleared - phase 2 maintains
@@ -291,6 +292,8 @@ class MeshletView {
         const target = Math.min(Math.ceil(wanted * this.growTo), this.world.recordCapacity);
         if (target <= this.recordCapacity) return false;
         this.recordCapacity = target;
+        this.selectedMeshletsBuffer.destroy();
+        this.selectedMeshletsBuffer = new StorageBuffer(this.device, Math.max(target * 8, 16), BUFFERUSAGE_COPY_DST);
         const old = this.recordsBuffer;
         this.recordsBuffer = new StorageBuffer(this.device, Math.max(target * RECORD_U32S * BYTES_PER_WORD, 16), BUFFERUSAGE_COPY_DST);
         this.meshInstances.forEach(mi => mi.setParameter('records', this.recordsBuffer));
@@ -313,6 +316,7 @@ class MeshletView {
         }
         this.workItemsBuffer = null;
         this.recordsBuffer?.destroy();
+        this.selectedMeshletsBuffer?.destroy();
         if (this._ownsClaimBits) {
             this.claimBitsBuffer?.destroy();
         }
