@@ -19,6 +19,11 @@ import { Component } from '../component.js';
  * over HTTP Range requests relative to the asset's URL. The entity's world transform applies
  * to the asset's placements and may change dynamically.
  *
+ * A mixed container can also retain regular primitives, such as alpha-blended windows. Render
+ * these by adding `containerAsset.resource.instantiateRenderEntity()` as a child of this
+ * entity. The glTF parser excludes streamed primitives from that regular render hierarchy;
+ * the meshlet component itself only draws the streamed primitives.
+ *
  * ```javascript
  * const entity = new Entity();
  * entity.addComponent('meshlet', { asset: containerAsset });

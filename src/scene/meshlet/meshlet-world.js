@@ -472,8 +472,9 @@ class MeshletWorld {
         }
 
         const pairWords = Math.max(Math.ceil((pairs + totalInstances) / 32), 4);
+        const claimWords = Math.max(Math.ceil((pairs * 2 + totalInstances) / 32), 4);
         // Upper bound for group headers, membership lists, packed selection links and instance/group tasks.
-        const cutBytes = totalMeshlets * 48 + pairs * 8 + totalInstances * 40;
+        const cutBytes = totalMeshlets * 56 + pairs * 8 + totalInstances * 40;
         const fixed = cutBytes + lightmapBytes + totalMeshlets * MESHLET_DATA_U32S * 4 +      // meshletData
             totalInstances * OBJECT_DATA_U32S * 4 +                // objectData
             totalPages * 4 +                                       // residency
@@ -482,11 +483,11 @@ class MeshletWorld {
         const workItemBytes = Math.max(workItems * WORK_ITEM_U32S * 4, 16);
         const recordBytes = Math.min(this.initialRecords || pairs, pairs) * (RECORD_U32S * 4 + 8);
         // camera view: own claim plane, own visibility bits, own work items, own records
-        const perCamera = pairWords * 4 * 2 + workItemBytes + recordBytes;
+        const perCamera = (claimWords + pairWords) * 4 + workItemBytes + recordBytes;
         // shadow view: claim plane and work items are shared across cascades, visibility bits
         // are a 16-byte placeholder
         const perShadow = recordBytes;
-        const shared = this.budgetShadowViews > 0 ? pairWords * 4 + workItemBytes : 0;
+        const shared = this.budgetShadowViews > 0 ? claimWords * 4 + workItemBytes : 0;
 
         const views = Math.max(this.budgetCameraViews, 1);
         const reserved = fixed + perCamera * views + perShadow * this.budgetShadowViews + shared;

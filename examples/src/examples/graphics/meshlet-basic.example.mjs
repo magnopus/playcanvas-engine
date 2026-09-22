@@ -1,6 +1,6 @@
 // @config
 //
-// Local Zorah streaming reproduction. Load a chunk as a container asset and stream its
+// Load a local test asset as a container and stream its
 // geometry pages on demand. Orbit, pan and zoom into surfaces to inspect residency transitions;
 // toggle occlusion to exercise CameraFrame's scene-depth attachment and two-phase HZB path.
 // See assets/meshlets/README.md for the local asset setup.
@@ -22,11 +22,18 @@ import {
     LightComponentSystem,
     MeshletComponentSystem,
     Mouse,
+    RenderComponentSystem,
     RESOLUTION_AUTO,
+    SHADERPASS_ALBEDO,
+    SHADERPASS_METALNESS,
+    SHADERPASS_ROUGHNESS,
+    SHADERPASS_WORLDNORMAL,
     ScriptComponentSystem,
     ScriptHandler,
+    TextureHandler,
     TouchDevice,
     Vec3,
+    basisInitialize,
     createGraphicsDevice
 } from 'playcanvas';
 
@@ -35,10 +42,24 @@ import { data, deviceType } from 'examples/context';
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
+const models = {
+    bunny: { name: 'Bunny', url: './assets/meshlets/bunny-v2.glb' },
+    zorah: { name: 'Zorah chunk 003', url: './assets/meshlets/zorah/chunk_003.streamed.glb' },
+    magoffice: { name: 'MagOffice', url: './assets/meshlets/magoffice_streamed.glb' }
+};
+const requestedAsset = new URLSearchParams(location.search).get('asset') ?? '';
+const assetName = Object.hasOwn(models, requestedAsset) ? requestedAsset : 'zorah';
+const selectedModel = models[assetName];
+
+// The office has streamed KTX2 textures and inline transparent meshes.
+basisInitialize({
+    glueUrl: './assets/wasm/basis/basis.wasm.js',
+    wasmUrl: './assets/wasm/basis/basis.wasm.wasm',
+    fallbackUrl: './assets/wasm/basis/basis.js'
+});
+
 const assets = {
-    model: new Asset('Zorah chunk 001', 'container', {
-        url: './assets/meshlets/zorah/chunk_003.streamed.glb'
-    }),
+    model: new Asset(selectedModel.name, 'container', { url: selectedModel.url }),
     orbit: new Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' })
 };
 
@@ -52,10 +73,11 @@ createOptions.touch = new TouchDevice(document.body);
 createOptions.componentSystems = [
     CameraComponentSystem,
     LightComponentSystem,
+    RenderComponentSystem,
     ScriptComponentSystem,
     MeshletComponentSystem
 ];
-createOptions.resourceHandlers = [ContainerHandler, ScriptHandler];
+createOptions.resourceHandlers = [ContainerHandler, ScriptHandler, TextureHandler];
 
 const app = new AppBase(canvas);
 app.init(createOptions);
@@ -70,15 +92,20 @@ app.on('destroy', () => {
 });
 
 const assetListLoader = new AssetListLoader(Object.values(assets), app.assets);
-await new Promise((resolve) => {
-    assetListLoader.load(resolve);
+await new Promise((resolve, reject) => {
+    assetListLoader.load((error) => (error ? reject(error) : resolve()));
 });
 
-// This chunk needs ~279 MiB of metadata, ~126 MiB of root pages and ~347 MiB of
+// Zorah chunk 003 needs ~279 MiB of metadata, ~126 MiB of root pages and ~347 MiB of
 // root draw indices alone. Reserve room for the cut tables, records and streamed detail too.
 app.systems.meshlet.poolBytes = 2048 * 1024 * 1024;
-const model = new Entity('Zorah chunk 001');
+const model = new Entity(selectedModel.name);
 model.addComponent('meshlet', { asset: assets.model });
+// The parser skips streamed placeholders on the regular path. Instantiate the remaining
+// geometry too: alpha-blended windows stay inline so the forward renderer can sort them.
+if (assets.model.resource.renders.some((asset) => asset.resource.meshes.length > 0)) {
+    model.addChild(assets.model.resource.instantiateRenderEntity());
+}
 app.root.addChild(model);
 
 const light = new Entity('Sun');
@@ -119,9 +146,23 @@ cameraFrame.bloom.enabled = false;
 cameraFrame.update();
 app.on('destroy', () => cameraFrame.destroy());
 
-// debug colour toggle: mode 2 tints every meshlet cluster its own colour, 0 restores the lit
-// material. Re-applied every frame so it also survives world rebuilds.
-data.set('data', { meshletColours: false, occlusion: false });
+const shaderPasses = {
+    normals: SHADERPASS_WORLDNORMAL,
+    albedo: SHADERPASS_ALBEDO,
+    metalness: SHADERPASS_METALNESS,
+    roughness: SHADERPASS_ROUGHNESS
+};
+data.set('data', { asset: assetName, visualization: 'material', occlusion: false });
+data.on('data.asset:set', (value) => {
+    if (value === assetName || !Object.hasOwn(models, value)) return;
+    // Reload releases the previous world's page and texture pools before loading another asset.
+    const url = new URL(location.href);
+    url.searchParams.set('asset', value);
+    location.assign(url.href);
+});
+data.on('data.visualization:set', (value) => {
+    camera.camera.setShaderPass(shaderPasses[value]);
+});
 data.on('data.occlusion:set', (value) => {
     app.systems.meshlet.occlusion = value;
 });
@@ -134,11 +175,12 @@ app.on('framerender', () => {
     if (!world?.finalized) {
         return;
     }
-    world.setColorMode(data.get('data.meshletColours') ? 2 : 0);
+    const visualization = data.get('data.visualization');
+    world.setColorMode(visualization === 'meshlet' ? 2 : visualization === 'lod' ? 1 : 0);
     if (!framed) {
         const bounds = world.worldBounds;
         const radius = bounds.halfExtents.length();
-        const distance = radius / Math.sin(camera.camera.fov * Math.PI / 360);
+        const distance = radius / Math.sin((camera.camera.fov * Math.PI) / 360);
         const position = new Vec3(0.5, 0.3, 1).normalize().mulScalar(distance).add(bounds.center);
         camera.camera.farClip = Math.max(distance * 4, 100);
         // @ts-ignore

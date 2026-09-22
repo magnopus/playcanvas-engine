@@ -52,6 +52,7 @@ export async function runMeshletCutGpuChecks(device) {
         compute.setParameter('taskCount', level.count);
         compute.setParameter('rootStage', level.root ? 1 : 0);
         compute.setParameter('totalPairs', 20);
+        compute.setParameter('freeBase', 22);
         compute.setupDispatch(1);
         return compute;
     });
@@ -81,6 +82,7 @@ export async function runMeshletCutGpuChecks(device) {
     compact.setParameter('selectedMeshlets', selectedBuffer);
     compact.setParameter('workItems', buffer(new Uint32Array([0, 0, 1, 0])));
     compact.setParameter('totalPairs', 20);
+    compact.setParameter('freeBase', 22);
     compact.setParameter('workItemCapacity', 2);
     compact.setupDispatch(2);
     const selectedArgsShader = new Shader(device, { name: 'CutSelectedArgs', shaderLanguage: SHADERLANGUAGE_WGSL, cshader: dispatchArgsWGSL });
@@ -105,14 +107,25 @@ export async function runMeshletCutGpuChecks(device) {
         { name: 'record capacity admits only roots', missing: [], indices: 24, records: 2, expected: [8, 9] },
         { name: 'capacity admits one complete replacement', missing: [], indices: 9, records: 10 },
         { name: 'evicted fine page', missing: [2], indices: 24, records: 10, expected: [0, 1, 6, 7] },
-        { name: 'fine page returns', missing: [], indices: 24, records: 10, expected: [0, 1, 2, 3] }
+        { name: 'fine page returns', missing: [], indices: 24, records: 10, expected: [0, 1, 2, 3] },
+        // Root 9's group lies outside the frustum. Both middle replacements depend on it, so
+        // it must still refine (without pages or charge) or the visible surface stays coarse.
+        { name: 'off-screen shared ancestor', offscreen: true, missing: [5, 7], indices: 24, records: 10, expected: [0, 1, 2, 3] },
+        { name: 'off-screen ancestor, visible page missing', offscreen: true, missing: [2], indices: 24, records: 10, expected: [0, 1, 6] }
     ];
+    // Moves root 9's replacement group (its bounds and its children's parent bounds) off-screen.
+    const offscreenMeshlets = meshlets.slice();
+    const offscreenFloats = new Float32Array(offscreenMeshlets.buffer);
+    for (const field of [9 * MESHLET_DATA_U32S + M.GROUP_SPHERE, 5 * MESHLET_DATA_U32S + M.PARENT_SPHERE, 7 * MESHLET_DATA_U32S + M.PARENT_SPHERE]) {
+        offscreenFloats[field] = 50;
+    }
     try {
         // Keep submissions sequential so page eviction/return cases reuse the same GPU state.
         await scenarios.reduce((previous, scenario) => previous.then(async () => {
             const residency = new Uint32Array(10);
             for (const page of scenario.missing) residency[page] = MESHLET_NO_PARENT;
             bindings.residency.write(0, residency);
+            bindings.meshletData.write(0, scenario.offscreen ? offscreenMeshlets : meshlets);
             bindings.claimBits.clear(); bindings.requests.clear();
             const initialCounters = new Uint32Array(MESHLET_COUNTER_U32S);
             initialCounters[MESHLET_COUNTER.WORK_ITEMS] = 2;
@@ -153,13 +166,18 @@ export async function runMeshletCutGpuChecks(device) {
             }
             if (!set(20)) throw new Error(`${scenario.name}: root cut was not admitted`);
             if (set(21)) throw new Error(`${scenario.name}: admitted off-screen instance`);
+            const freeGroups = [8, 9].filter(g => set(22 + g));
+            if (JSON.stringify(freeGroups) !== JSON.stringify(scenario.offscreen ? [9] : [])) throw new Error(`${scenario.name}: unexpected off-frustum refinements ${freeGroups}`);
             const selected = [];
             let covered = 0, indexCount = 0;
             for (let m = 0; m < 10; m++) {
                 const row = m * MESHLET_DATA_U32S, parent = meshlets[row + M.PARENT], birth = meshlets[row + M.BIRTH_GROUP];
                 if ((parent === MESHLET_NO_PARENT || set(parent)) && (birth === MESHLET_NO_PARENT || !set(birth))) {
                     if (covered & coverage[m]) throw new Error(`${scenario.name}: overlapping replacement`);
-                    covered |= coverage[m]; selected.push(m);
+                    covered |= coverage[m];
+                    // off-screen by construction: covered, but never compacted or resident
+                    if (parent !== MESHLET_NO_PARENT && set(22 + parent)) continue;
+                    selected.push(m);
                     indexCount += meshlets[row + M.TRIANGLE_COUNT] * 3;
                     if (scenario.missing.includes(m)) throw new Error(`${scenario.name}: selected unavailable geometry`);
                 }
@@ -176,6 +194,9 @@ export async function runMeshletCutGpuChecks(device) {
             }
             if (scenario.name === 'all detail resident' && demand[MESHLET_COUNTER.DEMAND_BASE] !== 24) {
                 throw new Error('Fully refined cut must report exactly 24 indices even when nothing is drawn');
+            }
+            if (scenario.offscreen && demand[MESHLET_COUNTER.DEMAND_BASE] !== indexCount) {
+                throw new Error(`${scenario.name}: off-frustum refinement must charge nothing and refund its coarse members`);
             }
             device.computeDispatch([reset, finalize], 'CutDemandPhase2');
             const phase2 = new Uint32Array(MESHLET_COUNTER_U32S);

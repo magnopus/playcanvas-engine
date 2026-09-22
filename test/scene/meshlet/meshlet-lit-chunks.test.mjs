@@ -248,6 +248,20 @@ describe('buildMeshletLitChunks', function () {
         expect(chunks.litEngineMainStartVS).to.include('meshletDecodeTangent(');
     });
 
+    it('uses only baked tangent frames for normal mapping', function () {
+        const chunks = buildMeshletLitChunks({ ...textured, tangents: true });
+        expect(chunks.normalMapPS).to.include(`meshletSampleSlot(${MATERIAL_SLOT.NORMAL}u`);
+        expect(chunks.normalMapPS).to.include('vMeshletTangentW');
+        expect(chunks.normalMapPS).to.include('B = cross(n, T) * vMeshletBtSign');
+        expect(chunks.normalMapPS).not.to.include('dMeshletPosition');
+        expect(chunks.normalMapPS).not.to.match(/dpdx\(|dpdy\(|determinant|bitangent/);
+        expect(chunks.litEngineMainStartPS).not.to.include('dMeshletPosition');
+
+        const noTangents = buildMeshletLitChunks({ ...textured, tangents: false });
+        expect(noTangents.normalMapPS).not.to.include(`meshletSampleSlot(${MATERIAL_SLOT.NORMAL}u`);
+        expect(noTangents.normalMapPS).not.to.include('vMeshletTangentW');
+    });
+
     it('threads one varying per UV channel up to the slot word limit and selects per slot', function () {
         const chunks = buildMeshletLitChunks({ textures: true, uvChannels: MESHLET_MAX_UV_CHANNELS + 5 });
         for (let n = 0; n < MESHLET_MAX_UV_CHANNELS; n++) {

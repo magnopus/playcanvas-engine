@@ -193,6 +193,9 @@ class MeshletView {
         // one bit per instance-meshlet pair, 32 to a word; a few words minimum so tiny scenes
         // still get a real buffer
         const pairWords = Math.max(Math.ceil((world.totalPairs + world.instanceCount) / 32), 4);
+        // the claim plane also holds one off-frustum refinement flag per pair after the
+        // admission bits (see meshletCutWGSL)
+        const claimWords = Math.max(Math.ceil((world.totalPairs * 2 + world.instanceCount) / 32), 4);
         this.cullParamsBuffer = new StorageBuffer(device, (CULL_PARAMS_VEC4S + (this.rootSelection ? Math.ceil(world.instanceCount / 4) : 0)) * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
         this.countersBuffer = new StorageBuffer(device, MESHLET_COUNTER_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
         // demand readbacks go through a pooled staging buffer, the same way the residency's
@@ -202,7 +205,7 @@ class MeshletView {
             new StorageBuffer(device, Math.max(world.workItemCapacity * WORK_ITEM_U32S * BYTES_PER_WORD, 16), BUFFERUSAGE_COPY_DST);
         this._ownsWorkItems = !sharedWorkItems;
         this.recordsBuffer = null; // allocated below, once recordCapacity is known
-        this.claimBitsBuffer = sharedClaimBits ?? new StorageBuffer(device, pairWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
+        this.claimBitsBuffer = sharedClaimBits ?? new StorageBuffer(device, claimWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         this._ownsClaimBits = !sharedClaimBits;
         // Records are demand-grown like the index buffer. Sizing them for the worst case (every
         // meshlet of every instance drawn at once) is hopeless on scattered scenes - a jungle

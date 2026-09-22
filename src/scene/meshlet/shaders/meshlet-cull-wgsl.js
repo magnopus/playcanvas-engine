@@ -101,6 +101,7 @@ export const compactMeshletsWGSL = /* wgsl */ `
     ${meshletDataWGSL}
     ${meshletWorkItemsWGSL('read')}
     uniform totalPairs: u32;
+    uniform freeBase: u32;
     uniform workItemCapacity: u32;
     uniform recordCapacity: u32;
     var<storage, read> selectionTopology: array<vec2u>;
@@ -120,6 +121,9 @@ export const compactMeshletsWGSL = /* wgsl */ `
         if (parent != ${MESHLET_NO_PARENT}u) {
             let bit = pairBase + parent;
             if ((claimBits[bit >> 5u] & (1u << (bit & 31u))) == 0u) { return false; }
+            // refined only to unblock its dependants: off-frustum, so never drawn or resident
+            let freeBit = uniform.freeBase + bit;
+            if ((claimBits[freeBit >> 5u] & (1u << (freeBit & 31u))) != 0u) { return false; }
         }
         let birth = selectionTopology[meshlet].y;
         if (birth != ${MESHLET_NO_PARENT}u) {

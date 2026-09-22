@@ -164,7 +164,9 @@ class RenderPassMeshletDraw extends RenderPass {
         if (this.sceneTextures !== undefined) shaderParams.sceneTextures = this.sceneTextures;
 
         const step = this.layerRenderSteps[0];
-        this.renderer.renderForwardLayer(camera, this.renderTarget, null, false, SHADER_FORWARD, {
+        // Match the regular forward passes, including the camera's material debug views.
+        const shaderPass = camera.shaderPassInfo?.index ?? SHADER_FORWARD;
+        this.renderer.renderForwardLayer(camera, this.renderTarget, null, false, shaderPass, {
             meshInstances: this.meshInstances,
             lightLayer: step.layer,
             lightClusters: step.lightClusters ?? undefined

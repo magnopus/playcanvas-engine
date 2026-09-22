@@ -114,12 +114,16 @@ class MeshletCutData {
                 };
                 for (const group of groups) {
                     const coarse = [];
-                    const parents = new Set();
+                    const parents = new Map();
                     for (let m = group.start; m < group.start + group.count; m++) {
                         source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP] = group.start;
                         coarse.push(m);
                         const parent = source[m * MESHLET_DATA_U32S + M.PARENT];
-                        if (parent !== MESHLET_NO_PARENT) parents.add(parent);
+                        if (parent !== MESHLET_NO_PARENT) {
+                            let members = parents.get(parent);
+                            if (!members) parents.set(parent, members = []);
+                            members.push(m);
+                        }
                     }
                     const pages = new Set();
                     for (const child of group.children) pages.add(source[child * MESHLET_DATA_U32S + M.PAGE]);
@@ -128,9 +132,12 @@ class MeshletCutData {
                     // Header: representative, dependency count, page-list offset/count,
                     // fine/coarse index and record costs. Lists contain unique parent
                     // representatives and pages, avoiding serial scans over every meshlet.
-                    words.push(first + group.start, parents.size, offset + 8 + parents.size, pages.size,
+                    // Each parent also carries the coarse cost it contributed: an off-frustum
+                    // parent refines without charging its children, so a replacement must not
+                    // subtract those uncharged members from its own charge.
+                    words.push(first + group.start, parents.size, offset + 8 + parents.size * 3, pages.size,
                         fineCost[0], coarseCost[0], fineCost[1], coarseCost[1]);
-                    for (const parent of parents) words.push(parent);
+                    for (const [parent, members] of parents) words.push(parent, ...costs(members));
                     for (const page of pages) words.push(page);
                     tasks.push({ level: group.level, offset });
                 }

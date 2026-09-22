@@ -42,6 +42,33 @@ describe('meshlet replacement groups', function () {
         }
     });
 
+    it('stores the coarse cost each parent contributes to a replacement', function () {
+        const { meshlets, objects } = createCutFixture();
+        const device = {
+            buffers: new Set(),
+            _vram: { sb: 0 },
+            createBufferImpl: () => ({
+                allocate() {},
+                destroy() {},
+                write(device, offset, data) {
+                    this.words = data.slice();
+                }
+            })
+        };
+        const cut = new MeshletCutData(device, meshlets, objects);
+        try {
+            // Group 4 replaces coarse members 4 (under root 8) and 5 (under root 9) with 0 and 1.
+            const words = Array.from(cut.groups.impl.words.slice(0, 16));
+            expect(words).to.deep.equal([
+                4, 2, 14, 2, 12, 6, 2, 2,
+                8, 3, 1, 9, 3, 1,
+                0, 1
+            ]);
+        } finally {
+            cut.destroy();
+        }
+    });
+
     it('recovers all coarse members and cross-linked fine dependencies', function () {
         const { groups, roots } = buildMeshletGroups(createCutFixture().meshlets);
         expect(roots).to.deep.equal([8, 9]);

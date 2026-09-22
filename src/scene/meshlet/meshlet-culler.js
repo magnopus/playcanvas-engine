@@ -116,6 +116,7 @@ class MeshletCuller {
             compute.setParameter('taskCount', level.count);
             compute.setParameter('rootStage', level.root ? 1 : 0);
             compute.setParameter('totalPairs', world.totalPairs);
+            compute.setParameter('freeBase', world.totalPairs + world.instanceCount);
             compute.setParameter('recordCapacity', view.recordCapacity);
             bindCapacities(compute, view);
             compute.setParameter('cutGroups', world.cut.groups);
@@ -160,6 +161,7 @@ class MeshletCuller {
         instanceCull.setParameter('workItems', view.workItemsBuffer);
 
         this.compactMeshlets.setParameter('totalPairs', world.totalPairs);
+        this.compactMeshlets.setParameter('freeBase', world.totalPairs + world.instanceCount);
         this.compactMeshlets.setParameter('workItemCapacity', world.workItemCapacity);
         this.compactMeshlets.setParameter('recordCapacity', view.recordCapacity);
         this.compactMeshlets.setParameter('objectData', world.objectDataBuffer);

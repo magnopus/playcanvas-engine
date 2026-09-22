@@ -22,7 +22,7 @@ describe('RenderPassMeshletDraw', function () {
         camera.clearColor = new Color(0.1, 0.2, 0.3, 1);
         camera.clearDepth = 0.5;
         camera.clearStencil = 3;
-        cameraComponent = { camera };
+        cameraComponent = { camera, shaderParams: {} };
     });
 
     afterEach(function () {
@@ -83,6 +83,22 @@ describe('RenderPassMeshletDraw', function () {
         expect(options.meshInstances).to.equal(pass.meshInstances);
         expect(options.lightLayer).to.equal(lightLayer);
         expect(options.lightClusters, 'unassigned clusters fall through to the allocator default').to.equal(undefined);
+    });
+
+    it('uses the camera debug shader pass in either draw phase and restores forward shading', function () {
+        const calls = [];
+        renderer.renderForwardLayer = (...args) => calls.push(args[4]);
+        const passes = ['Phase1', 'Phase2'].map((name) => {
+            const pass = new RenderPassMeshletDraw(app.graphicsDevice, renderer, name);
+            pass.setup(cameraComponent, null);
+            pass.meshInstances = [{}];
+            return pass;
+        });
+        cameraComponent.camera.shaderPassInfo = { index: 7 };
+        passes.forEach(pass => pass.execute());
+        cameraComponent.camera.shaderPassInfo = null;
+        passes.forEach(pass => pass.execute());
+        expect(calls).to.deep.equal([7, 7, SHADER_FORWARD, SHADER_FORWARD]);
     });
 
     it('claims the camera directional shadow passes once and releases them after the frame', function () {

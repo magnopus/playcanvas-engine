@@ -179,7 +179,9 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             dMeshletUv${n} = vec2f(bitcast<f32>(pagePool[meshletUv${n}Word]), bitcast<f32>(pagePool[meshletUv${n}Word + 1u]));
         }`).join('')}
         ${tan ? /* wgsl */ `
-        dMeshletTangentW = vec3f(1.0, 0.0, 0.0);
+        // A resource without tangents can share a world with one that has them. Zero leaves
+        // those surfaces on their geometric normal; normal maps require baked tangent data.
+        dMeshletTangentW = vec3f(0.0);
         dMeshletBtSign = 1.0;
         if (meshletHasTangents) {
             let meshletTangent = meshletDecodeTangent(pagePool[meshletLayout.tangentBase + meshletVert]);
@@ -368,9 +370,10 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             return fallback;
         }
 
-        fn meshletSampleSlot(slot: u32, fallback: vec4f) -> vec4f {
+        // Sampling uses the same UV channel and texture transform for every material slot,
+        // particularly on materials that tile or mirror their normal map.
+        fn meshletSlotUv(slot: u32) -> mat3x2f {
             let slotWord = materialTable[vMeshletMatRow].slotWords[slot];
-            let texIndex = slotWord & 0xFFFFu;
 
             var uv = ${uv0 ? 'vMeshletUv0' : 'vec2f(0.0)'};
             var ddx = ${uv0 ? 'dMeshletUv0Dx' : 'vec2f(0.0)'};
@@ -390,7 +393,13 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
                 ddx = ddx * transformScale;
                 ddy = ddy * transformScale;
             }
-            return meshletSampleTexture(texIndex, uv, ddx, ddy, fallback);
+            return mat3x2f(uv, ddx, ddy);
+        }
+
+        fn meshletSampleSlot(slot: u32, fallback: vec4f) -> vec4f {
+            let texIndex = materialTable[vMeshletMatRow].slotWords[slot] & 0xFFFFu;
+            let uv = meshletSlotUv(slot);
+            return meshletSampleTexture(texIndex, uv[0], uv[1], uv[2], fallback);
         }` : ''}
         ${lightmapped ? /* wgsl */ `
         fn meshletHasLightmap() -> bool {
@@ -490,16 +499,13 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         }
     `;
 
-    // two-sided normal flip without LIT_TBN, plus (when tangents stream) normal mapping from
-    // the page-pool tangent frame
+    // Normal maps use the tangent frame baked into the meshlet pages. Assets without streamed
+    // tangents retain their geometric normals; the baker emits tangents by default.
     const normalMapPS = /* wgsl */ `
         fn getNormal() {
             var n = select(-dVertexNormalW, dVertexNormalW, pcFrontFacing);
-            ${tan ? /* wgsl */ `
+            ${tan && uv0 ? /* wgsl */ `
             let normalSlotWord = ${material}.slotWords[${MATERIAL_SLOT.NORMAL}u];
-            // a degenerate tangent frame (zero, or parallel to the normal - a coarse DAG level
-            // can carry either) keeps the geometric normal: normalising it would give NaN and
-            // shade the whole cluster black
             let tangentProjected = vMeshletTangentW - n * dot(vMeshletTangentW, n);
             if ((normalSlotWord & 0xFFFFu) != ${MATERIAL_SLOT_ABSENT}u && dot(tangentProjected, tangentProjected) > 1e-6) {
                 let normalSample = ${sample(MATERIAL_SLOT.NORMAL, 'vec4f(0.5, 0.5, 1.0, 1.0)')}.xyz * 2.0 - 1.0;

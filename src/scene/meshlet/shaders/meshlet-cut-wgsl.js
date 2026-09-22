@@ -12,6 +12,8 @@ export const meshletCutWGSL = /* wgsl */ `
     uniform taskCount: u32;
     uniform rootStage: u32;
     uniform totalPairs: u32;
+    // bit base of the off-frustum refinement flags, after the pair and admission bits
+    uniform freeBase: u32;
     uniform recordCapacity: u32;
     uniform indexCapacity0: u32;
     uniform indexCapacity1: u32;
@@ -52,6 +54,8 @@ export const meshletCutWGSL = /* wgsl */ `
         if (uniform.rootStage == 0u && !bitSet(admissionBit)) { return; }
         let offset = task.y;
         let object = objectData[instance];
+        var unchargedIndices = 0u;
+        var unchargedRecords = 0u;
         let first = cutGroups[offset];
         let parentCount = cutGroups[offset + 1u];
         let pageStart = cutGroups[offset + 2u];
@@ -67,18 +71,40 @@ export const meshletCutWGSL = /* wgsl */ `
         } else {
             // Every coarse member must belong to the active cut. A DAG replacement may
             // depend on several different ancestor groups, all of which must have refined.
+            // Members under an off-frustum parent were never charged (see below).
             for (var c = 0u; c < parentCount; c++) {
-                let parent = cutGroups[offset + 8u + c];
+                let parent = cutGroups[offset + 8u + c * 3u];
                 if (!bitSet(object.firstPairBit + parent)) { return; }
+                if (bitSet(uniform.freeBase + object.firstPairBit + parent)) {
+                    unchargedIndices += cutGroups[offset + 9u + c * 3u];
+                    unchargedRecords += cutGroups[offset + 10u + c * 3u];
+                }
             }
             let group = meshletData[first];
             let center = (object.worldMatrix * vec4f(group.groupSphere.xyz, 1.0)).xyz;
             let radius = group.groupSphere.w * object.maxScale;
-            if (!inFrustum(center, radius)) { return; }
             let ortho = cullParams[${CULL_PARAMS.STREAMING}u].y;
             let distanceToGroup = max(distance(center, cullParams[${CULL_PARAMS.CAMERA}u].xyz) - radius, 1e-5);
             let scale = select(cullParams[${CULL_PARAMS.CAMERA}u].w / distanceToGroup, ortho, ortho > 0.0);
             if (group.clusterError * object.maxScale * scale <= cullParams[${CULL_PARAMS.LOD}u].x) { return; }
+            // An off-frustum group still refines by distance, otherwise an on-screen
+            // replacement depending on it (a DAG group straddling the screen edge) stays
+            // coarse up close. Its finer members are never drawn - compaction skips children
+            // of flagged groups - so it needs no pages, charges nothing and refunds its
+            // charged coarse members, which leave the cut. The margin keeps the flag clear
+            // of any group whose children's bounds could still reach the frustum.
+            if (!inFrustum(center, radius * 1.01)) {
+                let refundIndices = cutGroups[offset + 5u] - unchargedIndices;
+                let refundRecords = cutGroups[offset + 7u] - unchargedRecords;
+                let flags = group.flags;
+                let bucket = select(select(0u, 1u, (flags & ${MESHLET_FLAG_TWO_SIDED}u) != 0u), 2u, (flags & ${MESHLET_FLAG_ALPHA_MASKED}u) != 0u);
+                atomicSub(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], refundIndices);
+                atomicSub(&cutBudget[bucket], refundIndices);
+                atomicSub(&cutBudget[3u], refundRecords);
+                markBit(object.firstPairBit + first - object.firstMeshlet);
+                markBit(uniform.freeBase + object.firstPairBit + first - object.firstMeshlet);
+                return;
+            }
         }
         var ready = true;
         for (var c = 0u; c < pageCount; c++) {
@@ -109,9 +135,9 @@ export const meshletCutWGSL = /* wgsl */ `
             return;
         }
         let fineIndices = cutGroups[offset + 4u];
-        let coarseIndices = cutGroups[offset + 5u];
+        let coarseIndices = cutGroups[offset + 5u] - unchargedIndices;
         let fineRecords = cutGroups[offset + 6u];
-        let coarseRecords = cutGroups[offset + 7u];
+        let coarseRecords = cutGroups[offset + 7u] - unchargedRecords;
         // Keep non-negative charges: if reclustering increases coarse record count, retaining
         // the extra reservation is conservative and avoids capacity being spent twice.
         let indexNeed = max(fineIndices, coarseIndices) - coarseIndices;
