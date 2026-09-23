@@ -3,14 +3,18 @@ import {
     CULL_FLAG_HZB_LINEAR, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_INSTANCE_CULL_WORKGROUP
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
+import { Vec3 } from '../../core/math/vec3.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { MeshletHzb } from './meshlet-hzb.js'
  * @import { MeshletWorld } from './meshlet-world.js'
  * @import { MeshletView } from './meshlet-view.js'
- * @import { Vec3 } from '../../core/math/vec3.js'
  */
+
+// root-selection inputs of a shadow view, stable across the per-frame depth fit (see beginFrame)
+const _selectionPlanes = new Float32Array(24);
+const _selectionCamera = new Vec3();
 
 
 /**
@@ -283,8 +287,27 @@ class MeshletCuller {
         // frame params, one vec4 row each (CULL_PARAMS.*)
         const params = this.cullParams;
         if (view.rootSelection) {
-            view.rootSelection.update(frustumPlanes, cameraPos, view.indexCapacity, view.recordCapacity,
-                (this.cullFlags & CULL_FLAG_SHADOW_VIEW) !== 0);
+            const shadow = (this.cullFlags & CULL_FLAG_SHADOW_VIEW) !== 0;
+            let selectionPlanes = frustumPlanes, selectionCamera = cameraPos;
+            if (shadow && this.orthoScale > 0 && this.viewDir) {
+                // A directional cascade's near/far and its camera's position along the light
+                // come from the union of the frame's visible caster bounds, so one animated
+                // caster (a skinned player) moves them every frame - and any input change reruns
+                // the selection's full per-instance pass. The side planes are texel-snapped and
+                // stable: select against those alone (conservative - the meshlet caster bounds
+                // already span the world's height), from the camera's lateral position. The GPU
+                // cull still gets the exact frustum.
+                _selectionPlanes.set(frustumPlanes);
+                for (let p = 16; p < 24; p += 4) {
+                    _selectionPlanes[p] = _selectionPlanes[p + 1] = _selectionPlanes[p + 2] = 0;
+                    _selectionPlanes[p + 3] = 1;
+                }
+                const d = this.viewDir;
+                _selectionCamera.copy(d).mulScalar(-cameraPos.dot(d)).add(cameraPos);
+                selectionPlanes = _selectionPlanes;
+                selectionCamera = _selectionCamera;
+            }
+            view.rootSelection.update(selectionPlanes, selectionCamera, view.indexCapacity, view.recordCapacity, shadow);
             let changed = false;
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
                 const capacity = view.rootSelection.capacity[b];

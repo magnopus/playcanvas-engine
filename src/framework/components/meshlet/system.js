@@ -70,13 +70,22 @@ class MeshletComponentSystem extends ComponentSystem {
     _activeComponents = [];
 
     /**
-     * Set when some component's hidden or shadow-casting state may differ from what the world
-     * holds, so the next sync re-checks them.
+     * Components whose world transform may differ from what the world holds. Filled by the
+     * entities' dirty notifications and by rebuilds, drained by the per-frame sync - a static
+     * scene of any size costs nothing per frame.
      *
-     * @type {boolean}
+     * @type {MeshletComponent[]}
      * @ignore
      */
-    _stateDirty = true;
+    _transformQueue = [];
+
+    /**
+     * Components whose hidden or shadow-casting state may differ from what the world holds.
+     *
+     * @type {MeshletComponent[]}
+     * @ignore
+     */
+    _stateQueue = [];
 
     /** @private */
     _poolBytes = 256 * 1024 * 1024;
@@ -409,7 +418,10 @@ class MeshletComponentSystem extends ComponentSystem {
         const groups = [];
         for (const guid in this.store) {
             const component = this.store[guid].entity.meshlet;
-            if (!component?._effectiveResource) continue;
+            if (!component) continue;
+            // left at -1 unless this rebuild places it, so the sync skips unplaced components
+            component._placementIndex = -1;
+            if (!component._effectiveResource) continue;
             if (!component._effectiveBaseUrl) {
                 Debug.warnOnce('MeshletComponent: no stream base URL - assign an asset with an http(s) file URL (not a blob: or data: URL), or set baseUrl with the resource.');
                 continue;
@@ -444,43 +456,41 @@ class MeshletComponentSystem extends ComponentSystem {
                     component._transformDirty = true;
                     component._hiddenApplied = null;
                     component._castShadowsApplied = null;
+                    component.onWorldDirty();
+                    component._queueState();
                     components.push(component);
                 }
                 world.addStreamedResource(resource, null, baseUrl, merged, fetchOptions);
             }
         });
         this._activeComponents = components;
-        this._stateDirty = true;
     }
 
     /** @private */
     _syncTransforms() {
         const world = this.director.world;
         if (!world.finalized) return;
-        const components = this._activeComponents;
-        for (let i = 0; i < components.length; i++) {
-            const component = components[i];
-            const entity = component.entity;
-            // Every change to the node or an ancestor bumps its world-dirty version, so a static
-            // placement costs one compare here instead of a world-transform fetch and matrix
-            // compare - this loop runs over every component, every frame.
-            if (component._transformDirty || component._lastTransformVer !== entity._aabbVer) {
-                component._lastTransformVer = entity._aabbVer;
-                const wt = entity.getWorldTransform();
-                if (component._transformDirty || !component._lastTransform.equals(wt)) {
-                    component._transformDirty = false;
-                    component._lastTransform.copy(wt);
-                    world.setPlacementTransform(component._placementIndex, wt, component._subBase, component._subCount);
-                }
+
+        const transforms = this._transformQueue;
+        for (let i = 0; i < transforms.length; i++) {
+            const component = transforms[i];
+            component._transformQueued = false;
+            if (component._placementIndex < 0) continue;
+            const wt = component.entity.getWorldTransform();
+            // a transform set to its current value still dirties the node: skip the upload
+            if (component._transformDirty || !component._lastTransform.equals(wt)) {
+                component._transformDirty = false;
+                component._lastTransform.copy(wt);
+                world.setPlacementTransform(component._placementIndex, wt, component._subBase, component._subCount);
             }
         }
+        transforms.length = 0;
 
-        // hidden and shadow-casting state only changes through onEnable/onDisable, the
-        // castShadows setter or a rebuild, which raise this flag - no per-frame getter walk
-        if (!this._stateDirty) return;
-        this._stateDirty = false;
-        for (let i = 0; i < components.length; i++) {
-            const component = components[i];
+        const states = this._stateQueue;
+        for (let i = 0; i < states.length; i++) {
+            const component = states[i];
+            component._stateQueued = false;
+            if (component._placementIndex < 0) continue;
             const hidden = !(component.enabled && component.entity.enabled);
             if (component._hiddenApplied !== hidden) {
                 component._hiddenApplied = hidden;
@@ -492,6 +502,7 @@ class MeshletComponentSystem extends ComponentSystem {
                 world.setPlacementCastShadows(component._placementIndex, casts, component._subBase, component._subCount);
             }
         }
+        states.length = 0;
     }
 
     destroy() {

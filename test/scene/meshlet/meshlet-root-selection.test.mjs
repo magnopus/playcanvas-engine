@@ -119,7 +119,7 @@ describe('MeshletRootSelection', function () {
         a.update(planes, Vec3.ZERO, [9, 0, 0], 3, false);
         expect(Array.from(a.wanted)).to.deep.equal([1, 0, 0, 0]);
         const b = new MeshletRootSelection(world);
-        b.pages.set([1, 0, 0, 0]);
+        b.pages.set([0, 0, 0, 1]);
         world.rootPagesVersion++;
         a.update(planes, Vec3.ZERO, [9, 0, 0], 3, false);
         expect(Array.from(a.wanted)).to.deep.equal([0, 0, 0, 0]);

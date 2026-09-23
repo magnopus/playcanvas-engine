@@ -107,12 +107,20 @@ class MeshletComponent extends Component {
     _lastTransform = new Mat4();
 
     /**
-     * The entity's world-dirty version (GraphNode#_aabbVer) when _lastTransform was taken.
+     * Whether this component is in the system's transform sync queue.
      *
-     * @type {number}
+     * @type {boolean}
      * @ignore
      */
-    _lastTransformVer = -1;
+    _transformQueued = false;
+
+    /**
+     * Whether this component is in the system's hidden / shadow-casting sync queue.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    _stateQueued = false;
 
     /**
      * Create a new MeshletComponent.
@@ -134,6 +142,32 @@ class MeshletComponent extends Component {
             },
             this
         );
+
+        // the entity reports its own world-transform changes, so the per-frame sync visits
+        // only moved components rather than polling every one
+        entity._worldDirtyListener = this;
+    }
+
+    /**
+     * Called by the entity whenever its world transform (or an ancestor's) is dirtied.
+     *
+     * @ignore
+     */
+    onWorldDirty() {
+        if (this._transformQueued) return;
+        this._transformQueued = true;
+        this.system._transformQueue.push(this);
+    }
+
+    /**
+     * Queues a re-check of this component's hidden and shadow-casting state.
+     *
+     * @ignore
+     */
+    _queueState() {
+        if (this._stateQueued) return;
+        this._stateQueued = true;
+        this.system._stateQueue.push(this);
     }
 
     /**
@@ -147,7 +181,7 @@ class MeshletComponent extends Component {
         value = value !== false;
         if (this._castShadows === value) return;
         this._castShadows = value;
-        this.system._stateDirty = true;
+        this._queueState();
     }
 
     /**
@@ -291,15 +325,16 @@ class MeshletComponent extends Component {
             this.system.app.assets.load(asset);
         }
         // no rebuild: the system's per-frame sync flips this component's hide bit
-        this.system._stateDirty = true;
+        this._queueState();
     }
 
     onDisable() {
         // no rebuild: the system's per-frame sync flips this component's hide bit
-        this.system._stateDirty = true;
+        this._queueState();
     }
 
     onBeforeRemove() {
+        if (this.entity._worldDirtyListener === this) this.entity._worldDirtyListener = null;
         this.asset = null;
         this._resource = null;
         this.system._markDirty();

@@ -173,6 +173,16 @@ class GraphNode extends EventHandler {
     _aabbVer = 0;
 
     /**
+     * Notified (onWorldDirty) whenever this node's world transform is dirtied, so a system can
+     * track the few nodes that moved instead of polling every node it owns each frame. Not
+     * cloned.
+     *
+     * @type {{ onWorldDirty: function(): void }|null}
+     * @ignore
+     */
+    _worldDirtyListener = null;
+
+    /**
      * Marks the node to ignore hierarchy sync entirely (including children nodes). The engine code
      * automatically freezes and unfreezes objects whenever required. Segregating dynamic and
      * stationary nodes into subhierarchies allows to reduce sync time significantly.
@@ -1191,6 +1201,7 @@ class GraphNode extends EventHandler {
         this._dirtyNormal = true;
         this._worldScaleSign = 0;   // world matrix is dirty, mark this flag dirty too
         this._aabbVer++;
+        if (this._worldDirtyListener) this._worldDirtyListener.onWorldDirty();
     }
 
     /**

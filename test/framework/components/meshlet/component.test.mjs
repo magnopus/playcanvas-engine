@@ -80,6 +80,32 @@ describe('MeshletComponent', function () {
         clone.destroy();
     });
 
+    it('queues only components whose world transform was dirtied', function () {
+        const system = app.systems.meshlet;
+        const parent = new Entity();
+        const moved = new Entity();
+        const still = new Entity();
+        moved.addComponent('meshlet');
+        still.addComponent('meshlet');
+        parent.addChild(moved);
+        app.root.addChild(parent);
+        app.root.addChild(still);
+        app.root.syncHierarchy();
+        system._transformQueue.forEach((c) => {
+            c._transformQueued = false;
+        });
+        system._transformQueue.length = 0;
+
+        parent.setLocalPosition(1, 2, 3);
+        moved.setLocalPosition(4, 5, 6);
+        expect(system._transformQueue, 'an ancestor move queues the descendant once').to.deep.equal([moved.meshlet]);
+
+        moved.removeComponent('meshlet');
+        expect(moved._worldDirtyListener, 'removal detaches the listener').to.equal(null);
+        parent.destroy();
+        still.destroy();
+    });
+
     it('clears its references when removed', function () {
         const e = new Entity();
         e.addComponent('meshlet', { resource: { instances: [] } });
