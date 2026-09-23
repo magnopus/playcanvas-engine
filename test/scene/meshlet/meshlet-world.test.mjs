@@ -263,7 +263,11 @@ describe('MeshletWorld', function () {
             expect(b.budget).to.equal(1024 * 1024);
             expect(b.fixed).to.be.above(0);
             expect(b.pagePool + b.indices + b.fixed + b.perView).to.equal(b.budget);
-            expect(b.indices).to.equal(Math.floor((b.budget - b.fixed - b.perView) * world.indexBudgetFraction));
+            // the pool is capped at every page; the rest of its share goes to the indices
+            const share = Math.floor((b.budget - b.fixed - b.perView) * world.indexBudgetFraction);
+            const allPages = world.totalPages * world.pageSizeBytes;
+            expect(b.pagePool).to.equal(Math.min(b.budget - b.fixed - b.perView - share, allPages));
+            expect(b.indices).to.equal(b.budget - b.fixed - b.perView - b.pagePool);
             expect(world.indexBudgetTotal).to.equal(Math.floor(b.indices / 4));
             expect(world.pagePoolBytes).to.equal(b.pagePool);
             world.destroy();

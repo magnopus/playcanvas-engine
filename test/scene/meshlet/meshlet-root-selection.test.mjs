@@ -85,6 +85,48 @@ describe('MeshletRootSelection', function () {
         selection.destroy();
     });
 
+    it('skips the instance pass while its inputs repeat', function () {
+        const { world, planes } = fixture();
+        const selection = new MeshletRootSelection(world);
+        let passes = 0;
+        const select = selection._select;
+        selection._select = function (...args) {
+            passes++;
+            return select.apply(this, args);
+        };
+        selection.update(planes, Vec3.ZERO, [6, 0, 0], 2, false);
+        selection.update(planes, Vec3.ZERO, [6, 0, 0], 2, false);
+        const settledPasses = passes;
+        selection.update(planes, Vec3.ZERO, [6, 0, 0], 2, false);
+        expect(passes).to.equal(settledPasses);
+        expect(Array.from(selection.wanted)).to.deep.equal([1, 1, 0, 0]);
+
+        // a moved instance reruns the pass
+        const f = world.objectDataCpuF;
+        f[12] = 100;
+        world.objectVersion = 1;
+        selection.update(planes, Vec3.ZERO, [6, 0, 0], 2, false);
+        expect(passes).to.equal(settledPasses + 1);
+        expect(Array.from(selection.wanted)).to.deep.equal([0, 1, 1, 0]);
+        selection.destroy();
+    });
+
+    it('reruns when another view changes its pages', function () {
+        const { world, planes } = fixture();
+        world.poolSlots = 1;
+        const a = new MeshletRootSelection(world);
+        a.update(planes, Vec3.ZERO, [9, 0, 0], 3, false);
+        a.update(planes, Vec3.ZERO, [9, 0, 0], 3, false);
+        expect(Array.from(a.wanted)).to.deep.equal([1, 0, 0, 0]);
+        const b = new MeshletRootSelection(world);
+        b.pages.set([1, 0, 0, 0]);
+        world.rootPagesVersion++;
+        a.update(planes, Vec3.ZERO, [9, 0, 0], 3, false);
+        expect(Array.from(a.wanted)).to.deep.equal([0, 0, 0, 0]);
+        a.destroy();
+        b.destroy();
+    });
+
     it('accounts for the pinned working set of other views', function () {
         const { world, planes } = fixture();
         world.poolSlots = 1;

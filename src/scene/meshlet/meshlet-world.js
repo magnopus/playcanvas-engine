@@ -12,7 +12,7 @@ import { OBJECT_FLAG_NO_SHADOW,
     MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
-    MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
+    MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, MESHLET_NO_PARENT, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
     RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S,
     MESHLET_COLOR_MODE } from './constants.js';
@@ -100,6 +100,15 @@ class MeshletWorld {
     /** @type {Set<import('./meshlet-root-selection.js').MeshletRootSelection>} */
     rootSelections = new Set();
 
+    /**
+     * Bumped when any root selection's page set changes or a selection is added or removed -
+     * each selection accounts for the others' pages, so it reruns when this moves.
+     *
+     * @type {number}
+     * @ignore
+     */
+    rootPagesVersion = 0;
+
     objectDataBuffer = null;
 
     materialTableBuffer = null;
@@ -177,6 +186,16 @@ class MeshletWorld {
      * @type {number}
      */
     contentVersion = 0;
+
+    /**
+     * Bumped whenever an instance's matrix, hidden or shadow-casting state changes - the
+     * objectData inputs of CPU root selection, which skips its per-instance pass while this and
+     * its other inputs are unchanged.
+     *
+     * @type {number}
+     * @ignore
+     */
+    objectVersion = 0;
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
@@ -465,6 +484,7 @@ class MeshletWorld {
      */
     _resolveBudget(counts) {
         const { totalPages, totalMeshlets, totalInstances, totalMaterialRows, pairs, workItems, lightmapBytes = 0 } = counts;
+        const cutTasks = counts.cutTasks ?? pairs;
         if (!(this.poolBytes > 0)) {
             this.budgetBreakdown = null;
             this.maxIndices = 0;
@@ -473,8 +493,11 @@ class MeshletWorld {
 
         const pairWords = Math.max(Math.ceil((pairs + totalInstances) / 32), 4);
         const claimWords = Math.max(Math.ceil((pairs * 2 + totalInstances) / 32), 4);
-        // Upper bound for group headers, membership lists, packed selection links and instance/group tasks.
-        const cutBytes = totalMeshlets * 56 + pairs * 8 + totalInstances * 40;
+        // Group headers and membership lists (upper bound), packed selection links, and one
+        // task per (instance, group). Instances share every per-meshlet table; charging the
+        // tasks per (instance, meshlet) reserved ~8x their size - 535 MB of a 768 MB budget
+        // for 40k copies of one small asset, starving the index buffer below even its roots.
+        const cutBytes = totalMeshlets * (56 + 8) + cutTasks * 8 + totalInstances * 40;
         const fixed = cutBytes + lightmapBytes + totalMeshlets * MESHLET_DATA_U32S * 4 +      // meshletData
             totalInstances * OBJECT_DATA_U32S * 4 +                // objectData
             totalPages * 4 +                                       // residency
@@ -502,8 +525,15 @@ class MeshletWorld {
             available = minPool;
         }
 
-        const indexBytes = Math.floor(available * this.indexBudgetFraction);
-        const pagePool = available - indexBytes;
+        let indexBytes = Math.floor(available * this.indexBudgetFraction);
+        let pagePool = available - indexBytes;
+        // The pool never allocates more slots than the scene has pages (many instances of a
+        // small asset fit whole): hand the rest to the index buffer instead of leaving it unused.
+        const allPages = totalPages * this.pageSizeBytes;
+        if (allPages > 0 && pagePool > allPages) {
+            indexBytes += pagePool - allPages;
+            pagePool = allPages;
+        }
         // one pool shared across every view; the director distributes it by demand
         this.indexBudgetTotal = Math.max(Math.floor(indexBytes / 4), 3);
         this.indexOverrun = 0;
@@ -603,11 +633,30 @@ class MeshletWorld {
         // loop below recomputes them as it writes the tables.
         let budgetPairs = 0;
         let budgetWorkItems = 0;
+        let budgetCutTasks = 0;
+        // replacement groups per primitive (distinct parent representatives): the cut dispatches
+        // one task per (instance, group), far fewer than one per (instance, meshlet)
+        const groupCounts = new Map();
+        const groupCount = (prim) => {
+            let groups = groupCounts.get(prim);
+            if (groups === undefined) {
+                const parents = new Set();
+                for (let m = 0; m < prim.meshletCount; m++) {
+                    const parent = prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.PARENT];
+                    if (parent !== MESHLET_NO_PARENT) parents.add(parent);
+                }
+                groups = parents.size;
+                groupCounts.set(prim, groups);
+            }
+            return groups;
+        };
         for (const { resource, instances } of pending) {
             for (const inst of (instances ?? resource.instances)) {
-                const n = resource.primitives[inst.primIndex].meshletCount;
+                const prim = resource.primitives[inst.primIndex];
+                const n = prim.meshletCount;
                 budgetPairs += n;
                 budgetWorkItems += Math.ceil(n / MESHLET_CULL_SLICE);
+                budgetCutTasks += groupCount(prim) + 1;
             }
         }
         this.pagePoolBytes = this._resolveBudget({
@@ -617,6 +666,7 @@ class MeshletWorld {
             totalMaterialRows,
             lightmapBytes: anyLightmaps ? totalInstances * 64 : 0,
             pairs: budgetPairs,
+            cutTasks: budgetCutTasks,
             workItems: budgetWorkItems
         });
 
@@ -1230,6 +1280,7 @@ class MeshletWorld {
             objectDataF[row + OBJECT_DATA.MAX_SCALE] = maxAxisScale(matrix);
         }
         this._worldBoundsDirty = true;
+        this.objectVersion++;
         this._uploadObjectRows(instanceBase + start, count);
     }
 
@@ -1255,6 +1306,7 @@ class MeshletWorld {
             const flagsWord = (instanceBase + i) * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS;
             objectData[flagsWord] = hidden ? (objectData[flagsWord] | OBJECT_FLAG_HIDDEN) : (objectData[flagsWord] & ~OBJECT_FLAG_HIDDEN);
         }
+        this.objectVersion++;
         this._uploadObjectRows(instanceBase + start, count);
     }
 
@@ -1279,6 +1331,7 @@ class MeshletWorld {
             const flagsWord = (instanceBase + i) * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS;
             objectData[flagsWord] = casts ? (objectData[flagsWord] & ~OBJECT_FLAG_NO_SHADOW) : (objectData[flagsWord] | OBJECT_FLAG_NO_SHADOW);
         }
+        this.objectVersion++;
         this._uploadObjectRows(instanceBase + start, count);
     }
 

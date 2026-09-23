@@ -69,6 +69,15 @@ class MeshletComponentSystem extends ComponentSystem {
      */
     _activeComponents = [];
 
+    /**
+     * Set when some component's hidden or shadow-casting state may differ from what the world
+     * holds, so the next sync re-checks them.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    _stateDirty = true;
+
     /** @private */
     _poolBytes = 256 * 1024 * 1024;
 
@@ -441,6 +450,7 @@ class MeshletComponentSystem extends ComponentSystem {
             }
         });
         this._activeComponents = components;
+        this._stateDirty = true;
     }
 
     /** @private */
@@ -450,12 +460,27 @@ class MeshletComponentSystem extends ComponentSystem {
         const components = this._activeComponents;
         for (let i = 0; i < components.length; i++) {
             const component = components[i];
-            const wt = component.entity.getWorldTransform();
-            if (component._transformDirty || !component._lastTransform.equals(wt)) {
-                component._transformDirty = false;
-                component._lastTransform.copy(wt);
-                world.setPlacementTransform(component._placementIndex, wt, component._subBase, component._subCount);
+            const entity = component.entity;
+            // Every change to the node or an ancestor bumps its world-dirty version, so a static
+            // placement costs one compare here instead of a world-transform fetch and matrix
+            // compare - this loop runs over every component, every frame.
+            if (component._transformDirty || component._lastTransformVer !== entity._aabbVer) {
+                component._lastTransformVer = entity._aabbVer;
+                const wt = entity.getWorldTransform();
+                if (component._transformDirty || !component._lastTransform.equals(wt)) {
+                    component._transformDirty = false;
+                    component._lastTransform.copy(wt);
+                    world.setPlacementTransform(component._placementIndex, wt, component._subBase, component._subCount);
+                }
             }
+        }
+
+        // hidden and shadow-casting state only changes through onEnable/onDisable, the
+        // castShadows setter or a rebuild, which raise this flag - no per-frame getter walk
+        if (!this._stateDirty) return;
+        this._stateDirty = false;
+        for (let i = 0; i < components.length; i++) {
+            const component = components[i];
             const hidden = !(component.enabled && component.entity.enabled);
             if (component._hiddenApplied !== hidden) {
                 component._hiddenApplied = hidden;

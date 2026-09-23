@@ -77,13 +77,10 @@ class MeshletComponent extends Component {
     _transformDirty = true;
 
     /**
-     * Whether this component's instances cast shadows. Per instance: applied by the system's
-     * per-frame sync as a buffer write, no rebuild. Shadow passes run only while the system's
-     * {@link MeshletComponentSystem#shadows} is on.
-     *
      * @type {boolean}
+     * @private
      */
-    castShadows = true;
+    _castShadows = true;
 
     /**
      * Shadow-casting state currently baked into the world's objectData rows (null = unknown).
@@ -110,6 +107,14 @@ class MeshletComponent extends Component {
     _lastTransform = new Mat4();
 
     /**
+     * The entity's world-dirty version (GraphNode#_aabbVer) when _lastTransform was taken.
+     *
+     * @type {number}
+     * @ignore
+     */
+    _lastTransformVer = -1;
+
+    /**
      * Create a new MeshletComponent.
      *
      * @param {MeshletComponentSystem} system - The ComponentSystem that created this Component.
@@ -129,6 +134,29 @@ class MeshletComponent extends Component {
             },
             this
         );
+    }
+
+    /**
+     * Sets whether this component's instances cast shadows. Per instance: applied by the
+     * system's per-frame sync as a buffer write, no rebuild. Shadow passes run only while the
+     * system's {@link MeshletComponentSystem#shadows} is on. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    set castShadows(value) {
+        value = value !== false;
+        if (this._castShadows === value) return;
+        this._castShadows = value;
+        this.system._stateDirty = true;
+    }
+
+    /**
+     * Gets whether this component's instances cast shadows.
+     *
+     * @type {boolean}
+     */
+    get castShadows() {
+        return this._castShadows;
     }
 
     /**
@@ -263,10 +291,12 @@ class MeshletComponent extends Component {
             this.system.app.assets.load(asset);
         }
         // no rebuild: the system's per-frame sync flips this component's hide bit
+        this.system._stateDirty = true;
     }
 
     onDisable() {
         // no rebuild: the system's per-frame sync flips this component's hide bit
+        this.system._stateDirty = true;
     }
 
     onBeforeRemove() {
