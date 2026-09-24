@@ -1,9 +1,32 @@
 # Streamed meshlet example assets
 
+## Basic demo asset and material inspection
+
+The **Asset** dropdown in `graphics/meshlet-basic` selects Bunny, Zorah chunk 003, or
+MagOffice. Switching reloads the example to release the previous asset's geometry and texture
+pools. A direct office link is `/iframe/graphics_meshlet-basic.html?deviceType=webgpu&asset=magoffice`.
+The **Visualisation** dropdown includes meshlet colours, LOD tiers, world normals (including
+normal maps), albedo, metalness and roughness.
+
+For the local office bake, keep `magoffice_streamed.glb`, `magoffice_streamed_meshlets/` and
+`magoffice_streamed_textures/` together in this directory. These local assets are ignored by git.
+The example initializes Basis for the streamed KTX2 textures and instantiates both the meshlet
+component and the container's remaining regular geometry. The parser excludes streamed
+placeholders from the latter, so this does not draw the streamed surfaces twice.
+
+The inspected office bake retains 41 BLEND primitives (1,623 triangles before instancing).
+`--strip-source-geometry` does not strip these: the bake leaves them inline for the sorted
+transparent renderer. A loader that creates only a meshlet component will omit these surfaces.
+The rebaked package has normal maps and packed `oct16_sign` tangents in its streamed pages, so
+the normal-map shader can use the baked frame directly. The glTF-tools bake defaults now retain
+tangents; pass `--no-tangents` only when deliberately omitting normal-map support. Runtime does
+not reconstruct tangents for tangent-free pages, so those pages use geometric normals. The local
+package grew from 473 to 508 pages (about 2.2 MiB more geometry storage).
+
 ## Local Zorah reproduction
 
-`graphics/meshlet-basic` loads a local Zorah chunk through an asset link; select the chunk
-in the example's asset URL (currently `chunk_000.streamed.glb`). Chunk 003 reproduces the
+`graphics/meshlet-basic` loads a local Zorah chunk through an asset link; the dropdown's Zorah
+choice currently selects `chunk_003.streamed.glb`. Chunk 003 reproduces the
 large-coarse-set allocation failure.
 From the engine repository root, create it with:
 

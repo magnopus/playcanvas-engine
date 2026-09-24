@@ -16,6 +16,9 @@ examples/node_modules
 examples/assets/meshlets/zorah-local
 examples/assets/meshlets/iss-group-comparison/
 examples/assets/meshlets/zorah-tiles/
+examples/assets/meshlets/magoffice_streamed.glb
+examples/assets/meshlets/magoffice_streamed_meshlets/
+examples/assets/meshlets/magoffice_streamed_textures/
 node_modules
 npm-debug.log
 types
