@@ -5,7 +5,7 @@ import { Color } from '../../../core/math/color.js';
 import {
     CLEARFLAG_COLOR, CLEARFLAG_DEPTH, CLEARFLAG_STENCIL,
     CULLFACE_NONE,
-    isIntegerPixelFormat,
+    isIntegerPixelFormat, pixelFormatInfo,
     FILTER_NEAREST, FILTER_LINEAR, FILTER_NEAREST_MIPMAP_NEAREST, FILTER_NEAREST_MIPMAP_LINEAR,
     FILTER_LINEAR_MIPMAP_NEAREST, FILTER_LINEAR_MIPMAP_LINEAR,
     FUNC_ALWAYS,
@@ -45,6 +45,7 @@ import { WebglUploadStream } from './webgl-upload-stream.js';
 import { WebglXrBridge } from './webgl-xr-bridge.js';
 import { WebglXrMsaaCopy } from './webgl-xr-msaa-copy.js';
 import { BlendState } from '../blend-state.js';
+import { validateClearValues } from '../render-pass.js';
 import { DepthState } from '../depth-state.js';
 import { StencilParameters } from '../stencil-parameters.js';
 import { WebglGpuProfiler } from './webgl-gpu-profiler.js';
@@ -64,8 +65,11 @@ const _attachmentBlendState = new BlendState();
 // maximum number of color attachments a BlendState can describe
 const maxBlendAttachments = 8;
 
-// reused storage for the clear color of an individual attachment, to avoid allocations
+// reused storage for the clear color of an individual attachment, to avoid allocations. The typed
+// array matching the format class of the attachment is used.
 const _attachmentClearValue = new Float32Array(4);
+const _attachmentClearValueInt = new Int32Array(4);
+const _attachmentClearValueUint = new Uint32Array(4);
 
 // reused options for the render pass clears, to avoid allocations. The fields not covered by the
 // flags are ignored by the clear call.
@@ -97,6 +101,10 @@ const getPixelFormatChannelsForRgbaReadback = (format) => {
 };
 
 const invalidateAttachments = [];
+
+// How long a pixel buffer copy waits for the start of the next frame before going ahead without it,
+// long enough that a frame arriving at a badly degraded rate still counts as arriving.
+const READBACK_FRAME_START_WAIT = 100;
 
 /**
  * WebglGraphicsDevice extends the base {@link GraphicsDevice} to provide rendering capabilities
@@ -137,6 +145,16 @@ class WebglGraphicsDevice extends GraphicsDevice {
      * @private
      */
     _xrMsaaCopy = null;
+
+    /**
+     * Copies out of a pixel buffer waiting to run at the start of the next frame, for the reads
+     * which asked for that, see {@link WebglGraphicsDevice#readPixelsAsync}. Drained by
+     * {@link WebglGraphicsDevice#frameStart}, and on device destruction and context loss.
+     *
+     * @type {Set<{ run: () => void, abandon: () => void, fail: () => void }>}
+     * @private
+     */
+    _readbackCopies = new Set();
 
     /**
      * Creates a new WebglGraphicsDevice instance.
@@ -198,7 +216,7 @@ class WebglGraphicsDevice extends GraphicsDevice {
 
         // #4136 - turn off antialiasing on AppleWebKit browsers 15.4
         const ua = (typeof navigator !== 'undefined') && navigator.userAgent;
-        this.forceDisableMultisampling = ua && ua.includes('AppleWebKit') && (ua.includes('15.4') || ua.includes('15_4'));
+        this.forceDisableMultisampling = ua && ua.includes('AppleWebKit') && (ua.includes('Version/15.4') || ua.includes('OS 15_4'));
         if (this.forceDisableMultisampling) {
             options.antialias = false;
             Debug.log('Antialiasing has been turned off due to rendering issues on AppleWebKit 15.4');
@@ -664,6 +682,12 @@ class WebglGraphicsDevice extends GraphicsDevice {
      */
     destroy() {
         super.destroy();
+
+        // rendering stops here, so a copy still waiting for the start of a frame would never run,
+        // and the read it belongs to would never settle
+        for (const copy of [...this._readbackCopies]) {
+            copy.abandon();
+        }
         const gl = this.gl;
 
         if (this.feedback) {
@@ -911,8 +935,6 @@ class WebglGraphicsDevice extends GraphicsDevice {
         // blending into 32-bit float render targets requires this extension
         this.extFloatBlend = this.getExtension('EXT_float_blend');
         this.textureFloatBlendable = !!this.extFloatBlend;
-        this.extDrawBuffersIndexed = this.getExtension('OES_draw_buffers_indexed');
-        this.supportsIndependentBlending = !!this.extDrawBuffersIndexed;
         this.extBlendFuncExtended = this.getExtension('WEBGL_blend_func_extended');
         this.supportsDualSourceBlending = !!this.extBlendFuncExtended;
         this.extDrawBuffersIndexed = this.getExtension('OES_draw_buffers_indexed');
@@ -949,10 +971,6 @@ class WebglGraphicsDevice extends GraphicsDevice {
         const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
 
         this.maxPrecision = this.precision = this.getPrecision();
-
-        const contextAttribs = gl.getContextAttributes();
-        this.supportsMsaa = contextAttribs?.antialias ?? false;
-        this.supportsStencil = contextAttribs?.stencil ?? false;
 
         // Query parameter values from the WebGL context
         this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
@@ -1105,7 +1123,9 @@ class WebglGraphicsDevice extends GraphicsDevice {
         this.boundVao = null;
         this.activeFramebuffer = null;
         this.feedback = null;
-        this.transformFeedbackBuffer = null;
+
+        /** @type {VertexBuffer[]|null} */
+        this.transformFeedbackBuffers = null;
 
         this.textureUnit = 0;
         this.initTextureUnits(this.maxCombinedTextures);
@@ -1119,6 +1139,14 @@ class WebglGraphicsDevice extends GraphicsDevice {
     loseContext() {
 
         super.loseContext();
+
+        // The pixel buffers these copies would read went with the context, and rendering stops
+        // while it is lost, so nothing is coming to run them. Failed rather than settled, so a read
+        // cannot come back holding whatever its destination was last filled with - a caller reusing
+        // a buffer between reads would have no way to tell that from a fresh result.
+        for (const copy of [...this._readbackCopies]) {
+            copy.fail();
+        }
 
         // release shaders
         for (const shader of this.shaders) {
@@ -1368,6 +1396,14 @@ class WebglGraphicsDevice extends GraphicsDevice {
     frameStart() {
         super.frameStart();
 
+        // pixel buffer copies run here, ahead of the rendering this frame queues for them to wait
+        // on - though after whatever the update phase issued, this being the start of the render
+        if (this._readbackCopies.size > 0) {
+            for (const copy of [...this._readbackCopies]) {
+                copy.run();
+            }
+        }
+
         this.updateBackbuffer();
 
         this.gpuProfiler.frameStart();
@@ -1419,10 +1455,14 @@ class WebglGraphicsDevice extends GraphicsDevice {
             _clearOptions.stencil = depthStencilOps.clearStencilValue;
         }
 
-        // a single color attachment is cleared by the same clear call
+        // A single color attachment of a float / normalized format is cleared by the same clear
+        // call. Integer formats cannot be cleared by gl.clear (the results are undefined), and use
+        // the per-attachment path below instead.
         const colorBufferCount = rt._colorBuffers?.length ?? 0;
         const colorOps = renderPass.colorOps;
-        if (colorBufferCount <= 1 && colorOps?.clear) {
+        const useClearBuffers = colorBufferCount > 1 ||
+            (colorBufferCount === 1 && isIntegerPixelFormat(rt._colorBuffers[0].format));
+        if (!useClearBuffers && colorOps?.clear) {
             clearFlags |= CLEARFLAG_COLOR;
             const { clearValue } = colorOps;
             const color = _clearOptions.color;
@@ -1437,21 +1477,24 @@ class WebglGraphicsDevice extends GraphicsDevice {
             this.clear(_clearOptions);
         }
 
-        // Multiple color attachments are cleared individually using clearBufferfv, as the
-        // non-indexed gl.clear applies a single clear color to all draw buffers. This applies
-        // their own clear colors, and preserves the content of the attachments which do not
-        // clear. Note that clearBufferfv is affected by the color write masks, including the
-        // per-attachment ones, and so these are reset first.
-        if (colorBufferCount > 1) {
+        // The remaining color attachments are cleared individually using clearBuffer functions,
+        // as the non-indexed gl.clear applies a single clear color to all draw buffers, and does
+        // not support integer formats. This applies their own clear colors, uses the clearBuffer
+        // function matching the format class of each attachment, and preserves the content of the
+        // attachments which do not clear. Note that the clearBuffer functions are affected by the
+        // color write masks, including the per-attachment ones, and so these are reset first.
+        if (useClearBuffers) {
             const gl = this.gl;
             const { colorArrayOps } = renderPass;
+
+            // integer formats require the clear value components to be integers representable in
+            // the format, as they would otherwise be silently truncated by the typed array
+            Debug.call(() => validateClearValues(renderPass));
+
             let writeMasksReset = false;
             for (let i = 0; i < colorBufferCount; i++) {
                 const colorOps = colorArrayOps[i];
                 if (colorOps?.clear) {
-
-                    Debug.assert(!isIntegerPixelFormat(rt._colorBuffers[i].format),
-                        'Clearing an integer color attachment of a render pass is not supported.', rt);
 
                     if (!writeMasksReset) {
                         this.setBlendState(BlendState.NOBLEND);
@@ -1459,11 +1502,21 @@ class WebglGraphicsDevice extends GraphicsDevice {
                     }
 
                     const { clearValue } = colorOps;
-                    _attachmentClearValue[0] = clearValue.r;
-                    _attachmentClearValue[1] = clearValue.g;
-                    _attachmentClearValue[2] = clearValue.b;
-                    _attachmentClearValue[3] = clearValue.a;
-                    gl.clearBufferfv(gl.COLOR, i, _attachmentClearValue);
+                    const formatInfo = pixelFormatInfo.get(rt._colorBuffers[i].format);
+                    const clearValueArray = formatInfo?.isUint ? _attachmentClearValueUint :
+                        (formatInfo?.isInt ? _attachmentClearValueInt : _attachmentClearValue);
+                    clearValueArray[0] = clearValue.r;
+                    clearValueArray[1] = clearValue.g;
+                    clearValueArray[2] = clearValue.b;
+                    clearValueArray[3] = clearValue.a;
+
+                    if (formatInfo?.isUint) {
+                        gl.clearBufferuiv(gl.COLOR, i, clearValueArray);
+                    } else if (formatInfo?.isInt) {
+                        gl.clearBufferiv(gl.COLOR, i, clearValueArray);
+                    } else {
+                        gl.clearBufferfv(gl.COLOR, i, clearValueArray);
+                    }
                 }
             }
         }
@@ -1838,6 +1891,50 @@ class WebglGraphicsDevice extends GraphicsDevice {
         }
     }
 
+    /**
+     * Generates the key of the vertex array object cache for the supplied vertex buffers. Each part
+     * identifies both the buffer and its format, and is delimited, so distinct buffer lists cannot
+     * generate the same key.
+     *
+     * @param {VertexBuffer[]} vertexBuffers - The vertex buffers of the draw.
+     * @returns {string} The cache key.
+     * @private
+     */
+    _vertexArrayKey(vertexBuffers) {
+        let key = '';
+        for (let i = 0; i < vertexBuffers.length; i++) {
+            key += vertexBuffers[i].vaoKeyPart;
+        }
+        return key;
+    }
+
+    /**
+     * Removes the cached vertex array object for the supplied vertex buffers, if one exists.
+     *
+     * This is needed by code which exchanges the GPU buffers behind VertexBuffer objects while
+     * leaving the objects themselves in place - see {@link TransformFeedback#process}. A vertex
+     * array object captures the GPU buffers it was built from, and this cache is keyed on the
+     * VertexBuffer objects, so such an exchange is invisible to it and a stale vertex array object
+     * would keep reading the buffers from before the exchange.
+     *
+     * Only has an effect when more than one vertex buffer is supplied - a single vertex buffer stores
+     * its vertex array object on itself, and so it travels with the buffer.
+     *
+     * @param {VertexBuffer[]} vertexBuffers - The vertex buffers whose cached vertex array object
+     * should be removed.
+     * @ignore
+     */
+    removeVertexArrayFromCache(vertexBuffers) {
+        if (vertexBuffers.length > 1) {
+            const key = this._vertexArrayKey(vertexBuffers);
+            const vao = this._vaoMap.get(key);
+            if (vao) {
+                this._vaoMap.delete(key);
+                this.gl.deleteVertexArray(vao);
+            }
+        }
+    }
+
     // function creates VertexArrayObject from list of vertex buffers
     createVertexArray(vertexBuffers) {
 
@@ -1847,12 +1944,7 @@ class WebglGraphicsDevice extends GraphicsDevice {
         const useCache = vertexBuffers.length > 1;
         if (useCache) {
 
-            // generate unique key for the vertex buffers
-            key = '';
-            for (let i = 0; i < vertexBuffers.length; i++) {
-                const vertexBuffer = vertexBuffers[i];
-                key += vertexBuffer.id + vertexBuffer.format.renderingHash;
-            }
+            key = this._vertexArrayKey(vertexBuffers);
 
             // try to get VAO from cache
             vao = this._vaoMap.get(key);
@@ -1906,7 +1998,11 @@ class WebglGraphicsDevice extends GraphicsDevice {
             // unbind any array buffer
             gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
-            // add it to cache
+            // add it to cache. Note that entries are not removed when one of the vertex buffers is
+            // destroyed - the cache only retains the vertex array object itself, not the buffers, and
+            // the number of buffers taking part in multi-buffer draws is small, so pruning per
+            // destroyed buffer is not considered worth the cost. The cache is released in full when
+            // the device is destroyed or the context is lost.
             if (useCache) {
                 this._vaoMap.set(key, vao);
             }
@@ -2012,7 +2108,7 @@ class WebglGraphicsDevice extends GraphicsDevice {
                         }
                     });
 
-                    Debug.call(() => this.validateAttributes(this.shader, this.vertexBuffers[0]?.format, this.vertexBuffers[1]?.format));
+                    Debug.call(() => this.validateAttributes(this.shader, this.vertexBuffers));
 
                     this.setBuffers(indexBuffer);
                 }
@@ -2104,9 +2200,12 @@ class WebglGraphicsDevice extends GraphicsDevice {
                     }
                 }
 
-                if (this.transformFeedbackBuffer) {
-                    // Enable TF, start writing to out buffer
-                    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, this.transformFeedbackBuffer.impl.bufferId);
+                const transformFeedbackBuffers = this.transformFeedbackBuffers;
+                if (transformFeedbackBuffers) {
+                    // Enable TF, start writing to out buffers
+                    for (let i = 0; i < transformFeedbackBuffers.length; i++) {
+                        gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, i, transformFeedbackBuffers[i].impl.bufferId);
+                    }
                     gl.beginTransformFeedback(gl.POINTS);
                 }
 
@@ -2160,10 +2259,12 @@ class WebglGraphicsDevice extends GraphicsDevice {
                     }
                 }
 
-                if (this.transformFeedbackBuffer) {
+                if (transformFeedbackBuffers) {
                     // disable TF
                     gl.endTransformFeedback();
-                    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+                    for (let i = 0; i < transformFeedbackBuffers.length; i++) {
+                        gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, i, null);
+                    }
                 }
 
                 this._drawCallsPerFrame++;
@@ -2333,9 +2434,12 @@ class WebglGraphicsDevice extends GraphicsDevice {
      * data.
      * @param {boolean} [forceRgba] - If true, forces RGBA/UNSIGNED_BYTE format for guaranteed
      * WebGL support. Used for reading non-RGBA 8-bit normalized textures. Defaults to false.
+     * @param {boolean} [frequent] - Set for a read issued every frame or every few frames, which
+     * runs the copy out of the pixel buffer at the start of the next frame instead of as soon as
+     * the data is available. Defaults to false.
      * @ignore
      */
-    async readPixelsAsync(x, y, w, h, pixels, forceRgba = false) {
+    async readPixelsAsync(x, y, w, h, pixels, forceRgba = false, frequent = false) {
         const gl = this.gl;
 
         let format, pixelType;
@@ -2358,11 +2462,86 @@ class WebglGraphicsDevice extends GraphicsDevice {
         // async wait for previous read to finish
         await this.clientWaitAsync(0, 16);
 
-        // copy the resulting data once it's arrived
-        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buf);
-        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, pixels);
-        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-        gl.deleteBuffer(buf);
+        // The copy out of the pixel buffer is synchronous, and the driver services it by submitting
+        // and then waiting for whatever commands are outstanding when it runs. This read's own fence
+        // has signalled by now, so that wait is spent entirely on unrelated work queued behind it,
+        // which on a heavy scene is a frame's worth of rendering.
+        const copyOut = () => {
+            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buf);
+            gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, pixels);
+            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+            gl.deleteBuffer(buf);
+        };
+
+        // The device can go away while the fence above is being waited on, which no drain reaches -
+        // a frequent read is not queued for its copy until the wait is over, and a read taking the
+        // copy below is not tracked at all - so it is answered for here. Nothing slips through in
+        // between, there being no await between this and either.
+        if (this._destroyed) {
+
+            // settled without the copy, exactly as a queued read is - the caller is told the device
+            // went away rather than handed data, so the bytes would go nowhere
+            gl.deleteBuffer(buf);
+            return pixels;
+        }
+        if (this.contextLost) {
+
+            // The pixel buffer went with the context, so the destination was never written and the
+            // copy has nothing to write to it. Handing it back would pass off whatever it last held
+            // as a result, which a caller has no way to tell from a real one - an all-zero pick
+            // reads as nothing picked rather than as a failed read.
+            gl.deleteBuffer(buf);
+            throw new Error('Texture read did not complete, as the WebGL context was lost.');
+        }
+
+        if (!frequent) {
+            copyOut();
+            return pixels;
+        }
+
+        // Running the copy at the start of the next frame leaves nothing of that frame queued in
+        // front of it, at the cost of the read settling a frame later.
+        await new Promise((resolve, reject) => {
+            const copy = {
+                timer: 0,
+                settled: false,
+
+                // a read settles once, whichever of the ways below gets to it first
+                end: (settle) => {
+                    if (copy.settled) {
+                        return;
+                    }
+                    copy.settled = true;
+                    clearTimeout(copy.timer);
+                    this._readbackCopies.delete(copy);
+                    settle();
+                },
+
+                // the copy this was all deferred for, at the start of a frame or once the wait for
+                // one has run out
+                run: () => copy.end(() => {
+                    copyOut();
+                    resolve();
+                }),
+
+                // The device is going away, which the caller of the read is told about instead of
+                // being given data. Settling without the copy, as the bytes it waits for would go
+                // straight in the bin, and the wait is the one this deferral exists to avoid.
+                abandon: () => copy.end(resolve),
+
+                // the pixel buffer went with the context, so there is nothing left to read and the
+                // read has to fail rather than hand back whatever the destination happens to hold
+                fail: () => copy.end(() => {
+                    reject(new Error('Texture read did not complete, as the WebGL context was lost.'));
+                })
+            };
+
+            // A read cannot be left waiting on frames which may not come - rendering stops
+            // altogether for a hidden tab, and whoever awaits the read would wait for good. So the
+            // next frame is used when it starts soon enough, and this stands in when it does not.
+            copy.timer = setTimeout(copy.run, READBACK_FRAME_START_WAIT);
+            this._readbackCopies.add(copy);
+        });
 
         return pixels;
     }
@@ -2405,17 +2584,38 @@ class WebglGraphicsDevice extends GraphicsDevice {
             this.gl.flush();
         }
 
+        // A render target made here is this method's to free, and freeing it goes through the device, so
+        // it has to happen while the device is still usable. The destroy event fires before the backend
+        // is torn down for exactly this, and the read settling is the other way it can come about -
+        // whichever happens first releases it once.
+        let released = !!options.renderTarget;
+        const release = () => {
+            if (released) {
+                return;
+            }
+            released = true;
+            this.off('destroy', release);
+            renderTarget.destroy();
+        };
+        if (!released) {
+            this.on('destroy', release);
+        }
+
         return new Promise((resolve, reject) => {
-            const readPromise = this.readPixelsAsync(x, y, width, height, readBuffer, needsRgbaReadback);
+            const readPromise = this.readPixelsAsync(x, y, width, height, readBuffer, needsRgbaReadback,
+                options.frequent ?? false);
 
             readPromise.then((data) => {
 
-                // return if the device was destroyed
-                if (this._destroyed) return;
+                release();
 
-                // destroy RT if we created it
-                if (!options.renderTarget) {
-                    renderTarget.destroy();
+                // The device was destroyed while the read was in flight, so there is nothing valid to
+                // return - but the promise still has to settle, or whoever is waiting on it waits for
+                // good. Rejecting rather than resolving, as a caller cannot be handed data which was
+                // never read, and this is the same way every other failure on this path reports.
+                if (this._destroyed) {
+                    reject(new Error('Texture read did not complete, as the graphics device was destroyed.'));
+                    return;
                 }
 
                 // Extract channels from RGBA data if needed
@@ -2430,7 +2630,10 @@ class WebglGraphicsDevice extends GraphicsDevice {
                 } else {
                     resolve(data);
                 }
-            }).catch(reject);
+            }).catch((error) => {
+                release();
+                reject(error);
+            });
         });
     }
 
@@ -2474,25 +2677,43 @@ class WebglGraphicsDevice extends GraphicsDevice {
     }
 
     /**
-     * Sets the output vertex buffer. It will be written to by a shader with transform feedback
-     * varyings.
+     * Sets the output vertex buffers. They will be written to by a shader with transform feedback
+     * varyings. A shader created with {@link TRANSFORM_FEEDBACK_INTERLEAVED} captures all varyings
+     * into a single buffer, and so expects one buffer. A shader created with
+     * {@link TRANSFORM_FEEDBACK_SEPARATE} captures each varying into its own buffer, and so expects
+     * one buffer per varying, in declaration order.
      *
-     * @param {VertexBuffer} tf - The output vertex buffer.
+     * @param {VertexBuffer[]|null} buffers - The output vertex buffers, or null to disable transform
+     * feedback.
      * @ignore
      */
-    setTransformFeedbackBuffer(tf) {
-        if (this.transformFeedbackBuffer !== tf) {
-            this.transformFeedbackBuffer = tf;
+    setTransformFeedbackBuffers(buffers) {
 
-            const gl = this.gl;
-            if (tf) {
-                if (!this.feedback) {
-                    this.feedback = gl.createTransformFeedback();
-                }
+        Debug.call(() => {
+            buffers?.forEach((buffer, index) => {
+                Debug.assert(buffer, `Transform feedback buffer at index ${index} is null - a buffer is required for every varying the shader captures.`);
+
+                // A vertex buffer only allocates its GPU storage when it is first given data, so a
+                // buffer created without any is still empty here. Transform feedback would fail on
+                // beginTransformFeedback with an error naming neither the buffer nor the cause, so
+                // catch it while the buffer is still identifiable.
+                Debug.assert(buffer?.impl.initialized, `Transform feedback buffer ${buffer?.id} at index ${index} has no GPU storage allocated, so it cannot be written to. A vertex buffer allocates its storage when first given data, so pass initial data when creating a buffer which only transform feedback writes to.`, buffer);
+            });
+        });
+
+        const gl = this.gl;
+        const active = buffers?.length ? buffers : null;
+        const wasActive = this.transformFeedbackBuffers !== null;
+
+        this.transformFeedbackBuffers = active;
+
+        if (active) {
+            if (!wasActive) {
+                this.feedback ??= gl.createTransformFeedback();
                 gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, this.feedback);
-            } else {
-                gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
             }
+        } else if (wasActive) {
+            gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
         }
     }
 

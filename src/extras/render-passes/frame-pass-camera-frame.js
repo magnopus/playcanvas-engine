@@ -307,6 +307,8 @@ class FramePassCameraFrame extends FramePass {
 
         options.sceneTextureDepth = (meshletDepth || (postProcessDepth && (!requiresSplatDepth || splatDepth))) &&
             deviceSupported && !unsupportedReason;
+        options.sceneTextureDepth = (meshletDepth || (postProcessDepth && deviceSupported && !unsupportedReason)) &&
+            (!requiresSplatDepth || splatDepth);
 
         options.prepassEnabled = inSceneDepth || (postProcessDepth && !options.sceneTextureDepth);
 
@@ -519,7 +521,7 @@ class FramePassCameraFrame extends FramePass {
         }
     }
 
-    createRenderTarget(name, depth, stencil, samples, flipY, sceneTextures) {
+    createRenderTarget(name, depth, stencil, samples, sceneTextures) {
 
         const texture = new Texture(this.device, {
             name: name,
@@ -537,8 +539,7 @@ class FramePassCameraFrame extends FramePass {
             colorBuffers: sceneTextures?.length ? [texture, ...sceneTextures] : [texture],
             depth: depth,
             stencil: stencil,
-            samples: samples,
-            flipY: flipY
+            samples: samples
         });
     }
 
@@ -573,10 +574,10 @@ class FramePassCameraFrame extends FramePass {
             this.sceneDepthSlot = sceneTextures.length;
         }
 
-        // create a render target to render the scene into. flipY is inherited from the target
-        // render target - the compose pass samples it accordingly.
-        const flipY = !!targetRenderTarget?.flipY;
-        this.rt = this.createRenderTarget('SceneColor', true, options.stencil, options.samples, flipY, sceneTextures);
+        // create a render target to render the scene into. This uses the API-native orientation
+        // regardless of the orientation of the target render target - the compose pass flips its
+        // sampling when needed to store the requested orientation in the target render target.
+        this.rt = this.createRenderTarget('SceneColor', true, options.stencil, options.samples, sceneTextures);
         this.sceneTexture = this.rt.colorBuffer;
 
         if (this.sceneDepthTexture) {
@@ -604,7 +605,7 @@ class FramePassCameraFrame extends FramePass {
 
         // when half size scene color buffer is used
         if (this._sceneHalfEnabled) {
-            this.rtHalf = this.createRenderTarget('SceneColorHalf', false, false, 1, flipY);
+            this.rtHalf = this.createRenderTarget('SceneColorHalf', false, false, 1);
             this.sceneTextureHalf = this.rtHalf.colorBuffer;
         }
 
@@ -936,10 +937,11 @@ class FramePassCameraFrame extends FramePass {
     setupVolumetricFogPass(options) {
         if (options.volumetricFogEnabled) {
 
-            // The fog samples the scene depth, and so blends into the alias of the scene color rather
-            // than the scene render target, which the depth is attached to.
+            // the scene pass provides the light clusters used by the local lights of the fog. The fog
+            // samples the scene depth, and so blends into the alias of the scene color rather than the
+            // scene render target, which the depth is attached to.
             this.volumetricFogPass = new FramePassVolumetricFog(this.device, this.cameraComponent,
-                this.sceneTexture, this.rtSceneColor ?? this.rt);
+                this.sceneTexture, this.rtSceneColor ?? this.rt, this.scenePass);
 
             // when TAA is used, the fog noise pattern changes each frame and TAA resolves it
             this.volumetricFogPass.temporalDither = options.taaEnabled;
@@ -1057,9 +1059,19 @@ class FramePassCameraFrame extends FramePass {
 
         if (this.sceneDepthTexture) {
 
-            // the alias of the scene color is not resized by a pass of its own, as it shares its
-            // texture with the scene render target, which the scene pass resizes
-            this.rtSceneColor.resize(this.rt.width, this.rt.height);
+            // The alias of the scene color is not resized by a pass of its own, as it shares its
+            // texture with the scene render target, which the scene pass resizes. Its size is
+            // evaluated the same way that pass evaluates it, instead of read back from the render
+            // target - the frame graph updates the passes this frame pass owns after it, so on the
+            // frame the canvas resizes the render target is still the previous size. Reading it back
+            // would leave this alias attached to the texture the shared one has replaced, and the
+            // passes rendering into it writing to nothing for that frame.
+            const { scenePass } = this;
+            const resizeSource = scenePass.options.resizeSource ?? this.device.backBuffer;
+            this.rtSceneColor.resize(
+                Math.floor(resizeSource.width * scenePass.scaleX),
+                Math.floor(resizeSource.height * scenePass.scaleY)
+            );
 
             // cleared to the reciprocal of the far clip, which makes the background a surface at
             // that distance taking part in the average the blended geometry accumulates - whatever

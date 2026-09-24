@@ -575,9 +575,11 @@ class ForwardRenderer extends Renderer {
             }
             // #endif
 
-            // skip instanced rendering with 0 instances
+            // Skip hardware-instanced rendering with 0 instances. When draw commands (indirect /
+            // multi-draw) are bound, they are the source of truth for the number of draws and
+            // per-draw instance counts, so instancingData.count must not gate the draw.
             const instancingData = drawCall.instancingData;
-            if (instancingData && instancingData.count <= 0) {
+            if (instancingData && instancingData.count <= 0 && !drawCall.getDrawCommands(camera)) {
                 continue;
             }
 
@@ -594,13 +596,7 @@ class ForwardRenderer extends Renderer {
             if (material !== prevMaterial) {
                 this._materialSwitches++;
                 material._scene = scene;
-
-                if (material.dirty) {
-                    DebugGraphics.pushGpuMarker(device, `Node: ${drawCall.node.name}, Material: ${material.name}`);
-                    material.updateUniforms(device, scene);
-                    material.dirty = false;
-                    DebugGraphics.popGpuMarker(device);
-                }
+                material.prepareForRender(device, scene);
             }
 
             const shaderInstance = drawCall.getShaderInstance(pass, lightHash, scene, shaderParams, viewUniformFormat, sortedLights);

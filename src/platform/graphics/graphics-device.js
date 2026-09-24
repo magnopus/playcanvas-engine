@@ -267,6 +267,19 @@ class GraphicsDevice extends EventHandler {
     supportsSubgroups = false;
 
     /**
+     * True if the device supports subgroup size control (WebGPU only). This depends on
+     * {@link supportsSubgroups} and, when available, allows a compute shader to pin its execution
+     * to a specific subgroup size (a power of two within the {@link minSubgroupSize} to
+     * {@link maxSubgroupSize} range) via the WGSL `@subgroup_size` attribute. The
+     * `subgroup-size-control` device feature is automatically requested when this is supported, and
+     * the shader define `CAPS_SUBGROUP_SIZE_CONTROL` is set for conditional compilation.
+     *
+     * @type {boolean}
+     * @readonly
+     */
+    supportsSubgroupSizeControl = false;
+
+    /**
      * True if the device supports the WGSL subgroup_uniformity extension, which allows
      * subgroup functionality to be considered uniform in more cases during shader compilation.
      * This is automatically enabled via the `enable subgroups;` directive when
@@ -353,22 +366,20 @@ class GraphicsDevice extends EventHandler {
     supportsUnrestrictedPointerParameters = false;
 
     /**
-     * Maximum subgroup (warp/wavefront) size reported for the device. Zero means either
-     * subgroups are not supported ({@link supportsSubgroups} is false), or the WebGPU
-     * implementation did not expose the value.
+     * Maximum subgroup (warp/wavefront) size reported for the device. Zero means either the device
+     * does not expose subgroup sizes, or the WebGPU implementation did not report the value.
      *
      * @type {number}
-     * @ignore
+     * @readonly
      */
     maxSubgroupSize = 0;
 
     /**
-     * Minimum subgroup (warp/wavefront) size reported for the device. Zero means either
-     * subgroups are not supported ({@link supportsSubgroups} is false), or the WebGPU
-     * implementation did not expose the value.
+     * Minimum subgroup (warp/wavefront) size reported for the device. Zero means either the device
+     * does not expose subgroup sizes, or the WebGPU implementation did not report the value.
      *
      * @type {number}
-     * @ignore
+     * @readonly
      */
     minSubgroupSize = 0;
 
@@ -789,6 +800,7 @@ class GraphicsDevice extends EventHandler {
         if (this.supportsPrimitiveIndex) capsDefines.set('CAPS_PRIMITIVE_INDEX', '');
         if (this.supportsShaderF16) capsDefines.set('CAPS_SHADER_F16', '');
         if (this.supportsSubgroups) capsDefines.set('CAPS_SUBGROUPS', '');
+        if (this.supportsSubgroupSizeControl) capsDefines.set('CAPS_SUBGROUP_SIZE_CONTROL', '');
         if (this.supportsSubgroupId) capsDefines.set('CAPS_SUBGROUP_ID', '');
         if (this.supportsLinearIndexing) capsDefines.set('CAPS_LINEAR_INDEXING', '');
         if (this.supportsUnrestrictedPointerParameters) capsDefines.set('CAPS_UNRESTRICTED_POINTER_PARAMETERS', '');
@@ -929,6 +941,7 @@ class GraphicsDevice extends EventHandler {
         this.depthState = new DepthState();
         this.cullMode = CULLFACE_BACK;
         this.frontFace = FRONTFACE_CCW;
+        this.alphaToCoverage = false;
 
         // Cached viewport and scissor dimensions
         this.vx = this.vy = this.vw = this.vh = 0;
@@ -939,71 +952,129 @@ class GraphicsDevice extends EventHandler {
 
     // ---- deprecated block start ----
 
+    /**
+     * @deprecated The limit has been removed.
+     * @ignore
+     */
     get boneLimit() {
         Debug.deprecated('GraphicsDevice#boneLimit is deprecated and the limit has been removed.');
         return 1024;
     }
 
+    /**
+     * @deprecated Use GraphicsDevice#isWebGL2 instead.
+     * @ignore
+     */
     get webgl2() {
         Debug.deprecated('GraphicsDevice#webgl2 is deprecated, use GraphicsDevice#isWebGL2 instead.');
         return this.isWebGL2;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get textureFloatHighPrecision() {
         Debug.deprecated('GraphicsDevice#textureFloatHighPrecision is deprecated and always returns true.');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get extBlendMinmax() {
         Debug.deprecated('GraphicsDevice#extBlendMinmax is deprecated as it is always true.');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get extTextureHalfFloat() {
         Debug.deprecated('GraphicsDevice#extTextureHalfFloat is deprecated as it is always true.');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get extTextureLod() {
         Debug.deprecated('GraphicsDevice#extTextureLod is deprecated as it is always true.');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get textureHalfFloatFilterable() {
         Debug.deprecated('GraphicsDevice#textureHalfFloatFilterable is deprecated as it is always true.');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get supportsMrt() {
         Debug.deprecated('GraphicsDevice#supportsMrt is deprecated as it is always true.');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get supportsVolumeTextures() {
         Debug.deprecated('GraphicsDevice#supportsVolumeTextures is deprecated as it is always true.');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get supportsInstancing() {
         Debug.deprecated('GraphicsDevice#supportsInstancing is deprecated as it is always true.');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get textureHalfFloatUpdatable() {
         Debug.deprecated('GraphicsDevice#textureHalfFloatUpdatable is deprecated as it is always true.');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get extTextureFloat() {
         Debug.deprecated('GraphicsDevice#extTextureFloat is deprecated as it is always true');
         return true;
     }
 
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
     get extStandardDerivatives() {
         Debug.deprecated('GraphicsDevice#extStandardDerivatives is deprecated as it is always true.');
         return true;
     }
 
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {number} blendSrc - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @param {number} blendDst - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @ignore
+     */
     setBlendFunction(blendSrc, blendDst) {
         Debug.deprecated('GraphicsDevice#setBlendFunction is deprecated, use GraphicsDevice.setBlendState instead.');
         const currentBlendState = this.blendState;
@@ -1013,6 +1084,14 @@ class GraphicsDevice extends EventHandler {
         this.setBlendState(_tempBlendState);
     }
 
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {number} blendSrc - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @param {number} blendDst - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @param {number} blendSrcAlpha - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @param {number} blendDstAlpha - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @ignore
+     */
     setBlendFunctionSeparate(blendSrc, blendDst, blendSrcAlpha, blendDstAlpha) {
         Debug.deprecated('GraphicsDevice#setBlendFunctionSeparate is deprecated, use GraphicsDevice.setBlendState instead.');
         const currentBlendState = this.blendState;
@@ -1022,6 +1101,12 @@ class GraphicsDevice extends EventHandler {
         this.setBlendState(_tempBlendState);
     }
 
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {number} blendEquation - The blend equation. Can be any of the BLENDEQUATION_*
+     * constants.
+     * @ignore
+     */
     setBlendEquation(blendEquation) {
         Debug.deprecated('GraphicsDevice#setBlendEquation is deprecated, use GraphicsDevice.setBlendState instead.');
         const currentBlendState = this.blendState;
@@ -1031,6 +1116,14 @@ class GraphicsDevice extends EventHandler {
         this.setBlendState(_tempBlendState);
     }
 
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {number} blendEquation - The blend equation. Can be any of the BLENDEQUATION_*
+     * constants.
+     * @param {number} blendAlphaEquation - The blend equation. Can be any of the BLENDEQUATION_*
+     * constants.
+     * @ignore
+     */
     setBlendEquationSeparate(blendEquation, blendAlphaEquation) {
         Debug.deprecated('GraphicsDevice#setBlendEquationSeparate is deprecated, use GraphicsDevice.setBlendState instead.');
         const currentBlendState = this.blendState;
@@ -1040,6 +1133,14 @@ class GraphicsDevice extends EventHandler {
         this.setBlendState(_tempBlendState);
     }
 
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {boolean} redWrite - True to enable writing of the red channel and false otherwise.
+     * @param {boolean} greenWrite - True to enable writing of the green channel and false otherwise.
+     * @param {boolean} blueWrite - True to enable writing of the blue channel and false otherwise.
+     * @param {boolean} alphaWrite - True to enable writing of the alpha channel and false otherwise.
+     * @ignore
+     */
     setColorWrite(redWrite, greenWrite, blueWrite, alphaWrite) {
         Debug.deprecated('GraphicsDevice#setColorWrite is deprecated, use GraphicsDevice.setBlendState instead.');
         const currentBlendState = this.blendState;
@@ -1052,6 +1153,11 @@ class GraphicsDevice extends EventHandler {
         return this.blendState.blend;
     }
 
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {boolean} blending - True to enable blending and false to disable it.
+     * @ignore
+     */
     setBlending(blending) {
         Debug.deprecated('GraphicsDevice#setBlending is deprecated, use GraphicsDevice.setBlendState instead.');
         _tempBlendState.copy(this.blendState);
@@ -1059,6 +1165,11 @@ class GraphicsDevice extends EventHandler {
         this.setBlendState(_tempBlendState);
     }
 
+    /**
+     * @deprecated Use GraphicsDevice.setDepthState instead.
+     * @param {boolean} write - True to enable depth writing and false otherwise.
+     * @ignore
+     */
     setDepthWrite(write) {
         Debug.deprecated('GraphicsDevice#setDepthWrite is deprecated, use GraphicsDevice.setDepthState instead.');
         _tempDepthState.copy(this.depthState);
@@ -1066,6 +1177,11 @@ class GraphicsDevice extends EventHandler {
         this.setDepthState(_tempDepthState);
     }
 
+    /**
+     * @deprecated Use GraphicsDevice.setDepthState instead.
+     * @param {number} func - The depth testing function. Can be any of the FUNC_* constants.
+     * @ignore
+     */
     setDepthFunc(func) {
         Debug.deprecated('GraphicsDevice#setDepthFunc is deprecated, use GraphicsDevice.setDepthState instead.');
         _tempDepthState.copy(this.depthState);
@@ -1073,6 +1189,11 @@ class GraphicsDevice extends EventHandler {
         this.setDepthState(_tempDepthState);
     }
 
+    /**
+     * @deprecated Use GraphicsDevice.setDepthState instead.
+     * @param {boolean} test - True to enable depth testing and false otherwise.
+     * @ignore
+     */
     setDepthTest(test) {
         Debug.deprecated('GraphicsDevice#setDepthTest is deprecated, use GraphicsDevice.setDepthState instead.');
         _tempDepthState.copy(this.depthState);
@@ -1713,26 +1834,25 @@ class GraphicsDevice extends EventHandler {
      * vertex buffers.
      *
      * @param {Shader} shader - The shader to validate.
-     * @param {VertexFormat} vb0Format - The format of the first vertex buffer.
-     * @param {VertexFormat} vb1Format - The format of the second vertex buffer.
+     * @param {(VertexBuffer|null|undefined)[]} vertexBuffers - The vertex buffers of the draw.
      * @protected
      */
-    validateAttributes(shader, vb0Format, vb1Format) {
+    validateAttributes(shader, vertexBuffers) {
 
         Debug.call(() => {
 
             // add all attribute locations from vertex formats to the set
             _tempSet.clear();
-            vb0Format?.elements.forEach(element => _tempSet.add(semanticToLocation[element.name]));
-            vb1Format?.elements.forEach(element => _tempSet.add(semanticToLocation[element.name]));
+            for (let i = 0; i < vertexBuffers.length; i++) {
+                vertexBuffers[i]?.format.elements.forEach(element => _tempSet.add(semanticToLocation[element.name]));
+            }
 
             // every location shader needs must be in the vertex buffer
             for (const [location, name] of shader.attributes) {
                 if (!_tempSet.has(location)) {
                     Debug.errorOnce(`Vertex attribute [${name}] at location ${location} required by the shader is not present in the currently assigned vertex buffers, while rendering [${DebugGraphics.toString()}]`, {
                         shader,
-                        vb0Format,
-                        vb1Format
+                        vertexBuffers
                     });
                 }
             }

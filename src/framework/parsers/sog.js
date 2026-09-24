@@ -105,7 +105,13 @@ class SogParser {
     }
 
     /**
-     * Checks if loading should be aborted due to asset unload or invalid device.
+     * Checks if loading should be aborted due to asset unload, app teardown or invalid device.
+     *
+     * Nothing cancels an in-flight request, so any of these callbacks can run after
+     * {@link AppBase#destroy}. That tears down in a fixed order - the asset registry is dropped
+     * before the graphics device is marked destroyed - so a callback can arrive while `app.assets`
+     * is already null and the device still looks alive. Every access here has to tolerate that,
+     * hence the optional chaining on the registry rather than only on the device.
      *
      * @param {Asset} asset - The asset being loaded.
      * @param {boolean} unloaded - Whether the asset was unloaded during async loading.
@@ -113,9 +119,9 @@ class SogParser {
      * @private
      */
     _shouldAbort(asset, unloaded) {
-        if (unloaded || !this.app.assets.get(asset.id)) return true;
+        if (unloaded) return true;
         if (!this.app?.graphicsDevice || this.app.graphicsDevice._destroyed) return true;
-        return false;
+        return !this.app.assets?.get(asset.id);
     }
 
     /**
@@ -324,7 +330,9 @@ class SogParser {
             const options = {
                 retry: this.handler.maxRetries > 0,
                 maxRetries: this.handler.maxRetries,
-                responseType: Http.ResponseType.JSON
+                responseType: Http.ResponseType.JSON,
+                // Magnopus patched - add withCredentials option
+                withCredentials: asset?.options?.crossOrigin === 'use-credentials'
             };
 
             http.get(url.load, options, (err, meta) => {

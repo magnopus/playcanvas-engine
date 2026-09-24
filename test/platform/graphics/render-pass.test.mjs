@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 
 import { Color } from '../../../src/core/math/color.js';
-import { PIXELFORMAT_RGBA8 } from '../../../src/platform/graphics/constants.js';
+import { PIXELFORMAT_DEPTH, PIXELFORMAT_R32F, PIXELFORMAT_RGBA8 } from '../../../src/platform/graphics/constants.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { RenderPass } from '../../../src/platform/graphics/render-pass.js';
 import { RenderTarget } from '../../../src/platform/graphics/render-target.js';
@@ -104,6 +104,96 @@ describe('RenderPass', function () {
 
             expect(renderPass.colorArrayOps[0].clear).to.equal(false);
             expect(renderPass.colorArrayOps[1].clear).to.equal(false);
+        });
+
+    });
+
+    describe('#allocateAttachments: explicit multisampled attachments', function () {
+
+        const createMsTexture = (name, format = PIXELFORMAT_RGBA8) => {
+            device.isWebGPU = true;
+            device.maxSamples = 4;
+            return new Texture(device, { name, width: 4, height: 4, format, samples: 4 });
+        };
+
+        it('stores the samples when there is no resolve buffer', function () {
+            const rt = new RenderTarget({ colorBuffer: createMsTexture('ms'), depth: false });
+            const pass = new RenderPass(device);
+            pass.init(rt);
+
+            expect(pass.samples).to.equal(4);
+            expect(pass.colorArrayOps[0].store).to.equal(true);
+            expect(pass.colorArrayOps[0].resolve).to.equal(false);
+
+            rt.destroyTextureBuffers();
+            rt.destroy();
+        });
+
+        it('resolves and discards the samples when a resolve buffer is assigned', function () {
+            const resolve = new Texture(device, { name: 'resolve', width: 4, height: 4, format: PIXELFORMAT_RGBA8, mipmaps: false });
+            const rt = new RenderTarget({ colorBuffer: createMsTexture('ms2'), resolveBuffer: resolve, depth: false });
+            const pass = new RenderPass(device);
+            pass.init(rt);
+
+            expect(pass.colorArrayOps[0].store).to.equal(false);
+            expect(pass.colorArrayOps[0].resolve).to.equal(true);
+
+            rt.destroyTextureBuffers();
+            rt.destroy();
+        });
+
+        it('applies the defaults per attachment', function () {
+            const resolve = new Texture(device, { name: 'resolve0', width: 4, height: 4, format: PIXELFORMAT_RGBA8, mipmaps: false });
+            const rt = new RenderTarget({
+                colorBuffers: [createMsTexture('msA'), createMsTexture('msB')],
+                resolveBuffers: [resolve, null],
+                depth: false
+            });
+            const pass = new RenderPass(device);
+            pass.init(rt);
+
+            expect(pass.colorArrayOps[0].store).to.equal(false);
+            expect(pass.colorArrayOps[0].resolve).to.equal(true);
+            expect(pass.colorArrayOps[1].store).to.equal(true);
+            expect(pass.colorArrayOps[1].resolve).to.equal(false);
+
+            rt.destroyTextureBuffers();
+            rt.destroy();
+        });
+
+    });
+
+    describe('#allocateAttachments: multisampled depth', function () {
+
+        const createMsDepth = () => {
+            device.isWebGPU = true;
+            device.maxSamples = 4;
+            return new Texture(device, { name: 'msDepth', width: 4, height: 4, format: PIXELFORMAT_DEPTH, samples: 4 });
+        };
+
+        it('stores depth and does not resolve without a depth resolve buffer', function () {
+            const rt = new RenderTarget({ depthBuffer: createMsDepth() });
+            const pass = new RenderPass(device);
+            pass.init(rt);
+
+            expect(pass.depthStencilOps.storeDepth).to.equal(true);
+            expect(pass.depthStencilOps.resolveDepth).to.equal(false);
+
+            rt.destroyTextureBuffers();
+            rt.destroy();
+        });
+
+        it('resolves depth by default when a depth resolve buffer is assigned', function () {
+            const resolve = new Texture(device, { name: 'depthResolve', width: 4, height: 4, format: PIXELFORMAT_R32F, mipmaps: false });
+            const rt = new RenderTarget({ depthBuffer: createMsDepth(), depthResolveBuffer: resolve });
+            const pass = new RenderPass(device);
+            pass.init(rt);
+
+            expect(pass.depthStencilOps.storeDepth).to.equal(true);
+            expect(pass.depthStencilOps.resolveDepth).to.equal(true);
+
+            rt.destroyTextureBuffers();
+            rt.destroy();
         });
 
     });

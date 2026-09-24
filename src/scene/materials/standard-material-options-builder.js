@@ -11,6 +11,8 @@ import {
     SHADERDEF_SCREENSPACE, SHADERDEF_SKIN, SHADERDEF_TANGENTS, SHADERDEF_UV0, SHADERDEF_UV1, SHADERDEF_VCOLOR, SHADERDEF_LMAMBIENT,
     TONEMAP_NONE,
     DITHER_NONE,
+    PARALLAX_OCCLUSION,
+    PARALLAX_OFFSET,
     SHADERDEF_MORPH_TEXTURE_BASED_INT, SHADERDEF_BATCH,
     FOG_NONE,
     REFLECTIONSRC_NONE, REFLECTIONSRC_ENVATLAS, REFLECTIONSRC_ENVATLASHQ, REFLECTIONSRC_CUBEMAP, REFLECTIONSRC_SPHEREMAP,
@@ -24,31 +26,11 @@ import {
 import { _matTex2D } from '../shader-lib/programs/standard.js';
 import { LitMaterialOptionsBuilder } from './lit-material-options-builder.js';
 
-const arraysEqual = (a, b) => {
-    if (a.length !== b.length) {
-        return false;
-    }
-    for (let i = 0; i < a.length; ++i) {
-        if (a[i] !== b[i]) {
-            return false;
-        }
-    }
-    return true;
-};
-
-const notWhite = (color) => {
-    return color.r !== 1 || color.g !== 1 || color.b !== 1;
-};
-
 const notBlack = (color) => {
     return color.r !== 0 || color.g !== 0 || color.b !== 0;
 };
 
 class StandardMaterialOptionsBuilder {
-    constructor() {
-        this._mapXForms = null;
-    }
-
     // Minimal options for Depth and Shadow passes
     updateMinRef(options, scene, stdMat, objDefs, pass, sortedLights) {
         this._updateSharedOptions(options, scene, stdMat, objDefs, pass);
@@ -126,13 +108,11 @@ class StandardMaterialOptionsBuilder {
         }
 
         options.litOptions.vertexColors = false;
-        this._mapXForms = [];
 
         const uniqueTextureMap = {};
-        for (const p in _matTex2D) {
+        for (const p of _matTex2D.keys()) {
             this._updateTexOptions(options, stdMat, p, hasUv0, hasUv1, hasUv2, hasUv3, hasUv4, hasVcolor, minimalOptions, uniqueTextureMap);
         }
-        this._mapXForms = null;
 
         // true if ssao is applied directly in the lit shaders. Also ensure the AO part is generated in the front end
         options.litOptions.ssao = cameraShaderParams?.ssaoEnabled;
@@ -142,6 +122,13 @@ class StandardMaterialOptionsBuilder {
         options.litOptions.lightMapEnabled = options.lightMap;
         options.litOptions.dirLightMapEnabled = options.dirLightMap;
         options.litOptions.useHeights = options.heightMap;
+
+        // the parallax mode only matters when a height map is assigned
+        options.parallaxMode = options.heightMap ? stdMat.parallaxMode : PARALLAX_OFFSET;
+
+        // self shadowing marches the height field, so it needs the marched mode - the tap count
+        // doubles as the switch, as alphaTest does above
+        options.parallaxSelfShadow = options.parallaxMode === PARALLAX_OCCLUSION && stdMat.parallaxShadowSamples > 0;
         options.litOptions.useNormals = options.normalMap;
         options.litOptions.useClearCoatNormals = options.clearCoatNormalMap;
         options.litOptions.useAo = options.aoMap || options.aoVertexColor || options.litOptions.ssao;
@@ -203,7 +190,7 @@ class StandardMaterialOptionsBuilder {
 
                     options[mname] = !!stdMat[mname];
                     options[iname] = identifier;
-                    options[tname] = this._getMapTransformID(stdMat.getUniform(tname), stdMat[uname]);
+                    options[tname] = stdMat._getMapTransformId(p);
                     options[cname] = stdMat[cname];
                     options[uname] = stdMat[uname];
                 }
@@ -228,14 +215,6 @@ class StandardMaterialOptionsBuilder {
 
         const useSpecularColor = (!stdMat.useMetalness || stdMat.useMetalnessSpecularColor);
 
-        // The constant specular color / specularity factor is included whenever it differs from
-        // the multiplicative identity (white / 1), regardless of whether a map is also present.
-        // This matches the glTF KHR_materials_specular spec (specularFactor * specularTexture) and
-        // mirrors how metalness is handled below. The legacy `specularTint` / `specularityFactorTint`
-        // flags are still honored as explicit overrides.
-        const specularTint = useSpecular &&
-                             (stdMat.specularTint || notWhite(stdMat.specular));
-
         const specularityFactorTint = useSpecular && stdMat.useMetalnessSpecularColor &&
                                       (stdMat.specularityFactorTint || stdMat.specularityFactor !== 1);
 
@@ -243,7 +222,6 @@ class StandardMaterialOptionsBuilder {
 
         const equalish = (a, b) => Math.abs(a - b) < 1e-4;
 
-        options.specularTint = specularTint;
         options.specularityFactorTint = specularityFactorTint;
         options.metalnessTint = (stdMat.useMetalness && stdMat.metalness < 1);
         options.glossTint = true;
@@ -267,12 +245,6 @@ class StandardMaterialOptionsBuilder {
         options.clearCoatGloss = !!stdMat.clearCoatGloss;
         options.clearCoatPackedNormal = isPackedNormalMap(stdMat.clearCoatNormalMap);
         options.iorTint = !equalish(stdMat.refractionIndex, 1.0 / 1.5);
-
-        // hack, see Scene.forcePassThroughSpecular description
-        if (scene.forcePassThroughSpecular) {
-            options.specularEncoding = 'linear';
-            options.sheenEncoding = 'linear';
-        }
 
         options.iridescenceTint = stdMat.iridescence !== 1.0;
 
@@ -427,25 +399,6 @@ class StandardMaterialOptionsBuilder {
         if (options.litOptions.lights.length === 0 && !scene.clusteredLightingEnabled) {
             options.litOptions.noShadow = true;
         }
-    }
-
-    _getMapTransformID(xform, uv) {
-        if (!xform) return 0;
-
-        let xforms = this._mapXForms[uv];
-        if (!xforms) {
-            xforms = [];
-            this._mapXForms[uv] = xforms;
-        }
-
-        for (let i = 0; i < xforms.length; i++) {
-            if (arraysEqual(xforms[i][0].value, xform[0].value) &&
-                arraysEqual(xforms[i][1].value, xform[1].value)) {
-                return i + 1;
-            }
-        }
-
-        return xforms.push(xform);
     }
 }
 

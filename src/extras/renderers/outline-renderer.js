@@ -5,6 +5,7 @@ import { getSingleAttachmentBlendState } from '../../platform/graphics/blend-sta
 import {
     ADDRESS_CLAMP_TO_EDGE, BLENDEQUATION_ADD, BLENDMODE_ONE_MINUS_SRC_ALPHA, BLENDMODE_SRC_ALPHA,
     FILTER_LINEAR, FILTER_LINEAR_MIPMAP_LINEAR, PIXELFORMAT_SRGBA8,
+    RENDERTARGET_ORIGIN_BOTTOM,
     SEMANTIC_POSITION
 } from '../../platform/graphics/constants.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
@@ -363,13 +364,14 @@ class OutlineRenderer {
             magFilter: FILTER_LINEAR
         });
 
-        // render target
+        // render target - the outline texture is composited using a raw-uv fullscreen quad
+        // written against the WebGL layout, so replicate it on all graphics APIs
         return new RenderTarget({
             colorBuffer: texture,
             depth: depth,
+            origin: RENDERTARGET_ORIGIN_BOTTOM,
             // magnopus patched - antialias
-            samples: 4,
-            flipY: this.app.graphicsDevice.isWebGPU
+            samples: 4
         });
     }
 

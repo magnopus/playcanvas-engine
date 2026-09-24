@@ -138,12 +138,18 @@ class Material {
     alphaTest = 0;
 
     /**
-     * Enables or disables alpha to coverage (WebGL2 only). When enabled, and if hardware
-     * anti-aliasing is on, limited order-independent transparency can be achieved. Quality depends
-     * on the number of MSAA samples of the current render target. It can nicely soften edges of
-     * otherwise sharp alpha cutouts, but isn't recommended for large area semi-transparent
-     * surfaces. Note, that you don't need to enable blending to make alpha to coverage work. It
-     * will work without it, just like alphaTest.
+     * Enables or disables alpha to coverage. When enabled, and if hardware anti-aliasing is on,
+     * limited order-independent transparency can be achieved. Quality depends on the number of
+     * MSAA samples of the current render target. It can nicely soften edges of otherwise sharp
+     * alpha cutouts, but isn't recommended for large area semi-transparent surfaces. Note, that
+     * you don't need to enable blending to make alpha to coverage work. It will work without it,
+     * just like alphaTest.
+     *
+     * This requires a multi-sampled render target, and is silently ignored when rendering to a
+     * single-sampled one. On WebGPU it additionally requires the first color attachment of the
+     * render target to use a blendable format with an alpha channel, and is silently ignored
+     * otherwise - note that {@link PIXELFORMAT_111110F}, the default HDR format used by
+     * {@link CameraFrame}, has no alpha channel.
      */
     alphaToCoverage = false;
 
@@ -220,6 +226,52 @@ class Material {
         if (new.target === Material) {
             Debug.error('Material class cannot be instantiated, use ShaderMaterial instead');
         }
+    }
+
+    /**
+     * Enables or disables flat shading. When enabled, the surface is shaded using the geometric
+     * normal of the triangle the fragment belongs to, instead of the normal interpolated from the
+     * vertex normals, giving the mesh a faceted look. This works on skinned and morphed geometry as
+     * well.
+     *
+     * The geometric normal is oriented to match the winding of the triangle, as configured by
+     * {@link Material#frontFace}, and so it agrees with correctly authored vertex normals. Flat
+     * shading therefore only changes the faceting - {@link Material#cull},
+     * {@link Material#frontFace} and {@link StandardMaterial#twoSidedLighting} all behave the same
+     * as they do for smooth shading.
+     *
+     * {@link StandardMaterial} and {@link LitMaterial} implement this automatically. For a
+     * {@link ShaderMaterial}, this adds a `FLAT_SHADING` define to the shader, which the supplied
+     * shader code needs to handle. The `flatNormalPS` chunk provides the `getFlatNormal` function
+     * used by the engine internally, and can be used for this:
+     *
+     * ```javascript
+     * #include "flatNormalPS"
+     * ...
+     * #ifdef FLAT_SHADING
+     *     vec3 normal = getFlatNormal(worldPos);
+     * #else
+     *     vec3 normal = normalize(interpolatedNormal);
+     * #endif
+     * ```
+     *
+     * As with other material properties, call {@link Material#update} after changing this.
+     *
+     * Defaults to false.
+     *
+     * @type {boolean}
+     */
+    set flatShading(value) {
+        this.setDefine('FLAT_SHADING', value);
+    }
+
+    /**
+     * Gets whether flat shading is enabled.
+     *
+     * @type {boolean}
+     */
+    get flatShading() {
+        return this.defines.has('FLAT_SHADING');
     }
 
     /**
@@ -315,11 +367,23 @@ class Material {
         return this.shaderChunks.version;
     }
 
+    /**
+     * @deprecated Use Material.getShaderChunks instead. For example:
+     * material.getShaderChunks(SHADERLANGUAGE_GLSL).set("chunkName", "chunkCode")
+     * @type {Object<string, string>}
+     * @ignore
+     */
     set chunks(value) {
         Debug.deprecated('Material.chunks has been removed, please use Material.getShaderChunks instead. For example: material.getShaderChunks(SHADERLANGUAGE_GLSL).set("chunkName", "chunkCode")');
         this._oldChunks = value;
     }
 
+    /**
+     * @deprecated Use Material.getShaderChunks instead. For example:
+     * material.getShaderChunks(SHADERLANGUAGE_GLSL).set("chunkName", "chunkCode")
+     * @type {Object<string, string>}
+     * @ignore
+     */
     get chunks() {
         Debug.deprecated('Material.chunks has been removed, please use Material.getShaderChunks instead. For example: material.getShaderChunks(SHADERLANGUAGE_GLSL).set("chunkName", "chunkCode")');
         Object.assign(this._oldChunks, Object.fromEntries(this.shaderChunks.glsl));
@@ -370,7 +434,38 @@ class Material {
 
     _scene = null;
 
-    dirty = true;
+    /**
+     * Incremented by {@link Material#update} so internal consumers can detect material changes
+     * without consuming shared dirty state.
+     *
+     * @type {number}
+     * @private
+     */
+    _updateVersion = 0;
+
+    /**
+     * The update version most recently processed by {@link Material#prepareForRender}.
+     *
+     * @type {number}
+     * @private
+     */
+    _preparedVersion = -1;
+
+    /**
+     * The version incremented each time {@link Material#update} is called.
+     *
+     * @type {number}
+     * @ignore
+     */
+    get updateVersion() {
+        return this._updateVersion;
+    }
+
+    /** @ignore */
+    get dirty() {
+        Debug.removed('Material#dirty has been removed. Call Material#update() after modifying material properties.');
+        return undefined;
+    }
 
     /**
      * Sets whether the red channel is written to the color buffer. If true, the red component of
@@ -755,10 +850,31 @@ class Material {
         }
     }
 
-    updateUniforms(device, scene) {
+    /** @private */
+    _clearVariantsIfDirty() {
         if (this._dirtyShader) {
             this.clearVariants();
             this._dirtyShader = false;
+        }
+    }
+
+    updateUniforms(device, scene) {
+        // Compatibility fallback for materials rendered without calling update().
+        this._clearVariantsIfDirty();
+    }
+
+    /**
+     * Prepares the material for rendering when it has been updated since the previous preparation.
+     *
+     * @param {GraphicsDevice} device - The graphics device.
+     * @param {Scene} scene - The scene.
+     * @ignore
+     */
+    prepareForRender(device, scene) {
+        const version = this._updateVersion;
+        if (this._preparedVersion !== version) {
+            this.updateUniforms(device, scene);
+            this._preparedVersion = version;
         }
     }
 
@@ -802,11 +918,11 @@ class Material {
         if (this._definesDirty || this._shaderChunks?.isDirty()) {
             this._definesDirty = false;
             this._shaderChunks?.resetDirty();
-
-            this.clearVariants();
+            this._dirtyShader = true;
         }
 
-        this.dirty = true;
+        this._clearVariantsIfDirty();
+        this._updateVersion++;
     }
 
     // Parameter management
@@ -1011,6 +1127,50 @@ class Material {
      */
     removeMeshInstanceRef(meshInstance) {
         this.meshInstances.delete(meshInstance);
+    }
+
+    /**
+     * Sets the material's shader. Not supported.
+     *
+     * @ignore
+     * @deprecated Use {@link ShaderMaterial} instead.
+     */
+    set shader(value) {
+        Debug.removed('Material#shader was removed. Use ShaderMaterial instead.');
+    }
+
+    /**
+     * Gets the material's shader. Always returns null.
+     *
+     * @ignore
+     * @deprecated Use {@link ShaderMaterial} instead.
+     */
+    get shader() {
+        Debug.removed('Material#shader was removed. Use ShaderMaterial instead.');
+        return null;
+    }
+
+    /**
+     * Sets whether blending is enabled. Note: this is used by the Editor.
+     *
+     * @type {boolean}
+     * @ignore
+     * @deprecated Use {@link Material#blendState} instead.
+     */
+    set blend(value) {
+        Debug.deprecated('Material#blend is deprecated, use Material.blendState.');
+        this.blendState.blend = value;
+    }
+
+    /**
+     * Gets whether blending is enabled.
+     *
+     * @type {boolean}
+     * @ignore
+     * @deprecated Use {@link Material#blendState} instead.
+     */
+    get blend() {
+        return this.blendState.blend;
     }
 }
 

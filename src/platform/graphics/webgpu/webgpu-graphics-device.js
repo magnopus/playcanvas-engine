@@ -472,8 +472,9 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
         this.supportsTextureFormatTier1 ||= this.supportsTextureFormatTier2;
         this.supportsPrimitiveIndex = requireFeature('primitive-index');
         this.supportsSubgroups = requireFeature('subgroups');
-        this.maxSubgroupSize = this.supportsSubgroups ? (this.gpuAdapter?.info?.subgroupMaxSize ?? 0) : 0;
-        this.minSubgroupSize = this.supportsSubgroups ? (this.gpuAdapter?.info?.subgroupMinSize ?? 0) : 0;
+        this.supportsSubgroupSizeControl = requireFeature('subgroup-size-control');
+        this.maxSubgroupSize = this.gpuAdapter?.info?.subgroupMaxSize ?? 0;
+        this.minSubgroupSize = this.gpuAdapter?.info?.subgroupMinSize ?? 0;
         const wgslFeatureNames = window.navigator.gpu.wgslLanguageFeatures ?
             Array.from(window.navigator.gpu.wgslLanguageFeatures) : [];
         Debug.log(
@@ -489,7 +490,9 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
             const adapterLimits = this.gpuAdapter?.limits;
             if (adapterLimits) {
                 for (const limitName in adapterLimits) {
-                    // skip these as they fail on Windows Chrome and are not part of spec currently
+                    // subgroup sizes are exposed via GPUAdapterInfo (read above), not as requestable
+                    // limits - some implementations (e.g. Windows Chrome) still surface them here and
+                    // reject them in requiredLimits, so skip them
                     if (limitName === 'minSubgroupSize' || limitName === 'maxSubgroupSize') {
                         continue;
                     }
@@ -934,12 +937,12 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
                     }
                 }
 
-                Debug.call(() => this.validateAttributes(this.shader, vb0?.format, vb1?.format));
+                Debug.call(() => this.validateAttributes(this.shader, [vb0, vb1]));
 
                 // render pipeline
                 pipeline = this.renderPipeline.get(primitive, vb0?.format, vb1?.format, indexBuffer?.format, this.shader, this.renderTarget,
                     this.bindGroupFormats, this.blendState, this.depthState, this.cullMode,
-                    this.stencilEnabled, this.stencilFront, this.stencilBack, this.frontFace);
+                    this.stencilEnabled, this.stencilFront, this.stencilBack, this.frontFace, this.alphaToCoverage);
                 Debug.assert(pipeline);
 
                 if (this.pipeline !== pipeline) {
@@ -1066,6 +1069,7 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
     }
 
     setAlphaToCoverage(state) {
+        this.alphaToCoverage = state;
     }
 
     initializeContextCaches() {
@@ -1189,17 +1193,25 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
         if (target) {
 
             // resolve depth buffer (stencil resolve is not yet implemented)
-            if (target.depthBuffer && renderPass.depthStencilOps.resolveDepth) {
-                if (renderPass.samples > 1 && target.autoResolve) {
+            if (target.depthBuffer && renderPass.depthStencilOps.resolveDepth && renderPass.samples > 1) {
+
+                // legacy mode: the internally allocated multisampled depth is resolved into the
+                // user-provided single-sampled depthBuffer (R32F), additionally gated on
+                // autoResolve. Explicit mode: the user-provided multisampled depthBuffer is
+                // resolved into depthResolveBuffer, driven purely by the per-pass resolveDepth
+                // flag - matching how explicit color resolve buffers are controlled.
+                const explicitMsaa = target.depthBuffer.samples > 1;
+                if (explicitMsaa || target.autoResolve) {
                     const depthAttachment = target.impl.depthAttachment;
-                    const destTexture = target.depthBuffer.impl.gpuTexture;
+                    const sourceTexture = explicitMsaa ? depthAttachment?.depthTexture : depthAttachment?.multisampledDepthBuffer;
+                    const destTexture = explicitMsaa ? target.depthResolveBuffer?.impl.gpuTexture : target.depthBuffer.impl.gpuTexture;
 
                     // a transient (memoryless) depth buffer cannot be sampled, so it cannot be the
                     // source of a shader-based depth resolve (it has no TEXTURE_BINDING usage)
                     if (depthAttachment?.transient) {
                         Debug.errorOnce(`Depth resolve is not possible on render target '${target.name}' because its depth is a transient (memoryless) attachment. Disable transientDepth to allow depth resolve.`);
-                    } else if (depthAttachment && destTexture) {
-                        this.resolver.resolveDepth(this.commandEncoder, depthAttachment.multisampledDepthBuffer, destTexture);
+                    } else if (sourceTexture && destTexture) {
+                        this.resolver.resolveDepth(this.commandEncoder, sourceTexture, destTexture, target.depthResolveMode);
                     }
                 }
             }
@@ -1505,7 +1517,13 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
 
             const read = () => {
 
-                destBuffer?.mapAsync(GPUMapMode.READ).then(() => {
+                this.mapBufferAsync(destBuffer, GPUMapMode.READ).then((mapped) => {
+
+                    if (!mapped) {
+                        stagingBuffer.destroy(this);
+                        reject(new Error('Failed to map a staging buffer for reading, most likely because the device was lost.'));
+                        return;
+                    }
 
                     // copy data to a buffer
                     data ??= new Uint8Array(size);
@@ -1577,6 +1595,16 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
 
         if (color) {
 
+            // WebGPU only allows copies between textures with equal sample counts. A copy between
+            // a multisampled and a single-sampled color buffer is not a copy - use a resolve.
+            const srcSamples = (source ? source.colorBuffer?.samples : 1) ?? 1;
+            const dstSamples = (dest ? dest.colorBuffer?.samples : 1) ?? 1;
+            if (srcSamples !== dstSamples) {
+                Debug.errorOnce(`copyRenderTarget: cannot copy between color buffers with different sample counts (source '${source?.name}' has ${srcSamples}, destination '${dest?.name}' has ${dstSamples}). Use a resolve instead of a copy.`);
+                DebugGraphics.popGpuMarker(this);
+                return false;
+            }
+
             // read from supplied render target, or from the framebuffer
             /** @type {GPUTexelCopyTextureInfo} */
             const copySrc = {
@@ -1609,14 +1637,38 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
                 return false;
             }
 
-            const sourceTexture = sourceRT.impl.depthAttachment.depthTexture;
+            // internally allocated depth uses depthTexture (multisampled when samples > 1); a
+            // user-provided depth buffer with samples > 1 stores its multisampled depth separately
+            const sourceAttachment = sourceRT.impl.depthAttachment;
+            const sourceTexture = sourceAttachment.depthTexture ?? sourceAttachment.multisampledDepthBuffer;
             const sourceMipLevel = sourceRT.mipLevel;
 
             if (sourceRT.samples > 1) {
 
-                // resolve the depth to a color buffer of destination render target
-                const destTexture = dest.colorBuffer.impl.gpuTexture;
-                this.resolver.resolveDepth(commandEncoder, sourceTexture, destTexture);
+                // multisampled destination depth buffer - a plain copy between the multisampled
+                // depth textures (a depth snapshot). WebGPU requires equal sample counts and
+                // matching formats.
+                const destMsDepth = dest?.depthBuffer?.samples > 1 ? dest.depthBuffer : null;
+                if (destMsDepth) {
+                    if (destMsDepth.samples !== sourceRT.samples) {
+                        Debug.errorOnce(`copyRenderTarget: cannot copy depth between render targets with different sample counts (source '${sourceRT.name}' has ${sourceRT.samples}, destination '${dest.name}' has ${destMsDepth.samples}).`);
+                        DebugGraphics.popGpuMarker(this);
+                        return false;
+                    }
+                    Debug.assert(copySize.width === destMsDepth.width && copySize.height === destMsDepth.height,
+                        'copyRenderTarget: copies of multisampled depth must cover the entire texture.');
+                    commandEncoder.copyTextureToTexture(
+                        { texture: sourceTexture },
+                        { texture: destMsDepth.impl.gpuTexture },
+                        copySize
+                    );
+                } else {
+
+                    // resolve the depth to a color buffer of destination render target, using the
+                    // resolve mode of the source render target
+                    const destTexture = dest.colorBuffer.impl.gpuTexture;
+                    this.resolver.resolveDepth(commandEncoder, sourceTexture, destTexture, sourceRT.depthResolveMode);
+                }
 
             } else {
 
