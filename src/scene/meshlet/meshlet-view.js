@@ -372,14 +372,14 @@ class MeshletView {
      * Allocates this view's index buffer at the current capacity. No initial data: every index
      * is written by the index-write pass before any draw reads it (finalizeArgs bounds each
      * draw to the committed end), so uploading a zeroed copy of a buffer this size is pure
-     * cost - and IndexBuffer keeps no CPU shadow unless one is asked for.
+     * cost - gpuOnly also skips IndexBuffer's CPU shadow copy.
      *
      * @private
      */
     _allocIndexBuffer() {
         const total = Math.max(this.indexTotal(), MIN_INDICES);
         this.indexBuffer = new IndexBuffer(this.device, INDEXFORMAT_UINT32, total, BUFFER_STATIC,
-            undefined, { storage: true });
+            undefined, { storage: true, gpuOnly: true });
     }
 
     /**

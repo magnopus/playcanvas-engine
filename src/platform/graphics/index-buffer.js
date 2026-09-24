@@ -45,6 +45,9 @@ class IndexBuffer {
      * @param {object} [options] - Object for passing optional arguments.
      * @param {boolean} [options.storage] - Defines if the index buffer can be used as a storage
      * buffer by a compute shader. Defaults to false. Only supported on WebGPU.
+     * @param {boolean} [options.gpuOnly] - When no initial data is given, skips allocating the
+     * CPU copy of the indices, for buffers whose contents are only written on the GPU. The copy
+     * is allocated by {@link IndexBuffer#lock} if it is ever requested. Defaults to false.
      * @example
      * // Create an index buffer holding 3 16-bit indices. The buffer is marked as
      * // static, hinting that the buffer will never be modified.
@@ -71,17 +74,17 @@ class IndexBuffer {
         this.bytesPerIndex = bytesPerIndex;
         this.numBytes = this.numIndices * bytesPerIndex;
 
-        // The CPU-side copy is allocated LAZILY, by lock(). A buffer whose contents are
-        // written on the GPU never needs one, and at meshlet scale that shadow copy is
-        // hundreds of megabytes of pure waste - large enough to fail outright and take the
-        // frame's encoding down with it.
-        this.storage = null;
         if (initialData) {
             this.setData(initialData);
-        } else {
-            // still create the GPU buffer - unlock() allocates from numBytes and uploads
-            // nothing when there is no CPU copy to upload
+        } else if (options?.gpuOnly) {
+            // A buffer whose contents are written on the GPU never needs a CPU copy, and at
+            // meshlet scale that copy is hundreds of megabytes - large enough to fail outright.
+            // lock() allocates one on demand. Still create the GPU buffer: unlock() allocates
+            // from numBytes and uploads nothing when there is no CPU copy.
+            this.storage = null;
             this.unlock();
+        } else {
+            this.storage = new ArrayBuffer(this.numBytes);
         }
 
         this.adjustVramSizeTracking(graphicsDevice._vram, this.numBytes);

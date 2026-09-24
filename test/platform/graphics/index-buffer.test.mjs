@@ -25,7 +25,13 @@ describe('IndexBuffer', function () {
 
   describe('CPU copy', function () {
 
-    it('allocates no CPU copy when constructed without data, and still creates the GPU buffer', function () {
+    it('allocates the CPU copy up front by default', function () {
+      const ib = new IndexBuffer(device, INDEXFORMAT_UINT16, 10, BUFFER_STATIC);
+      expect(ib.storage).to.be.an.instanceof(ArrayBuffer);
+      expect(ib.storage.byteLength).to.equal(20);
+    });
+
+    it('allocates no CPU copy for a gpuOnly buffer, and still creates the GPU buffer', function () {
       let unlocks = 0;
       const original = device.createIndexBufferImpl;
       device.createIndexBufferImpl = (ib, options) => {
@@ -33,14 +39,15 @@ describe('IndexBuffer', function () {
         impl.unlock = () => unlocks++;
         return impl;
       };
-      const ib = new IndexBuffer(device, INDEXFORMAT_UINT32, 100, BUFFER_STATIC);
+      const ib = new IndexBuffer(device, INDEXFORMAT_UINT32, 100, BUFFER_STATIC, undefined, { gpuOnly: true });
       expect(ib.storage).to.equal(null);
       expect(ib.numBytes).to.equal(400);
       expect(unlocks, 'unlock() allocates the GPU buffer').to.equal(1);
     });
 
-    it('allocates the CPU copy on the first lock() and returns the same buffer afterwards', function () {
-      const ib = new IndexBuffer(device, INDEXFORMAT_UINT16, 10, BUFFER_STATIC);
+    it('allocates the CPU copy of a gpuOnly buffer on the first lock() and returns the same buffer afterwards', function () {
+      const ib = new IndexBuffer(device, INDEXFORMAT_UINT16, 10, BUFFER_STATIC, undefined, { gpuOnly: true });
+      expect(ib.storage).to.equal(null);
       const storage = ib.lock();
       expect(storage).to.be.an.instanceof(ArrayBuffer);
       expect(storage.byteLength).to.equal(20);
@@ -56,7 +63,7 @@ describe('IndexBuffer', function () {
     });
 
     it('does not upload on restoreContext when there is no CPU copy to restore from', function () {
-      const ib = new IndexBuffer(device, INDEXFORMAT_UINT32, 4, BUFFER_STATIC);
+      const ib = new IndexBuffer(device, INDEXFORMAT_UINT32, 4, BUFFER_STATIC, undefined, { gpuOnly: true });
       let unlocks = 0;
       ib.impl.unlock = () => unlocks++;
       ib.restoreContext();
@@ -71,13 +78,78 @@ describe('IndexBuffer', function () {
 
     it('tracks numBytes on creation and releases the same amount on destroy without a CPU copy', function () {
       const before = device._vram.ib;
-      const ib = new IndexBuffer(device, INDEXFORMAT_UINT32, 25, BUFFER_STATIC);
+      const ib = new IndexBuffer(device, INDEXFORMAT_UINT32, 25, BUFFER_STATIC, undefined, { gpuOnly: true });
       expect(device._vram.ib - before).to.equal(100);
       // the null impl never reports itself initialized; stand in for a real backend
       ib.impl.initialized = true;
       ib.impl.destroy = () => { };
       ib.destroy();
       expect(device._vram.ib).to.equal(before);
+    });
+  });
+
+  describe('#writeData', function () {
+
+    it('writes into storage supplied as an ArrayBuffer', function () {
+      const buffer = new IndexBuffer(device, INDEXFORMAT_UINT16, 3);
+
+      buffer.writeData(new Uint16Array([4, 5, 6]), 3);
+
+      const indices = [];
+      expect(buffer.readData(indices)).to.equal(3);
+      expect(indices).to.deep.equal([4, 5, 6]);
+
+      buffer.destroy();
+    });
+
+    it('writes into storage supplied as a typed array', function () {
+      // Regression test - the write used to be applied to a detached copy of the storage,
+      // rather than to the storage itself, so it never reached the GPU. Reachable through
+      // Mesh#setIndices on any GLB-loaded mesh, as the GLB parser supplies typed arrays.
+      const indices = new Uint16Array([1, 2, 3]);
+      const buffer = new IndexBuffer(device, INDEXFORMAT_UINT16, 3, undefined, indices);
+
+      buffer.writeData(new Uint16Array([4, 5, 6]), 3);
+
+      expect(Array.from(indices)).to.deep.equal([4, 5, 6]);
+
+      buffer.destroy();
+    });
+
+    it('writes only the requested count', function () {
+      const indices = new Uint32Array([1, 2, 3]);
+      const buffer = new IndexBuffer(device, INDEXFORMAT_UINT32, 3, undefined, indices);
+
+      buffer.writeData([4, 5, 6], 2);
+
+      expect(Array.from(indices)).to.deep.equal([4, 5, 3]);
+
+      buffer.destroy();
+    });
+  });
+
+  describe('#readData', function () {
+
+    it('reads from storage supplied as a typed array', function () {
+      const indices = new Uint32Array([1, 2, 3]);
+      const buffer = new IndexBuffer(device, INDEXFORMAT_UINT32, 3, undefined, indices);
+
+      const read = new Uint32Array(3);
+      expect(buffer.readData(read)).to.equal(3);
+      expect(Array.from(read)).to.deep.equal([1, 2, 3]);
+
+      buffer.destroy();
+    });
+
+    it('reads from storage that is a typed array view into a larger buffer', function () {
+      const backing = new Uint32Array([7, 7, 1, 2, 3, 7, 7]);
+      const buffer = new IndexBuffer(device, INDEXFORMAT_UINT32, 3, undefined, backing.subarray(2, 5));
+
+      const read = [];
+      expect(buffer.readData(read)).to.equal(3);
+      expect(read).to.deep.equal([1, 2, 3]);
+
+      buffer.destroy();
     });
   });
 });
@@ -175,70 +247,5 @@ describe('WebgpuBuffer.unlock', function () {
     buffer.unlock(device, new Uint16Array([1, 2, 3]), 6);
     expect(created).to.deep.equal([8]);
     expect(writes).to.deep.equal([8]);
-  });
-});
-
-describe('#writeData', function () {
-
-  it('writes into storage supplied as an ArrayBuffer', function () {
-    const buffer = new IndexBuffer(device, INDEXFORMAT_UINT16, 3);
-
-    buffer.writeData(new Uint16Array([4, 5, 6]), 3);
-
-    const indices = [];
-    expect(buffer.readData(indices)).to.equal(3);
-    expect(indices).to.deep.equal([4, 5, 6]);
-
-    buffer.destroy();
-  });
-
-  it('writes into storage supplied as a typed array', function () {
-    // Regression test - the write used to be applied to a detached copy of the storage,
-    // rather than to the storage itself, so it never reached the GPU. Reachable through
-    // Mesh#setIndices on any GLB-loaded mesh, as the GLB parser supplies typed arrays.
-    const indices = new Uint16Array([1, 2, 3]);
-    const buffer = new IndexBuffer(device, INDEXFORMAT_UINT16, 3, undefined, indices);
-
-    buffer.writeData(new Uint16Array([4, 5, 6]), 3);
-
-    expect(Array.from(indices)).to.deep.equal([4, 5, 6]);
-
-    buffer.destroy();
-  });
-
-  it('writes only the requested count', function () {
-    const indices = new Uint32Array([1, 2, 3]);
-    const buffer = new IndexBuffer(device, INDEXFORMAT_UINT32, 3, undefined, indices);
-
-    buffer.writeData([4, 5, 6], 2);
-
-    expect(Array.from(indices)).to.deep.equal([4, 5, 3]);
-
-    buffer.destroy();
-  });
-});
-
-describe('#readData', function () {
-
-  it('reads from storage supplied as a typed array', function () {
-    const indices = new Uint32Array([1, 2, 3]);
-    const buffer = new IndexBuffer(device, INDEXFORMAT_UINT32, 3, undefined, indices);
-
-    const read = new Uint32Array(3);
-    expect(buffer.readData(read)).to.equal(3);
-    expect(Array.from(read)).to.deep.equal([1, 2, 3]);
-
-    buffer.destroy();
-  });
-
-  it('reads from storage that is a typed array view into a larger buffer', function () {
-    const backing = new Uint32Array([7, 7, 1, 2, 3, 7, 7]);
-    const buffer = new IndexBuffer(device, INDEXFORMAT_UINT32, 3, undefined, backing.subarray(2, 5));
-
-    const read = [];
-    expect(buffer.readData(read)).to.equal(3);
-    expect(read).to.deep.equal([1, 2, 3]);
-
-    buffer.destroy();
   });
 });

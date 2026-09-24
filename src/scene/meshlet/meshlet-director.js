@@ -675,13 +675,8 @@ class MeshletDirector {
         _viewProj.mul2(camera.projectionMatrix, camera.viewMatrix);
         _frustum.setFromMat4(_viewProj);
         const planes = this._frustumPlanes;
-        for (let p = 0; p < 6; p++) {
-            const plane = _frustum.planes[p];
-            planes[p * 4 + 0] = plane.normal.x;
-            planes[p * 4 + 1] = plane.normal.y;
-            planes[p * 4 + 2] = plane.normal.z;
-            planes[p * 4 + 3] = plane.distance;
-        }
+        // same packed layout the cull shaders read: normal xyz, distance, per plane
+        planes.set(_frustum.planeData);
 
         // With a CameraFrame the camera's own renderTarget is the OUTPUT (often the backbuffer);
         // the scene is rendered into the frame pass's internal target, which is also where the

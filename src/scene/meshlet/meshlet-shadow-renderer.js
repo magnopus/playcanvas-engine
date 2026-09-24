@@ -374,13 +374,8 @@ class MeshletShadowRenderer {
         _view.copy(node.getWorldTransform()).invert();
         _viewProj.mul2(shadowCam.projectionMatrix, _view);
         _frustum.setFromMat4(_viewProj);
-        for (let i = 0; i < 6; i++) {
-            const plane = _frustum.planes[i];
-            _planes[i * 4 + 0] = plane.normal.x;
-            _planes[i * 4 + 1] = plane.normal.y;
-            _planes[i * 4 + 2] = plane.normal.z;
-            _planes[i * 4 + 3] = plane.distance;
-        }
+        // same packed layout the cull shaders read: normal xyz, distance, per plane
+        _planes.set(_frustum.planeData);
 
         const projection = this._projection(entry.light, view, shadowCam);
         if (!projection) {
