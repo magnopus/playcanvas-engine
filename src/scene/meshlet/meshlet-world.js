@@ -470,6 +470,23 @@ class MeshletWorld {
     }
 
     /**
+     * Largest page pool, in pages, a single buffer can hold on this device. The pool is bound
+     * as storage, so both the buffer and the storage binding limits apply; exceeding them fails
+     * buffer creation with a validation error instead of allocating.
+     *
+     * @param {import('../../platform/graphics/graphics-device.js').GraphicsDevice} device - Device.
+     * @returns {number} Page count.
+     */
+    maxPoolSlots(device) {
+        const limits = device.limits ?? {};
+        const limitBytes = Math.min(
+            limits.maxBufferSize ?? Number.MAX_SAFE_INTEGER,
+            limits.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER
+        );
+        return Math.max(Math.floor(limitBytes / this.pageSizeBytes), 1);
+    }
+
+    /**
      * Splits {@link poolBytes} into a page-pool size and an index ceiling.
      *
      * The fixed costs (world tables) and the per-view working set are exactly computable from
@@ -676,6 +693,11 @@ class MeshletWorld {
                 Math.max(Math.floor(this.pagePoolBytes / this.pageSizeBytes), 1) :
                 totalPages;
             poolSlots = Math.min(poolSlots, totalPages);
+        }
+        const maxSlots = this.maxPoolSlots(device);
+        if (poolSlots > maxSlots) {
+            Debug.warnOnce(`MeshletWorld: page pool of ${poolSlots} pages (${(poolSlots * this.pageSizeBytes / 1048576).toFixed(0)} MB) exceeds the device buffer limit; clamped to ${maxSlots} pages.`);
+            poolSlots = maxSlots;
         }
         this.poolSlots = poolSlots;
         // retention: adopt a compatible previous world's page pool (its resident pages stay

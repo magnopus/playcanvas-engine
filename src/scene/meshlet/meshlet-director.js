@@ -507,7 +507,7 @@ class MeshletDirector {
         const newPagePoolBytes = poolBytes === prevWorld.poolBytes ? prevWorld.pagePoolBytes : poolBytes;
         let newPoolSlots = newPagePoolBytes > 0 ?
             Math.max(Math.floor(newPagePoolBytes / prevWorld.pageSizeBytes), 1) : newTotalPages;
-        newPoolSlots = Math.min(newPoolSlots, newTotalPages);
+        newPoolSlots = Math.min(newPoolSlots, newTotalPages, prevWorld.maxPoolSlots(this.device));
 
         let carriedSlots = null;
         if (prefix > 0 && (poolBytes === prevWorld.poolBytes || newPoolSlots >= prevWorld.poolSlots) &&
@@ -710,7 +710,10 @@ class MeshletDirector {
         }
         const useOcclusion = this._occlusionEnabled && !!depthTexture;
         Debug.call(() => {
-            if (this._occlusionEnabled && !depthTexture) {
+            // a CameraFrame marked for rebuild (the view was just created, or occlusion just
+            // flipped) adds its scene depth on that rebuild - only a settled frame is a fallback
+            const rebuildPending = cameraComponent.framePasses?.some(pass => pass.layersDirty);
+            if (this._occlusionEnabled && !depthTexture && !rebuildPending) {
                 Debug.warnOnce('MeshletDirector: occlusion requires the camera to render into a render target with a depth texture, or a CameraFrame able to render the scene depth (no multi-sampling, no depth prepass); falling back to single-phase culling.');
             }
         });

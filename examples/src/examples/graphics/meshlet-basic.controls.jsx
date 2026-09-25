@@ -1,9 +1,11 @@
 import {
     BindingTwoWay,
     BooleanInput,
+    Label,
     LabelGroup,
     Panel,
-    SelectInput
+    SelectInput,
+    SliderInput
 } from '@playcanvas/pcui/react';
 
 /**
@@ -29,6 +31,22 @@ export function Controls({ observer }) {
                         { v: 'zorah', t: 'Zorah chunk 003 (local)' },
                         { v: 'magoffice', t: 'MagOffice (local)' }
                     ]}
+                />
+            </LabelGroup>
+            <LabelGroup text='Error px'>
+                <SliderInput
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.threshold' }}
+                    min={0.25}
+                    max={32}
+                    precision={2}
+                />
+            </LabelGroup>
+            <LabelGroup text='Drawn'>
+                <Label
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.stats' }}
+                    value={observer.get('data.stats')}
                 />
             </LabelGroup>
             <LabelGroup text='Occlusion culling'>

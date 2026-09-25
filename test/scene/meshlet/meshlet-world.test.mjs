@@ -160,6 +160,23 @@ describe('MeshletWorld', function () {
         }
     });
 
+    it('clamps the page pool to the device buffer limit instead of failing buffer creation', function () {
+        const world = new MeshletWorld(device);
+        try {
+            // a generous budget would size the pool to all 4 pages; the device holds 3
+            device.limits = { maxBufferSize: PAGE_BYTES * 3 + 7, maxStorageBufferBindingSize: PAGE_BYTES * 8 };
+            world.poolBytes = 1024 * 1024 * 1024;
+            world.addStreamedResource(makeResource(device).resource, null, 'https://example.test/first/');
+            world.addStreamedResource(makeResource(device).resource, null, 'https://example.test/second/');
+            world.finalize();
+            expect(world.poolSlots).to.equal(3);
+            expect(world.pagePool.byteSize).to.equal(PAGE_BYTES * 3);
+            expect(world.maxPoolSlots(device)).to.equal(3);
+        } finally {
+            world.destroy();
+        }
+    });
+
     it('refreshes and shrinks world bounds after partial placement transform updates', function () {
         const world = build(new MeshletWorld(device), makeResource(device, { instances: 2 }));
         const bounds = world.worldBounds;

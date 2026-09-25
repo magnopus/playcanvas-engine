@@ -264,6 +264,10 @@ class FramePassCameraFrame extends FramePass {
         this.prePass = null;
         this.scenePass = null;
         this.scenePassTransparent = null;
+        // destroyed with the other passes above; a rebuild without meshlet phase-2 passes would
+        // otherwise keep scheduling it, rendering into the destroyed scene render target
+        this.scenePassAfterMeshlets = null;
+        this.meshletPasses = null;
         this.colorGrabPass = null;
         this.composePass = null;
         this.bloomPass = null;
@@ -307,8 +311,6 @@ class FramePassCameraFrame extends FramePass {
 
         options.sceneTextureDepth = (meshletDepth || (postProcessDepth && (!requiresSplatDepth || splatDepth))) &&
             deviceSupported && !unsupportedReason;
-        options.sceneTextureDepth = (meshletDepth || (postProcessDepth && deviceSupported && !unsupportedReason)) &&
-            (!requiresSplatDepth || splatDepth);
 
         options.prepassEnabled = inSceneDepth || (postProcessDepth && !options.sceneTextureDepth);
 

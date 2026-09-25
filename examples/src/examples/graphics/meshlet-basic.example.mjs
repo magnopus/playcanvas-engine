@@ -48,7 +48,7 @@ const models = {
     magoffice: { name: 'MagOffice', url: './assets/meshlets/magoffice_streamed.glb' }
 };
 const requestedAsset = new URLSearchParams(location.search).get('asset') ?? '';
-const assetName = Object.hasOwn(models, requestedAsset) ? requestedAsset : 'zorah';
+const assetName = Object.hasOwn(models, requestedAsset) ? requestedAsset : 'bunny';
 const selectedModel = models[assetName];
 
 // The office has streamed KTX2 textures and inline transparent meshes.
@@ -152,7 +152,9 @@ const shaderPasses = {
     metalness: SHADERPASS_METALNESS,
     roughness: SHADERPASS_ROUGHNESS
 };
-data.set('data', { asset: assetName, visualization: 'material', occlusion: false });
+// Two-phase HZB occlusion builds its pyramid from the CameraFrame's single-sample scene depth.
+app.systems.meshlet.occlusion = true;
+data.set('data', { asset: assetName, visualization: 'material', occlusion: true, threshold: 1, stats: '' });
 data.on('data.asset:set', (value) => {
     if (value === assetName || !Object.hasOwn(models, value)) return;
     // Reload releases the previous world's page and texture pools before loading another asset.
@@ -166,14 +168,29 @@ data.on('data.visualization:set', (value) => {
 data.on('data.occlusion:set', (value) => {
     app.systems.meshlet.occlusion = value;
 });
+data.on('data.threshold:set', (value) => {
+    app.systems.meshlet.dagPixelThreshold = value;
+});
 
 // The orbit script only discovers render components. Frame the meshlet world's transformed
 // bounds once the component system has built it, so the camera fits the full chunk.
 let framed = false;
+let statFrames = 0;
 app.on('framerender', () => {
-    const world = app.systems.meshlet.director?.world;
+    const director = app.systems.meshlet.director;
+    const world = director?.world;
     if (!world?.finalized) {
         return;
+    }
+    // The view reads its counters back each frame to size its buffers; reuse them. The index
+    // demand covers the whole LOD cut before occlusion, so it does not change when occlusion is
+    // toggled - the drawn meshlet count does.
+    const view = director.views.get(camera.camera);
+    if (view?.lastDemand && ++statFrames % 30 === 0) {
+        const tris = Math.round(view.lastDemand.indices.reduce((a, b) => a + b, 0) / 3);
+        const res = director.residency;
+        data.set('data.stats', `${view.renderedMeshlets} meshlets drawn, cut ${(tris / 1e6).toFixed(2)}M tris, ` +
+            `${res ? res.residentPages : 0}/${world.totalPages} pages`);
     }
     const visualization = data.get('data.visualization');
     world.setColorMode(visualization === 'meshlet' ? 2 : visualization === 'lod' ? 1 : 0);
