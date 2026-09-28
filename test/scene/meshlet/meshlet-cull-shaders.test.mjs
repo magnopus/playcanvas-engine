@@ -14,6 +14,7 @@ import {
 } from '../../../src/scene/meshlet/shaders/meshlet-cull-wgsl.js';
 import { meshletCutWGSL } from '../../../src/scene/meshlet/shaders/meshlet-cut-wgsl.js';
 import * as pageWGSL from '../../../src/scene/meshlet/shaders/meshlet-page-wgsl.js';
+import { meshletRootAdmitWGSL, meshletRootClassifyWGSL } from '../../../src/scene/meshlet/shaders/meshlet-root-admit-wgsl.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
 // The cull shaders cannot run headless, but their text is a contract with the JS that binds
@@ -60,12 +61,36 @@ describe('meshlet cull shaders', function () {
     it('reports complete cut demand before visibility culling and commits only drawn indices', function () {
         expect(meshletCullWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.CURSOR_BASE}u + bucket], indexNeed)`);
         expect(meshletCullWGSL).to.not.include(`counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket]`);
-        expect(meshletCutWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indices)`);
+        expect(meshletRootAdmitWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indices)`);
+        expect(meshletRootAdmitWGSL.indexOf(`counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indices`))
+        .to.be.below(meshletRootAdmitWGSL.indexOf('if (indexBefore + indices > capacity'));
         expect(meshletCullWGSL).to.include(`atomicMax(&counters[${MESHLET_COUNTER.COMMITTED_BASE}u + bucket], cursor + indexNeed)`);
         // demand is recorded BEFORE the capacity check so an overflowing frame still reports it
         expect(meshletCutWGSL.indexOf(`counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indexNeed`))
         .to.be.below(meshletCutWGSL.indexOf('if (recordBefore + recordNeed > uniform.recordCapacity'));
         expect(count(meshletCullWGSL, /uniform indexCapacity\d : u32;/g)).to.equal(MESHLET_BUCKET_COUNT);
+    });
+
+    it('admits roots band by band from the classified root list and records them for hysteresis', function () {
+        expect(meshletRootClassifyWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.ROOT_CANDIDATES}u], 1u)`);
+        expect(meshletRootClassifyWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.ROOT_SUBPIXEL}u], 1u)`);
+        // an incumbent is promoted one band, never past band 0
+        expect(meshletRootClassifyWGSL).to.include('band = max(band, 1u) - 1u');
+        expect(meshletRootAdmitWGSL).to.include('if ((entry >> 27u) != uniform.rootBand) { return; }');
+        expect(meshletRootAdmitWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.ROOT_UNREADY_INSTANCES}u], 1u)`);
+        expect(meshletRootAdmitWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.ROOT_REJECTED_INSTANCES}u], 1u)`);
+        // a rejected root refunds its charge but keeps its records as demand
+        const reject = meshletRootAdmitWGSL.indexOf('atomicSub(&cutBudget[bucket], indices)');
+        expect(reject).to.be.at.least(0);
+        expect(meshletRootAdmitWGSL.indexOf('atomicAdd(&cutBudget[4u], records)')).to.be.above(reject);
+        expect(meshletRootAdmitWGSL).to.include('atomicOr(&claimBits[uniform.nextBase + (instance >> 5u)]');
+        // the cut stages only refine instances the admission took
+        expect(meshletCutWGSL).to.not.include('rootStage');
+    });
+
+    it('keeps the root passes within the per-stage storage buffer limit', function () {
+        expect(count(meshletRootClassifyWGSL, /var<storage/g)).to.be.at.most(10);
+        expect(count(meshletRootAdmitWGSL, /var<storage/g)).to.be.at.most(10);
     });
 
     it('requires record capacity before reserving indices and skips index-overflow records', function () {

@@ -228,7 +228,8 @@ describe('MeshletDirector', function () {
         expect(director.world.indexCeiling).to.equal(1000);
 
         // pressure measures the refinement above each view's admitted roots (the coarsest the cut can go)
-        const rootsA = a.rootSelection.indices.reduce((x, y) => x + y, 0);
+        a.lastRoots.admitted = [100, 0, 0];
+        const rootsA = 100;
         a.lastDemand = { indices: [900, 0, 0], records: 1 };
         b.lastDemand = { indices: [100, 0, 0], records: 1 };
         expect(director._distributeIndexBudget()).to.be.closeTo((900 - rootsA) / (875 - rootsA), 1e-9);
@@ -248,7 +249,7 @@ describe('MeshletDirector', function () {
         // a root floor filling most of the share, with nothing refined above it, is not starvation:
         // coarsening cannot shrink it (this pinned the controller at maxScale on wide views)
         director.world.indexBudgetTotal = 1000;
-        a.rootSelection.indices = [800, 0, 0];
+        a.lastRoots.admitted = [800, 0, 0];
         a.lastDemand = { indices: [800, 0, 0], records: 1 };
         director._distributeIndexBudget();
         expect(a.indexPressure()).to.equal(0);

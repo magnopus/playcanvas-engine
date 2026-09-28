@@ -3,7 +3,8 @@ import { expect } from 'chai';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import {
-    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_ADMISSION_BITS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER_U32S, MESHLET_INSTANCE_CULL_WORKGROUP
+    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_INSTANCE_CULL_WORKGROUP,
+    MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS, MESHLET_ROOT_BAND_OCTAVES, claimPersistBase
 } from '../../../src/scene/meshlet/constants.js';
 import { FramePassMeshletCompute } from '../../../src/scene/meshlet/frame-pass-meshlet-compute.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
@@ -44,10 +45,10 @@ const storage = (byteSize = 16) => ({
 });
 
 const makeWorld = () => ({
-    cut: { levels: [{ start: 0, count: 130, root: true }], groups: storage(), tasks: storage(), selectionTopology: storage() },
+    cut: { levels: [{ start: 0, count: 130, root: true }, { start: 130, count: 50, root: false }], groups: storage(), tasks: storage(), selectionTopology: storage() },
     totalPairs: 1000,
     instanceCount: 130,
-    workItemCapacity: 40,
+    workItemCapacity: 80,
     pageSizeBytes: 65536,
     totalPages: 12,
     objectDataBuffer: storage(),
@@ -122,33 +123,83 @@ describe('MeshletCuller', function () {
         culler.destroy();
     });
 
-    it('packs root-selection admissions into the params tail and uploads it only when they change', function () {
+    it('builds one root admission pass per priority band, bound to the root list, before the cut stages', function () {
         const view = makeView();
-        const wanted = new Float32Array(130);
-        for (const i of [0, 5, 23, 24, 100, 129]) wanted[i] = 1;
-        view.rootSelection = { wanted, wantedVersion: 1, capacity: [10, 20, 30], update() {} };
-        const culler = new MeshletCuller(device, makeWorld(), view, shaders);
-        const head = CULL_PARAMS_VEC4S * 4;
-        const tailWrites = () => view.cullParamsBuffer.writes.filter(w => w.offset === head * 4);
+        const world = makeWorld();
+        const culler = new MeshletCuller(device, world, view, shaders);
+        expect(culler.cutStages, 'the root level is admitted, not cut').to.have.lengthOf(1);
+        expect(culler.cutStages[0].getParameter('taskStart')).to.equal(130);
+        expect(culler.rootAdmit).to.have.lengthOf(MESHLET_ROOT_BANDS);
+        culler.rootAdmit.forEach((compute, band) => {
+            expect(compute.getParameter('rootBand')).to.equal(band);
+            expect(compute.getParameter('rootList')).to.equal(view.workItemsBuffer);
+            expect(compute.getParameter('cutBudget')).to.equal(view.cutBudgetBuffer);
+            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
+                expect(compute.getParameter(`indexCapacity${b}`)).to.equal(view.indexCapacity[b]);
+            }
+        });
+        expect(culler.rootClassify.getParameter('rootList')).to.equal(view.workItemsBuffer);
+        expect(culler.rootArgs.getParameter('counterIndex')).to.equal(MESHLET_COUNTER.ROOT_CANDIDATES);
 
         culler.beginFrame(planes, camera, 640, viewProj, null);
-        expect(view.cullParamsBuffer.writes[0]).to.include({ offset: 0, dataOffset: 0, size: head });
-        expect(tailWrites()).to.have.length(1);
-        const tail = tailWrites()[0].data.subarray(head);
-        for (let i = 0; i < 130; i++) {
-            const word = Math.floor(i / MESHLET_ADMISSION_BITS);
-            const set = (tail[word] & (1 << (i % MESHLET_ADMISSION_BITS))) !== 0;
-            expect(set, `instance ${i}`).to.equal(wanted[i] === 1);
+        expect(log.dispatches[0].name).to.equal('MeshletRootAdmit');
+        expect(log.dispatches[0].computes).to.deep.equal(['MeshletrootClassify', 'MeshletdispatchArgs',
+            ...Array.from({ length: MESHLET_ROOT_BANDS }, (_, band) => `MeshletRootAdmit${band}`)]);
+        for (const compute of culler.rootAdmit) {
+            expect(compute.indirectSlotIndex).to.equal(culler.rootArgs.getParameter('dispatchSlot'));
         }
+        culler.destroy();
+    });
+
+    it('rejects a work-item buffer too small to hold the root list', function () {
+        const world = makeWorld();
+        world.workItemCapacity = 10;
+        expect(() => new MeshletCuller(device, world, makeView(), shaders)).to.throw(/root list/);
+    });
+
+    it('writes the root priority rows, from the view camera or a given priority origin', function () {
+        const view = makeView();
+        const culler = new MeshletCuller(device, makeWorld(), view, shaders);
+        culler.beginFrame(planes, camera, 640, viewProj, null);
+        const row = index => index * 4;
+        let params = view.cullParamsBuffer.writes[0].data;
+        expect(Array.from(params.subarray(row(CULL_PARAMS.ROOT_PRIORITY), row(CULL_PARAMS.ROOT_PRIORITY) + 4))).to.deep.equal([1, 2, 3, 640]);
+        expect(params[row(CULL_PARAMS.ROOT_BANDS)]).to.equal(MESHLET_ROOT_BAND_MAX_PIXELS);
+        expect(params[row(CULL_PARAMS.ROOT_BANDS) + 1]).to.be.closeTo(MESHLET_ROOT_BANDS / MESHLET_ROOT_BAND_OCTAVES, 1e-6);
+        expect(params[row(CULL_PARAMS.ROOT_BANDS) + 2]).to.equal(MESHLET_ROOT_BANDS);
+        expect(params[row(CULL_PARAMS.ROOT_BANDS) + 3]).to.equal(0);
+
+        // a shadow view ranks by the scene camera, not its own orthographic one
+        culler.priorityOrigin = { x: 7, y: 8, z: 9 };
+        culler.priorityProjScale = 900;
+        culler.rootMinPixels = 0.5;
+        culler.beginFrame(planes, camera, 640, viewProj, null);
+        params = view.cullParamsBuffer.writes[1].data;
+        expect(Array.from(params.subarray(row(CULL_PARAMS.ROOT_PRIORITY), row(CULL_PARAMS.ROOT_PRIORITY) + 4))).to.deep.equal([7, 8, 9, 900]);
+        expect(params[row(CULL_PARAMS.ROOT_BANDS) + 3]).to.equal(0.5);
+        culler.destroy();
+    });
+
+    it('keeps last frame\'s admissions for hysteresis, swapping the persistent regions each frame', function () {
+        const view = makeView();
+        const world = makeWorld();
+        const culler = new MeshletCuller(device, world, view, shaders);
+        const base = claimPersistBase(world.totalPairs, world.instanceCount);
+        const words = Math.ceil(world.instanceCount / 32);
 
         culler.beginFrame(planes, camera, 640, viewProj, null);
-        expect(tailWrites(), 'same version, no tail upload').to.have.length(1);
+        expect(culler.rootClassify.getParameter('hasPrevious'), 'no previous frame yet').to.equal(0);
+        const next0 = culler.rootAdmit[0].getParameter('nextBase');
+        expect(next0).to.equal(base + words);
 
-        wanted[5] = 0;
-        view.rootSelection.wantedVersion++;
         culler.beginFrame(planes, camera, 640, viewProj, null);
-        expect(tailWrites()).to.have.length(2);
-        expect(tailWrites()[1].data[head] & (1 << 5)).to.equal(0);
+        expect(culler.rootClassify.getParameter('hasPrevious')).to.equal(1);
+        expect(culler.rootClassify.getParameter('prevBase'), 'reads what the last frame wrote').to.equal(next0);
+        expect(culler.rootAdmit[0].getParameter('nextBase')).to.equal(base);
+
+        culler.hysteresis = false;
+        culler.beginFrame(planes, camera, 640, viewProj, null);
+        expect(culler.rootClassify.getParameter('hasPrevious')).to.equal(0);
         culler.destroy();
     });
 
@@ -178,14 +229,17 @@ describe('MeshletCuller', function () {
         const culler = new MeshletCuller(device, makeWorld(), view, shaders);
         culler.beginFrame(planes, camera, 640, viewProj, null);
 
-        expect(log.clears, 'counters then claim bits, never the requests buffer').to.deep.equal([MESHLET_COUNTER_U32S * 4, 64]);
-        expect(log.dispatches).to.have.lengthOf(3);
-        expect(log.dispatches[0].name).to.equal('MeshletResidentCut');
-        expect(log.dispatches[0].computes).to.deep.equal(['Meshletcut']);
-        expect(log.dispatches[1].name).to.equal('MeshletCompact');
-        expect(log.dispatches[1].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs', 'MeshletcompactMeshlets', 'MeshletdispatchArgs']);
-        expect(log.dispatches[2].name).to.equal('MeshletCullPhase1');
-        expect(log.dispatches[2].computes).to.deep.equal(['MeshletmeshletCull', 'MeshletfinalizeArgs', 'MeshletindexWrite']);
+        const base = claimPersistBase(1000, 130);
+        expect(log.clears, 'counters, transient claim bits, this frame\'s admissions; never the requests buffer')
+        .to.deep.equal([MESHLET_COUNTER_U32S * 4, base * 4, Math.ceil(130 / 32) * 4]);
+        expect(log.dispatches).to.have.lengthOf(4);
+        expect(log.dispatches[0].name).to.equal('MeshletRootAdmit');
+        expect(log.dispatches[1].name).to.equal('MeshletResidentCut');
+        expect(log.dispatches[1].computes).to.deep.equal(['Meshletcut']);
+        expect(log.dispatches[2].name).to.equal('MeshletCompact');
+        expect(log.dispatches[2].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs', 'MeshletcompactMeshlets', 'MeshletdispatchArgs']);
+        expect(log.dispatches[3].name).to.equal('MeshletCullPhase1');
+        expect(log.dispatches[3].computes).to.deep.equal(['MeshletmeshletCull', 'MeshletfinalizeArgs', 'MeshletindexWrite']);
         expect(culler.instanceCull.countX).to.equal(Math.ceil(130 / MESHLET_INSTANCE_CULL_WORKGROUP));
         expect(culler.meshletCull.getParameter('phase'), 'no HZB: single phase').to.equal(0);
         expect(culler.meshletCull.getParameter('hzbTexture')).to.equal(shaders.dummyHzb);
@@ -212,8 +266,8 @@ describe('MeshletCuller', function () {
         expect(Array.from(view.cullParamsBuffer.writes[0].data.subarray(CULL_PARAMS.LOD * 4 + 1, CULL_PARAMS.LOD * 4 + 4))).to.deep.equal([320, 200, 9]);
 
         culler.dispatchPhase2();
-        expect(log.dispatches[3].name).to.equal('MeshletCullPhase2');
-        expect(log.dispatches[3].computes[0], 'counters reset first').to.equal('MeshletresetPhase2');
+        expect(log.dispatches[4].name).to.equal('MeshletCullPhase2');
+        expect(log.dispatches[4].computes[0], 'counters reset first').to.equal('MeshletresetPhase2');
         expect(culler.meshletCullPhase2.getParameter('hzbTexture')).to.equal(hzb.texture);
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             expect(culler.finalizeArgsPhase2.getParameter(`drawSlot${b}`)).to.equal(MESHLET_BUCKET_COUNT + b);
@@ -234,8 +288,8 @@ describe('MeshletCuller', function () {
         const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
         culler.forceSubmitBoundaries = true;
         culler.beginFrame(planes, camera, 640, viewProj, null);
-        expect(log.dispatches.map(d => d.name)).to.deep.equal(['MeshletResidentCut', 'MeshletCompacta', 'MeshletCompactb', 'MeshletCullPhase1b', 'MeshletCullPhase1c']);
-        expect(log.submits).to.equal(3);
+        expect(log.dispatches.map(d => d.name)).to.deep.equal(['MeshletRootClassify', 'MeshletRootAdmit', 'MeshletResidentCut', 'MeshletCompacta', 'MeshletCompactb', 'MeshletCullPhase1b', 'MeshletCullPhase1c']);
+        expect(log.submits).to.equal(4);
         culler.destroy();
     });
 

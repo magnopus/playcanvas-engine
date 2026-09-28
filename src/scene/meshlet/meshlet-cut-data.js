@@ -81,7 +81,6 @@ class MeshletCutData {
         const rootPages = new Set();
         this.rootIndices = [0, 0, 0];
         this.rootRecords = 0;
-        this.instanceRoots = [];
         // Per primitive, in its meshlet index range: [first] = the lowest LOD level holding a root
         // (terminal groups leave roots below the top), [first + level] = where that level starts
         // (level-major order). Compaction starts each instance at the finer of its cut's finest
@@ -156,16 +155,17 @@ class MeshletCutData {
                 const rootCost = costs(roots);
                 const pages = new Set();
                 for (const root of roots) pages.add(source[root * MESHLET_DATA_U32S + M.PAGE]);
-                const rootOffset = words.length;
-                words.push(first, 0, rootOffset + 8, pages.size, rootCost[0], 0, rootCost[1], 0);
-                for (const page of pages) words.push(page);
                 const flags = source[M.FLAGS];
                 const bucket = flags & MESHLET_FLAG_ALPHA_MASKED ? 2 : (flags & MESHLET_FLAG_TWO_SIDED ? 1 : 0);
-                primitive = { tasks, rootOffset, rootCost, bucket, admission: { pages: Array.from(pages), cost: rootCost, bucket } };
+                const rootOffset = words.length;
+                // root header: word 5 carries the draw bucket (there is no coarser cost to hold),
+                // so the root admission needs no meshlet record
+                words.push(first, 0, rootOffset + 8, pages.size, rootCost[0], bucket, rootCost[1], 0);
+                for (const page of pages) words.push(page);
+                primitive = { tasks, rootOffset, rootCost, bucket };
                 primitives.set(first, primitive);
             }
             rootTasks.push(instance, primitive.rootOffset);
-            this.instanceRoots.push(primitive.admission);
             this.rootIndices[primitive.bucket] += primitive.rootCost[0];
             this.rootRecords += primitive.rootCost[1];
             for (const task of primitive.tasks) {

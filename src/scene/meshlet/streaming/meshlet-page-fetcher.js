@@ -54,12 +54,13 @@ class MeshletPageFetcher {
      * @param {number} blobIndex - Index into the manifest's blobs.
      * @param {number} offset - Byte offset.
      * @param {number} length - Byte length.
+     * @param {number} [priority] - Scheduler priority (FETCH_PRIORITY_*); demand pages by default.
      * @returns {Promise<ArrayBuffer|null>} The bytes, or null when the scheduler dropped the request.
      */
-    fetchRange(blobIndex, offset, length) {
+    fetchRange(blobIndex, offset, length, priority = FETCH_PRIORITY_PAGES) {
         return this.scheduler.fetchRange(this._blobUrl(blobIndex), offset, length, {
             credentials: this.credentials,
-            priority: FETCH_PRIORITY_PAGES
+            priority
         });
     }
 

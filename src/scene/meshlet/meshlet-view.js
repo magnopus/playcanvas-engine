@@ -6,13 +6,12 @@ import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { WebgpuReadbackPool } from '../../platform/graphics/webgpu/webgpu-readback-pool.js';
 import { Debug } from '../../core/debug.js';
 import {
-    CULL_PARAMS_VEC4S, admissionVec4s, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, RECORD_U32S, WORK_ITEM_U32S
+    CULL_PARAMS_VEC4S, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, RECORD_U32S, WORK_ITEM_U32S
 } from './constants.js';
 import { GraphNode } from '../graph-node.js';
 import { Mesh } from '../mesh.js';
 import { MeshInstance } from '../mesh-instance.js';
 import { FramePassMeshletCompute } from './frame-pass-meshlet-compute.js';
-import { MeshletRootSelection } from './meshlet-root-selection.js';
 import { MeshletCuller } from './meshlet-culler.js';
 import { RenderPassMeshletDraw } from './render-pass-meshlet-draw.js';
 
@@ -29,6 +28,16 @@ import { RenderPassMeshletDraw } from './render-pass-meshlet-draw.js';
 // the draw index buffer is never smaller than one triangle, so an empty view still binds a
 // valid buffer
 const MIN_INDICES = 3;
+
+// smallest share of a view's index capacity a bucket keeps when capacity follows demand
+const RESLICE_FLOOR = 0.02;
+
+// fraction of the capacity that must move before the bucket ranges are re-divided
+const RESLICE_HYSTERESIS = 0.1;
+
+// LOD pressure reported while roots are rejected: between the budget controller's ease and
+// starve thresholds, so it holds its current error scale
+const ROOT_REJECTED_PRESSURE = 0.7;
 
 // bytes per vec4 row of the cull parameter block, and per u32 of a word-addressed buffer
 const BYTES_PER_VEC4 = 16;
@@ -94,6 +103,15 @@ class MeshletView {
      * @type {{ indices: number[], records: number }|null}
      */
     lastDemand = null;
+
+    /**
+     * Root admission counters from the last readback: root indices admitted and rejected per
+     * bucket, candidate instances (visible, above the sub-pixel cut), instances rejected for
+     * capacity, instances whose root pages were not resident, and instances cut as sub-pixel.
+     *
+     * @type {{admitted: number[], rejected: number[], candidates: number, rejectedInstances: number, unready: number, subpixel: number}}
+     */
+    lastRoots = { admitted: [0, 0, 0], rejected: [0, 0, 0], candidates: 0, rejectedInstances: 0, unready: 0, subpixel: 0 };
 
     /** @type {number} - Rendered meshlets across both phases from the last completed readback. */
     renderedMeshlets = 0;
@@ -188,7 +206,6 @@ class MeshletView {
         this.world = world;
         this.cameraComponent = cameraComponent;
         this.singlePhase = singlePhase;
-        this.rootSelection = world.cut.instanceRoots ? new MeshletRootSelection(world) : null;
 
         // one bit per instance-meshlet pair, 32 to a word; a few words minimum so tiny scenes
         // still get a real buffer
@@ -196,8 +213,7 @@ class MeshletView {
         // the claim plane also holds one off-frustum refinement flag per pair after the
         // admission bits (see meshletCutWGSL)
         const claimWords = claimWordCount(world.totalPairs, world.instanceCount);
-        // frame rows, then the root-selection admissions packed MESHLET_ADMISSION_BITS to a float
-        this.cullParamsBuffer = new StorageBuffer(device, (CULL_PARAMS_VEC4S + (this.rootSelection ? admissionVec4s(world.instanceCount) : 0)) * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
+        this.cullParamsBuffer = new StorageBuffer(device, CULL_PARAMS_VEC4S * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
         this.countersBuffer = new StorageBuffer(device, MESHLET_COUNTER_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
         // demand readbacks go through a pooled staging buffer, the same way the residency's
         // request-marks readback does, rather than allocating a staging buffer per read
@@ -306,7 +322,6 @@ class MeshletView {
     }
 
     destroy() {
-        this.rootSelection?.destroy();
         this.culler?.destroy();
         this.culler = null;
         this.hzb?.destroy();
@@ -361,11 +376,59 @@ class MeshletView {
      * @private
      */
     _clampToCeiling(capacity) {
-        const ceiling = this.indexShare > 0 ? this.indexShare : this.world.indexCeiling;
+        const ceiling = this._ceiling();
         const total = capacity[0] + capacity[1] + capacity[2];
         if (total <= ceiling) return false;
-        const scale = ceiling / Math.max(total, 1);
-        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) capacity[b] = Math.floor(capacity[b] * scale);
+        this._split(capacity, ceiling, this.lastDemand?.indices ?? capacity);
+        return true;
+    }
+
+    /** @returns {number} This view's index ceiling. @private */
+    _ceiling() {
+        return this.indexShare > 0 ? this.indexShare : this.world.indexCeiling;
+    }
+
+    /**
+     * Splits `total` indices across the buckets in proportion to `weights`, each bucket weighted
+     * at least RESLICE_FLOOR of the sum so one that is briefly empty can still admit.
+     *
+     * @param {number[]} capacity - Receives the split, modified in place.
+     * @param {number} total - Indices to split.
+     * @param {number[]} weights - Per-bucket weights (demand).
+     * @private
+     */
+    _split(capacity, total, weights) {
+        let sum = 0;
+        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) sum += weights[b];
+        const floor = sum > 0 ? sum * RESLICE_FLOOR : 1;
+        let weighted = 0;
+        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) weighted += Math.max(weights[b], floor);
+        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
+            capacity[b] = Math.floor(Math.min(total * Math.max(weights[b], floor) / weighted, this.world.indexWorst[b]));
+        }
+    }
+
+    /**
+     * Re-divides a view's index capacity between the buckets by their demand, when the buffer
+     * is at its ceiling and cannot grow. The GPU admission charges each bucket separately, so a
+     * split fixed at allocation time (say an opaque-heavy start, then a masked-foliage district)
+     * would reject roots in one bucket while another holds unused room. The total, and so the
+     * buffer, is unchanged: only the bucket ranges move.
+     *
+     * @param {number[]} demand - Per-bucket demand (unclamped).
+     * @returns {boolean} True when the ranges changed.
+     * @private
+     */
+    _resliceBuckets(demand) {
+        const total = this.indexTotal();
+        if (total < this._ceiling() * this.growAt) return false;
+        const next = [0, 0, 0];
+        this._split(next, total, demand);
+        let moved = 0;
+        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) moved += Math.abs(next[b] - this.indexCapacity[b]);
+        // hysteresis: small demand swings leave the ranges alone
+        if (moved < total * RESLICE_HYSTERESIS) return false;
+        this.indexCapacity = next;
         return true;
     }
 
@@ -396,12 +459,17 @@ class MeshletView {
         const ceiling = this.indexShare > 0 ? this.indexShare : this.world.indexCeiling;
         if (!(ceiling > 0) || !Number.isFinite(ceiling)) return 0;
         const demand = d.indices.reduce((a, b) => a + b, 0);
-        // Coarsening cannot go below the admitted roots, so measure only the refinement above
-        // them against the room above them. Counting the roots too pinned the controller at its
+        // Coarsening cannot go below the roots, so measure only the refinement above them
+        // against the room above them. Counting the roots too pinned the controller at its
         // maximum on scenes whose root floor alone passes indexStarvedAt of the share (a wide view
         // of ~1M placements), coarsening everything without shrinking the demand at all.
-        const roots = this.rootSelection ? this.rootSelection.indices.reduce((a, b) => a + b, 0) : 0;
-        return Math.max(demand - roots, 0) / Math.max(ceiling - roots, 1);
+        const r = this.lastRoots;
+        const roots = r ? r.admitted[0] + r.admitted[1] + r.admitted[2] + r.rejected[0] + r.rejected[1] + r.rejected[2] : 0;
+        const pressure = Math.max(demand - roots, 0) / Math.max(ceiling - roots, 1);
+        // When roots themselves are rejected, coarsening cannot help (the roots are the coarsest
+        // level) - hold between the controller's ease and starve thresholds instead of winding
+        // it to its maximum and blurring everything that did get admitted.
+        return r?.rejectedInstances > 0 ? Math.min(pressure, ROOT_REJECTED_PRESSURE) : pressure;
     }
 
     /** @returns {number} This view's total unclamped index demand, or 0 before the first readback. */
@@ -532,17 +600,21 @@ class MeshletView {
             // may already be encoded against the old buffer while the draw reads the new,
             // never-written one - which rasterises garbage indices as stretched degenerate
             // triangles. {@link applyPendingGrowth} does the swap before anything is encoded.
+            // rejected roots count as demand on the GPU, so an initially small buffer grows to
+            // the full visible root set within its budget
             const indices = [];
-            // CPU admission can defer every instance before the GPU sees it. Preserve that
-            // coarse demand so an initially small buffer can grow within its budget.
-            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
-                indices.push(Math.max(data[MESHLET_COUNTER.DEMAND_BASE + b], this.rootSelection?.requestedByBucket[b] ?? 0));
-            }
-            this._pendingDemand = {
-                indices,
-                records: Math.max(data[MESHLET_COUNTER.RECORD_DEMAND], this.rootSelection?.recordDemand ?? 0)
-            };
+            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) indices.push(data[MESHLET_COUNTER.DEMAND_BASE + b]);
+            this._pendingDemand = { indices, records: data[MESHLET_COUNTER.RECORD_DEMAND] };
             this.lastDemand = this._pendingDemand;
+            const roots = this.lastRoots;
+            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
+                roots.admitted[b] = data[MESHLET_COUNTER.ROOT_ADMITTED_BASE + b];
+                roots.rejected[b] = data[MESHLET_COUNTER.ROOT_REJECTED_BASE + b];
+            }
+            roots.candidates = data[MESHLET_COUNTER.ROOT_CANDIDATES];
+            roots.rejectedInstances = data[MESHLET_COUNTER.ROOT_REJECTED_INSTANCES];
+            roots.unready = data[MESHLET_COUNTER.ROOT_UNREADY_INSTANCES];
+            roots.subpixel = data[MESHLET_COUNTER.ROOT_SUBPIXEL];
             this.renderedMeshlets = data[MESHLET_COUNTER.RENDERED];
         }).catch(() => {
             this._countersReadBusy = false;
@@ -575,6 +647,10 @@ class MeshletView {
                 this.culler.bindIndexState(this);
             }
         } else if (this.shrinkIndexBuffer(d.indices, target)) {
+            this.culler.bindIndexState(this);
+        }
+        // at the ceiling: move capacity to the buckets that want it
+        if (this._resliceBuckets(d.indices)) {
             this.culler.bindIndexState(this);
         }
         // records overflow the same way - dropped records are missing draws, which the

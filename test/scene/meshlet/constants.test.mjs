@@ -10,7 +10,7 @@ import {
     MESHLET_INDEX_WRITE_WORKGROUP, MESHLET_INSTANCE_CULL_WORKGROUP,
     OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED,
     PAGE_HEADER, PAGE_HEADER_BYTES, PAGE_TABLE, PAGE_TABLE_FIELDS, RECORD_U32S, TEX_RESIDENCY_U32S, TEXEL_RATE_PER_MIP,
-    WORK_ITEM_U32S
+    WORK_ITEM_U32S, claimLevelBase, claimPersistBase, claimWordCount
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletPrimitive, MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
 
@@ -26,12 +26,26 @@ describe('meshlet constants', function () {
         expect(PAGE_HEADER_BYTES).to.equal(48);
     });
 
-    it('sizes the counter buffer for three blocks of one word per bucket, padded to 4', function () {
-        // [0] workItems, [1] records, then cursors / committed ends / unclamped demand per bucket
-        const needed = MESHLET_COUNTER.RECORD_DEMAND + 1;
+    it('sizes the counter buffer to its last word, padded to 4, with no two counters sharing a word', function () {
+        const words = [];
+        for (const [name, index] of Object.entries(MESHLET_COUNTER)) {
+            const span = name.endsWith('_BASE') ? MESHLET_BUCKET_COUNT : 1;
+            for (let k = 0; k < span; k++) words.push(index + k);
+        }
+        expect(new Set(words).size, 'distinct words').to.equal(words.length);
+        const needed = Math.max(...words) + 1;
         expect(MESHLET_COUNTER_U32S).to.be.at.least(needed);
         expect(MESHLET_COUNTER_U32S % 4).to.equal(0);
         expect(MESHLET_COUNTER_U32S - needed).to.be.below(4);
+    });
+
+    it('lays the claim plane out as transient bits, then two persistent admission regions', function () {
+        for (const [pairs, instances] of [[1000, 130], [31, 1], [64, 64], [1 << 20, 100000]]) {
+            const persist = claimPersistBase(pairs, instances);
+            expect(persist, 'after the admission bits and level flags').to.be.at.least(claimLevelBase(pairs, instances));
+            expect(persist * 32, 'after every admission bit').to.be.at.least(pairs + instances);
+            expect(claimWordCount(pairs, instances) - persist).to.equal(2 * Math.ceil(instances / 32));
+        }
     });
 
     it('numbers the draw buckets contiguously in index-buffer order', function () {

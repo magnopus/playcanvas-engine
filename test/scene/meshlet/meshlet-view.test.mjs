@@ -117,7 +117,7 @@ describe('MeshletView', function () {
         expect(view.selectedMeshletsBuffer.byteSize).to.equal(100 * 8);
         // pair bits, admission bits, then one off-frustum refinement flag per pair
         // claim bits, then one finest-cut-level word per instance
-        expect(view.claimBitsBuffer.byteSize).to.equal((Math.ceil((PAIRS * 2 + 7) / 32) + 7) * 4);
+        expect(view.claimBitsBuffer.byteSize).to.equal((Math.ceil((PAIRS * 2 + 7) / 32) + 7 + 2 * Math.ceil(7 / 32)) * 4, 'transient bits, then two persistent admission regions');
         expect(view.visBitsBuffer.byteSize).to.equal(pairWords * 4);
         expect(view.indexCapacity).to.deep.equal([300, 60, 30]);
         expect(view.indexBuffer.numIndices).to.equal(390);
@@ -240,21 +240,62 @@ describe('MeshletView', function () {
         view.destroy();
     });
 
-    it('grows within the ceiling when CPU admission prevents any GPU draw demand', async function () {
+    it('grows within the ceiling when rejected roots are the only demand', async function () {
         const view = makeView();
         view.indexShare = 1000;
-        view.rootSelection = {
-            requestedByBucket: [2000, 0, 0],
-            recordDemand: 200,
-            destroy() {}
-        };
-        view.readbackPool.read = () => Promise.resolve(counters([0, 0, 0], 0));
+        // the root admission counts rejected roots as demand, though nothing drew
+        view.readbackPool.read = () => Promise.resolve(counters([2000, 0, 0], 200));
         view.monitorIndexDemand();
         await Promise.resolve();
         expect(view.indexDemand()).to.equal(2000);
         view.applyPendingGrowth();
         expect(view.indexTotal()).to.be.greaterThan(390).and.at.most(1000);
         expect(view.recordCapacity).to.equal(320);
+        view.destroy();
+    });
+
+    it('reads the root admission counters back with the demand', async function () {
+        const view = makeView();
+        const data = counters([500, 0, 0], 0);
+        data[MESHLET_COUNTER.ROOT_ADMITTED_BASE] = 300;
+        data[MESHLET_COUNTER.ROOT_REJECTED_BASE + 2] = 40;
+        data[MESHLET_COUNTER.ROOT_CANDIDATES] = 9;
+        data[MESHLET_COUNTER.ROOT_REJECTED_INSTANCES] = 2;
+        data[MESHLET_COUNTER.ROOT_UNREADY_INSTANCES] = 3;
+        data[MESHLET_COUNTER.ROOT_SUBPIXEL] = 4;
+        view.readbackPool.read = () => Promise.resolve(data);
+        view.monitorIndexDemand();
+        await Promise.resolve();
+        expect(view.lastRoots).to.deep.equal({
+            admitted: [300, 0, 0], rejected: [0, 0, 40], candidates: 9, rejectedInstances: 2, unready: 3, subpixel: 4
+        });
+        view.destroy();
+    });
+
+    it('measures LOD pressure above the roots, and holds it while roots are rejected', function () {
+        const view = makeView();
+        view.indexShare = 1000;
+        view.lastDemand = { indices: [900, 0, 0], records: 0 };
+        view.lastRoots.admitted = [500, 0, 0];
+        expect(view.indexPressure(), 'refinement 400 of the 500 above the roots').to.be.closeTo(0.8, 1e-9);
+        view.lastDemand = { indices: [1500, 0, 0], records: 0 };
+        view.lastRoots.rejected = [200, 0, 0];
+        view.lastRoots.rejectedInstances = 1;
+        expect(view.indexPressure(), 'coarsening cannot help rejected roots').to.equal(0.7);
+        view.destroy();
+    });
+
+    it('re-divides a capacity at its ceiling between the buckets by their demand', function () {
+        const view = makeView();
+        view.indexShare = 390;
+        expect(view.indexCapacity).to.deep.equal([300, 60, 30]);
+        expect(view._resliceBuckets([300, 62, 29]), 'small swings leave the ranges alone').to.equal(false);
+        expect(view._resliceBuckets([30, 60, 300])).to.equal(true);
+        expect(view.indexTotal()).to.be.at.most(390);
+        expect(view.indexCapacity[2]).to.be.greaterThan(view.indexCapacity[0]);
+        // below the ceiling the buffer grows instead
+        view.indexShare = 100000;
+        expect(view._resliceBuckets([300, 60, 30])).to.equal(false);
         view.destroy();
     });
 

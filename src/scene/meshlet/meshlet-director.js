@@ -2,6 +2,7 @@ import { Debug } from '../../core/debug.js';
 import { Frustum } from '../../core/shape/frustum.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { math } from '../../core/math/math.js';
+import { Vec3 } from '../../core/math/vec3.js';
 import { LAYERID_WORLD } from '../constants.js';
 import { MESHLET_BUCKET_COUNT } from './constants.js';
 import { MeshletBudgetManager } from './meshlet-budget-manager.js';
@@ -232,6 +233,18 @@ class MeshletDirector {
      * @type {((info: object) => void)|null}
      */
     onBudgetExceeded = null;
+
+    /**
+     * The scene camera's position and projection scale from its last cull, which shadow views
+     * use to rank root admission (see MeshletCuller#priorityOrigin).
+     *
+     * @type {Vec3}
+     * @ignore
+     */
+    priorityOrigin = new Vec3();
+
+    /** @type {number} @ignore */
+    priorityProjScale = 0;
 
     /** @type {number} - consecutive infeasible frames before {@link onBudgetExceeded} fires. */
     budgetOverrunFrames = 120;
@@ -694,6 +707,9 @@ class MeshletDirector {
             halfFov = Math.atan(Math.tan(halfFov) * viewportHeight / Math.max(viewportWidth, 1));
         }
         const projScale = viewportHeight / (2 * Math.tan(halfFov));
+        // shadow views rank their casters' root admission by this camera's view of them
+        this.priorityOrigin.copy(cameraComponent.entity.getPosition());
+        this.priorityProjScale = projScale;
 
         // Two-phase occlusion needs a scene depth the HZB can sample. A render target with a
         // depth texture supplies hardware (NDC) depth. A CameraFrame keeps its scene depth as a
@@ -741,22 +757,26 @@ class MeshletDirector {
 
         view.culler.beginFrame(planes, cameraComponent.entity.getPosition(), projScale, _viewProj.data,
             useOcclusion ? view.hzb : null);
-        const deferred = view.rootSelection?.deferred ?? 0;
+        // root admission runs on the GPU; its counters arrive a few frames late by readback
+        const roots = view.lastRoots;
+        const deferred = roots.rejectedInstances;
         if (deferred && !view._rootBudgetWarned) {
             view._rootBudgetWarned = true;
-            Debug.warnOnce(`MeshletDirector: ${deferred} visible instances are deferred because their complete coarse geometry exceeds the current working-set capacity. No partial instances are emitted. This bake needs cheaper coarse levels to display the entire visible set within this budget.`);
+            Debug.warnOnce(`MeshletDirector: ${deferred} visible instances are deferred because their complete coarse geometry exceeds the current working-set capacity. The smallest on screen are dropped first; no partial instances are emitted. This bake needs cheaper coarse levels to display the entire visible set within this budget.`);
+            const rejected = roots.rejected[0] + roots.rejected[1] + roots.rejected[2];
+            const admitted = roots.admitted[0] + roots.admitted[1] + roots.admitted[2];
             this.onBudgetExceeded?.({
                 budgetBytes: this.world.poolBytes,
-                suggestedBudgetBytes: this.world.poolBytes +
-                    Math.max(view.rootSelection.requestedIndices - view.indexTotal(), 0) * 4 +
-                    Math.max(view.rootSelection.requestedRecords - view.recordCapacity, 0) * 16,
-                indexDemandRatio: view.rootSelection.requestedIndices / Math.max(view.indexTotal(), 1),
+                suggestedBudgetBytes: this.world.poolBytes + rejected * 4,
+                indexDemandRatio: (admitted + rejected) / Math.max(view.indexTotal(), 1),
                 indexCeiling: this.world.indexCeiling,
                 indexOverrun: this.world.indexOverrun,
                 pagesMissing: this.residency?.lastMissingWanted ?? 0,
                 poolPages: this.world.poolSlots,
                 totalPages: this.world.totalPages,
-                rootInstancesDeferred: deferred
+                rootInstancesDeferred: deferred,
+                rootInstancesUnready: roots.unready,
+                rootShortfallPages: this.residency?.rootShortfallPages ?? 0
             });
         } else if (!deferred) {
             view._rootBudgetWarned = false;

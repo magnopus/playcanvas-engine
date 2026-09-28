@@ -1,9 +1,10 @@
 import { Compute } from '../../platform/graphics/compute.js';
 import {
-    CULL_FLAG_HZB_LINEAR, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_ADMISSION_BITS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_COMPACT_SLICE, MESHLET_INSTANCE_CULL_WORKGROUP, admissionVec4s, claimLevelBase
+    CULL_FLAG_HZB_LINEAR, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_CULL_SLICE,
+    MESHLET_COMPACT_SLICE, MESHLET_INSTANCE_CULL_WORKGROUP, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS,
+    MESHLET_ROOT_BAND_OCTAVES, WORK_ITEM_U32S, claimLevelBase, claimPersistBase
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
-import { Vec3 } from '../../core/math/vec3.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
@@ -11,10 +12,6 @@ import { Vec3 } from '../../core/math/vec3.js';
  * @import { MeshletWorld } from './meshlet-world.js'
  * @import { MeshletView } from './meshlet-view.js'
  */
-
-// root-selection inputs of a shadow view, stable across the per-frame depth fit (see beginFrame)
-const _selectionPlanes = new Float32Array(24);
-const _selectionCamera = new Vec3();
 
 
 /**
@@ -49,8 +46,41 @@ class MeshletCuller {
     /** @type {Float32Array} - the per-view parameter rows (CULL_PARAMS.*), uploaded each frame. */
     cullParams = new Float32Array(CULL_PARAMS_VEC4S * 4);
 
-    /** @type {number} - root selection `wantedVersion` last uploaded into the params tail. */
-    _wantedVersion = -1;
+    /**
+     * Where root admission measures projected size from, and its projection scale. Null uses
+     * this view's own camera; a shadow view passes the viewing camera's, so casters are ranked
+     * by how much they matter to what is on screen (its own camera sits far back along the
+     * light, and an orthographic projection has no size falloff).
+     *
+     * @type {import('../../core/math/vec3.js').Vec3|null}
+     */
+    priorityOrigin = null;
+
+    /** @type {number} - projection scale for {@link priorityOrigin} (px per unit at distance 1). */
+    priorityProjScale = 0;
+
+    /**
+     * Projected size in pixels below which an instance is not admitted at all (0 admits every
+     * visible instance). Its roots would draw sub-pixel; skipping them frees capacity for the
+     * rest on scenes with very many small placements.
+     *
+     * @type {number}
+     */
+    rootMinPixels = 0;
+
+    /**
+     * Keep last frame's admissions for hysteresis. Views sharing one claim buffer (shadow
+     * cascades) must disable it: their persistent bits would mix across faces.
+     *
+     * @type {boolean}
+     */
+    hysteresis = true;
+
+    /** @type {number} - which persistent admission region holds last frame (see claimPersistBase). */
+    _parity = 0;
+
+    /** @type {boolean} - the previous region holds a real previous frame. */
+    _hasPrevious = false;
 
     dagPixelThreshold = 1;
 
@@ -107,9 +137,6 @@ class MeshletCuller {
         this.device = device;
         this.world = world;
         this.view = view;
-        if (view.rootSelection) {
-            this.cullParams = new Float32Array((CULL_PARAMS_VEC4S + admissionVec4s(world.instanceCount)) * 4);
-        }
 
         this.shaders = cullShaders ?? new MeshletCullShaders(device);
         this._ownsShaders = !cullShaders;
@@ -117,11 +144,11 @@ class MeshletCuller {
 
         const makeCompute = name => new Compute(device, this.shaders[name], `Meshlet${name}`);
 
-        this.cutStages = world.cut.levels.map((level) => {
+        // Roots are admitted by the root passes below; the cut stages refine, one DAG level each.
+        this.cutStages = world.cut.levels.filter(level => !level.root).map((level) => {
             const compute = makeCompute('cut');
             compute.setParameter('taskStart', level.start);
             compute.setParameter('taskCount', level.count);
-            compute.setParameter('rootStage', level.root ? 1 : 0);
             compute.setParameter('totalPairs', world.totalPairs);
             compute.setParameter('freeBase', world.totalPairs + world.instanceCount);
             compute.setParameter('levelBase', claimLevelBase(world.totalPairs, world.instanceCount));
@@ -141,6 +168,49 @@ class MeshletCuller {
             compute.setupDispatch(Math.min(groups, 65535), Math.ceil(groups / 65535));
             return compute;
         });
+        // Root admission: classify every instance into priority bands (one pass), then admit
+        // band by band - largest on screen first - from the compacted candidate list. The list
+        // lives in the work-item buffer, which is unused until the instance cull fills it.
+        const rootListWords = world.workItemCapacity * WORK_ITEM_U32S;
+        if (rootListWords < world.instanceCount) {
+            throw new Error(`MeshletCuller: work items (${rootListWords} words) cannot hold the root list of ${world.instanceCount} instances.`);
+        }
+        this.persistBase = claimPersistBase(world.totalPairs, world.instanceCount);
+        this.persistWords = Math.ceil(world.instanceCount / 32);
+        this.rootClassify = makeCompute('rootClassify');
+        this.rootClassify.setParameter('instanceCount', world.instanceCount);
+        this.rootClassify.setParameter('objectData', world.objectDataBuffer);
+        this.rootClassify.setParameter('cullParams', view.cullParamsBuffer);
+        this.rootClassify.setParameter('claimBits', view.claimBitsBuffer);
+        this.rootClassify.setParameter('counters', view.countersBuffer);
+        this.rootClassify.setParameter('rootList', view.workItemsBuffer);
+        const classifyGroups = Math.ceil(world.instanceCount / 64);
+        this.rootClassify.setupDispatch(Math.min(classifyGroups, 65535), Math.ceil(classifyGroups / 65535));
+        this.rootArgs = makeCompute('dispatchArgs');
+        this.rootArgs.setParameter('counterIndex', MESHLET_COUNTER.ROOT_CANDIDATES);
+        this.rootArgs.setParameter('groupSize', 64);
+        this.rootArgs.setParameter('workItemCapacity', world.instanceCount);
+        this.rootArgs.setParameter('counters', view.countersBuffer);
+        this.rootArgs.setupDispatch(1);
+        // one instance per band: uniform writes land before the frame's command buffer
+        this.rootAdmit = [];
+        for (let band = 0; band < MESHLET_ROOT_BANDS; band++) {
+            const compute = new Compute(device, this.shaders.rootAdmit, `MeshletRootAdmit${band}`);
+            compute.setParameter('rootBand', band);
+            compute.setParameter('totalPairs', world.totalPairs);
+            compute.setParameter('recordCapacity', view.recordCapacity);
+            bindCapacities(compute, view);
+            compute.setParameter('cutGroups', world.cut.groups);
+            compute.setParameter('cutTasks', world.cut.tasks);
+            compute.setParameter('residency', world.residencyBuffer);
+            compute.setParameter('requests', world.requestsBuffer);
+            compute.setParameter('claimBits', view.claimBitsBuffer);
+            compute.setParameter('cutBudget', view.cutBudgetBuffer);
+            compute.setParameter('counters', view.countersBuffer);
+            compute.setParameter('rootList', view.workItemsBuffer);
+            this.rootAdmit.push(compute);
+        }
+
         this.instanceCull = makeCompute('instanceCull');
         this.dispatchArgs = makeCompute('dispatchArgs');
         this.compactMeshlets = makeCompute('compactMeshlets');
@@ -236,7 +306,7 @@ class MeshletCuller {
      * @param {MeshletView} view - The view.
      */
     bindIndexState(view) {
-        for (const compute of [...this.cutStages, this.meshletCull, this.meshletCullPhase2, this.finalizeArgs, this.finalizeArgsPhase2]) {
+        for (const compute of [...this.cutStages, ...this.rootAdmit, this.meshletCull, this.meshletCullPhase2, this.finalizeArgs, this.finalizeArgsPhase2]) {
             bindCapacities(compute, view);
         }
         for (const compute of [this.indexWrite, this.indexWritePhase2]) {
@@ -257,7 +327,7 @@ class MeshletCuller {
         for (const compute of [this.meshletCull, this.meshletCullPhase2]) {
             compute.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
         }
-        for (const compute of this.cutStages) compute.setParameter('recordCapacity', view.recordCapacity);
+        for (const compute of [...this.cutStages, ...this.rootAdmit]) compute.setParameter('recordCapacity', view.recordCapacity);
         for (const compute of [this.meshletCull, this.meshletCullPhase2, this.indexWrite, this.indexWritePhase2]) {
             compute.setParameter('records', view.recordsBuffer);
             compute.setParameter('recordCapacity', view.recordCapacity);
@@ -293,36 +363,6 @@ class MeshletCuller {
 
         // frame params, one vec4 row each (CULL_PARAMS.*)
         const params = this.cullParams;
-        if (view.rootSelection) {
-            const shadow = (this.cullFlags & CULL_FLAG_SHADOW_VIEW) !== 0;
-            let selectionPlanes = frustumPlanes, selectionCamera = cameraPos;
-            if (shadow && this.orthoScale > 0 && this.viewDir) {
-                // A directional cascade's near/far and its camera's position along the light
-                // come from the union of the frame's visible caster bounds, so one animated
-                // caster (a skinned player) moves them every frame - and any input change reruns
-                // the selection's full per-instance pass. The side planes are texel-snapped and
-                // stable: select against those alone (conservative - the meshlet caster bounds
-                // already span the world's height), from the camera's lateral position. The GPU
-                // cull still gets the exact frustum.
-                _selectionPlanes.set(frustumPlanes);
-                for (let p = 16; p < 24; p += 4) {
-                    _selectionPlanes[p] = _selectionPlanes[p + 1] = _selectionPlanes[p + 2] = 0;
-                    _selectionPlanes[p + 3] = 1;
-                }
-                const d = this.viewDir;
-                _selectionCamera.copy(d).mulScalar(-cameraPos.dot(d)).add(cameraPos);
-                selectionPlanes = _selectionPlanes;
-                selectionCamera = _selectionCamera;
-            }
-            view.rootSelection.update(selectionPlanes, selectionCamera, view.indexCapacity, view.recordCapacity, shadow);
-            let changed = false;
-            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
-                const capacity = view.rootSelection.capacity[b];
-                changed ||= view.indexCapacity[b] !== capacity;
-                view.indexCapacity[b] = capacity;
-            }
-            if (changed) this.bindIndexState(view);
-        }
         const row = index => index * 4;
         params.set(frustumPlanes, row(CULL_PARAMS.PLANES));
         params[row(CULL_PARAMS.CAMERA) + 0] = cameraPos.x;
@@ -341,35 +381,39 @@ class MeshletCuller {
         params[row(CULL_PARAMS.VIEW_DIR) + 0] = this.viewDir?.x ?? 0;
         params[row(CULL_PARAMS.VIEW_DIR) + 1] = this.viewDir?.y ?? 0;
         params[row(CULL_PARAMS.VIEW_DIR) + 2] = this.viewDir?.z ?? 1;
+        // root admission: projected size from the priority origin, ranked into log bands
+        const origin = this.priorityOrigin ?? cameraPos;
+        params[row(CULL_PARAMS.ROOT_PRIORITY) + 0] = origin.x;
+        params[row(CULL_PARAMS.ROOT_PRIORITY) + 1] = origin.y;
+        params[row(CULL_PARAMS.ROOT_PRIORITY) + 2] = origin.z;
+        params[row(CULL_PARAMS.ROOT_PRIORITY) + 3] = this.priorityOrigin ? this.priorityProjScale : projScale;
+        params[row(CULL_PARAMS.ROOT_BANDS) + 0] = MESHLET_ROOT_BAND_MAX_PIXELS;
+        params[row(CULL_PARAMS.ROOT_BANDS) + 1] = MESHLET_ROOT_BANDS / MESHLET_ROOT_BAND_OCTAVES;
+        params[row(CULL_PARAMS.ROOT_BANDS) + 2] = MESHLET_ROOT_BANDS;
+        params[row(CULL_PARAMS.ROOT_BANDS) + 3] = this.rootMinPixels;
 
         // queue.writeBuffer executes before this frame's command buffer, so these clears land
         // ahead of every dispatch below. The requests buffer is NOT cleared here - the residency
         // manager clears it in-encoder after its readback copy, or the copy would see zeros.
         // The counters buffer clears in-encoder for the same reason: the director's index-demand
         // readback copy is encoded earlier this frame and must see last frame's values.
-        // the frame rows every frame; the packed admission tail only when the root selection
-        // admitted differently (moving the camera near the ground over ~1M instances)
-        const head = CULL_PARAMS_VEC4S * 4;
-        view.cullParamsBuffer.write(0, params, 0, head);
-        const selection = view.rootSelection;
-        if (selection && selection.wantedVersion !== this._wantedVersion) {
-            this._wantedVersion = selection.wantedVersion;
-            const wanted = selection.wanted;
-            params.fill(0, head);
-            for (let i = 0; i < wanted.length; i++) {
-                if (wanted[i]) {
-                    const word = (i / MESHLET_ADMISSION_BITS) | 0;
-                    params[head + word] += 1 << (i - word * MESHLET_ADMISSION_BITS);
-                }
-            }
-            view.cullParamsBuffer.write(head * 4, params, head, params.length - head);
-        }
+        view.cullParamsBuffer.write(0, params);
         view.cutBudgetBuffer.write(0, view.cutBudgetInitial);
         const encoder = device.getCommandEncoder();
         encoder.clearBuffer(view.countersBuffer.impl.buffer, 0, view.countersBuffer.byteSize);
-        // claim bits clear on the GPU: the CPU mirror is one bit per instance-meshlet pair,
-        // which reaches tens of MB on scattered scenes - far too much to upload every frame
-        encoder.clearBuffer(view.claimBitsBuffer.impl.buffer, 0, view.claimBitsBuffer.byteSize);
+        // Claim bits clear on the GPU (one bit per instance-meshlet pair reaches tens of MB),
+        // all but last frame's persistent admission region, which the root classify reads for
+        // hysteresis. This frame's region is cleared for the admission to fill.
+        const prevBase = this.persistBase + this._parity * this.persistWords;
+        const nextBase = this.persistBase + (1 - this._parity) * this.persistWords;
+        encoder.clearBuffer(view.claimBitsBuffer.impl.buffer, 0, this.persistBase * 4);
+        encoder.clearBuffer(view.claimBitsBuffer.impl.buffer, nextBase * 4, this.persistWords * 4);
+        const hysteresis = this.hysteresis && this._hasPrevious;
+        this.rootClassify.setParameter('prevBase', prevBase);
+        this.rootClassify.setParameter('hasPrevious', hysteresis ? 1 : 0);
+        for (const compute of this.rootAdmit) compute.setParameter('nextBase', nextBase);
+        this._parity = 1 - this._parity;
+        this._hasPrevious = this.hysteresis;
 
         // per-frame indirect slots
         // one draw slot per bucket per phase: [phase 1 buckets..., phase 2 buckets...]
@@ -379,12 +423,16 @@ class MeshletCuller {
             this._drawSlots.push(device.getIndirectDrawSlot());
         }
         this._dispatchSlotCull = device.getIndirectDispatchSlot();
+        this._dispatchSlotRoots = device.getIndirectDispatchSlot();
         this._dispatchSlotSelected = device.getIndirectDispatchSlot();
         this._dispatchSlotWrite = device.getIndirectDispatchSlot();
 
         this._hzbTexture = twoPhase ? hzb.texture : null;
         this.meshletCull.setParameter('hzbTexture', this._hzbTexture ?? this.dummyHzb);
 
+        this.rootArgs.setParameter('dispatchSlot', this._dispatchSlotRoots);
+        this.rootArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
+        for (const compute of this.rootAdmit) compute.setupIndirectDispatch(this._dispatchSlotRoots);
         this.dispatchArgs.setParameter('dispatchSlot', this._dispatchSlotCull);
         this.dispatchArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
         this.selectedArgs.setParameter('dispatchSlot', this._dispatchSlotSelected);
@@ -408,7 +456,14 @@ class MeshletCuller {
         this.finalizeArgs.setupDispatch(1);
         this.indexWrite.setupIndirectDispatch(this._dispatchSlotWrite);
 
-        device.computeDispatch(this.cutStages, 'MeshletResidentCut');
+        if (this.forceSubmitBoundaries) {
+            device.computeDispatch([this.rootClassify, this.rootArgs], 'MeshletRootClassify');
+            device.submit();
+            device.computeDispatch(this.rootAdmit, 'MeshletRootAdmit');
+        } else {
+            device.computeDispatch([this.rootClassify, this.rootArgs, ...this.rootAdmit], 'MeshletRootAdmit');
+        }
+        if (this.cutStages.length) device.computeDispatch(this.cutStages, 'MeshletResidentCut');
 
         if (this.forceSubmitBoundaries) {
             device.computeDispatch([this.instanceCull, this.dispatchArgs], 'MeshletCompacta');

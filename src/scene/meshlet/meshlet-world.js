@@ -97,17 +97,6 @@ class MeshletWorld {
     /** @type {MeshletCutData|null} */
     cut = null;
 
-    /** @type {Set<import('./meshlet-root-selection.js').MeshletRootSelection>} */
-    rootSelections = new Set();
-
-    /**
-     * Bumped when any root selection's page set changes or a selection is added or removed -
-     * each selection accounts for the others' pages, so it reruns when this moves.
-     *
-     * @type {number}
-     * @ignore
-     */
-    rootPagesVersion = 0;
 
     objectDataBuffer = null;
 
@@ -500,7 +489,7 @@ class MeshletWorld {
      * @private
      */
     _resolveBudget(counts) {
-        const { totalPages, totalMeshlets, totalInstances, totalMaterialRows, pairs, workItems, lightmapBytes = 0 } = counts;
+        const { totalPages, totalMeshlets, totalInstances, totalMaterialRows, pairs, workItems, lightmapBytes = 0, rootPages = 0 } = counts;
         const cutTasks = counts.cutTasks ?? pairs;
         if (!(this.poolBytes > 0)) {
             this.budgetBreakdown = null;
@@ -533,17 +522,22 @@ class MeshletWorld {
         const reserved = fixed + perCamera * views + perShadow * this.budgetShadowViews + shared;
         let available = this.poolBytes - reserved;
 
-        // A budget that cannot even hold the fixed cost is not a budget. Keep going with the
-        // smallest workable pool rather than allocating nothing - the roots must stay resident
-        // or the scene cannot draw at all - and say so.
-        const minPool = Math.min(totalPages, 64) * this.pageSizeBytes;
+        // The pool must hold every resource's pinned root pages plus a demand reserve - without
+        // the roots nothing draws. A budget that cannot even hold the fixed cost is not a
+        // budget: keep going with that minimum pool rather than allocating nothing, and say so.
+        const minPool = Math.min(totalPages, rootPages + Math.min(64, Math.max(totalPages - rootPages, 0))) * this.pageSizeBytes;
         if (available < minPool) {
-            Debug.warnOnce(`MeshletWorld: geometry budget ${(this.poolBytes / 1048576).toFixed(0)} MB is below the ${(reserved / 1048576).toFixed(0)} MB this scene needs for its fixed and per-view buffers; falling back to a minimum page pool.`);
+            Debug.warnOnce(`MeshletWorld: geometry budget ${(this.poolBytes / 1048576).toFixed(0)} MB is below the ${((reserved + minPool) / 1048576).toFixed(0)} MB this scene needs for its fixed and per-view buffers and its ${rootPages} root pages; falling back to that minimum page pool.`);
             available = minPool;
         }
 
         let indexBytes = Math.floor(available * this.indexBudgetFraction);
         let pagePool = available - indexBytes;
+        if (pagePool < minPool) {
+            // the roots come before the index budget
+            indexBytes -= minPool - pagePool;
+            pagePool = minPool;
+        }
         // The pool never allocates more slots than the scene has pages (many instances of a
         // small asset fit whole): hand the rest to the index buffer instead of leaving it unused.
         const allPages = totalPages * this.pageSizeBytes;
@@ -555,7 +549,7 @@ class MeshletWorld {
         this.indexBudgetTotal = Math.max(Math.floor(indexBytes / 4), 3);
         this.indexOverrun = 0;
         this.maxIndices = 0;
-        this.budgetBreakdown = { budget: this.poolBytes, fixed, perView: reserved - fixed, pagePool, indices: indexBytes };
+        this.budgetBreakdown = { budget: this.poolBytes, fixed, perView: reserved - fixed, pagePool, indices: indexBytes, rootPages };
         return pagePool;
     }
 
@@ -667,15 +661,34 @@ class MeshletWorld {
             }
             return groups;
         };
+        // unique root pages per resource (the pages of meshlets without a parent): pinned for
+        // the resource's lifetime, so the pool is sized to hold them before anything else
+        const rootPagesOf = new Map();
+        const rootScanned = new Set();
         for (const { resource, instances } of pending) {
+            let roots = rootPagesOf.get(resource);
+            if (!roots) rootPagesOf.set(resource, roots = new Set());
             for (const inst of (instances ?? resource.instances)) {
                 const prim = resource.primitives[inst.primIndex];
                 const n = prim.meshletCount;
                 budgetPairs += n;
                 budgetWorkItems += Math.ceil(n / MESHLET_COMPACT_SLICE);
                 budgetCutTasks += groupCount(prim) + 1;
+                if (!rootScanned.has(prim)) {
+                    rootScanned.add(prim);
+                    for (let m = 0; m < n; m++) {
+                        const row = m * MESHLET_DATA_U32S;
+                        if (prim.meshletData[row + MESHLET_DATA.PARENT] === MESHLET_NO_PARENT) {
+                            roots.add(prim.meshletData[row + MESHLET_DATA.PAGE]);
+                        }
+                    }
+                }
             }
         }
+        let rootPageCount = 0;
+        rootPagesOf.forEach((roots) => {
+            rootPageCount += roots.size;
+        });
         this.pagePoolBytes = this._resolveBudget({
             totalPages,
             totalMeshlets,
@@ -684,7 +697,8 @@ class MeshletWorld {
             lightmapBytes: anyLightmaps ? totalInstances * 64 : 0,
             pairs: budgetPairs,
             cutTasks: budgetCutTasks,
-            workItems: budgetWorkItems
+            workItems: budgetWorkItems,
+            rootPages: rootPageCount
         });
 
         let poolSlots = totalPages;

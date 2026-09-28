@@ -1,6 +1,7 @@
 import { Debug } from '../../../core/debug.js';
 import { WebgpuReadbackPool } from '../../../platform/graphics/webgpu/webgpu-readback-pool.js';
 import { PAGE_NOT_RESIDENT, PAGE_REQUEST } from '../constants.js';
+import { FETCH_PRIORITY_ROOTS } from './meshlet-fetch-scheduler.js';
 import { MeshletPageFetcher } from './meshlet-page-fetcher.js';
 
 /**
@@ -16,11 +17,20 @@ import { MeshletPageFetcher } from './meshlet-page-fetcher.js';
 export const MAX_IN_FLIGHT_RUNS = 8;
 
 /**
+ * Minimum pool slots kept free of pinned roots for demand pages, so a pool too small for every
+ * root still streams refinement.
+ */
+const DEMAND_SLOT_RESERVE = 64;
+
+/**
  * Streaming residency for a meshlet world: reads back the GPU's per-frame page request marks
  * (one to two frames latent), coalesces missing pages into HTTP Range runs, uploads arrived
- * pages into free or LRU-evicted pool slots and maintains the page-to-slot residency map. Root
- * pages are requested and pinned only for active instances, providing the complete coarse
- * cut from which the GPU commits resident refinement groups.
+ * pages into free or LRU-evicted pool slots and maintains the page-to-slot residency map.
+ *
+ * Every resource's root pages (its coarsest clusters, `cut.rootPages`) are fetched once at load
+ * and pinned for the resource's lifetime, as in Nanite: a few pages per unique mesh, whatever the
+ * placement count. Any placement's coarse cut is then always drawable, so admission needs no
+ * per-view page accounting.
  *
  * @ignore
  */
@@ -77,8 +87,25 @@ class MeshletResidency {
 
     _residencyDirty = false;
 
-    /** @type {boolean} - demand streaming initialized; individual coarse pages may still be absent. */
+    /** @type {boolean} - demand streaming initialized (root pages may still be arriving). */
     rootsResident = false;
+
+    /** @type {boolean} - every pinnable root page is installed. */
+    rootsLoaded = false;
+
+    /** @type {number} - root pages that could not be pinned because the pool is too small. */
+    rootShortfallPages = 0;
+
+    /** @type {Uint8Array} - global page -> 1 when it is a pinned root page. */
+    _isRoot;
+
+    /** @type {Array<{ globalPage: number, words: Uint32Array }>} - root pages awaiting install. */
+    _arrivedRoots = [];
+
+    _arrivedRootsHead = 0;
+
+    /** @type {number} - root fetch runs still outstanding. */
+    _rootRunsPending = 0;
 
     // stats
     residentPages = 0;
@@ -111,11 +138,24 @@ class MeshletResidency {
         this.maxInstallBytesPerFrame = world.maxInstallBytesPerFrame ?? this.maxInstallBytesPerFrame;
         this.device = device;
         this.world = world;
-        this._rootWanted = new Uint8Array(world.totalPages);
-        this._compareRequests = (a, b) => this._rootWanted[b] - this._rootWanted[a];
         this.readbackPool = new WebgpuReadbackPool(device);
 
         const slots = world.poolSlots;
+        // Root pages pinned for good, up to what the pool can hold beside a demand reserve; the
+        // world's budget sizes the pool to fit them, so a shortfall means the budget is too small.
+        const rootPages = world.cut?.rootPages ?? [];
+        // the world's budget sizes the pool for every root plus this reserve; a pool too small
+        // for both (a budget below the fixed costs) still keeps half its slots for demand
+        const reserve = Math.min(DEMAND_SLOT_RESERVE, Math.max(world.totalPages - rootPages.length, 0), Math.floor(slots / 2));
+        const pinnable = Math.min(rootPages.length, Math.max(slots - reserve, 0));
+        this._isRoot = new Uint8Array(world.totalPages);
+        for (let i = 0; i < pinnable; i++) this._isRoot[rootPages[i]] = 1;
+        this.rootShortfallPages = rootPages.length - pinnable;
+        if (this.rootShortfallPages) {
+            Debug.warnOnce(`MeshletResidency: the page pool (${slots} slots) cannot pin all ${rootPages.length} root pages; ${this.rootShortfallPages} stream on demand instead.`);
+        }
+        this._compareRequests = (a, b) => this._isRoot[b] - this._isRoot[a];
+
         if (carry && carry.slotPage.length <= slots) {
             this.slotPage = new Uint32Array(slots).fill(PAGE_NOT_RESIDENT);
             this.slotPage.set(carry.slotPage);
@@ -136,6 +176,9 @@ class MeshletResidency {
                     this.slotPinned[s] = 0;
                     this.freeSlots.push(s);
                 } else {
+                    // pins follow the new world's roots: a carried pin on a page that is no
+                    // longer a root is released, a carried page that is now a root is pinned
+                    this.slotPinned[s] = this._isRoot[this.slotPage[s]];
                     this.residentPages++;
                 }
             }
@@ -177,24 +220,54 @@ class MeshletResidency {
     }
 
     /**
-     * Starts demand streaming. Coarse pages are requested by active views, rather than
-     * downloading and permanently pinning every resource's entire root shard.
-     * @returns {Promise<void>} Resolves when request processing is enabled.
+     * Starts streaming: fetches every resource's pinnable root pages (skipping those a carried
+     * pool already holds) at root priority, and enables demand request processing at once - the
+     * GPU simply cannot admit an instance until its roots land.
+     *
+     * @returns {Promise<void>} Resolves when every root fetch has settled (failed streams are
+     * reported and marked dead; their placements stay unadmitted).
      */
     loadRoots() {
         this.rootsResident = true;
-        return Promise.resolve();
-    }
-
-    _refreshRootPins() {
-        if (!this.world.rootSelections) return;
-        this._rootWanted.fill(0);
-        for (const selection of this.world.rootSelections) {
-            for (let p = 0; p < this._rootWanted.length; p++) this._rootWanted[p] |= selection.pages[p];
+        const world = this.world;
+        const byStream = new Map();
+        for (let page = 0; page < this._isRoot.length; page++) {
+            if (!this._isRoot[page] || world.residency[page] !== PAGE_NOT_RESIDENT) continue;
+            const stream = this._streamOf(page);
+            if (!stream || stream.dead) continue;
+            let list = byStream.get(stream);
+            if (!list) byStream.set(stream, list = []);
+            list.push(page - stream.pageBase);
+            this.inFlight.add(page);
         }
-        for (let s = 0; s < this.slotPage.length; s++) {
-            this.slotPinned[s] = this._rootWanted[this.slotPage[s]] ?? 0;
+        const fetches = [];
+        for (const [stream, localPages] of byStream) {
+            for (const run of stream.fetcher.buildRuns(localPages)) {
+                this._rootRunsPending++;
+                fetches.push(stream.fetcher.fetchRange(run.blob, run.offset, run.length, FETCH_PRIORITY_ROOTS).then((bytes) => {
+                    if (!bytes) {
+                        for (const { localPage } of run.pages) this.inFlight.delete(stream.pageBase + localPage);
+                        return;
+                    }
+                    const pageWordsSize = stream.resource.manifest.pageSizeBytes / 4;
+                    for (const { localPage, byteOffset } of run.pages) {
+                        this._arrivedRoots.push({
+                            globalPage: stream.pageBase + localPage,
+                            words: new Uint32Array(bytes, byteOffset, pageWordsSize)
+                        });
+                    }
+                }).catch((err) => {
+                    // roots are required: no retries against a backoff, the stream is dead
+                    stream.failures = Math.max(stream.failures, 3);
+                    this._failStream(stream, err);
+                    for (const { localPage } of run.pages) this.inFlight.delete(stream.pageBase + localPage);
+                }).finally(() => {
+                    this._rootRunsPending--;
+                }));
+            }
         }
+        if (!fetches.length) this.rootsLoaded = true;
+        return Promise.all(fetches).then(() => undefined);
     }
 
     _allocSlot(protectedSet) {
@@ -240,7 +313,7 @@ class MeshletResidency {
         world.residency[globalPage] = slot;
         world.contentVersion++;
         this.slotPage[slot] = globalPage;
-        this.slotPinned[slot] = pinned || this._rootWanted[globalPage] ? 1 : 0;
+        this.slotPinned[slot] = pinned || this._isRoot[globalPage] ? 1 : 0;
         this.slotLastUsed[slot] = this.frame;
         this.residentPages++;
         if (!pinned) this.fetchedPages++;
@@ -255,8 +328,26 @@ class MeshletResidency {
      */
     _drainArrived() {
         const pageBytes = this.world.pageSizeBytes;
-        const budget = Math.max(this.maxInstallBytesPerFrame, pageBytes);
+        let budget = Math.max(this.maxInstallBytesPerFrame, pageBytes);
         let spent = 0;
+        // roots first, at up to four times the budget while they load: nothing of a placement
+        // draws until they are in, and they are a bounded one-off (a few pages per unique mesh)
+        if (!this.rootsLoaded) {
+            const rootBudget = budget * 4;
+            while (this._arrivedRootsHead < this._arrivedRoots.length && spent < rootBudget) {
+                const { globalPage, words } = this._arrivedRoots[this._arrivedRootsHead++];
+                this.inFlight.delete(globalPage);
+                this._installPage(globalPage, words, true);
+                spent += pageBytes;
+            }
+            if (this._arrivedRootsHead === this._arrivedRoots.length) {
+                this._arrivedRoots.length = 0;
+                this._arrivedRootsHead = 0;
+                if (this._rootRunsPending === 0) this.rootsLoaded = true;
+            }
+            budget = Math.max(budget - spent, 0);
+            spent = 0;
+        }
         while (this._arrivedHead < this._arrived.length && spent < budget) {
             const { globalPage, words } = this._arrived[this._arrivedHead++];
             this.inFlight.delete(globalPage);
@@ -337,7 +428,6 @@ class MeshletResidency {
         this.frame++;
         const world = this.world;
 
-        this._refreshRootPins();
         this._drainArrived();
         this._flushResidency();
 
@@ -405,8 +495,7 @@ class MeshletResidency {
         const streams = this._streams;
         let si = 0; // streams are ordered by pageBase, pages ascend: one pass tracks the stream
         for (let p = 0; p < world.totalPages; p++) {
-            const mark = this._rootWanted[p] ?
-                (world.residency[p] === PAGE_NOT_RESIDENT ? PAGE_REQUEST.MISSING : PAGE_REQUEST.USED) : marks[p];
+            const mark = marks[p];
             if (mark === PAGE_REQUEST.NONE) continue;
             wanted.add(p);
             if (mark === PAGE_REQUEST.USED) {

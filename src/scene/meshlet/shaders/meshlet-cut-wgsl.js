@@ -1,16 +1,19 @@
 import {
-    CULL_PARAMS, CULL_PARAMS_VEC4S, CULL_FLAG_SHADOW_VIEW, MESHLET_ADMISSION_BITS, MESHLET_COUNTER, MESHLET_FLAG_ALPHA_MASKED,
-    MESHLET_FLAG_TWO_SIDED, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_NO_SHADOW,
+    CULL_PARAMS, MESHLET_COUNTER, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED,
     PAGE_NOT_RESIDENT, PAGE_REQUEST, MESHLET_LEVEL_BIAS
 } from '../constants.js';
 import { meshletStructsWGSL, meshletDataWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
-/** Select complete replacements from coarse to fine, reserving capacity before refinement. @ignore */
+/**
+ * Select complete replacements from coarse to fine, reserving capacity before refinement. The
+ * roots are admitted beforehand (meshletRootAdmitWGSL); a stage runs one DAG level's groups.
+ *
+ * @ignore
+ */
 export const meshletCutWGSL = /* wgsl */ `
     ${meshletStructsWGSL}
     uniform taskStart: u32;
     uniform taskCount: u32;
-    uniform rootStage: u32;
     uniform totalPairs: u32;
     // bit base of the off-frustum refinement flags, after the pair and admission bits
     uniform freeBase: u32;
@@ -53,7 +56,7 @@ export const meshletCutWGSL = /* wgsl */ `
         let task = cutTasks[uniform.taskStart + index];
         let instance = task.x;
         let admissionBit = uniform.totalPairs + instance;
-        if (uniform.rootStage == 0u && !bitSet(admissionBit)) { return; }
+        if (!bitSet(admissionBit)) { return; }
         let offset = task.y;
         let object = objectData[instance];
         var unchargedIndices = 0u;
@@ -62,18 +65,7 @@ export const meshletCutWGSL = /* wgsl */ `
         let parentCount = cutGroups[offset + 1u];
         let pageStart = cutGroups[offset + 2u];
         let pageCount = cutGroups[offset + 3u];
-        if (uniform.rootStage != 0u) {
-            if (arrayLength(&cullParams) > ${CULL_PARAMS_VEC4S}u) {
-                let word = instance / ${MESHLET_ADMISSION_BITS}u;
-                let flags = u32(cullParams[${CULL_PARAMS_VEC4S}u + word / 4u][word % 4u]);
-                if ((flags & (1u << (instance % ${MESHLET_ADMISSION_BITS}u))) == 0u) { return; }
-            }
-            let shadow = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_SHADOW_VIEW}u) != 0u;
-            if ((object.flags & ${OBJECT_FLAG_HIDDEN}u) != 0u ||
-                (shadow && (object.flags & ${OBJECT_FLAG_NO_SHADOW}u) != 0u)) { return; }
-            let center = (object.worldMatrix * vec4f(object.sphere.xyz, 1.0)).xyz;
-            if (!inFrustum(center, object.sphere.w * object.maxScale)) { return; }
-        } else {
+        {
             // Every coarse member must belong to the active cut. A DAG replacement may
             // depend on several different ancestor groups, all of which must have refined.
             // Members under an off-frustum parent were never charged (see below).
@@ -120,25 +112,6 @@ export const meshletCutWGSL = /* wgsl */ `
             ready = ready && resident;
         }
         if (!ready) { return; }
-        if (uniform.rootStage != 0u) {
-            // Reserve complete roots before refinement. Admission is bounded by the current
-            // buffers, never by the sum of all placements' potential coarse draws.
-            let flags = meshletData[first].flags;
-            let bucket = select(select(0u, 1u, (flags & ${MESHLET_FLAG_TWO_SIDED}u) != 0u), 2u, (flags & ${MESHLET_FLAG_ALPHA_MASKED}u) != 0u);
-            let capacity = select(select(uniform.indexCapacity0, uniform.indexCapacity1, bucket == 1u), uniform.indexCapacity2, bucket == 2u);
-            let indices = cutGroups[offset + 4u];
-            let records = cutGroups[offset + 6u];
-            let indexBefore = atomicAdd(&cutBudget[bucket], indices);
-            let recordBefore = atomicAdd(&cutBudget[3u], records);
-            if (indexBefore + indices > capacity || recordBefore + records > uniform.recordCapacity) {
-                atomicSub(&cutBudget[bucket], indices);
-                atomicSub(&cutBudget[3u], records);
-                return;
-            }
-            atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indices);
-            markBit(admissionBit);
-            return;
-        }
         let fineIndices = cutGroups[offset + 4u];
         let coarseIndices = cutGroups[offset + 5u] - unchargedIndices;
         let fineRecords = cutGroups[offset + 6u];

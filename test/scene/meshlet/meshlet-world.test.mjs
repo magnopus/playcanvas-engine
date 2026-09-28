@@ -342,15 +342,15 @@ describe('MeshletWorld', function () {
         });
 
         it('starts cold instead of copying a carried pool the new pool cannot hold', function () {
-            // a budget of a few bytes resolves to the minimum pool (min(pages, 64) pages less the
-            // index share = one slot); the carried pool has 4, as a budget cut leaves behind
-            const { world, carried, copies } = setup(4, 64);
-            expect(world.poolSlots).to.equal(1);
+            // a budget of a few bytes resolves to the minimum pool - the root pages plus a demand
+            // reserve, here both pages; the carried pool has 5, more than twice that
+            const { world, carried, copies } = setup(5, 64);
+            expect(world.poolSlots).to.equal(2);
             expect(copies, 'nothing is copied into a smaller buffer').to.deep.equal([]);
             expect(carried.destroyed).to.equal(true);
             expect(world.adoptedPages).to.equal(0);
             expect(Array.from(world.residency), 'every page re-streams').to.deep.equal([PAGE_NOT_RESIDENT, PAGE_NOT_RESIDENT]);
-            expect(world.pagePool.byteSize).to.equal(PAGE_BYTES);
+            expect(world.pagePool.byteSize).to.equal(2 * PAGE_BYTES);
             world.destroy();
         });
     });

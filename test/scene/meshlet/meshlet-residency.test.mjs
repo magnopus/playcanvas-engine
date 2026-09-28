@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 
 import { PAGE_NOT_RESIDENT, PAGE_REQUEST } from '../../../src/scene/meshlet/constants.js';
+import { FETCH_PRIORITY_ROOTS } from '../../../src/scene/meshlet/streaming/meshlet-fetch-scheduler.js';
 import { MeshletResidency } from '../../../src/scene/meshlet/streaming/meshlet-residency.js';
 
 const PAGE = 256;
@@ -81,37 +82,71 @@ describe('MeshletResidency', function () {
         residency.destroy();
     });
 
-    it('enables demand streaming without fetching the whole root shard', async function () {
-        const world = makeWorld(1, 3);
-        world.cut = { rootPages: [0, 1, 2] };
+    it('fetches every root page at root priority and pins it for good', async function () {
+        const world = makeWorld(4, 6);
+        world.cut = { rootPages: [0, 2] };
         const residency = new MeshletResidency(device, world);
-        let fetched = false;
-        residency._streams[0].fetcher.fetchBlob = () => {
-            fetched = true;
-            return Promise.resolve(new ArrayBuffer(PAGE));
+        const fetches = [];
+        residency._streams[0].fetcher = {
+            buildRuns: pages => pages.map((p, i) => ({ blob: 0, offset: p * PAGE, length: PAGE, pages: [{ localPage: p, byteOffset: 0 }] })),
+            fetchRange: (blob, offset, length, priority) => {
+                fetches.push({ page: offset / PAGE, priority });
+                const bytes = new ArrayBuffer(PAGE);
+                new Uint32Array(bytes)[0] = offset / PAGE;
+                return Promise.resolve(bytes);
+            }
         };
         await residency.loadRoots();
-        expect(fetched).to.equal(false);
-        expect(residency.rootsResident).to.equal(true);
-        expect(residency.residentPages).to.equal(0);
+        expect(fetches).to.deep.equal([{ page: 0, priority: FETCH_PRIORITY_ROOTS }, { page: 2, priority: FETCH_PRIORITY_ROOTS }]);
+        expect(residency.rootsResident, 'demand streaming starts at once').to.equal(true);
+        expect(residency.rootsLoaded).to.equal(false);
+        residency._drainArrived();
+        expect(residency.rootsLoaded).to.equal(true);
+        expect(world.residency[0]).to.not.equal(PAGE_NOT_RESIDENT);
+        expect(world.residency[2]).to.not.equal(PAGE_NOT_RESIDENT);
+        expect(residency.slotPinned[world.residency[0]]).to.equal(1);
+        expect(residency.slotPinned[world.residency[2]]).to.equal(1);
+        // demand pages evict around the roots, never through them
+        for (const page of [1, 3, 4, 5]) residency._installPage(page, words(page), false);
+        expect(world.residency[0]).to.not.equal(PAGE_NOT_RESIDENT);
+        expect(world.residency[2]).to.not.equal(PAGE_NOT_RESIDENT);
         residency.destroy();
     });
 
-    it('pins only active coarse pages and releases them when the view moves away', function () {
-        const world = makeWorld(2, 3);
-        const selection = { pages: new Uint8Array([1, 0, 0]) };
-        world.rootSelections = new Set([selection]);
+    it('pins a demand-installed root page too', function () {
+        const world = makeWorld(4, 6);
+        world.cut = { rootPages: [3] };
         const residency = new MeshletResidency(device, world);
-        residency._installPage(0, words(0), false);
-        residency._installPage(1, words(1), false);
-        residency._refreshRootPins();
-        expect(Array.from(residency.slotPinned)).to.deep.equal([1, 0]);
-        selection.pages.set([0, 1, 0]);
-        residency._refreshRootPins();
-        expect(Array.from(residency.slotPinned)).to.deep.equal([0, 1]);
-        residency._installPage(2, words(2), false);
-        expect(world.residency[0]).to.equal(PAGE_NOT_RESIDENT);
-        expect(world.residency[1]).not.to.equal(PAGE_NOT_RESIDENT);
+        residency._installPage(3, words(3), false);
+        expect(residency.slotPinned[world.residency[3]]).to.equal(1);
+        residency.destroy();
+    });
+
+    it('pins only the roots the pool can hold beside a demand reserve, and reports the rest', function () {
+        const world = makeWorld(4, 10);
+        world.cut = { rootPages: [0, 1, 2, 3, 4] };
+        const residency = new MeshletResidency(device, world);
+        // a pool below roots + demand reserve keeps half its slots for demand
+        expect(residency.rootShortfallPages).to.equal(3);
+        const roomy = makeWorld(8, 7);
+        roomy.cut = { rootPages: [0, 1, 2, 3, 4] };
+        const fits = new MeshletResidency(device, roomy);
+        expect(fits.rootShortfallPages, '8 slots - reserve of 2 non-root pages = 6 pinnable').to.equal(0);
+        residency.destroy();
+        fits.destroy();
+    });
+
+    it('marks a stream dead when its roots cannot be fetched', async function () {
+        const world = makeWorld(4, 6);
+        world.cut = { rootPages: [0] };
+        const residency = new MeshletResidency(device, world);
+        residency._streams[0].fetcher = {
+            buildRuns: pages => [{ blob: 0, offset: 0, length: PAGE, pages: pages.map(p => ({ localPage: p, byteOffset: 0 })) }],
+            fetchRange: () => Promise.reject(new Error('404'))
+        };
+        await residency.loadRoots();
+        expect(residency._streams[0].dead).to.equal(true);
+        expect(residency.inFlight.size).to.equal(0);
         residency.destroy();
     });
 
@@ -178,6 +213,7 @@ describe('MeshletResidency', function () {
         first.slotLastUsed[world.residency[9]] = 40;
 
         const smaller = makeWorld(4, 6);   // pages 6..9 dropped
+        smaller.cut = { rootPages: [0] };  // pins follow the new world's roots
         smaller.residency.set(world.residency.subarray(0, 6));
         const carried = new MeshletResidency(device, smaller, { slotPage: first.slotPage, slotPinned: first.slotPinned, slotLastUsed: first.slotLastUsed, frame: first.frame });
         expect(carried.frame, 'the LRU clock continues').to.equal(40);

@@ -395,6 +395,14 @@ class MeshletShadowRenderer {
         culler.dagPixelThreshold = director.dagPixelThreshold * director.shadowThresholdScale;
         culler.pressureScale = director.budget.pressureScale;
         culler.forceSubmitBoundaries = director.forceSubmitBoundaries;
+        // rank casters by what they cover on screen, not in the light's (orthographic) view;
+        // before the scene camera has culled, the face ranks by its own projection
+        if (director.priorityProjScale > 0) {
+            culler.priorityOrigin = director.priorityOrigin;
+            culler.priorityProjScale = director.priorityProjScale;
+        }
+        // the faces share one claim buffer, so its persistent admission bits would mix
+        culler.hysteresis = !this._claimBits;
 
         view.applyPendingGrowth();
         view.syncMaterials();

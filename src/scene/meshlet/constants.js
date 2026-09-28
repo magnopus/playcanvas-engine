@@ -119,29 +119,39 @@ export const CULL_PARAMS = {
     LOD: 7,
     VIEW_PROJ: 8,
     STREAMING: 12,
-    VIEW_DIR: 13
+    VIEW_DIR: 13,
+    // root admission priority: origin xyz, projection scale (px per unit at distance 1)
+    ROOT_PRIORITY: 14,
+    // root admission bands: largest projected size (px), bands per octave, band count, and the
+    // projected size below which an instance is not admitted (0 = never)
+    ROOT_BANDS: 15
 };
 
 /** vec4 rows in the cull parameter buffer. @type {number} */
 export const CULL_PARAMS_VEC4S = 16;
 
 /**
- * Root-selection admission flags packed into each float of the cull params tail. Integers up to
- * 2^24 are exact in f32, so the shader reads the flags back with integer ops, at 1/24th of the
- * upload of a float per instance.
+ * Priority bands of GPU root admission. Instances are ranked by projected size - the quantity
+ * the LOD test uses - into this many log-spaced bands, and admitted band by band, largest on
+ * screen first, so a budget that cannot take every visible root keeps the ones that matter.
  *
  * @ignore
  */
-export const MESHLET_ADMISSION_BITS = 24;
+export const MESHLET_ROOT_BANDS = 16;
 
 /**
- * Vec4 rows the admission flags of `instanceCount` instances occupy in the cull params tail.
+ * Projected size (pixels) of the first root admission band; bands step down by octaves from it.
  *
- * @param {number} instanceCount - Instances in the world.
- * @returns {number} Row count.
  * @ignore
  */
-export const admissionVec4s = instanceCount => Math.ceil(Math.ceil(instanceCount / MESHLET_ADMISSION_BITS) / 4);
+export const MESHLET_ROOT_BAND_MAX_PIXELS = 4096;
+
+/**
+ * Octaves the root admission bands span below MESHLET_ROOT_BAND_MAX_PIXELS (to 0.5 px).
+ *
+ * @ignore
+ */
+export const MESHLET_ROOT_BAND_OCTAVES = 13;
 
 /** cullFlags bit 0: suppress the texel-rate feedback marks (orthographic / shadow views). @type {number} */
 export const CULL_FLAG_NO_TEXEL_RATE = 1 << 0;
@@ -221,7 +231,7 @@ export const MESHLET_BUCKET_MASKED = 2;
  *
  * @type {number}
  */
-export const MESHLET_COUNTER_U32S = 16;
+export const MESHLET_COUNTER_U32S = 24;
 
 /**
  * Word offsets into the counter buffer; the three per-bucket blocks are indexed as
@@ -237,7 +247,13 @@ export const MESHLET_COUNTER = {
     DEMAND_BASE: 8,     // unclamped demand per bucket - survives the phase-2 reset
     RENDERED: 11,
     RECORD_DEMAND: 12,
-    SELECTED: 13       // compact cut count, retained across both occlusion phases
+    SELECTED: 13,      // compact cut count, retained across both occlusion phases
+    ROOT_CANDIDATES: 14,          // instances the root classify appended for admission
+    ROOT_ADMITTED_BASE: 15,       // admitted root indices per bucket
+    ROOT_REJECTED_BASE: 18,       // root indices per bucket that did not fit
+    ROOT_REJECTED_INSTANCES: 21,  // instances whose roots did not fit
+    ROOT_UNREADY_INSTANCES: 22,   // instances whose root pages were not resident
+    ROOT_SUBPIXEL: 23             // instances below the admission size threshold
 };
 
 /** @type {number} - material record word 11, bit 0. */
@@ -524,14 +540,29 @@ export const MESHLET_LEVEL_BIAS = 256;
 export const claimLevelBase = (totalPairs, instanceCount) => Math.max(Math.ceil((totalPairs * 2 + instanceCount) / 32), 4);
 
 /**
- * Words in a view's claim buffer: the claim bits, then one finest-cut-level word per instance.
+ * Word offset of the persistent per-instance admission bits in a view's claim buffer: two
+ * regions of one bit per instance, after the finest-cut-level words, that swap roles each frame.
+ * The root admission marks this frame's admissions in one and reads the previous frame's from
+ * the other (hysteresis); the per-frame clear leaves the previous region intact.
+ *
+ * @param {number} totalPairs - Instance-meshlet pairs in the world.
+ * @param {number} instanceCount - Instances in the world.
+ * @returns {number} Word offset of the first region; the second follows ceil(instanceCount / 32) words later.
+ * @ignore
+ */
+export const claimPersistBase = (totalPairs, instanceCount) => claimLevelBase(totalPairs, instanceCount) + instanceCount;
+
+/**
+ * Words in a view's claim buffer: the claim bits, one finest-cut-level word per instance, then
+ * the two persistent admission bit regions.
  *
  * @param {number} totalPairs - Instance-meshlet pairs in the world.
  * @param {number} instanceCount - Instances in the world.
  * @returns {number} Word count.
  * @ignore
  */
-export const claimWordCount = (totalPairs, instanceCount) => claimLevelBase(totalPairs, instanceCount) + instanceCount;
+export const claimWordCount = (totalPairs, instanceCount) => claimPersistBase(totalPairs, instanceCount) + 2 * Math.ceil(instanceCount / 32);
+
 
 /**
  * Width of the two-dimensional indirect dispatch grid. Work-item counts above it wrap into the
