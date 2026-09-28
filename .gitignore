@@ -19,6 +19,7 @@ examples/assets/meshlets/zorah-tiles/
 examples/assets/meshlets/magoffice_streamed.glb
 examples/assets/meshlets/magoffice_streamed_meshlets/
 examples/assets/meshlets/magoffice_streamed_textures/
+examples/assets/meshlets/caldera/
 node_modules
 npm-debug.log
 types
