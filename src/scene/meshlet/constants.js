@@ -125,6 +125,24 @@ export const CULL_PARAMS = {
 /** vec4 rows in the cull parameter buffer. @type {number} */
 export const CULL_PARAMS_VEC4S = 16;
 
+/**
+ * Root-selection admission flags packed into each float of the cull params tail. Integers up to
+ * 2^24 are exact in f32, so the shader reads the flags back with integer ops, at 1/24th of the
+ * upload of a float per instance.
+ *
+ * @ignore
+ */
+export const MESHLET_ADMISSION_BITS = 24;
+
+/**
+ * Vec4 rows the admission flags of `instanceCount` instances occupy in the cull params tail.
+ *
+ * @param {number} instanceCount - Instances in the world.
+ * @returns {number} Row count.
+ * @ignore
+ */
+export const admissionVec4s = instanceCount => Math.ceil(Math.ceil(instanceCount / MESHLET_ADMISSION_BITS) / 4);
+
 /** cullFlags bit 0: suppress the texel-rate feedback marks (orthographic / shadow views). @type {number} */
 export const CULL_FLAG_NO_TEXEL_RATE = 1 << 0;
 
@@ -466,13 +484,54 @@ export const PAGE_TABLE = {
 };
 
 /**
- * Meshlets per cull work item. One workgroup of the meshlet-cull compute shader processes one
- * slice of this many consecutive meshlets of one instance; the instance cull emits
- * ceil(meshletCount / MESHLET_CULL_SLICE) work items per surviving instance.
+ * Lanes per workgroup of the compaction and meshlet-cull compute shaders. Compaction packs
+ * MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE work items into one workgroup; the meshlet cull
+ * processes this many consecutive entries of the compacted cut.
  *
  * @ignore
  */
 export const MESHLET_CULL_SLICE = 64;
+
+/**
+ * Meshlets per compaction work item. The instance cull emits ceil(remaining / this) items per
+ * surviving instance, and one compaction workgroup of MESHLET_CULL_SLICE lanes serves
+ * MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE items. A distant instance keeps only a few coarse
+ * meshlets after its finer levels are skipped, so a whole 64-lane workgroup per instance would
+ * leave most lanes idle; with ~1M visible instances that floor dominated the pass.
+ *
+ * @ignore
+ */
+export const MESHLET_COMPACT_SLICE = 8;
+
+/**
+ * Bias of the per-instance finest-cut-level words after the claim bits: the cut stores
+ * `MESHLET_LEVEL_BIAS - level` with atomicMax into a word cleared to 0 each frame, so 0 means
+ * "nothing refined" and a larger value a finer level.
+ *
+ * @ignore
+ */
+export const MESHLET_LEVEL_BIAS = 256;
+
+/**
+ * Word offset of the per-instance finest-cut-level words in a view's claim buffer: after the
+ * pair bits, the admission bits and the off-frustum refinement bits.
+ *
+ * @param {number} totalPairs - Instance-meshlet pairs in the world.
+ * @param {number} instanceCount - Instances in the world.
+ * @returns {number} Word offset.
+ * @ignore
+ */
+export const claimLevelBase = (totalPairs, instanceCount) => Math.max(Math.ceil((totalPairs * 2 + instanceCount) / 32), 4);
+
+/**
+ * Words in a view's claim buffer: the claim bits, then one finest-cut-level word per instance.
+ *
+ * @param {number} totalPairs - Instance-meshlet pairs in the world.
+ * @param {number} instanceCount - Instances in the world.
+ * @returns {number} Word count.
+ * @ignore
+ */
+export const claimWordCount = (totalPairs, instanceCount) => claimLevelBase(totalPairs, instanceCount) + instanceCount;
 
 /**
  * Width of the two-dimensional indirect dispatch grid. Work-item counts above it wrap into the

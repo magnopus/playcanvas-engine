@@ -4,7 +4,7 @@ import { expect } from 'chai';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import {
     INDIRECT_DRAW_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED,
-    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S,
+    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COMPACT_SLICE, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S,
     MESHLET_DISPATCH_WIDTH, OBJECT_DATA, OBJECT_DATA_U32S, PAGE_HEADER, RECORD_U32S, TEX_RESIDENCY_U32S,
     WORK_ITEM_U32S
 } from '../../../src/scene/meshlet/constants.js';
@@ -41,8 +41,12 @@ describe('meshlet cull shaders', function () {
 
     it('size the cull workgroup to the work-item slice and round the fan-out up', function () {
         expect(meshletCullWGSL).to.include(`@workgroup_size(${MESHLET_CULL_SLICE})`);
-        expect(instanceCullWGSL).to.include(`(meshletCount + ${MESHLET_CULL_SLICE - 1}u) / ${MESHLET_CULL_SLICE}u`);
-        expect(instanceCullWGSL).to.include(`workItems[item] = MeshletWorkItem(instance, slice * ${MESHLET_CULL_SLICE}u);`);
+        // compaction items start at the cut's finest level, not at meshlet 0, and pack
+        // MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE to a workgroup
+        expect(instanceCullWGSL).to.include(`(meshletCount - start + ${MESHLET_COMPACT_SLICE - 1}u) / ${MESHLET_COMPACT_SLICE}u`);
+        expect(instanceCullWGSL).to.include(`workItems[item] = MeshletWorkItem(instance, start + slice * ${MESHLET_COMPACT_SLICE}u);`);
+        expect(compactMeshletsWGSL).to.include(`* ${MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE}u + lane.x / ${MESHLET_COMPACT_SLICE}u`);
+        expect(compactMeshletsWGSL).to.include(`sliceStart + lane.x % ${MESHLET_COMPACT_SLICE}u`);
     });
 
     it('dispatch the cull and index-write passes over a 2D grid to dodge the per-dimension limit', function () {

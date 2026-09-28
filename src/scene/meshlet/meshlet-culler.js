@@ -1,6 +1,6 @@
 import { Compute } from '../../platform/graphics/compute.js';
 import {
-    CULL_FLAG_HZB_LINEAR, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_INSTANCE_CULL_WORKGROUP
+    CULL_FLAG_HZB_LINEAR, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_ADMISSION_BITS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_COMPACT_SLICE, MESHLET_INSTANCE_CULL_WORKGROUP, admissionVec4s, claimLevelBase
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
 import { Vec3 } from '../../core/math/vec3.js';
@@ -48,6 +48,9 @@ class MeshletCuller {
 
     /** @type {Float32Array} - the per-view parameter rows (CULL_PARAMS.*), uploaded each frame. */
     cullParams = new Float32Array(CULL_PARAMS_VEC4S * 4);
+
+    /** @type {number} - root selection `wantedVersion` last uploaded into the params tail. */
+    _wantedVersion = -1;
 
     dagPixelThreshold = 1;
 
@@ -105,7 +108,7 @@ class MeshletCuller {
         this.world = world;
         this.view = view;
         if (view.rootSelection) {
-            this.cullParams = new Float32Array((CULL_PARAMS_VEC4S + Math.ceil(world.instanceCount / 4)) * 4);
+            this.cullParams = new Float32Array((CULL_PARAMS_VEC4S + admissionVec4s(world.instanceCount)) * 4);
         }
 
         this.shaders = cullShaders ?? new MeshletCullShaders(device);
@@ -121,6 +124,7 @@ class MeshletCuller {
             compute.setParameter('rootStage', level.root ? 1 : 0);
             compute.setParameter('totalPairs', world.totalPairs);
             compute.setParameter('freeBase', world.totalPairs + world.instanceCount);
+            compute.setParameter('levelBase', claimLevelBase(world.totalPairs, world.instanceCount));
             compute.setParameter('recordCapacity', view.recordCapacity);
             bindCapacities(compute, view);
             compute.setParameter('cutGroups', world.cut.groups);
@@ -158,6 +162,8 @@ class MeshletCuller {
         instanceCull.setParameter('instanceCount', world.instanceCount);
         instanceCull.setParameter('totalPairs', world.totalPairs);
         instanceCull.setParameter('admittedBits', view.claimBitsBuffer);
+        instanceCull.setParameter('levelBase', claimLevelBase(world.totalPairs, world.instanceCount));
+        instanceCull.setParameter('levelStarts', world.cut.levelStarts);
         instanceCull.setParameter('workItemCapacity', world.workItemCapacity);
         instanceCull.setParameter('objectData', world.objectDataBuffer);
         instanceCull.setParameter('cullParams', view.cullParamsBuffer);
@@ -180,7 +186,8 @@ class MeshletCuller {
         this.selectedArgs.setParameter('groupSize', MESHLET_CULL_SLICE);
         this.selectedArgs.setParameter('counters', view.countersBuffer);
         this.dispatchArgs.setParameter('counterIndex', MESHLET_COUNTER.WORK_ITEMS);
-        this.dispatchArgs.setParameter('groupSize', 1);
+        // compaction packs several work items into one workgroup
+        this.dispatchArgs.setParameter('groupSize', MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE);
         this.dispatchArgs.setParameter('workItemCapacity', world.workItemCapacity);
         this.dispatchArgs.setParameter('counters', view.countersBuffer);
 
@@ -315,7 +322,6 @@ class MeshletCuller {
                 view.indexCapacity[b] = capacity;
             }
             if (changed) this.bindIndexState(view);
-            params.set(view.rootSelection.wanted, CULL_PARAMS_VEC4S * 4);
         }
         const row = index => index * 4;
         params.set(frustumPlanes, row(CULL_PARAMS.PLANES));
@@ -341,7 +347,23 @@ class MeshletCuller {
         // manager clears it in-encoder after its readback copy, or the copy would see zeros.
         // The counters buffer clears in-encoder for the same reason: the director's index-demand
         // readback copy is encoded earlier this frame and must see last frame's values.
-        view.cullParamsBuffer.write(0, params);
+        // the frame rows every frame; the packed admission tail only when the root selection
+        // admitted differently (moving the camera near the ground over ~1M instances)
+        const head = CULL_PARAMS_VEC4S * 4;
+        view.cullParamsBuffer.write(0, params, 0, head);
+        const selection = view.rootSelection;
+        if (selection && selection.wantedVersion !== this._wantedVersion) {
+            this._wantedVersion = selection.wantedVersion;
+            const wanted = selection.wanted;
+            params.fill(0, head);
+            for (let i = 0; i < wanted.length; i++) {
+                if (wanted[i]) {
+                    const word = (i / MESHLET_ADMISSION_BITS) | 0;
+                    params[head + word] += 1 << (i - word * MESHLET_ADMISSION_BITS);
+                }
+            }
+            view.cullParamsBuffer.write(head * 4, params, head, params.length - head);
+        }
         view.cutBudgetBuffer.write(0, view.cutBudgetInitial);
         const encoder = device.getCommandEncoder();
         encoder.clearBuffer(view.countersBuffer.impl.buffer, 0, view.countersBuffer.byteSize);

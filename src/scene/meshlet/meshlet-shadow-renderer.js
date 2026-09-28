@@ -7,7 +7,7 @@ import { Frustum } from '../../core/shape/frustum.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { math } from '../../core/math/math.js';
 import { Vec3 } from '../../core/math/vec3.js';
-import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, WORK_ITEM_U32S } from './constants.js';
+import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, WORK_ITEM_U32S, claimWordCount } from './constants.js';
 import { MeshletShadowView } from './meshlet-shadow-view.js';
 
 /**
@@ -460,7 +460,7 @@ class MeshletShadowRenderer {
         // sized exactly as a view sizes its own (one bit per instance-meshlet pair, 32 to a
         // word; one work item per WORK_ITEM_U32S words)
         if (this.shareClaimBits && !this._claimBits) {
-            const words = Math.max(Math.ceil((director.world.totalPairs * 2 + director.world.instanceCount) / 32), 4);
+            const words = claimWordCount(director.world.totalPairs, director.world.instanceCount);
             this._claimBits = new StorageBuffer(this.device, words * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         }
         if (!this._workItems) {

@@ -164,7 +164,7 @@ describe('MeshletShadowRenderer', function () {
         const claim = entry.views[0].claimBitsBuffer;
         expect(entry.views.every(v => v.claimBitsBuffer === claim && v.workItemsBuffer === renderer._workItems)).to.equal(true);
         // pair bits, admission bits, then one off-frustum refinement flag per pair
-        expect(claim.byteSize).to.equal(Math.ceil((PAIRS * 2 + 7) / 32) * 4);
+        expect(claim.byteSize).to.equal((Math.ceil((PAIRS * 2 + 7) / 32) + 7) * 4);
         expect(renderer._workItems.byteSize).to.equal(50 * WORK_ITEM_U32S * 4);
         expect(renderer.views).to.have.lengthOf(3);
     });

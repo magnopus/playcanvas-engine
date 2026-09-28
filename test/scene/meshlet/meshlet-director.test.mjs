@@ -227,21 +227,31 @@ describe('MeshletDirector', function () {
         director.world.indexBudgetTotal = 1000;
         expect(director.world.indexCeiling).to.equal(1000);
 
+        // pressure measures the refinement above each view's admitted roots (the coarsest the cut can go)
+        const rootsA = a.rootSelection.indices.reduce((x, y) => x + y, 0);
         a.lastDemand = { indices: [900, 0, 0], records: 1 };
         b.lastDemand = { indices: [100, 0, 0], records: 1 };
-        expect(director._distributeIndexBudget()).to.be.closeTo(900 / 875, 1e-9);
+        expect(director._distributeIndexBudget()).to.be.closeTo((900 - rootsA) / (875 - rootsA), 1e-9);
         expect(a.indexShare).to.equal(875);
         expect(b.indexShare, 'a floor for the active working set').to.equal(125);
         expect(a.indexShare + b.indexShare).to.equal(1000);
 
         a.lastDemand = { indices: [3000, 0, 0], records: 1 };
         b.lastDemand = null;
-        expect(director._distributeIndexBudget(), 'pressure includes reserved coarse coverage').to.be.closeTo(3000 / 875, 1e-9);
+        expect(director._distributeIndexBudget(), 'demand over the share is starved').to.be.closeTo((3000 - rootsA) / (875 - rootsA), 1e-9);
         expect(b.indexShare, 'an empty view keeps capacity for renewed demand').to.equal(125);
 
         director.world.indexBudgetTotal = 300;
         director._distributeIndexBudget();
         expect(a.indexShare + b.indexShare).to.be.at.most(300);
+
+        // a root floor filling most of the share, with nothing refined above it, is not starvation:
+        // coarsening cannot shrink it (this pinned the controller at maxScale on wide views)
+        director.world.indexBudgetTotal = 1000;
+        a.rootSelection.indices = [800, 0, 0];
+        a.lastDemand = { indices: [800, 0, 0], records: 1 };
+        director._distributeIndexBudget();
+        expect(a.indexPressure()).to.equal(0);
     });
 
     it('reports an infeasible working set without silently exceeding the budget', function () {

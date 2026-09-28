@@ -1,7 +1,7 @@
 import {
-    CULL_PARAMS, CULL_PARAMS_VEC4S, CULL_FLAG_SHADOW_VIEW, MESHLET_COUNTER, MESHLET_FLAG_ALPHA_MASKED,
+    CULL_PARAMS, CULL_PARAMS_VEC4S, CULL_FLAG_SHADOW_VIEW, MESHLET_ADMISSION_BITS, MESHLET_COUNTER, MESHLET_FLAG_ALPHA_MASKED,
     MESHLET_FLAG_TWO_SIDED, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_NO_SHADOW,
-    PAGE_NOT_RESIDENT, PAGE_REQUEST
+    PAGE_NOT_RESIDENT, PAGE_REQUEST, MESHLET_LEVEL_BIAS
 } from '../constants.js';
 import { meshletStructsWGSL, meshletDataWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
@@ -14,6 +14,8 @@ export const meshletCutWGSL = /* wgsl */ `
     uniform totalPairs: u32;
     // bit base of the off-frustum refinement flags, after the pair and admission bits
     uniform freeBase: u32;
+    // word base of the per-instance finest-cut-level words, after every claim bit
+    uniform levelBase: u32;
     uniform recordCapacity: u32;
     uniform indexCapacity0: u32;
     uniform indexCapacity1: u32;
@@ -61,8 +63,11 @@ export const meshletCutWGSL = /* wgsl */ `
         let pageStart = cutGroups[offset + 2u];
         let pageCount = cutGroups[offset + 3u];
         if (uniform.rootStage != 0u) {
-            if (arrayLength(&cullParams) > ${CULL_PARAMS_VEC4S}u &&
-                cullParams[${CULL_PARAMS_VEC4S}u + instance / 4u][instance % 4u] == 0.0) { return; }
+            if (arrayLength(&cullParams) > ${CULL_PARAMS_VEC4S}u) {
+                let word = instance / ${MESHLET_ADMISSION_BITS}u;
+                let flags = u32(cullParams[${CULL_PARAMS_VEC4S}u + word / 4u][word % 4u]);
+                if ((flags & (1u << (instance % ${MESHLET_ADMISSION_BITS}u))) == 0u) { return; }
+            }
             let shadow = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_SHADOW_VIEW}u) != 0u;
             if ((object.flags & ${OBJECT_FLAG_HIDDEN}u) != 0u ||
                 (shadow && (object.flags & ${OBJECT_FLAG_NO_SHADOW}u) != 0u)) { return; }
@@ -158,5 +163,9 @@ export const meshletCutWGSL = /* wgsl */ `
             return;
         }
         markBit(object.firstPairBit + first - object.firstMeshlet);
+        // this group's children (one level finer) are now selectable: compaction starts the
+        // instance no finer than the finest such level (see instanceCullWGSL)
+        let childLevel = meshletData[first].lodLevel - 1u;
+        atomicMax(&claimBits[uniform.levelBase + instance], ${MESHLET_LEVEL_BIAS}u - childLevel);
     }
 `;

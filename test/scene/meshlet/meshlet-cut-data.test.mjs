@@ -42,6 +42,32 @@ describe('meshlet replacement groups', function () {
         }
     });
 
+    it('tables where each LOD level starts and the lowest root level, for compaction to skip finer levels', function () {
+        const device = {
+            buffers: new Set(),
+            _vram: { sb: 0 },
+            createBufferImpl: () => ({ allocate() {}, destroy() {}, write() {} })
+        };
+        // fixture: level 0 = meshlets 0-3, level 1 = 4-7, level 2 = 8-9 (the roots)
+        let { meshlets, objects } = createCutFixture();
+        let cut = new MeshletCutData(device, meshlets, objects);
+        try {
+            expect(cut.levelStarts.byteSize).to.equal(10 * 4);
+            expect(Array.from(cut.levelStartsCpu.subarray(0, 3)), '[lowest root level, level 1 start, level 2 start]').to.deep.equal([2, 4, 8]);
+        } finally {
+            cut.destroy();
+        }
+        // a terminal group leaves a root at level 1: compaction must never start above it
+        ({ meshlets, objects } = createCutFixture());
+        meshlets[5 * MESHLET_DATA_U32S + M.PARENT] = MESHLET_NO_PARENT;
+        cut = new MeshletCutData(device, meshlets, objects);
+        try {
+            expect(cut.levelStartsCpu[0]).to.equal(1);
+        } finally {
+            cut.destroy();
+        }
+    });
+
     it('stores the coarse cost each parent contributes to a replacement', function () {
         const { meshlets, objects } = createCutFixture();
         const device = {

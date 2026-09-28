@@ -11,11 +11,11 @@ import { ShaderChunks } from '../shader-lib/shader-chunks.js';
 import { OBJECT_FLAG_NO_SHADOW,
     MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
-    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
+    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COMPACT_SLICE, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
     MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, MESHLET_NO_PARENT, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
     RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S,
-    MESHLET_COLOR_MODE } from './constants.js';
+    MESHLET_COLOR_MODE, claimWordCount } from './constants.js';
 import { createMeshletLitMaterial } from './meshlet-lit-material.js';
 import { createMeshletMaterial } from './meshlet-material.js';
 import { buildMeshletLitChunks } from './shaders/meshlet-lit-chunks-wgsl.js';
@@ -509,7 +509,7 @@ class MeshletWorld {
         }
 
         const pairWords = Math.max(Math.ceil((pairs + totalInstances) / 32), 4);
-        const claimWords = Math.max(Math.ceil((pairs * 2 + totalInstances) / 32), 4);
+        const claimWords = claimWordCount(pairs, totalInstances);
         // Group headers and membership lists (upper bound), packed selection links, and one
         // task per (instance, group). Instances share every per-meshlet table; charging the
         // tasks per (instance, meshlet) reserved ~8x their size - 535 MB of a 768 MB budget
@@ -672,7 +672,7 @@ class MeshletWorld {
                 const prim = resource.primitives[inst.primIndex];
                 const n = prim.meshletCount;
                 budgetPairs += n;
-                budgetWorkItems += Math.ceil(n / MESHLET_CULL_SLICE);
+                budgetWorkItems += Math.ceil(n / MESHLET_COMPACT_SLICE);
                 budgetCutTasks += groupCount(prim) + 1;
             }
         }
@@ -1006,7 +1006,7 @@ class MeshletWorld {
                 instanceBase++;
 
                 // capacities: worst case is every meshlet of the instance drawn
-                this.workItemCapacity += Math.ceil(prim.meshletCount / MESHLET_CULL_SLICE);
+                this.workItemCapacity += Math.ceil(prim.meshletCount / MESHLET_COMPACT_SLICE);
                 this.recordCapacity += prim.meshletCount;
                 const primCorners = primBucketCorners[inst.primIndex];
                 for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {

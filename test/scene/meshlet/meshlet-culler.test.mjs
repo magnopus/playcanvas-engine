@@ -3,7 +3,7 @@ import { expect } from 'chai';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import {
-    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER_U32S, MESHLET_INSTANCE_CULL_WORKGROUP
+    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_ADMISSION_BITS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER_U32S, MESHLET_INSTANCE_CULL_WORKGROUP
 } from '../../../src/scene/meshlet/constants.js';
 import { FramePassMeshletCompute } from '../../../src/scene/meshlet/frame-pass-meshlet-compute.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
@@ -38,8 +38,8 @@ const storage = (byteSize = 16) => ({
     impl: { buffer: {} },
     byteSize,
     writes: [],
-    write(offset, data) {
-        this.writes.push({ offset, data: data.slice() });
+    write(offset, data, dataOffset = 0, size = data.length - dataOffset) {
+        this.writes.push({ offset, data: data.slice(), dataOffset, size });
     }
 });
 
@@ -119,6 +119,36 @@ describe('MeshletCuller', function () {
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             expect(culler.finalizeArgsPhase2.getParameter(`indexCapacity${b}`)).to.equal(view.indexCapacity[b]);
         }
+        culler.destroy();
+    });
+
+    it('packs root-selection admissions into the params tail and uploads it only when they change', function () {
+        const view = makeView();
+        const wanted = new Float32Array(130);
+        for (const i of [0, 5, 23, 24, 100, 129]) wanted[i] = 1;
+        view.rootSelection = { wanted, wantedVersion: 1, capacity: [10, 20, 30], update() {} };
+        const culler = new MeshletCuller(device, makeWorld(), view, shaders);
+        const head = CULL_PARAMS_VEC4S * 4;
+        const tailWrites = () => view.cullParamsBuffer.writes.filter(w => w.offset === head * 4);
+
+        culler.beginFrame(planes, camera, 640, viewProj, null);
+        expect(view.cullParamsBuffer.writes[0]).to.include({ offset: 0, dataOffset: 0, size: head });
+        expect(tailWrites()).to.have.length(1);
+        const tail = tailWrites()[0].data.subarray(head);
+        for (let i = 0; i < 130; i++) {
+            const word = Math.floor(i / MESHLET_ADMISSION_BITS);
+            const set = (tail[word] & (1 << (i % MESHLET_ADMISSION_BITS))) !== 0;
+            expect(set, `instance ${i}`).to.equal(wanted[i] === 1);
+        }
+
+        culler.beginFrame(planes, camera, 640, viewProj, null);
+        expect(tailWrites(), 'same version, no tail upload').to.have.length(1);
+
+        wanted[5] = 0;
+        view.rootSelection.wantedVersion++;
+        culler.beginFrame(planes, camera, 640, viewProj, null);
+        expect(tailWrites()).to.have.length(2);
+        expect(tailWrites()[1].data[head] & (1 << 5)).to.equal(0);
         culler.destroy();
     });
 

@@ -24,10 +24,10 @@
 
 import { OBJECT_FLAG_NO_SHADOW, CULL_FLAG_SHADOW_VIEW,
     CULL_FLAG_HZB_LINEAR, CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
-    MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE,
+    MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_COMPACT_SLICE,
     MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP,
     MESHLET_INSTANCE_CULL_WORKGROUP, MESHLET_NO_PARENT, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HIDDEN,
-    PAGE_REQUEST, TEXEL_RATE_PER_MIP } from '../constants.js';
+    PAGE_REQUEST, TEXEL_RATE_PER_MIP, MESHLET_LEVEL_BIAS } from '../constants.js';
 import {
     meshletDataWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL,
     meshletWorkItemsWGSL
@@ -43,12 +43,16 @@ export const instanceCullWGSL = /* wgsl */ `
     uniform instanceCount : u32;
     uniform totalPairs : u32;
     uniform workItemCapacity : u32;
+    // word base of the per-instance finest-cut-level words in admittedBits (the claim buffer)
+    uniform levelBase : u32;
 
     ${meshletObjectDataWGSL}
     ${meshletWorkItemsWGSL('read_write')}
 
     var<storage, read> cullParams : array<vec4f>;
     var<storage, read> admittedBits : array<u32>;
+    // per primitive at its first meshlet: [0] lowest root level, [level] start of that level
+    var<storage, read> levelStarts : array<u32>;
     var<storage, read_write> counters : array<atomic<u32>>;
 
     @compute @workgroup_size(${MESHLET_INSTANCE_CULL_WORKGROUP})
@@ -82,13 +86,21 @@ export const instanceCullWGSL = /* wgsl */ `
             }
         }
 
+        // Selected meshlets lie no finer than the cut's finest refined level (the cut records it
+        // per instance) or the DAG's lowest root level. Meshlets are level-major, finest first,
+        // so skip every finer level rather than scanning the whole DAG of a distant instance.
         let meshletCount = objectData[instance].meshletCount;
-        let sliceCount = (meshletCount + ${MESHLET_CULL_SLICE - 1}u) / ${MESHLET_CULL_SLICE}u;
+        let firstMeshlet = objectData[instance].firstMeshlet;
+        var level = levelStarts[firstMeshlet];
+        let finest = admittedBits[uniform.levelBase + instance];
+        if (finest != 0u) { level = min(level, ${MESHLET_LEVEL_BIAS}u - finest); }
+        let start = select(levelStarts[firstMeshlet + level], 0u, level == 0u);
+        let sliceCount = (meshletCount - start + ${MESHLET_COMPACT_SLICE - 1}u) / ${MESHLET_COMPACT_SLICE}u;
         let firstItem = atomicAdd(&counters[${MESHLET_COUNTER.WORK_ITEMS}u], sliceCount);
         for (var slice = 0u; slice < sliceCount; slice++) {
             let item = firstItem + slice;
             if (item < uniform.workItemCapacity) {
-                workItems[item] = MeshletWorkItem(instance, slice * ${MESHLET_CULL_SLICE}u);
+                workItems[item] = MeshletWorkItem(instance, start + slice * ${MESHLET_COMPACT_SLICE}u);
             }
         }
     }
@@ -134,16 +146,17 @@ export const compactMeshletsWGSL = /* wgsl */ `
         return meshletData[meshlet].triangleCount != 0u;
     }
 
+    // one workgroup serves MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE work items, one lane per meshlet
     @compute @workgroup_size(${MESHLET_CULL_SLICE})
     fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
-        let item = group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x;
+        let item = (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * ${MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE}u + lane.x / ${MESHLET_COMPACT_SLICE}u;
         // All lanes reach the barriers, including unused lanes in the final work item.
         var instance = 0u;
         var localIndex = 0u;
         var selected = false;
         if (item < min(atomicLoad(&counters[${MESHLET_COUNTER.WORK_ITEMS}u]), uniform.workItemCapacity)) {
             instance = workItems[item].instance;
-            localIndex = workItems[item].sliceStart + lane.x;
+            localIndex = workItems[item].sliceStart + lane.x % ${MESHLET_COMPACT_SLICE}u;
             selected = isSelected(instance, localIndex);
         }
         var rank = 0u;

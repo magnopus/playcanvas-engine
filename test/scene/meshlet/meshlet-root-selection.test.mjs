@@ -111,6 +111,69 @@ describe('MeshletRootSelection', function () {
         selection.destroy();
     });
 
+    it('reuses a pass while the view stays within tolerance, admitting what the tolerance could bring into view', function () {
+        const { world, planes } = fixture();
+        const f = world.objectDataCpuF;
+        // just outside the exact frustum (x <= 10 + r), inside the widened one
+        f[2 * OBJECT_DATA_U32S + 12] = 11.5;
+        // room for every root, so only the frustum decides
+        world.poolSlots = 4;
+        const selection = new MeshletRootSelection(world);
+        let passes = 0;
+        const select = selection._select;
+        selection._select = function (...args) {
+            passes++;
+            return select.apply(this, args);
+        };
+        selection.update(planes, Vec3.ZERO, [12, 0, 0], 4, false);
+        selection.update(planes, Vec3.ZERO, [12, 0, 0], 4, false);
+        expect(Array.from(selection.wanted)).to.deep.equal([1, 1, 1, 0]);
+        const settled = passes;
+
+        // a small move reuses the pass
+        selection.update(planes, new Vec3(0.5, 0, 0), [12, 0, 0], 4, false);
+        expect(passes).to.equal(settled);
+
+        // beyond the move tolerance, or a changed clip distance, reruns it
+        selection.update(planes, new Vec3(6, 0, 0), [12, 0, 0], 4, false);
+        expect(passes).to.equal(settled + 1);
+        selection.update(planes, new Vec3(6, 0, 0), [12, 0, 0], 4, false);
+        const moved = passes;
+        const clipped = planes.slice();
+        clipped[3] = 0;
+        selection.update(clipped, new Vec3(6, 0, 0), [12, 0, 0], 4, false);
+        expect(passes).to.equal(moved + 1);
+        selection.destroy();
+    });
+
+    it('does not rerun when fed back the capacities it partitioned', function () {
+        const { world, planes } = fixture();
+        const selection = new MeshletRootSelection(world);
+        let passes = 0;
+        const select = selection._select;
+        selection._select = function (...args) {
+            passes++;
+            return select.apply(this, args);
+        };
+        // as the culler does: each update's capacities are the previous update's partition
+        let capacities = [9, 3, 0];
+        // long enough for the first, unsettled result to be rerun and settle
+        for (let frame = 0; frame < 10; frame++) {
+            selection.update(planes, Vec3.ZERO, capacities, 2, false);
+            capacities = selection.capacity.slice();
+        }
+        const settled = passes;
+        for (let frame = 0; frame < 4; frame++) {
+            selection.update(planes, Vec3.ZERO, capacities, 2, false);
+            capacities = selection.capacity.slice();
+        }
+        expect(passes).to.equal(settled);
+        // an external change (the draw buffers grew) still reruns
+        selection.update(planes, Vec3.ZERO, [capacities[0] + 6, capacities[1], capacities[2]], 2, false);
+        expect(passes).to.equal(settled + 1);
+        selection.destroy();
+    });
+
     it('reruns when another view changes its pages', function () {
         const { world, planes } = fixture();
         world.poolSlots = 1;

@@ -167,7 +167,7 @@ export const meshletRecordsWGSL = access => /* wgsl */ `
 `;
 
 /**
- * `workItems : array<MeshletWorkItem>` - one per slice of MESHLET_CULL_SLICE meshlets of a
+ * `workItems : array<MeshletWorkItem>` - one per slice of MESHLET_COMPACT_SLICE meshlets of a
  * surviving instance.
  *
  * @param {string} access - 'read' or 'read_write'.

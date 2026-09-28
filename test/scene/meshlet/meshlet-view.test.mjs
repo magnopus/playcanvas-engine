@@ -116,7 +116,8 @@ describe('MeshletView', function () {
         expect(view.recordsBuffer.byteSize).to.equal(100 * RECORD_U32S * 4);
         expect(view.selectedMeshletsBuffer.byteSize).to.equal(100 * 8);
         // pair bits, admission bits, then one off-frustum refinement flag per pair
-        expect(view.claimBitsBuffer.byteSize).to.equal(Math.ceil((PAIRS * 2 + 7) / 32) * 4);
+        // claim bits, then one finest-cut-level word per instance
+        expect(view.claimBitsBuffer.byteSize).to.equal((Math.ceil((PAIRS * 2 + 7) / 32) + 7) * 4);
         expect(view.visBitsBuffer.byteSize).to.equal(pairWords * 4);
         expect(view.indexCapacity).to.deep.equal([300, 60, 30]);
         expect(view.indexBuffer.numIndices).to.equal(390);

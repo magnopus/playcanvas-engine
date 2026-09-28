@@ -82,6 +82,11 @@ class MeshletCutData {
         this.rootIndices = [0, 0, 0];
         this.rootRecords = 0;
         this.instanceRoots = [];
+        // Per primitive, in its meshlet index range: [first] = the lowest LOD level holding a root
+        // (terminal groups leave roots below the top), [first + level] = where that level starts
+        // (level-major order). Compaction starts each instance at the finer of its cut's finest
+        // level and that root level, instead of scanning every LOD.
+        const levelStarts = new Uint32Array(meshlets.length / MESHLET_DATA_U32S);
         for (let instance = 0; instance < objects.length / OBJECT_DATA_U32S; instance++) {
             const first = objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET];
             const count = objects[instance * OBJECT_DATA_U32S + O.MESHLET_COUNT];
@@ -100,6 +105,13 @@ class MeshletCutData {
                     }
                 }
                 const { groups, roots } = buildMeshletGroups(source);
+                let minRootLevel = Infinity;
+                for (const root of roots) minRootLevel = Math.min(minRootLevel, source[root * MESHLET_DATA_U32S + M.LOD_LEVEL]);
+                for (let m = count - 1; m > 0; m--) {
+                    const level = source[m * MESHLET_DATA_U32S + M.LOD_LEVEL];
+                    if (level !== source[(m - 1) * MESHLET_DATA_U32S + M.LOD_LEVEL]) levelStarts[first + level] = m;
+                }
+                levelStarts[first] = Number.isFinite(minRootLevel) ? minRootLevel : 0;
                 for (const root of roots) rootPages.add(source[root * MESHLET_DATA_U32S + M.PAGE]);
                 for (let m = 0; m < count; m++) source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP] = MESHLET_NO_PARENT;
                 const tasks = [];
@@ -185,6 +197,9 @@ class MeshletCutData {
         }
         this.selectionTopology = new StorageBuffer(device, Math.max(topology.byteLength, 16), BUFFERUSAGE_COPY_DST);
         if (topology.length) this.selectionTopology.write(0, topology);
+        this.levelStarts = new StorageBuffer(device, Math.max(levelStarts.byteLength, 16), BUFFERUSAGE_COPY_DST);
+        if (levelStarts.length) this.levelStarts.write(0, levelStarts);
+        this.levelStartsCpu = levelStarts;
         this.rootPages = Array.from(rootPages).sort((a, b) => a - b);
     }
 
@@ -192,6 +207,7 @@ class MeshletCutData {
         this.groups.destroy();
         this.tasks.destroy();
         this.selectionTopology.destroy();
+        this.levelStarts.destroy();
     }
 }
 

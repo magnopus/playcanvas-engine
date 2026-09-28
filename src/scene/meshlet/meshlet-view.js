@@ -6,7 +6,7 @@ import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { WebgpuReadbackPool } from '../../platform/graphics/webgpu/webgpu-readback-pool.js';
 import { Debug } from '../../core/debug.js';
 import {
-    CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, RECORD_U32S, WORK_ITEM_U32S
+    CULL_PARAMS_VEC4S, admissionVec4s, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, RECORD_U32S, WORK_ITEM_U32S
 } from './constants.js';
 import { GraphNode } from '../graph-node.js';
 import { Mesh } from '../mesh.js';
@@ -195,8 +195,9 @@ class MeshletView {
         const pairWords = Math.max(Math.ceil((world.totalPairs + world.instanceCount) / 32), 4);
         // the claim plane also holds one off-frustum refinement flag per pair after the
         // admission bits (see meshletCutWGSL)
-        const claimWords = Math.max(Math.ceil((world.totalPairs * 2 + world.instanceCount) / 32), 4);
-        this.cullParamsBuffer = new StorageBuffer(device, (CULL_PARAMS_VEC4S + (this.rootSelection ? Math.ceil(world.instanceCount / 4) : 0)) * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
+        const claimWords = claimWordCount(world.totalPairs, world.instanceCount);
+        // frame rows, then the root-selection admissions packed MESHLET_ADMISSION_BITS to a float
+        this.cullParamsBuffer = new StorageBuffer(device, (CULL_PARAMS_VEC4S + (this.rootSelection ? admissionVec4s(world.instanceCount) : 0)) * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
         this.countersBuffer = new StorageBuffer(device, MESHLET_COUNTER_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
         // demand readbacks go through a pooled staging buffer, the same way the residency's
         // request-marks readback does, rather than allocating a staging buffer per read
@@ -394,7 +395,13 @@ class MeshletView {
         if (!d) return 0;
         const ceiling = this.indexShare > 0 ? this.indexShare : this.world.indexCeiling;
         if (!(ceiling > 0) || !Number.isFinite(ceiling)) return 0;
-        return d.indices.reduce((a, b) => a + b, 0) / ceiling;
+        const demand = d.indices.reduce((a, b) => a + b, 0);
+        // Coarsening cannot go below the admitted roots, so measure only the refinement above
+        // them against the room above them. Counting the roots too pinned the controller at its
+        // maximum on scenes whose root floor alone passes indexStarvedAt of the share (a wide view
+        // of ~1M placements), coarsening everything without shrinking the demand at all.
+        const roots = this.rootSelection ? this.rootSelection.indices.reduce((a, b) => a + b, 0) : 0;
+        return Math.max(demand - roots, 0) / Math.max(ceiling - roots, 1);
     }
 
     /** @returns {number} This view's total unclamped index demand, or 0 before the first readback. */
