@@ -9,6 +9,7 @@ import {
 } from '../../platform/graphics/constants.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
 import { Texture } from '../../platform/graphics/texture.js';
+import { ASPECT_MANUAL } from '../../scene/constants.js';
 import { drawQuadWithShader } from '../../scene/graphics/quad-render-utils.js';
 import { QuadRender } from '../../scene/graphics/quad-render.js';
 import { StandardMaterialOptions } from '../../scene/materials/standard-material-options.js';
@@ -266,6 +267,9 @@ class OutlineRenderer {
                         opts.litOptions.useMorphNormal = options.litOptions.useMorphNormal;
                         opts.litOptions.useMorphTextureBasedInt = options.litOptions.useMorphTextureBasedInt;
                         opts.litOptions.opacityFadesSpecular = options.litOptions.opacityFadesSpecular;
+                        // magnopus patched, ensure proper shader chunks are preserved
+                        opts.litOptions.shaderChunks = options.litOptions.shaderChunks;
+                        opts.litOptions.pass = options.litOptions.pass;
                         return opts;
                     }
 
@@ -373,8 +377,11 @@ class OutlineRenderer {
     updateRenderTarget(sceneCamera) {
 
         // main camera resolution
-        const width = sceneCamera.renderTarget?.width ?? this.app.graphicsDevice.width;
-        const height = sceneCamera.renderTarget?.height ?? this.app.graphicsDevice.height;
+        // magnopus patched
+        const targetWidth = sceneCamera.renderTarget?.width ?? this.app.graphicsDevice.width;
+        const targetHeight = sceneCamera.renderTarget?.height ?? this.app.graphicsDevice.height;
+        const width = Math.max(1, Math.floor(targetWidth * sceneCamera.rect.z));
+        const height = Math.max(1, Math.floor(targetHeight * sceneCamera.rect.w));
 
         const outlineCamera = this.outlineCameraEntity.camera;
         if (!outlineCamera.renderTarget || outlineCamera.renderTarget.width !== width || outlineCamera.renderTarget.height !== height) {
@@ -412,6 +419,9 @@ class OutlineRenderer {
         // copy other properties from the scene camera
         const outlineCamera = this.outlineCameraEntity.camera;
         outlineCamera.projection = sceneCamera.projection;
+        // magnopus patched, ensure outline as same ratio as target camera
+        outlineCamera.aspectRatioMode = ASPECT_MANUAL;
+        outlineCamera.aspectRatio = sceneCamera.aspectRatio;
         outlineCamera.horizontalFov = sceneCamera.horizontalFov;
         outlineCamera.fov = sceneCamera.fov;
         outlineCamera.orthoHeight = sceneCamera.orthoHeight;
