@@ -10,14 +10,14 @@ uniform int lod_level;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 // Set by the engine but not declared anywhere else
-uniform float view_index;
+uniform uint view_index;
 
 // stereoVideoType - 0: None, 1: SideBySide, 2: TopBottom
-vec2 getStereoVideoUV(vec2 uv, int stereoVideoType, int isStereoFlipped) {
+vec2 getStereoVideoUV(vec2 uv, int stereoVideoType, uint isStereoFlipped) {
     vec2 stereoUV = uv;
 
     if (stereoVideoType > 0) {
-        float isLeftEye = (view_index == float(isStereoFlipped)) ? 1.0 : 0.0;
+        float isLeftEye = (view_index == isStereoFlipped) ? 1.0 : 0.0;
 
         vec2 offset = vec2(0.0, 0.0);
         vec2 scale = vec2(1.0, 1.0);

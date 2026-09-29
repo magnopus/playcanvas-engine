@@ -5,7 +5,7 @@ uniform float material_emissiveIntensity;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform int emissiveStereoVideoType; // 0: None, 1: SideBySide, 2: TopBottom
-uniform int emissiveIsStereoFlipped; // 0: Not Flipped, 1: Flipped
+uniform uint emissiveIsStereoFlipped; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 

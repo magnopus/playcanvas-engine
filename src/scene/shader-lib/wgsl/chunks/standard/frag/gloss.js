@@ -6,7 +6,7 @@ export default /* wgsl */`
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform glossStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
-uniform glossIsStereoFlipped: i32; // 0: Not Flipped, 1: Flipped
+uniform glossIsStereoFlipped: u32; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
