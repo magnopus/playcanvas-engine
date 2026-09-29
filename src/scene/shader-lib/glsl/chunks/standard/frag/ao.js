@@ -11,7 +11,7 @@ export default /* glsl */`
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform int aoStereoVideoType; // 0: None, 1: SideBySide, 2: TopBottom
-uniform int aoIsStereoFlipped; // 0: Not Flipped, 1: Flipped
+uniform uint aoIsStereoFlipped; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 

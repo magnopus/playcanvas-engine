@@ -10,14 +10,14 @@ uniform lod_level: i32;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 // Set by the engine but not declared anywhere else
-uniform view_index: f32;
+uniform view_index: u32;
 
 // stereoVideoType - 0: None, 1: SideBySide, 2: TopBottom
-fn getStereoVideoUV(uv: vec2f, stereoVideoType: i32, isStereoFlipped: i32) -> vec2f {
+fn getStereoVideoUV(uv: vec2f, stereoVideoType: i32, isStereoFlipped: u32) -> vec2f {
     var stereoUV = uv;
 
     if (stereoVideoType > 0) {
-        let isLeftEye = select(0.0, 1.0, uniform.view_index == f32(isStereoFlipped));
+        let isLeftEye = select(0.0, 1.0, uniform.view_index == isStereoFlipped);
 
         var offset = vec2f(0.0, 0.0);
         var scale = vec2f(1.0, 1.0);
