@@ -193,7 +193,7 @@ CALDERA=~/caldera GLTF_TOOLS=~/gltf-tools PY=/path/to/venv/bin/python \
 ```
 
 Per region, `pipeline.sh` converts (`usd2glb.py`), bakes with
-`streamed-meshlets --stream-geometry --strip-source-geometry --no-tangents`, rewrites
+`streamed-meshlets --strip-source-geometry --no-tangents`, rewrites
 `caldera_scene.json` (`manifest.py`), and deletes the raw render GLB, so the disk peak stays near
 one raw GLB (Capital is 1.2 GB raw). Raw files go to `$CALDERA_RAW` (default `./caldera-raw`).
 Set `KEEPRAW=1` to keep them; `RECONVERT=1 NOBAKE=1` only regenerates the collision GLBs.
@@ -281,7 +281,7 @@ pages and (with `--format ktx2`) re-encodes the textures into range-fetchable KT
 cd gltf-tools
 deno run -A bundle.ts                       # rebuilds gltf-tools-plugin.js, which the CLI loads
 gltf-transform streamed-meshlets bistro2-raw.glb ../engine/examples/assets/meshlets/bistro-v2.glb \
-    --stream-geometry --strip-source-geometry --format ktx2 --fallback-size 0 \
+    --strip-source-geometry --format ktx2 --fallback-size 0 \
     --config ./gltf-tools-plugin.js
 ```
 

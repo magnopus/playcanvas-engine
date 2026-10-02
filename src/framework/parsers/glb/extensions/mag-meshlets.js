@@ -2,6 +2,7 @@ import { Debug } from '../../../../core/debug.js';
 import { Mat4 } from '../../../../core/math/mat4.js';
 import { Quat } from '../../../../core/math/quat.js';
 import { Vec3 } from '../../../../core/math/vec3.js';
+import { PAGE_SIZE_BYTES } from '../../../../scene/meshlet/constants.js';
 import { MeshletResource, MeshletPrimitive } from '../../../../scene/meshlet/meshlet-resource.js';
 import { GltfAccessor } from '../gltf-accessor.js';
 
@@ -150,10 +151,17 @@ const createMeshlets = (device, gltf, bufferViews) => {
         pageCount: manifestDef.pageCount ?? 0,
         rootPages: manifestDef.rootPages ?? [],
         attributeLayout: manifestDef.attributeLayout ?? {},
-        pageSizeBytes: manifestDef.pageSizeBytes ?? 65536,
+        pageSizeBytes: manifestDef.pageSizeBytes ?? PAGE_SIZE_BYTES,
         pageAlignment: manifestDef.pageAlignment ?? 256,
         positionGrid: manifestDef.positionGrid ?? null
     };
+
+    // the page pool is one array of fixed-size slots shared by every resource, so a page of any
+    // other size would be copied truncated or overrun its slot
+    if (manifest.pageSizeBytes !== PAGE_SIZE_BYTES) {
+        Debug.error(`glTF ${streamExtensionName} page size ${manifest.pageSizeBytes} is not supported, expected ${PAGE_SIZE_BYTES}. Re-bake the asset with current gltf-tools.`);
+        return null;
+    }
 
     if (!manifest.positionGrid) {
         Debug.error(`glTF ${streamExtensionName} v2 manifest is missing positionGrid.`);

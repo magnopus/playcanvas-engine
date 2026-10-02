@@ -426,6 +426,14 @@ export const PAGE_MAGIC = 0x4D504753;
 /** @type {number} */
 export const PAGE_FORMAT_VERSION = 2;
 
+/**
+ * Page size in bytes. Every resource in a world shares one page pool of page-sized slots, so
+ * assets baked with any other size are rejected at parse time rather than mixed.
+ *
+ * @type {number}
+ */
+export const PAGE_SIZE_BYTES = 65536;
+
 /** @type {number} */
 export const PAGE_FLAG_QUANTIZED = 1 << 0;
 

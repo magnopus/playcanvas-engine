@@ -22,7 +22,7 @@ for r in "$@"; do
     cp $RAW/caldera_${r}_collision.glb $OUT/
     if [[ -z "${NOBAKE:-}" ]]; then
         (cd $TOOLS && /usr/bin/time -l gltf-transform streamed-meshlets $RAW/caldera_$r.glb $OUT/caldera_$r.glb \
-            --stream-geometry --strip-source-geometry --no-tangents --config ./gltf-tools-plugin.js 2>&1 \
+            --strip-source-geometry --no-tangents --config ./gltf-tools-plugin.js 2>&1 \
             | grep -E "streamed .* page|Processed|real|peak memory|rror|failed|mesh=.* prim=[0-9]+:") || echo "BAKE FAILED $r"
         [[ -f $OUT/caldera_$r.glb ]] && $PY $HERE/manifest.py 2>/dev/null
         [[ -f $OUT/caldera_$r.glb && -z "${KEEPRAW:-}" && $r != terrain ]] && rm -f $RAW/caldera_$r.glb
