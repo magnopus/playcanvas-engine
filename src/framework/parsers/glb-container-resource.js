@@ -65,6 +65,9 @@ class GlbContainerResource {
         this.animations = animations;
         this.gsplats = gsplats;
         this._meshGSplats = meshGSplats;
+
+        // streamed meshlet resources (MAG_meshlets_gpu v2) - raw resources, one per document
+        this.meshlets = data.meshlets ? [data.meshlets] : [];
     }
 
     get model() {
@@ -412,6 +415,11 @@ class GlbContainerResource {
             destroyAssets(this.gsplats);
             this.gsplats = null;
             this._meshGSplats = null;
+        }
+
+        if (this.meshlets) {
+            this.meshlets.forEach(resource => resource.destroy());
+            this.meshlets = null;
         }
 
         if (this._model) {

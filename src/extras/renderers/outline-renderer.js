@@ -1,6 +1,7 @@
 import { Color } from '../../core/math/color.js';
 import { Entity } from '../../framework/entity.js';
 import { BlendState } from '../../platform/graphics/blend-state.js';
+import { getSingleAttachmentBlendState } from '../../platform/graphics/blend-state-utils.js';
 import {
     ADDRESS_CLAMP_TO_EDGE, BLENDEQUATION_ADD, BLENDMODE_ONE_MINUS_SRC_ALPHA, BLENDMODE_SRC_ALPHA,
     FILTER_LINEAR, FILTER_LINEAR_MIPMAP_LINEAR, PIXELFORMAT_SRGBA8,
@@ -315,7 +316,11 @@ class OutlineRenderer {
         const device = this.app.graphicsDevice;
         device.scope.resolve('source').setValue(this.rt.colorBuffer);
 
-        device.setDrawStates(this.blendState);
+        // The overlay only writes scene colour; CameraFrame can attach scene depth alongside it.
+        const attachmentCount = device.renderTarget?.colorBufferCount ?? 1;
+        const blendState = attachmentCount > 1 ?
+            getSingleAttachmentBlendState(this.blendState, attachmentCount) : this.blendState;
+        device.setDrawStates(blendState);
         this.quadRenderer.render();
     }
 

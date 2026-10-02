@@ -199,8 +199,8 @@ function BasisWorker() {
         const width = basisFile.getWidth();
         const height = basisFile.getHeight();
         const levels = basisFile.getLevels();
-        const hasAlpha = !!basisFile.getHasAlpha();
-        const isUASTC = basisFile.isUASTC && basisFile.isUASTC();
+        const hasAlpha = !!options.isTextureArray || !!basisFile.getHasAlpha();
+        const isUASTC = !!options.isTextureArray || (basisFile.isUASTC && basisFile.isUASTC());
 
         // a six-face file is a cubemap; faces are transcoded into per-mip arrays
         const cubemap = !!options.isCubemap;
@@ -224,7 +224,8 @@ function BasisWorker() {
             basisFormat = BASIS_FORMAT.cTFRGBA32;
         } else {
             // select output format based on supported formats
-            basisFormat = hasAlpha ? alphaMapping[format] : opaqueMapping[format];
+            basisFormat = options.isTextureArray && (format === 'none' || format === 'etc1') ?
+                BASIS_FORMAT.cTFRGBA32 : (hasAlpha ? alphaMapping[format] : opaqueMapping[format]);
 
             // if image dimensions don't work on target, fall back to uncompressed
             if (!dimensionsValid(width, height, basisFormat)) {
