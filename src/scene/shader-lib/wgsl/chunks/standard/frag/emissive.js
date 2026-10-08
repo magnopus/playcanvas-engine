@@ -5,7 +5,7 @@ uniform material_emissiveIntensity: f32;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform emissiveStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
-uniform emissiveIsStereoFlipped: i32; // 0: Not Flipped, 1: Flipped
+uniform emissiveIsStereoFlipped: u32; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 

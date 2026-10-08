@@ -389,7 +389,7 @@ class Picker {
      * Capture camera state needed to unproject pick-buffer depths into world space. Returns null
      * if no camera was supplied to the last prepare() call.
      *
-     * @returns {{invViewProj: Mat4, near: number, far: number, isOrtho: boolean, cameraPos: Vec3}|null}
+     * @returns {{invViewProj: Mat4, near: number, far: number, isOrtho: boolean, cameraPos: Vec3, rect: Vec4}|null}
      * Captured camera state, or null if no camera is bound.
      * @private
      */
@@ -404,7 +404,9 @@ class Picker {
             near: camera.nearClip,
             far: camera.farClip,
             isOrtho: camera.projection === PROJECTION_ORTHOGRAPHIC,
-            cameraPos: camera.entity.getPosition().clone()
+            cameraPos: camera.entity.getPosition().clone(),
+            // the pick pass renders into the camera's viewport rect, so unprojection maps into it too
+            rect: camera.rect.clone()
         };
     }
 
@@ -414,17 +416,22 @@ class Picker {
      * @param {number} x - Pick-buffer x in pixel coords, top-left origin.
      * @param {number} y - Pick-buffer y in pixel coords, top-left origin.
      * @param {number} linearDepth - Linear normalized depth [0,1].
-     * @param {{invViewProj: Mat4, near: number, far: number, isOrtho: boolean}} state - Camera state
-     * captured by {@link Picker#_captureCameraState}.
+     * @param {{invViewProj: Mat4, near: number, far: number, isOrtho: boolean, rect: Vec4}} state - Camera
+     * state captured by {@link Picker#_captureCameraState}.
      * @returns {Vec3} World position.
      * @private
      */
     _unprojectDepth(x, y, linearDepth, state) {
-        const { invViewProj, near, far, isOrtho } = state;
+        const { invViewProj, near, far, isOrtho, rect } = state;
         const ndcDepth = isOrtho ? linearDepth : (far * linearDepth / (linearDepth * (far - near) + near));
+
+        // map the pixel into the camera's viewport rect (normalized, bottom-left origin) - the
+        // projection only spans that rect, not the whole pick buffer
+        const vx = (x - rect.x * this.width) / (rect.z * this.width);
+        const vy = (y - (1 - rect.y - rect.w) * this.height) / (rect.w * this.height);
         const dc = new Vec4(
-            (x / this.width) * 2 - 1,
-            (1 - y / this.height) * 2 - 1,
+            vx * 2 - 1,
+            (1 - vy) * 2 - 1,
             ndcDepth * 2 - 1,
             1.0
         );

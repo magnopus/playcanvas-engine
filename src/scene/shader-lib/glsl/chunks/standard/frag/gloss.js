@@ -6,7 +6,7 @@ uniform float material_gloss;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform int glossStereoVideoType; // 0: None, 1: SideBySide, 2: TopBottom
-uniform int glossIsStereoFlipped; // 0: Not Flipped, 1: Flipped
+uniform uint glossIsStereoFlipped; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 

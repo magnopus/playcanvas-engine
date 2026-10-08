@@ -4,7 +4,7 @@ uniform vec3 material_diffuse;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
     uniform int diffuseStereoVideoType; // 0: None, 1: SideBySide, 2: TopBottom
-    uniform int diffuseIsStereoFlipped; // 0: Not Flipped, 1: Flipped
+    uniform uint diffuseIsStereoFlipped; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 

@@ -6,7 +6,7 @@ uniform material_metalness: f32;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform metalnessStereoVideoType: i32; // 0: None, 1: SideBySide, 2: TopBottom
-uniform metalnessIsStereoFlipped: i32; // 0: Not Flipped, 1: Flipped
+uniform metalnessIsStereoFlipped: u32; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 

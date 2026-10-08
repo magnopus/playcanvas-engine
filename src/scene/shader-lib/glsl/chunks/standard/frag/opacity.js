@@ -5,7 +5,7 @@ uniform float material_alphaDitherScale;
 // magnopus patched
 #ifdef MAG_STEREO_TEXTURE
 uniform int opacityStereoVideoType; // 0: None, 1: SideBySide, 2: TopBottom
-uniform int opacityIsStereoFlipped; // 0: Not Flipped, 1: Flipped
+uniform uint opacityIsStereoFlipped; // 0: Not Flipped, 1: Flipped
 #endif
 // end magnopus patched
 
