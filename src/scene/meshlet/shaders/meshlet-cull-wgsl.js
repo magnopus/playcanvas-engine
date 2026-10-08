@@ -291,8 +291,10 @@ export const meshletCullWGSL = /* wgsl */ `
         let hzbSize = cullParams[${CULL_PARAMS.LOD}u].yz;
         let rectPx = (uvMax - uvMin) * hzbSize;
         let mipCount = u32(cullParams[${CULL_PARAMS.LOD}u].w);
-        // pick the mip where the rect spans at most ~2 texels, test a 2x2 footprint
-        let mip = min(u32(max(ceil(log2(max(max(rectPx.x, rectPx.y), 1.0))) - 1.0, 0.0)), mipCount - 1u);
+        // pick the mip where the rect is at most one texel wide, so it straddles at most two texels
+        // per axis and the four corner samples below cover the whole footprint. A coarser rect
+        // can straddle three, leaving the middle texel (and any far depth in it) untested.
+        let mip = min(u32(max(ceil(log2(max(max(rectPx.x, rectPx.y), 1.0))), 0.0)), mipCount - 1u);
         let mipSize = vec2f(f32(max(u32(hzbSize.x) >> mip, 1u)), f32(max(u32(hzbSize.y) >> mip, 1u)));
         let texelMin = vec2u(clamp(uvMin * mipSize, vec2f(0.0), mipSize - 1.0));
         let texelMax = vec2u(clamp(uvMax * mipSize, vec2f(0.0), mipSize - 1.0));

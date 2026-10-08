@@ -22,11 +22,17 @@ const mip0DepthWGSL = /* wgsl */ `
         let dst = vec2i(input.position.xy);
         let size = vec2i(textureDimensions(uDepthMap));
         let src = dst * 2;
-        let d00 = textureLoad(uDepthMap, min(src, size - 1), 0);
-        let d10 = textureLoad(uDepthMap, min(src + vec2i(1, 0), size - 1), 0);
-        let d01 = textureLoad(uDepthMap, min(src + vec2i(0, 1), size - 1), 0);
-        let d11 = textureLoad(uDepthMap, min(src + vec2i(1, 1), size - 1), 0);
-        output.color = vec4f(max(max(d00, d10), max(d01, d11)), 0.0, 0.0, 1.0);
+        // the last texel of an odd-sized source row/column has no half-res texel of its own, so
+        // the final destination texel reduces it too - otherwise it would drop out of the pyramid
+        let extent = vec2i(2) + vec2i(select(0, 1, dst.x == (size.x >> 1u) - 1 && (size.x & 1) == 1),
+                                      select(0, 1, dst.y == (size.y >> 1u) - 1 && (size.y & 1) == 1));
+        var depth = 0.0;
+        for (var y = 0; y < extent.y; y++) {
+            for (var x = 0; x < extent.x; x++) {
+                depth = max(depth, textureLoad(uDepthMap, min(src + vec2i(x, y), size - 1), 0));
+            }
+        }
+        output.color = vec4f(depth, 0.0, 0.0, 1.0);
         return output;
     }
 `;
@@ -48,11 +54,16 @@ const mip0LinearWGSL = /* wgsl */ `
         let dst = vec2i(input.position.xy);
         let size = vec2i(textureDimensions(uDepthMap));
         let src = dst * 2;
-        let d00 = linearDepth(textureLoad(uDepthMap, min(src, size - 1), 0).x);
-        let d10 = linearDepth(textureLoad(uDepthMap, min(src + vec2i(1, 0), size - 1), 0).x);
-        let d01 = linearDepth(textureLoad(uDepthMap, min(src + vec2i(0, 1), size - 1), 0).x);
-        let d11 = linearDepth(textureLoad(uDepthMap, min(src + vec2i(1, 1), size - 1), 0).x);
-        output.color = vec4f(max(max(d00, d10), max(d01, d11)), 0.0, 0.0, 1.0);
+        // see mip0DepthWGSL: the final destination texel also covers an odd source remainder
+        let extent = vec2i(2) + vec2i(select(0, 1, dst.x == (size.x >> 1u) - 1 && (size.x & 1) == 1),
+                                      select(0, 1, dst.y == (size.y >> 1u) - 1 && (size.y & 1) == 1));
+        var depth = 0.0;
+        for (var y = 0; y < extent.y; y++) {
+            for (var x = 0; x < extent.x; x++) {
+                depth = max(depth, linearDepth(textureLoad(uDepthMap, min(src + vec2i(x, y), size - 1), 0).x));
+            }
+        }
+        output.color = vec4f(depth, 0.0, 0.0, 1.0);
         return output;
     }
 `;
@@ -74,11 +85,17 @@ const mipReduceWGSL = /* wgsl */ `
         }
         let srcSize = vec2i(textureDimensions(srcMip));
         let src = dst * 2;
-        let d00 = textureLoad(srcMip, min(src, srcSize - 1), 0).x;
-        let d10 = textureLoad(srcMip, min(src + vec2i(1, 0), srcSize - 1), 0).x;
-        let d01 = textureLoad(srcMip, min(src + vec2i(0, 1), srcSize - 1), 0).x;
-        let d11 = textureLoad(srcMip, min(src + vec2i(1, 1), srcSize - 1), 0).x;
-        textureStore(dstMip, dst, vec4f(max(max(d00, d10), max(d01, d11)), 0.0, 0.0, 1.0));
+        // mip sizes floor, so an odd source row/column would otherwise drop out of the pyramid:
+        // the final destination texel reduces the extra one as well
+        let extent = vec2i(2) + vec2i(select(0, 1, dst.x == dstSize.x - 1 && (srcSize.x & 1) == 1),
+                                      select(0, 1, dst.y == dstSize.y - 1 && (srcSize.y & 1) == 1));
+        var depth = 0.0;
+        for (var y = 0; y < extent.y; y++) {
+            for (var x = 0; x < extent.x; x++) {
+                depth = max(depth, textureLoad(srcMip, min(src + vec2i(x, y), srcSize - 1), 0).x);
+            }
+        }
+        textureStore(dstMip, dst, vec4f(depth, 0.0, 0.0, 1.0));
     }
 `;
 
