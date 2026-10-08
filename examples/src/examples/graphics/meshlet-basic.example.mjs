@@ -1,8 +1,9 @@
 // @config
 //
 // Load a local test asset as a container and stream its
-// geometry pages on demand. Orbit, pan and zoom into surfaces to inspect residency transitions;
-// toggle occlusion to exercise CameraFrame's scene-depth attachment and two-phase HZB path.
+// geometry pages on demand. Fly (WASD + mouse look, Shift/Ctrl for speed) or orbit and pan to inspect
+// residency transitions; toggle occlusion to exercise CameraFrame's scene-depth attachment and
+// two-phase HZB path.
 // See assets/meshlets/README.md for the local asset setup.
 //
 // @flag WEBGL_DISABLED
@@ -19,6 +20,7 @@ import {
     ContainerHandler,
     Entity,
     FILLMODE_FILL_WINDOW,
+    Keyboard,
     LightComponentSystem,
     MeshletComponentSystem,
     Mouse,
@@ -36,6 +38,7 @@ import {
     basisInitialize,
     createGraphicsDevice
 } from 'playcanvas';
+import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
 
 import { data, deviceType } from 'examples/context';
 
@@ -59,8 +62,7 @@ basisInitialize({
 });
 
 const assets = {
-    model: new Asset(selectedModel.name, 'container', { url: selectedModel.url }),
-    orbit: new Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' })
+    model: new Asset(selectedModel.name, 'container', { url: selectedModel.url })
 };
 
 const device = await createGraphicsDevice(canvas, { deviceTypes: [deviceType], antialias: false });
@@ -69,6 +71,7 @@ device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 const createOptions = new AppOptions();
 createOptions.graphicsDevice = device;
 createOptions.mouse = new Mouse(document.body);
+createOptions.keyboard = new Keyboard(window);
 createOptions.touch = new TouchDevice(document.body);
 createOptions.componentSystems = [
     CameraComponentSystem,
@@ -126,17 +129,8 @@ camera.addComponent('camera', {
     farClip: 1000
 });
 camera.addComponent('script');
-camera.script.create('orbitCamera', {
-    attributes: {
-        inertiaFactor: 0.2,
-        distanceMin: 0.05,
-        distanceMax: 0,
-        frameOnStart: false
-    }
-});
-camera.script.create('orbitCameraInputMouse');
-camera.script.create('orbitCameraInputTouch');
 app.root.addChild(camera);
+const cc = /** @type {CameraControls} */ (camera.script.create(CameraControls));
 
 // CameraFrame supplies the scene-depth colour attachment when occlusion is enabled.
 // Single-sample rendering keeps that path available; no separate depth prepass is requested.
@@ -172,8 +166,8 @@ data.on('data.threshold:set', (value) => {
     app.systems.meshlet.dagPixelThreshold = value;
 });
 
-// The orbit script only discovers render components. Frame the meshlet world's transformed
-// bounds once the component system has built it, so the camera fits the full chunk.
+// Frame the meshlet world's transformed bounds once the component system has built it, so the
+// camera fits the full chunk, and scale the fly speeds and near plane to its size.
 let framed = false;
 let statFrames = 0;
 app.on('framerender', () => {
@@ -200,8 +194,17 @@ app.on('framerender', () => {
         const distance = radius / Math.sin((camera.camera.fov * Math.PI) / 360);
         const position = new Vec3(0.5, 0.3, 1).normalize().mulScalar(distance).add(bounds.center);
         camera.camera.farClip = Math.max(distance * 4, 100);
-        // @ts-ignore
-        camera.script.orbitCamera.resetAndLookAtPoint(position, bounds.center);
+        // A fixed 0.01 near plane leaves the depth buffer too coarse at this scale: near-coplanar
+        // surfaces quantize to identical depths, and the order of the indirect draw (atomically
+        // allocated, so it changes every frame) then decides the winner, which reads as flicker
+        // on a static camera. Keep the far/near ratio modest instead.
+        camera.camera.nearClip = Math.max(radius * 0.001, 0.01);
+        Object.assign(cc, {
+            moveSpeed: radius * 0.1,
+            moveFastSpeed: radius * 0.5,
+            moveSlowSpeed: radius * 0.02
+        });
+        cc.reset(bounds.center, position);
         framed = true;
     }
 });
