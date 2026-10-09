@@ -296,8 +296,12 @@ export const meshletCullWGSL = /* wgsl */ `
         // can straddle three, leaving the middle texel (and any far depth in it) untested.
         let mip = min(u32(max(ceil(log2(max(max(rectPx.x, rectPx.y), 1.0))), 0.0)), mipCount - 1u);
         let mipSize = vec2f(f32(max(u32(hzbSize.x) >> mip, 1u)), f32(max(u32(hzbSize.y) >> mip, 1u)));
-        let texelMin = vec2u(clamp(uvMin * mipSize, vec2f(0.0), mipSize - 1.0));
-        let texelMax = vec2u(clamp(uvMax * mipSize, vec2f(0.0), mipSize - 1.0));
+        // texel i of a mip covers mip-0 texels [i * 2^mip, (i + 1) * 2^mip), the last one also the
+        // remainder an odd size floors away - so map through mip 0, not the floored mip size,
+        // which drifts the lookup toward the origin by up to a texel per level
+        let mipScale = hzbSize / f32(1u << mip);
+        let texelMin = vec2u(clamp(uvMin * mipScale, vec2f(0.0), mipSize - 1.0));
+        let texelMax = vec2u(clamp(uvMax * mipScale, vec2f(0.0), mipSize - 1.0));
         // the four corners of the 2x2 footprint; the HZB is a max-depth pyramid, so the
         // farthest of them is the conservative occluder depth
         let depth00 = textureLoad(hzbTexture, vec2i(i32(texelMin.x), i32(texelMin.y)), i32(mip)).x;
