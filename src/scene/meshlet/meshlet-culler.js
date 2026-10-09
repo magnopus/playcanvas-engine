@@ -11,6 +11,7 @@ import { MeshletCullShaders } from './meshlet-cull-shaders.js';
  * @import { MeshletHzb } from './meshlet-hzb.js'
  * @import { MeshletWorld } from './meshlet-world.js'
  * @import { MeshletView } from './meshlet-view.js'
+ * @typedef {import('../../core/math/vec3.js').Vec3} Vec3;
  */
 
 
