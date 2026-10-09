@@ -3,3 +3,7 @@
 
 # Cache directory
 cache
+# Streamed meshlet bake, 187 MB - see assets/meshlets/README.md for how to build it
+assets/meshlets/bistro-v2.glb
+assets/meshlets/bistro-v2_meshlets/
+assets/meshlets/bistro-v2_textures/

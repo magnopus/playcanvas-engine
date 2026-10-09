@@ -47,6 +47,7 @@ import { ABSOLUTE_URL } from '../asset/constants.js';
 import { createInstancing } from './glb/extensions/ext-mesh-gpu-instancing.js';
 import { createDracoMesh } from './glb/extensions/khr-draco-mesh-compression.js';
 import { createGSplats, hasGSplatExtension } from './glb/extensions/khr-gaussian-splatting.js';
+import { createMeshlets, hasMeshletExtension } from './glb/extensions/mag-meshlets.js';
 import { createLights } from './glb/extensions/khr-lights-punctual.js';
 import { createVariants, registerMeshVariants } from './glb/extensions/khr-materials-variants.js';
 import { getTextureSource } from './glb/extensions/texture-source.js';
@@ -81,6 +82,8 @@ class GlbResources {
     renders;
 
     gsplats;
+
+    meshlets;
 
     skins;
 
@@ -422,6 +425,12 @@ const createMesh = (device, gltfMesh, accessors, bufferViews, vertexBufferDict, 
 
         if (hasGSplatExtension(primitive)) {
             // gaussian splat primitives are handled by createGSplats instead
+            return;
+        }
+
+        if (hasMeshletExtension(primitive)) {
+            // streamed meshlet primitives are handled by createMeshlets instead - their inline
+            // geometry is only a 3-vertex AABB placeholder, never meant to be drawn
             return;
         }
 
@@ -1282,6 +1291,7 @@ const createResources = async (device, gltf, bufferViews, textures, options, app
     const bufferViewData = await Promise.all(bufferViews);
     const { meshes, meshVariants, meshDefaultMaterials, flatShadedMeshes, promises } = createMeshes(device, gltf, bufferViewData, options);
     const gsplats = options.skipMeshes ? [] : createGSplats(device, gltf, bufferViewData);
+    const meshlets = options.skipMeshes ? null : createMeshlets(device, gltf, bufferViewData);
     const animations = createAnimations(gltf, nodes, bufferViewData, options);
     createInstancing(device, gltf, nodeInstancingMap, bufferViewData);
 
@@ -1318,6 +1328,7 @@ const createResources = async (device, gltf, bufferViews, textures, options, app
     result.meshDefaultMaterials = meshDefaultMaterials;
     result.renders = renders;
     result.gsplats = gsplats;
+    result.meshlets = meshlets;
     result.skins = skins;
     result.lights = lights;
     result.cameras = cameras;

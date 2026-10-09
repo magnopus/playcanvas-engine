@@ -327,6 +327,8 @@ let deviceDetails = null;
  * circumstances the texture will be unswizzled during transcoding.
  * @param {boolean} [options.isKTX2] - Indicates the image is KTX2 format. Otherwise
  * basis format is assumed.
+ * @param {boolean} [options.isTextureArray] - Selects a consistent alpha-capable KTX2 output
+ * format regardless of each payload's alpha flag or source encoding.
  * @param {boolean} [options.isCubemap] - Indicates the image contains six cubemap faces. Only
  * supported for KTX2 files.
  * @returns {boolean} True if the basis worker was initialized and false otherwise.
@@ -345,6 +347,7 @@ function basisTranscode(device, url, data, callback, options) {
         deviceDetails: deviceDetails,
         isGGGR: !!options?.isGGGR,
         isKTX2: !!options?.isKTX2,
+        isTextureArray: !!options?.isTextureArray,
         isCubemap: !!options?.isCubemap
     });
 

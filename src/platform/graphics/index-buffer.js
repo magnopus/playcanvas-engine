@@ -45,6 +45,9 @@ class IndexBuffer {
      * @param {object} [options] - Object for passing optional arguments.
      * @param {boolean} [options.storage] - Defines if the index buffer can be used as a storage
      * buffer by a compute shader. Defaults to false. Only supported on WebGPU.
+     * @param {boolean} [options.gpuOnly] - When no initial data is given, skips allocating the
+     * CPU copy of the indices, for buffers whose contents are only written on the GPU. The copy
+     * is allocated by {@link IndexBuffer#lock} if it is ever requested. Defaults to false.
      * @example
      * // Create an index buffer holding 3 16-bit indices. The buffer is marked as
      * // static, hinting that the buffer will never be modified.
@@ -73,6 +76,13 @@ class IndexBuffer {
 
         if (initialData) {
             this.setData(initialData);
+        } else if (options?.gpuOnly) {
+            // A buffer whose contents are written on the GPU never needs a CPU copy, and at
+            // meshlet scale that copy is hundreds of megabytes - large enough to fail outright.
+            // lock() allocates one on demand. Still create the GPU buffer: unlock() allocates
+            // from numBytes and uploads nothing when there is no CPU copy.
+            this.storage = null;
+            this.unlock();
         } else {
             this.storage = new ArrayBuffer(this.numBytes);
         }
@@ -97,7 +107,9 @@ class IndexBuffer {
 
         if (this.impl.initialized) {
             this.impl.destroy(device);
-            this.adjustVramSizeTracking(device._vram, -this.storage.byteLength);
+            // numBytes, not storage.byteLength: they are equal by construction (setData
+            // rejects a mismatch) and storage may never have been allocated
+            this.adjustVramSizeTracking(device._vram, -this.numBytes);
         }
     }
 
@@ -122,7 +134,10 @@ class IndexBuffer {
      * @ignore
      */
     restoreContext() {
-        this.unlock();
+        // nothing to restore from when the contents only ever existed on the GPU
+        if (this.storage) {
+            this.unlock();
+        }
     }
 
     /**
@@ -152,10 +167,12 @@ class IndexBuffer {
      *
      * @returns {ArrayBuffer|ArrayBufferView} The memory that stores the buffer's indices. This
      * matches whatever was supplied as the initial data: an {@link ArrayBuffer} when none was
-     * provided, otherwise the {@link ArrayBuffer} or typed array that was passed in. Use
-     * {@link ArrayBuffer.isView} to distinguish the two before accessing it.
+     * provided (allocated on the first call), otherwise the {@link ArrayBuffer} or typed array
+     * that was passed in. Use {@link ArrayBuffer.isView} to distinguish the two before
+     * accessing it.
      */
     lock() {
+        this.storage ??= new ArrayBuffer(this.numBytes);
         return this.storage;
     }
 
@@ -166,7 +183,8 @@ class IndexBuffer {
      */
     unlock() {
 
-        // Upload the new index data
+        // Allocate the GPU buffer if needed and upload the CPU copy. With no CPU copy (the
+        // contents are written on the GPU) this allocates and uploads nothing.
         this.impl.unlock(this);
     }
 

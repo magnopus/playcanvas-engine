@@ -231,6 +231,9 @@ export { GSplatResource } from './scene/gsplat/gsplat-resource.js';
 export { GSplatVaryings } from './scene/gsplat-unified/gsplat-varyings.js';
 export { GSplatResourceBase } from './scene/gsplat/gsplat-resource-base.js';
 export { GSplatSogData } from './scene/gsplat/gsplat-sog-data.js';
+export { MeshletDirector } from './scene/meshlet/meshlet-director.js';
+export { MeshletResource } from './scene/meshlet/meshlet-resource.js';
+export { MeshletWorld } from './scene/meshlet/meshlet-world.js';
 export { GSplatSogResource } from './scene/gsplat/gsplat-sog-resource.js';
 
 // FRAMEWORK
@@ -264,6 +267,8 @@ export { ElementDragHelper } from './framework/components/element/element-drag-h
 export { Entity } from './framework/entity.js';
 export { GSplatComponent } from './framework/components/gsplat/component.js';
 export { GSplatComponentSystem } from './framework/components/gsplat/system.js';
+export { MeshletComponent } from './framework/components/meshlet/component.js';
+export { MeshletComponentSystem } from './framework/components/meshlet/system.js';
 export { ImageElement } from './framework/components/element/image-element.js';
 export * from './framework/components/joint/constants.js';
 export { JointComponent } from './framework/components/joint/component.js';

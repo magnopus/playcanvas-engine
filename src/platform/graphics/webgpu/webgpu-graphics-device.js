@@ -1459,7 +1459,7 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
      * @param {number} mode - GPUMapMode.READ or GPUMapMode.WRITE.
      * @returns {Promise<boolean>} A promise that resolves with true when the buffer is mapped,
      * or false when the mapping failed.
-     * @private
+     * @ignore
      */
     mapBufferAsync(buffer, mode) {
 
