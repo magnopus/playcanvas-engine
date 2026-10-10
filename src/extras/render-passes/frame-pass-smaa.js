@@ -242,7 +242,8 @@ class RenderPassSmaaNeighborhood extends RenderPassSmaa {
 class FramePassSmaa extends FramePass {
     /**
      * @param {GraphicsDevice} device - The graphics device.
-     * @param {TextureType} sourceTexture - A gamma-encoded LDR source texture.
+     * @param {TextureType} sourceTexture - A gamma-encoded source texture. Can be a float texture
+     * holding values above 1 when the output is HDR.
      * @param {RenderTargetType|null} targetRenderTarget - The output render target.
      */
     constructor(device, sourceTexture, targetRenderTarget) {
