@@ -153,7 +153,12 @@ const createMeshlets = (device, gltf, bufferViews) => {
         attributeLayout: manifestDef.attributeLayout ?? {},
         pageSizeBytes: manifestDef.pageSizeBytes ?? PAGE_SIZE_BYTES,
         pageAlignment: manifestDef.pageAlignment ?? 256,
-        positionGrid: manifestDef.positionGrid ?? null
+        positionGrid: manifestDef.positionGrid ?? null,
+        // the meshlet records carry MESHLET_FLAG_SLOPPY (absent on older bakes)
+        sloppyFlags: manifestDef.sloppyFlags === true,
+        // unique per bake run: versions the sidecars' persistent cache keys (absent on older
+        // bakes, which are stamped by a hash of their page table instead)
+        bakeId: typeof manifestDef.bakeId === 'string' ? manifestDef.bakeId : null
     };
 
     // the page pool is one array of fixed-size slots shared by every resource, so a page of any

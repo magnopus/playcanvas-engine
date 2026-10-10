@@ -22,6 +22,9 @@ export const MAX_IN_FLIGHT_RUNS = 8;
  */
 const DEMAND_SLOT_RESERVE = 64;
 
+/** Consecutive settled request readbacks that make a view count as converged. */
+const SETTLED_READBACKS = 2;
+
 /**
  * Streaming residency for a meshlet world: reads back the GPU's per-frame page request marks
  * (one to two frames latent), coalesces missing pages into HTTP Range runs, uploads arrived
@@ -78,6 +81,32 @@ class MeshletResidency {
      * @type {number}
      */
     maxInstallBytesPerFrame = 4 * 1024 * 1024;
+
+    /**
+     * Load as fast as possible: arrived pages install without the per-frame byte budget and more
+     * fetch runs may be in flight. Set by the director until the world is playable, while a
+     * loading screen hides the frame-time spikes this causes.
+     *
+     * @type {boolean}
+     */
+    fastLoad = false;
+
+    /** @type {boolean} - {@link loadFloor} has run. */
+    floorRequested = false;
+
+    /** @type {number} - floor pages left unrequested because the pool cannot hold them. */
+    floorShortfallPages = 0;
+
+    /**
+     * Floor pages requested but not yet installed (or failed).
+     *
+     * @type {Set<number>}
+     * @private
+     */
+    _floorPending = new Set();
+
+    /** @type {number} - consecutive request readbacks with nothing missing or in flight. @private */
+    _settledReadbacks = 0;
 
     frame = 0;
 
@@ -191,16 +220,35 @@ class MeshletResidency {
 
         this._requestData = new Uint32Array(world.totalPages + (world.materialRowCount ?? 0));
 
+        /**
+         * Every streamed resource's bake marks its sloppy clusters, so the floor is exact. Older
+         * bakes cannot tell sloppy levels apart, so readiness falls back to the view's cut
+         * having converged.
+         *
+         * @type {boolean}
+         */
+        this.sloppyAware = world.streamInfo.length > 0 && world.streamInfo.every(info => info.resource.manifest.sloppyFlags === true);
+
         // per-resource fetchers
-        this._streams = world.streamInfo.map(info => ({
+        this._streams = world.streamInfo.map((info, index) => ({
             ...info,
+            index,
             fetcher: new MeshletPageFetcher(info.resource.manifest, info.baseUrl, info.fetchOptions ?? null, this.world.fetchScheduler),
             // fetch failure state: a stream whose shard is gone for good (404-class) or keeps
             // failing is dead - its pages are never requested again, so a broken package costs
             // one error line instead of a request per readback for the rest of the session
             failures: 0,
             retryAfterFrame: 0,
-            dead: false
+            dead: false,
+            // per-resource load accounting (pages): roots and playable floor, required vs still
+            // outstanding; pages already resident count as required and done
+            rootsTotal: 0,
+            rootsPending: 0,
+            floorTotal: 0,
+            floorPending: 0,
+            // consecutive readbacks since the roots landed with none of this stream's pages
+            // missing or in flight - the convergence test for bakes without sloppy flags
+            settledReadbacks: 0
         }));
     }
 
@@ -232,9 +280,12 @@ class MeshletResidency {
         const world = this.world;
         const byStream = new Map();
         for (let page = 0; page < this._isRoot.length; page++) {
-            if (!this._isRoot[page] || world.residency[page] !== PAGE_NOT_RESIDENT) continue;
+            if (!this._isRoot[page]) continue;
             const stream = this._streamOf(page);
-            if (!stream || stream.dead) continue;
+            if (!stream) continue;
+            stream.rootsTotal++;
+            if (world.residency[page] !== PAGE_NOT_RESIDENT || stream.dead) continue;
+            stream.rootsPending++;
             let list = byStream.get(stream);
             if (!list) byStream.set(stream, list = []);
             list.push(page - stream.pageBase);
@@ -246,7 +297,7 @@ class MeshletResidency {
                 this._rootRunsPending++;
                 fetches.push(stream.fetcher.fetchRange(run.blob, run.offset, run.length, FETCH_PRIORITY_ROOTS).then((bytes) => {
                     if (!bytes) {
-                        for (const { localPage } of run.pages) this.inFlight.delete(stream.pageBase + localPage);
+                        for (const { localPage } of run.pages) this._settleFailedRoot(stream.pageBase + localPage);
                         return;
                     }
                     const pageWordsSize = stream.resource.manifest.pageSizeBytes / 4;
@@ -260,7 +311,7 @@ class MeshletResidency {
                     // roots are required: no retries against a backoff, the stream is dead
                     stream.failures = Math.max(stream.failures, 3);
                     this._failStream(stream, err);
-                    for (const { localPage } of run.pages) this.inFlight.delete(stream.pageBase + localPage);
+                    for (const { localPage } of run.pages) this._settleFailedRoot(stream.pageBase + localPage);
                 }).finally(() => {
                     this._rootRunsPending--;
                 }));
@@ -268,6 +319,86 @@ class MeshletResidency {
         }
         if (!fetches.length) this.rootsLoaded = true;
         return Promise.all(fetches).then(() => undefined);
+    }
+
+    /**
+     * Starts fetching the playable floor (see {@link MeshletCutData#floorPages}) beside the
+     * roots, without waiting for the GPU to request it level by level. Pages already resident or
+     * in flight are skipped; pages beyond what the pool can hold beside the roots and a demand
+     * reserve are left to demand streaming, coarsest kept first.
+     */
+    loadFloor() {
+        this.floorRequested = true;
+        const world = this.world;
+        const floor = world.cut?.floorPages ?? [];
+        let rootsMissing = 0;
+        for (const page of world.cut?.rootPages ?? []) {
+            if (this._isRoot[page] && world.residency[page] === PAGE_NOT_RESIDENT) rootsMissing++;
+        }
+        const reserve = Math.min(DEMAND_SLOT_RESERVE, Math.floor(this.slotPage.length / 4));
+        const capacity = Math.max(this.freeSlots.length - rootsMissing - reserve, 0);
+        let requested = 0;
+        for (const page of floor) {
+            if (this._isRoot[page]) continue;
+            const stream = this._streamOf(page);
+            if (!stream) continue;
+            if (world.residency[page] !== PAGE_NOT_RESIDENT) {
+                stream.floorTotal++;
+                continue;
+            }
+            if (stream.dead || this.inFlight.has(page)) continue;
+            if (requested >= capacity) {
+                this.floorShortfallPages++;
+                continue;
+            }
+            requested++;
+            stream.floorTotal++;
+            stream.floorPending++;
+            this._floorPending.add(page);
+            this.inFlight.add(page);
+            this._queue.push(page);
+        }
+        if (this.floorShortfallPages) {
+            Debug.warnOnce(`MeshletResidency: the page pool cannot hold the playable floor; ${this.floorShortfallPages} floor page(s) stream on demand instead. Raise the geometry budget (poolBytes).`);
+        }
+        this._pump();
+    }
+
+    /**
+     * Every requested floor page has been installed or given up on.
+     *
+     * @type {boolean}
+     */
+    get floorLoaded() {
+        return this.floorRequested && this._floorPending.size === 0;
+    }
+
+    /**
+     * The last request readbacks since the roots loaded found nothing missing and nothing in
+     * flight: the view's cut is fully resident.
+     *
+     * @type {boolean}
+     */
+    get demandSettled() {
+        return this._settledReadbacks >= SETTLED_READBACKS;
+    }
+
+    /**
+     * The roots and the playable floor are resident (on bakes without sloppy flags: the roots,
+     * and the current view's cut has converged).
+     *
+     * @type {boolean}
+     */
+    get playable() {
+        if (!this.rootsLoaded || !this.floorLoaded) return false;
+        // bakes with sloppy flags are done once their floor is in; only older bakes wait for
+        // their own share of the view's cut, so one old asset cannot hold up the rest
+        for (const stream of this._streams) {
+            if (!stream.dead && stream.resource.manifest.sloppyFlags !== true && stream.settledReadbacks < SETTLED_READBACKS) {
+                return false;
+            }
+        }
+        return true;
     }
 
     _allocSlot(protectedSet) {
@@ -328,7 +459,7 @@ class MeshletResidency {
      */
     _drainArrived() {
         const pageBytes = this.world.pageSizeBytes;
-        let budget = Math.max(this.maxInstallBytesPerFrame, pageBytes);
+        let budget = this.fastLoad ? Infinity : Math.max(this.maxInstallBytesPerFrame, pageBytes);
         let spent = 0;
         // roots first, at up to four times the budget while they load: nothing of a placement
         // draws until they are in, and they are a bounded one-off (a few pages per unique mesh)
@@ -336,7 +467,7 @@ class MeshletResidency {
             const rootBudget = budget * 4;
             while (this._arrivedRootsHead < this._arrivedRoots.length && spent < rootBudget) {
                 const { globalPage, words } = this._arrivedRoots[this._arrivedRootsHead++];
-                this.inFlight.delete(globalPage);
+                this._settleFailedRoot(globalPage);
                 this._installPage(globalPage, words, true);
                 spent += pageBytes;
             }
@@ -350,6 +481,7 @@ class MeshletResidency {
         }
         while (this._arrivedHead < this._arrived.length && spent < budget) {
             const { globalPage, words } = this._arrived[this._arrivedHead++];
+            this._settleFloor(globalPage);
             this.inFlight.delete(globalPage);
             this._installPage(globalPage, words, false);
             spent += pageBytes;
@@ -371,7 +503,8 @@ class MeshletResidency {
     }
 
     _pump() {
-        while (this._activeRuns < MAX_IN_FLIGHT_RUNS && this._queue.length) {
+        const maxRuns = this.fastLoad ? MAX_IN_FLIGHT_RUNS * 4 : MAX_IN_FLIGHT_RUNS;
+        while (this._activeRuns < maxRuns && this._queue.length) {
             // take a batch of queued pages per stream and coalesce into runs
             const byStream = new Map();
             for (const page of this._queue) {
@@ -391,7 +524,7 @@ class MeshletResidency {
                     stream.fetcher.fetchRange(run.blob, run.offset, run.length).then((bytes) => {
                         if (!bytes) {
                             // scheduler cleared (director destroyed): nothing arrives
-                            for (const { localPage } of run.pages) this.inFlight.delete(stream.pageBase + localPage);
+                            for (const { localPage } of run.pages) this._settleFailed(stream.pageBase + localPage);
                             return;
                         }
                         const pageWordsSize = stream.resource.manifest.pageSizeBytes / 4;
@@ -410,7 +543,7 @@ class MeshletResidency {
                         Debug.error(`MeshletResidency: run fetch failed: ${err.message}`);
                         this._failStream(stream, err);
                         for (const { localPage } of run.pages) {
-                            this.inFlight.delete(stream.pageBase + localPage);
+                            this._settleFailed(stream.pageBase + localPage);
                         }
                     }).finally(() => {
                         this._activeRuns--;
@@ -418,6 +551,69 @@ class MeshletResidency {
                 }
             }
         }
+    }
+
+    /**
+     * Forgets a page whose fetch was dropped or failed: demand may request it again, and a floor
+     * page stops holding up {@link floorLoaded}.
+     *
+     * @param {number} globalPage - The page.
+     * @private
+     */
+    _settleFailed(globalPage) {
+        this.inFlight.delete(globalPage);
+        this._settleFloor(globalPage);
+    }
+
+    /**
+     * Stops a floor page holding up its resource and {@link floorLoaded}.
+     *
+     * @param {number} globalPage - The page.
+     * @private
+     */
+    _settleFloor(globalPage) {
+        if (this._floorPending.delete(globalPage)) {
+            const stream = this._streamOf(globalPage);
+            if (stream) stream.floorPending--;
+        }
+    }
+
+    /**
+     * Forgets a root page that arrived (it installs next) or whose fetch failed.
+     *
+     * @param {number} globalPage - The page.
+     * @private
+     */
+    _settleFailedRoot(globalPage) {
+        if (this.inFlight.delete(globalPage)) {
+            const stream = this._streamOf(globalPage);
+            if (stream) stream.rootsPending--;
+        }
+    }
+
+    /**
+     * Load state of one streamed resource: its root pages and its playable floor.
+     *
+     * @param {object} resource - The resource (a MeshletResource in this world).
+     * @returns {{ playable: boolean, failed: boolean, totalBytes: number, loadedBytes: number }|null}
+     * Whether its roots and floor are resident (on bakes without sloppy flags, also that the
+     * view's cut has converged), whether its stream was given up on, and its required and
+     * resident page bytes; null when the resource is not in this world.
+     */
+    streamStatus(resource) {
+        const stream = this._streams.find(s => s.resource === resource);
+        if (!stream) return null;
+        const pageBytes = this.world.pageSizeBytes;
+        const total = stream.rootsTotal + stream.floorTotal;
+        const pending = stream.rootsPending + stream.floorPending;
+        const loaded = this.rootsResident && this.floorRequested && pending === 0;
+        const converged = stream.resource.manifest.sloppyFlags === true || stream.settledReadbacks >= SETTLED_READBACKS;
+        return {
+            playable: stream.dead || (loaded && converged),
+            failed: stream.dead,
+            totalBytes: total * pageBytes,
+            loadedBytes: (total - pending) * pageBytes
+        };
     }
 
     /**
@@ -440,10 +636,13 @@ class MeshletResidency {
         // LAST frame's marks; the buffer is then cleared in-encoder for the coming frame.
         if (!this._readbackBusy) {
             this._readbackBusy = true;
+            // marks recorded before the roots landed say nothing about convergence: the GPU
+            // admits no instance until its roots are resident
+            const afterRoots = this.rootsLoaded;
             const requestsSize = (world.totalPages + (world.materialRowCount ?? 0)) * 4;
             this.readbackPool.read(world.requestsBuffer, 0, requestsSize, this._requestData).then((data) => {
                 this._readbackBusy = false;
-                this._processRequests(data);
+                this._processRequests(data, afterRoots);
                 // texture-mip feedback marks live after the page marks - hand them to the
                 // texture residency (same readback, same clear)
                 if (!this._destroyed && world.materialRowCount) {
@@ -483,7 +682,31 @@ class MeshletResidency {
         return this._streams.reduce((n, s) => n + (s.dead ? 1 : 0), 0);
     }
 
-    _processRequests(marks) {
+    /**
+     * Per-stream form of the convergence test: a stream is settled when none of its pages is
+     * missing or in flight (or nothing missing could fit in the pool).
+     *
+     * @param {number[]} missing - Pages the cut wants that are not resident, ascending by stream.
+     * @param {number} budget - Slots available for fetching this readback.
+     * @param {boolean} afterRoots - The readback was kicked after the roots landed.
+     * @private
+     */
+    _updateStreamSettled(missing, budget, afterRoots) {
+        const streams = this._streams;
+        if (!streams.length) return;
+        const busy = new Uint8Array(streams.length);
+        const markBusy = (page) => {
+            const stream = this._streamOf(page);
+            if (stream) busy[stream.index] = 1;
+        };
+        if (budget > 0) for (const page of missing) markBusy(page);
+        for (const page of this.inFlight) markBusy(page);
+        for (let i = 0; i < streams.length; i++) {
+            streams[i].settledReadbacks = (afterRoots && !busy[i]) ? streams[i].settledReadbacks + 1 : 0;
+        }
+    }
+
+    _processRequests(marks, afterRoots = true) {
         if (this._destroyed) return;
         const world = this.world;
         const wanted = this._protected ?? new Set();
@@ -525,6 +748,11 @@ class MeshletResidency {
             if (page !== PAGE_NOT_RESIDENT && !this.slotPinned[s] && !wanted.has(page)) evictable++;
         }
         const budget = Math.max(this.freeSlots.length + evictable - this.inFlight.size, 0);
+        // converged: nothing in flight, and nothing missing - or nothing that could fit (a pool
+        // too small for the cut settles at the coarser fallback and must not wait forever)
+        const settled = afterRoots && this.inFlight.size === 0 && (missing.length === 0 || budget === 0);
+        this._settledReadbacks = settled ? this._settledReadbacks + 1 : 0;
+        this._updateStreamSettled(missing, budget, afterRoots);
         for (let i = 0; i < Math.min(missing.length, budget); i++) {
             this.inFlight.add(missing[i]);
             this._queue.push(missing[i]);

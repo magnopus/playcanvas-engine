@@ -10,6 +10,20 @@ import { Component } from '../component.js';
  */
 
 /**
+ * Load state of a meshlet component's streamed content.
+ *
+ * @typedef {object} MeshletStreamStatus
+ * @property {boolean} playable - Roots, playable floor and texture tails are resident (or the
+ * stream was given up on - see `failed`).
+ * @property {boolean} failed - The stream was given up on, or the component was removed before
+ * it became playable.
+ * @property {number} progress - 0..1 toward playable, by bytes.
+ * @property {number} totalBytes - Bytes needed to become playable: root and floor pages plus
+ * texture tails. 0 until the world has placed the component.
+ * @property {number} loadedBytes - Bytes of those already resident.
+ */
+
+/**
  * The MeshletComponent renders a streamed meshlet asset (`MAG_meshlets_gpu` /
  * `MAG_meshlets_stream` v2, baked by gltf-tools) through the GPU-driven meshlet pipeline:
  * per-cluster DAG LOD, on-demand geometry page streaming, optional two-phase HZB occlusion
@@ -37,10 +51,52 @@ import { Component } from '../component.js';
  */
 class MeshletComponent extends Component {
     /**
+     * Fired while this component's streamed content loads, with its progress (0..1) toward
+     * {@link MeshletComponent#playable} and the bytes that progress weighs.
+     *
+     * @event
+     * @example
+     * entity.meshlet.on('progress', (progress, totalBytes) => {
+     *     console.log(`${Math.round(progress * 100)}% of ${totalBytes} bytes`);
+     * });
+     */
+    static EVENT_PROGRESS = 'progress';
+
+    /**
+     * Fired when this component's content becomes {@link MeshletComponent#playable}.
+     *
+     * @event
+     * @example
+     * entity.meshlet.on('playable', () => {
+     *     console.log('streamed model ready');
+     * });
+     */
+    static EVENT_PLAYABLE = 'playable';
+
+    /**
      * @type {AssetReference}
      * @private
      */
     _assetReference;
+
+    /**
+     * The resource the last world rebuild placed for this component.
+     *
+     * @type {MeshletResource|null}
+     * @ignore
+     */
+    _placedResource = null;
+
+    /**
+     * Pending {@link whenPlayable} resolvers.
+     *
+     * @type {Array<(status: MeshletStreamStatus) => void>}
+     * @ignore
+     */
+    _playableWaiters = [];
+
+    /** @type {number} - progress last reported through {@link EVENT_PROGRESS}. @ignore */
+    _reportedProgress = -1;
 
     /**
      * Direct resource reference (bypasses the asset system).
@@ -333,8 +389,62 @@ class MeshletComponent extends Component {
         this._queueState();
     }
 
+    /**
+     * Load state of this component's streamed content: its root pages, its playable floor (the
+     * coarsest LOD free of sloppy simplification) and its texture tails. Not playable while the
+     * asset loads or before a world rebuild has placed it.
+     *
+     * @type {MeshletStreamStatus}
+     */
+    get streamStatus() {
+        return this.system._componentStatus(this);
+    }
+
+    /**
+     * Whether this component's streamed content is resident down to its playable floor, with
+     * its texture tails. Finer detail keeps streaming afterwards.
+     *
+     * @type {boolean}
+     */
+    get playable() {
+        return this.streamStatus.playable;
+    }
+
+    /**
+     * Resolves once this component's content is {@link playable} - at once if it is - or the
+     * component is removed. Fires {@link EVENT_PROGRESS} meanwhile.
+     *
+     * @returns {Promise<MeshletStreamStatus>} The status when settled; `failed` is set when the
+     * stream was given up on or the component was removed first.
+     * @example
+     * const status = await entity.meshlet.whenPlayable();
+     */
+    whenPlayable() {
+        const status = this.streamStatus;
+        if (status.playable) return Promise.resolve(status);
+        return new Promise((resolve) => {
+            this._playableWaiters.push(resolve);
+            this.system._watchPlayable(this);
+        });
+    }
+
+    /**
+     * Settles every {@link whenPlayable} waiter.
+     *
+     * @param {MeshletStreamStatus} status - The status to resolve with.
+     * @ignore
+     */
+    _settlePlayable(status) {
+        const waiters = this._playableWaiters;
+        this._playableWaiters = [];
+        this._reportedProgress = -1;
+        for (const resolve of waiters) resolve(status);
+    }
+
     onBeforeRemove() {
         if (this.entity._worldDirtyListener === this) this.entity._worldDirtyListener = null;
+        this.system._unwatchPlayable(this);
+        this._settlePlayable({ playable: false, failed: true, progress: 0, totalBytes: 0, loadedBytes: 0 });
         this.asset = null;
         this._resource = null;
         this.system._markDirty();

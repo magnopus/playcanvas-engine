@@ -142,6 +142,41 @@ class MeshletTextures {
     /** @type {number} - arrays whose tail load has started (the rest were appended and wait). @private */
     _tailsStarted = 0;
 
+    /** @type {number} - arrays whose tail region has not finished loading (or failing). @private */
+    _tailsPending = 0;
+
+    /**
+     * Every tail region requested so far has been fetched, transcoded and uploaded, or has
+     * failed: the always-resident low-resolution mips are in place.
+     *
+     * @type {boolean}
+     */
+    get tailsLoaded() {
+        return this._tailsPending === 0;
+    }
+
+    /**
+     * Tail-loading state of one resource's textures.
+     *
+     * @param {object} textureManifest - The manifest the resource was registered with.
+     * @returns {{ pending: number, totalBytes: number, loadedBytes: number }} Arrays whose tail
+     * has not finished (or failed), and the tail regions' total and finished byte sizes.
+     */
+    tailStatus(textureManifest) {
+        let pending = 0, totalBytes = 0, loadedBytes = 0;
+        for (const entry of this._arrays) {
+            if (entry.owner !== textureManifest) continue;
+            const bytes = entry.array.tail?.byteLength ?? 0;
+            totalBytes += bytes;
+            if (entry.tailDone) {
+                loadedBytes += bytes;
+            } else {
+                pending++;
+            }
+        }
+        return { pending, totalBytes, loadedBytes };
+    }
+
     /** @type {number} - textures with residency entries and family layers assigned. @private */
     _assigned = 0;
 
@@ -193,7 +228,9 @@ class MeshletTextures {
             // the finest size the fine pool holds for this texture; the source-mip space the
             // residency, marks and shader work in starts at it (mip 0 = topSize)
             const topSize = Math.max(Math.min(srcSize, this.maxFineSize), tailTop);
-            this._arrays.push({ array, source, firstTexIndex: this.textures.length });
+            // owner: the manifest identifies the resource across rebuilds (a carried texture
+            // system keeps it), so per-resource tail progress survives a rebuild
+            this._arrays.push({ array, source, firstTexIndex: this.textures.length, owner: textureManifest, tailDone: false });
             for (let layer = 0; layer < array.layers.length; layer++) {
                 this.textures.push({
                     family,
@@ -888,7 +925,11 @@ class MeshletTextures {
         const from = this._tailsStarted;
         this._tailsStarted = this._arrays.length;
         for (let a = from; a < this._arrays.length; a++) {
-            const { array, source, firstTexIndex } = this._arrays[a];
+            const entry = this._arrays[a];
+            const { array, source, firstTexIndex } = entry;
+            this._tailsPending++;
+            /** @type {Promise<any>[]} */
+            const layerJobs = [];
             source.fetchTail(array).then((tailBuffer) => {
                 if (!tailBuffer || this._destroyed) return;
                 const mipCount = array.layers[0].length;
@@ -908,17 +949,21 @@ class MeshletTextures {
                             this.families[tex.family].tail.impl.uploadTypedArrayData(this.device, new Uint8Array(result.levels[0]), level, tex.tailLayer);
                         }));
                     }
-                    Promise.all(jobs).then(() => {
+                    layerJobs.push(Promise.all(jobs).then(() => {
                         if (this._destroyed || jobs.length === 0) return;
                         // all tail mips resident: minLod = the tail's finest source mip
                         this.residencyCpu[texIndex * TEX_RESIDENCY_U32S + 1] = (tex.tailStart & 0xFFFF) | (tex.tailLayer << 16);
                         this._dirty = true;
                     }).catch((err) => {
                         Debug.warnOnce(`MeshletTextures: tail load failed for '${array.name}' layer ${layer}: ${err.message}`);
-                    });
+                    }));
                 }
+                return Promise.all(layerJobs);
             }).catch((err) => {
                 Debug.warnOnce(`MeshletTextures: tail fetch failed for '${array.name}': ${err.message}`);
+            }).finally(() => {
+                entry.tailDone = true;
+                this._tailsPending--;
             });
         }
     }

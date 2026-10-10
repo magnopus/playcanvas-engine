@@ -1,8 +1,8 @@
 import { expect } from 'chai';
 
 import { createCutFixture } from './meshlet-cut-fixture.mjs';
-import { MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT } from '../../../src/scene/meshlet/constants.js';
-import { buildMeshletGroups, MeshletCutData } from '../../../src/scene/meshlet/meshlet-cut-data.js';
+import { MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_FLAG_SLOPPY, MESHLET_NO_PARENT } from '../../../src/scene/meshlet/constants.js';
+import { buildMeshletGroups, collectFloorPages, MeshletCutData } from '../../../src/scene/meshlet/meshlet-cut-data.js';
 
 describe('meshlet replacement groups', function () {
     it('checks each shared page and parent representative once per replacement', function () {
@@ -148,5 +148,33 @@ describe('meshlet replacement groups', function () {
         } finally {
             cut.destroy();
         }
+    });
+});
+
+describe('meshlet playable floor', function () {
+
+    // fixture: G4 = {4,5} replaces {0,1}, G6 = {6,7} replaces {2,3}, G8 = {8} replaces {4,6},
+    // G9 = {9} replaces {5,7}; roots 8 and 9; page = meshlet index
+    const floor = (sloppy) => {
+        const { meshlets } = createCutFixture();
+        for (const m of sloppy) meshlets[m * MESHLET_DATA_U32S + M.FLAGS] |= MESHLET_FLAG_SLOPPY;
+        const { groups } = buildMeshletGroups(meshlets);
+        const pages = new Map();
+        collectFloorPages(meshlets, groups, pages);
+        return [...pages.keys()].sort((a, b) => (pages.get(b) - pages.get(a)) || (a - b));
+    };
+
+    it('is the roots alone when nothing is sloppy', function () {
+        expect(floor([])).to.deep.equal([8, 9]);
+    });
+
+    it('refines a sloppy root down to its replaced clusters', function () {
+        expect(floor([8])).to.deep.equal([8, 9, 4, 6]);
+    });
+
+    it('taints every coarser group built from sloppy clusters', function () {
+        // G4 is sloppy, and both roots replace one of its clusters: all four paths down to
+        // level 0 under G4 are needed, while G6's clean level 1 clusters stop there
+        expect(floor([4])).to.deep.equal([8, 9, 4, 5, 6, 7, 0, 1]);
     });
 });

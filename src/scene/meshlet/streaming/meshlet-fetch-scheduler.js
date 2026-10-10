@@ -28,6 +28,9 @@ const PRIORITY_SHARE = [1, 0.5, 0.25, 0.25];
 /**
  * @typedef {object} MeshletFetchRequestOptions
  * @property {string|null} [credentials] - Fetch credentials mode, or null for the default.
+ * @property {string|null} [cacheVersion] - Versions the request's {@link MeshletFetchScheduler#byteCache}
+ * key: the bytes are cached under `<url>#v=<cacheVersion>`, so content replaced behind an
+ * unversioned URL (a rebake) misses instead of being served stale. Null keys by the URL alone.
  * @property {number} [priority] - One of the FETCH_PRIORITY_* values; lower dispatches first.
  * @property {(() => boolean)|null} [stillWanted] - Polled when the request reaches the front of
  * the queue; a false answer drops the request unsent and resolves it with null.
@@ -66,10 +69,22 @@ class MeshletFetchScheduler {
     /** @type {number} - queued requests merged into another request. */
     coalesced = 0;
 
+    /** @type {number} - requests answered from {@link byteCache} without a fetch. */
+    cacheHits = 0;
+
+    /**
+     * Persistent cache in front of the network, or null for none. A request whose bytes are all
+     * stored is answered from it without queueing; fetched ranges are widened to the cache's
+     * chunk boundaries and stored in it.
+     *
+     * @type {import('../../../platform/net/byte-cache.js').ByteCache|null}
+     */
+    byteCache = null;
+
     /**
      * Pending requests, one FIFO per priority. `offset` is -1 for a whole-file request.
      *
-     * @type {Array<Array<{ url: string, offset: number, length: number, credentials: string|null,
+     * @type {Array<Array<{ url: string, cacheUrl: string, offset: number, length: number, credentials: string|null,
      * priority: number, stillWanted: (() => boolean)|null, resolve: Function, reject: Function }>>}
      * @private
      */
@@ -135,10 +150,35 @@ class MeshletFetchScheduler {
      * @returns {Promise<ArrayBuffer|null>} The bytes, or null when dropped.
      * @private
      */
-    _enqueue(url, offset, length, { credentials = null, priority = FETCH_PRIORITY_FINE, stillWanted = null }) {
+    _enqueue(url, offset, length, options) {
+        const cache = this.byteCache;
+        const cacheUrl = options.cacheVersion ? `${url}#v=${options.cacheVersion}` : url;
+        if (cache && (offset < 0 ? cache.hasFile(cacheUrl) : cache.hasRange(cacheUrl, offset, length))) {
+            const read = offset < 0 ?
+                cache.getFile(cacheUrl).then(hit => hit?.data ?? null) :
+                cache.getRange(cacheUrl, offset, length);
+            return read.then((bytes) => {
+                if (!bytes) return this._queue(url, offset, length, options);
+                this.cacheHits++;
+                return bytes;
+            });
+        }
+        return this._queue(url, offset, length, options);
+    }
+
+    /**
+     * @param {string} url - The URL.
+     * @param {number} offset - First byte, or -1 for the whole file.
+     * @param {number} length - Byte count.
+     * @param {MeshletFetchRequestOptions} options - Request options.
+     * @returns {Promise<ArrayBuffer|null>} The bytes, or null when dropped.
+     * @private
+     */
+    _queue(url, offset, length, { credentials = null, priority = FETCH_PRIORITY_FINE, stillWanted = null, cacheVersion = null }) {
         return new Promise((resolve, reject) => {
             const p = Math.min(Math.max(priority | 0, 0), this._queues.length - 1);
-            this._queues[p].push({ url, offset, length, credentials, priority: p, stillWanted, resolve, reject });
+            const cacheUrl = cacheVersion ? `${url}#v=${cacheVersion}` : url;
+            this._queues[p].push({ url, cacheUrl, offset, length, credentials, priority: p, stillWanted, resolve, reject });
             this._pump();
         });
     }
@@ -195,7 +235,7 @@ class MeshletFetchScheduler {
         let end = head.offset + head.length;
         for (let i = 0; i < queue.length;) {
             const req = queue[i];
-            if (req.offset < 0 || req.url !== head.url || req.credentials !== head.credentials) {
+            if (req.offset < 0 || req.url !== head.url || req.cacheUrl !== head.cacheUrl || req.credentials !== head.credentials) {
                 i++;
                 continue;
             }
@@ -234,6 +274,8 @@ class MeshletFetchScheduler {
         this.sentByPriority[head.priority]++;
         this._activeByPriority[head.priority]++;
         const ranged = head.offset >= 0;
+        const cacheUrl = head.cacheUrl;
+        const cache = this.byteCache?.accepts(cacheUrl) ? this.byteCache : null;
         let start = 0;
         let end = 0;
         /** @type {RequestInit} */
@@ -245,6 +287,12 @@ class MeshletFetchScheduler {
                 start = Math.min(start, req.offset);
                 end = Math.max(end, req.offset + req.length);
             }
+            if (cache) {
+                // whole chunks only, so every fetched byte can be stored
+                const aligned = cache.alignRange(cacheUrl, start, end - start);
+                start = aligned.offset;
+                end = aligned.offset + aligned.length;
+            }
             init.headers = { Range: `bytes=${start}-${end - 1}` };
         }
 
@@ -254,12 +302,23 @@ class MeshletFetchScheduler {
             }
             return response.arrayBuffer().then((buffer) => {
                 if (!ranged) {
+                    if (cache && response.status === 200) cache.putFile(cacheUrl, buffer);
                     head.resolve(buffer);
                     return;
                 }
-                // a 200 carrying more than the span is a host that ignored the Range header and
-                // sent the whole file: the buffer then starts at byte 0, not at `start`
-                const base = (response.status === 200 && buffer.byteLength > end - start) ? 0 : start;
+                // a 200 to a Range request is a host that ignored the header and sent the whole
+                // file: the buffer then starts at byte 0, not at `start`
+                const base = response.status === 200 ? 0 : start;
+                // store before resolving: a consumer may transfer the buffer
+                if (cache) {
+                    if (response.status === 200) {
+                        cache.putFile(cacheUrl, buffer);
+                    } else {
+                        // a short response ran into the end of the file (the widened range may
+                        // reach past it)
+                        cache.putRange(cacheUrl, start, buffer, buffer.byteLength < end - start);
+                    }
+                }
                 for (const req of batch) {
                     const local = req.offset - base;
                     if (local < 0 || local >= buffer.byteLength) {

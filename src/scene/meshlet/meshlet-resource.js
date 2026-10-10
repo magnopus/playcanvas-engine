@@ -82,7 +82,9 @@ class MeshletResource {
      *     attributeLayout: object,
      *     pageSizeBytes: number,
      *     pageAlignment: number,
-     *     positionGrid: { origin: number[], step: number, bits: number }
+     *     positionGrid: { origin: number[], step: number, bits: number },
+     *     sloppyFlags?: boolean,
+     *     bakeId?: string|null
      * }}
      */
     manifest;

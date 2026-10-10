@@ -7,6 +7,7 @@ import { http } from '../../platform/net/http.js';
  * @import { Asset } from '../asset/asset.js'
  * @import { BundlesFilterCallback } from '../asset/asset-registry.js'
  * @import { ResourceHandler } from './handler.js'
+ * @import { ByteCache } from '../../platform/net/byte-cache.js'
  */
 
 /**
@@ -432,6 +433,34 @@ class ResourceLoader {
      */
     get withCredentials() {
         return http.withCredentials;
+    }
+
+    /**
+     * Sets a persistent cache for asset downloads, or null for none. Asset requests are answered
+     * from the cache when the whole response is stored, and stored in it when they succeed, so
+     * assets downloaded in an earlier session load without touching the network. The cache
+     * assumes the content behind a URL never changes, so serve assets from versioned URLs.
+     *
+     * Note this is a process-global setting (it applies to the shared HTTP layer), so with
+     * multiple applications the last value set wins. It applies to requests made through the
+     * engine's HTTP layer, which carries most asset loads; formats fetched with `fetch()`
+     * directly (Gaussian splat PLY and SOG bundles, asset bundles) are not cached.
+     *
+     * @type {ByteCache|null}
+     * @example
+     * app.loader.byteCache = new pc.ByteCache(new pc.OpfsByteStore('my-app-assets'));
+     */
+    set byteCache(value) {
+        http.byteCache = value;
+    }
+
+    /**
+     * Gets the persistent cache for asset downloads.
+     *
+     * @type {ByteCache|null}
+     */
+    get byteCache() {
+        return http.byteCache;
     }
 
     /**

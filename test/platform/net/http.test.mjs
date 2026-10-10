@@ -2,7 +2,9 @@ import { expect } from 'chai';
 import nise from 'nise';
 import { restore, spy } from 'sinon';
 
+import { ByteCache } from '../../../src/platform/net/byte-cache.js';
 import { http, Http } from '../../../src/platform/net/http.js';
+import { MemoryByteStore } from '../../../src/platform/net/memory-byte-store.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
 describe('Http', function () {
@@ -262,4 +264,57 @@ describe('Http', function () {
 
     });
 
+    describe('#byteCache', function () {
+        let cache;
+
+        beforeEach(async function () {
+            cache = new ByteCache(new MemoryByteStore(), { flushDelay: 1e6 });
+            await cache.ready;
+            http.byteCache = cache;
+            spy(http, '_acquire');
+        });
+
+        afterEach(function () {
+            http.byteCache = null;
+        });
+
+        const get = (url, options = {}) => new Promise((resolve, reject) => {
+            http.get(url, options, (err, data) => (err ? reject(err) : resolve(data)));
+        });
+
+        // the response is stored asynchronously after the callback runs
+        const settle = () => new Promise((resolve) => {
+            setTimeout(resolve, 10);
+        });
+
+        it('serves a repeated binary request from the cache', async function () {
+            const first = await get('/test/assets/test.bin', { responseType: Http.ResponseType.ARRAY_BUFFER });
+            await settle();
+            const second = await get('/test/assets/test.bin', { responseType: Http.ResponseType.ARRAY_BUFFER });
+            expect(http._acquire.callCount).to.equal(1);
+            expect(cache.hits).to.equal(1);
+            expect(new Uint8Array(second)).to.deep.equal(new Uint8Array(first));
+        });
+
+        it('serves a repeated JSON request from the cache, parsed', async function () {
+            await get('/test/assets/test.json');
+            await settle();
+            const data = await get('/test/assets/test.json');
+            expect(http._acquire.callCount).to.equal(1);
+            expect(data).to.deep.equal({ a: 1, b: true, c: 'hello world' });
+        });
+
+        it('bypasses the cache when the request opts out', async function () {
+            await get('/test/assets/test.json');
+            await settle();
+            await get('/test/assets/test.json', { byteCache: false });
+            expect(http._acquire.callCount).to.equal(2);
+        });
+
+        it('does not store a failed response', async function () {
+            await get('/someurl.json').catch(() => {});
+            await settle();
+            expect(cache.entryCount).to.equal(0);
+        });
+    });
 });

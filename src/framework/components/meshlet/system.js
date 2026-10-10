@@ -6,6 +6,7 @@ import { MeshletComponent } from './component.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { ByteCache } from '../../../platform/net/byte-cache.js'
  * @import { CameraComponent } from '../camera/component.js'
  */
 
@@ -37,6 +38,20 @@ const _properties = ['asset', 'resource', 'baseUrl'];
  */
 class MeshletComponentSystem extends ComponentSystem {
     /**
+     * Fired each time the meshlet content becomes {@link MeshletComponentSystem#playable}: every
+     * component's asset has loaded, the world has rebuilt, and the streamed geometry and
+     * texture tails are resident down to the playable floor. Streaming slows to its budgeted,
+     * smooth pace from here.
+     *
+     * @event
+     * @example
+     * app.systems.meshlet.on('playable', () => {
+     *     hideLoadingScreen();
+     * });
+     */
+    static EVENT_PLAYABLE = 'playable';
+
+    /**
      * The shared meshlet director, or null on non-WebGPU devices.
      *
      * @type {MeshletDirector|null}
@@ -51,6 +66,17 @@ class MeshletComponentSystem extends ComponentSystem {
 
     /** @type {number} - ms timestamp of the latest dirty mark. @private */
     _dirtyLast = 0;
+
+    /** @type {boolean} - {@link playable} as of the last frame, to fire on transitions. @private */
+    _wasPlayable = true;
+
+    /**
+     * Components with {@link MeshletComponent#whenPlayable} waiters, polled each frame.
+     *
+     * @type {Set<MeshletComponent>}
+     * @private
+     */
+    _playableWatch = new Set();
 
     /** @type {number} - world rebuilds performed so far (a load-pattern statistic). */
     rebuildCount = 0;
@@ -234,6 +260,21 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
+     * Persistent cache for streamed geometry pages and texture regions, or null for none. See
+     * {@link MeshletDirector#byteCache}. The same cache can be shared with
+     * {@link ResourceLoader#byteCache}.
+     *
+     * @type {ByteCache|null}
+     */
+    set byteCache(value) {
+        if (this.director) this.director.byteCache = value;
+    }
+
+    get byteCache() {
+        return this.director?.byteCache ?? null;
+    }
+
+    /**
      * Sets the screen-space error threshold in pixels for the DAG LOD cut. Defaults to 1.
      *
      * @type {number}
@@ -383,6 +424,132 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
+     * Whether the meshlet content can be shown: no component is waiting for its asset to load,
+     * no world rebuild is pending, and the streamed geometry and texture tails are resident down
+     * to the playable floor - the coarsest LOD free of sloppy simplification (see
+     * {@link MeshletDirector#playable}). True when there is no meshlet content, or no WebGPU.
+     *
+     * @type {boolean}
+     */
+    get playable() {
+        return this._isPlayable(true);
+    }
+
+    /**
+     * @param {boolean} scanAssets - Check every component for a loading asset.
+     * @returns {boolean} Whether the content is playable.
+     * @private
+     */
+    _isPlayable(scanAssets) {
+        const director = this.director;
+        if (!director) return true;
+        if (this._dirty) return false;
+        // a world with nothing in it is never finalized, and has nothing to stream
+        if (director.world.finalized && !director.playable) return false;
+        return !scanAssets || !this._hasPendingAssets();
+    }
+
+    /**
+     * Resolves once the meshlet content is {@link playable} - at once if it already is. Call
+     * after the scene's components are created, so a rebuild for them is already pending.
+     *
+     * @returns {Promise<void>} Resolves when playable.
+     * @example
+     * await app.systems.meshlet.whenPlayable();
+     * hideLoadingScreen();
+     */
+    whenPlayable() {
+        if (this.playable) return Promise.resolve();
+        return new Promise((resolve) => {
+            this.once(MeshletComponentSystem.EVENT_PLAYABLE, () => resolve());
+        });
+    }
+
+    /**
+     * Load as fast as possible until {@link playable}, then stream at the smooth budgeted pace.
+     * Frames may stutter while fast-loading, so cover it with a loading screen; set false to
+     * always stream smoothly. Defaults to true. See {@link MeshletDirector#fastLoad}.
+     *
+     * @type {boolean}
+     */
+    set fastLoad(value) {
+        if (this.director) this.director.fastLoad = !!value;
+    }
+
+    get fastLoad() {
+        return this.director?.fastLoad ?? true;
+    }
+
+    /**
+     * @param {MeshletComponent} component - The component.
+     * @returns {import('./component.js').MeshletStreamStatus} Its load state.
+     * @ignore
+     */
+    _componentStatus(component) {
+        const director = this.director;
+        if (!director) return { playable: true, failed: false, progress: 1, totalBytes: 0, loadedBytes: 0 };
+        const resource = component._effectiveResource;
+        // not placed yet: the asset is loading, or the rebuild that adds it has not run
+        if (!resource || component._placementIndex < 0 || component._placedResource !== resource) {
+            return { playable: false, failed: false, progress: 0, totalBytes: 0, loadedBytes: 0 };
+        }
+        return director.resourceStatus(resource) ?? { playable: false, failed: false, progress: 0, totalBytes: 0, loadedBytes: 0 };
+    }
+
+    /**
+     * @param {MeshletComponent} component - A component with playable waiters.
+     * @ignore
+     */
+    _watchPlayable(component) {
+        this._playableWatch.add(component);
+    }
+
+    /**
+     * @param {MeshletComponent} component - The component.
+     * @ignore
+     */
+    _unwatchPlayable(component) {
+        this._playableWatch.delete(component);
+    }
+
+    /**
+     * Reports progress to, and settles, the components being waited on.
+     *
+     * @private
+     */
+    _updatePlayableWatch() {
+        for (const component of this._playableWatch) {
+            const status = this._componentStatus(component);
+            if (status.playable) {
+                this._playableWatch.delete(component);
+                component.fire(MeshletComponent.EVENT_PROGRESS, 1, status.totalBytes);
+                component.fire(MeshletComponent.EVENT_PLAYABLE, status);
+                component._settlePlayable(status);
+            } else if (status.progress !== component._reportedProgress) {
+                component._reportedProgress = status.progress;
+                component.fire(MeshletComponent.EVENT_PROGRESS, status.progress, status.totalBytes);
+            }
+        }
+    }
+
+    /**
+     * Whether an enabled component's asset is still loading (its resource cannot join the world
+     * yet).
+     *
+     * @returns {boolean} True while any such asset is loading.
+     * @private
+     */
+    _hasPendingAssets() {
+        for (const guid in this.store) {
+            const component = this.store[guid].entity.meshlet;
+            if (component && component.enabled && component.entity.enabled && component._assetReference.asset?.loading) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Rebuilds the world now if changes are pending, regardless of the quiet window.
      */
     flushRebuild() {
@@ -402,6 +569,16 @@ class MeshletComponentSystem extends ComponentSystem {
             }
         }
         this._syncTransforms();
+
+        // the director's state is from last frame's update: a transition fires one frame late.
+        // Once playable, a new asset marks the system dirty when assigned, so the per-component
+        // asset scan only runs while waiting.
+        const playable = this._isPlayable(!this._wasPlayable);
+        if (playable !== this._wasPlayable) {
+            this._wasPlayable = playable;
+            if (playable) this.fire(MeshletComponentSystem.EVENT_PLAYABLE);
+        }
+        if (this._playableWatch.size) this._updatePlayableWatch();
     }
 
     /** @private */
@@ -421,6 +598,7 @@ class MeshletComponentSystem extends ComponentSystem {
             if (!component) continue;
             // left at -1 unless this rebuild places it, so the sync skips unplaced components
             component._placementIndex = -1;
+            component._placedResource = null;
             if (!component._effectiveResource) continue;
             if (!component._effectiveBaseUrl) {
                 Debug.warnOnce('MeshletComponent: no stream base URL - assign an asset with an http(s) file URL (not a blob: or data: URL), or set baseUrl with the resource.');
@@ -451,6 +629,7 @@ class MeshletComponentSystem extends ComponentSystem {
                 for (let mi = 0; mi < members.length; mi++) {
                     const component = members[mi];
                     component._placementIndex = gi;
+                    component._placedResource = resource;
                     component._subBase = mi * per;
                     component._subCount = per;
                     component._transformDirty = true;

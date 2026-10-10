@@ -12,9 +12,10 @@ import { MeshletHzb } from './meshlet-hzb.js';
 import { MeshletView } from './meshlet-view.js';
 import { MeshletWorld } from './meshlet-world.js';
 import { MeshletResidency } from './streaming/meshlet-residency.js';
-import { MeshletFetchScheduler } from './streaming/meshlet-fetch-scheduler.js';
+import { MAX_CONCURRENT_FETCHES, MeshletFetchScheduler } from './streaming/meshlet-fetch-scheduler.js';
 
 /**
+ * @import { ByteCache } from '../../platform/net/byte-cache.js'
  * @import { CameraComponent } from '../../framework/components/camera/component.js'
  * @import { Color } from '../../core/math/color.js'
  * @import { ForwardRenderer } from '../renderer/forward-renderer.js'
@@ -185,11 +186,125 @@ class MeshletDirector {
      * @type {number}
      */
     set maxConcurrentFetches(value) {
-        this.fetchScheduler.maxConcurrent = Math.max(1, value | 0);
+        this._maxConcurrentFetches = Math.max(1, value | 0);
+        this._applyFetchConcurrency();
     }
 
     get maxConcurrentFetches() {
-        return this.fetchScheduler.maxConcurrent;
+        return this._maxConcurrentFetches;
+    }
+
+    /**
+     * Whether the streamed content can be shown: every resource's root pages and its playable
+     * floor - the coarsest LOD level free of sloppy (vertex-clustered) simplification - are
+     * resident, as are the low-resolution tails of the streamed textures. Bakes without sloppy
+     * flags instead need the current view's LOD cut to be fully resident. Finer detail keeps
+     * streaming afterwards. False while a rebuild's content is still loading.
+     *
+     * @type {boolean}
+     */
+    get playable() {
+        return this._playable;
+    }
+
+    /**
+     * Load state of one streamed resource in the current world: its root pages, its playable
+     * floor and its texture tails (see {@link playable}, which is the same test across every
+     * resource).
+     *
+     * @param {object} resource - The MeshletResource.
+     * @returns {{ playable: boolean, failed: boolean, progress: number, totalBytes: number, loadedBytes: number }|null}
+     * Whether the resource is playable, whether its stream was given up on (it then counts as
+     * playable, so nothing waits on it forever), its progress 0..1 and the bytes that progress
+     * weighs; null before the world is finalized. Only meaningful for a resource placed in this
+     * world (a resource it does not hold reads as resident).
+     */
+    resourceStatus(resource) {
+        const world = this.world;
+        if (!world.finalized) return null;
+        // a resource with no stream was uploaded fully resident at finalize
+        const geometry = this.residency?.streamStatus(resource) ?? { playable: true, failed: false, totalBytes: 0, loadedBytes: 0 };
+        const tails = (resource.textureManifest && world.textures) ?
+            world.textures.tailStatus(resource.textureManifest) :
+            { pending: 0, totalBytes: 0, loadedBytes: 0 };
+        const playable = geometry.playable && (geometry.failed || tails.pending === 0);
+        const totalBytes = geometry.totalBytes + tails.totalBytes;
+        const loadedBytes = geometry.loadedBytes + tails.loadedBytes;
+        return {
+            playable,
+            failed: geometry.failed,
+            progress: playable ? 1 : (totalBytes > 0 ? Math.min(loadedBytes / totalBytes, 0.999) : 0),
+            totalBytes,
+            loadedBytes
+        };
+    }
+
+    /** @private */
+    _applyFetchConcurrency() {
+        const fast = !!this.residency?.fastLoad;
+        this.fetchScheduler.maxConcurrent = fast ?
+            Math.max(this._maxConcurrentFetches, this.fastLoadConcurrentFetches) :
+            this._maxConcurrentFetches;
+    }
+
+    /**
+     * Re-evaluates {@link playable} and the fast-load phase. Runs each frame after the residency
+     * update.
+     *
+     * @private
+     */
+    _updatePlayable() {
+        const residency = this.residency;
+        const playable = (!this.world.streamed || !!residency?.playable) && (this.world.textures?.tailsLoaded ?? true);
+        if (residency) {
+            const fast = this.fastLoad && !playable;
+            if (residency.fastLoad !== fast) {
+                residency.fastLoad = fast;
+                this._applyFetchConcurrency();
+            }
+        }
+        if (playable !== this._playable) {
+            this._playable = playable;
+            if (playable) this.onPlayable?.();
+        }
+    }
+
+    /**
+     * Creates the streaming residency for the finalized world and starts loading its roots and
+     * playable floor.
+     *
+     * @param {object|null} carriedSlots - Slot state carried across a rebuild, or null.
+     * @private
+     */
+    _startStreaming(carriedSlots) {
+        this.residency = new MeshletResidency(this.device, this.world, carriedSlots);
+        // fast from the first request: the floor fetches below are issued right away
+        this.residency.fastLoad = this.fastLoad;
+        this._applyFetchConcurrency();
+        this.rootsLoaded = this.residency.loadRoots();
+        this.residency.loadFloor();
+        // the request readback carries the texture-mip feedback marks after the page marks
+        if (this.world.textures) {
+            this.residency.onTexelRateMarks = marks => this.world.textures?.processMarks(marks);
+        }
+    }
+
+    /**
+     * Persistent cache for streamed sidecar bytes - geometry pages and texture regions - or null
+     * for none. Ranges whose bytes are all stored load without a request, so re-entering a scene
+     * streams from local storage; fetched ranges are widened to the cache's chunk boundaries and
+     * stored. The cache assumes sidecar URLs are versioned (their content never changes).
+     *
+     * @type {ByteCache|null}
+     * @example
+     * director.byteCache = new pc.ByteCache(new pc.OpfsByteStore('my-app-meshlets'));
+     */
+    set byteCache(value) {
+        this.fetchScheduler.byteCache = value;
+    }
+
+    get byteCache() {
+        return this.fetchScheduler.byteCache;
     }
 
     /**
@@ -276,6 +391,37 @@ class MeshletDirector {
     rootsLoaded = null;
 
     /**
+     * Load as fast as possible until the world is {@link playable}: arrived pages upload
+     * without the per-frame budget and up to {@link fastLoadConcurrentFetches} requests go out
+     * at once. Frames may stutter meanwhile, so hide the load behind a loading screen. Once
+     * playable, streaming returns to its smooth, budgeted pace; a rebuild that adds content
+     * fast-loads again until that content is playable. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    fastLoad = true;
+
+    /**
+     * Cap on requests in flight while fast-loading (see {@link fastLoad}). Defaults to 64.
+     *
+     * @type {number}
+     */
+    fastLoadConcurrentFetches = 64;
+
+    /**
+     * Called each time the world becomes {@link playable}.
+     *
+     * @type {(() => void)|null}
+     */
+    onPlayable = null;
+
+    /** @type {boolean} @private */
+    _playable = false;
+
+    /** @type {number} - {@link maxConcurrentFetches} outside the fast-load phase. @private */
+    _maxConcurrentFetches = MAX_CONCURRENT_FETCHES;
+
+    /**
      * Ceiling on how much a rebuild may pre-grow a view's carried index capacity. Pre-sizing
      * exists only to avoid a few clamped frames while the demand readback catches up, so it
      * needs to cover a step change, not a scene-size ratio.
@@ -351,13 +497,9 @@ class MeshletDirector {
     finalize() {
         this._applyBudgetViews();
         this.world.finalize();
+        this._playable = false;
         if (this.world.streamed) {
-            this.residency = new MeshletResidency(this.device, this.world);
-            this.rootsLoaded = this.residency.loadRoots();
-            // the request readback carries the texture-mip feedback marks after the page marks
-            if (this.world.textures) {
-                this.residency.onTexelRateMarks = marks => this.world.textures?.processMarks(marks);
-            }
+            this._startStreaming(null);
         }
         return this.world;
     }
@@ -398,6 +540,8 @@ class MeshletDirector {
         const { poolBytes, texturePoolBytes, maxFineTextureSize, initialIndices, initialRecords, indexBudgetFraction } = prevWorld;
         this.residency = null;
         this.rootsLoaded = null;
+        this._playable = false;
+        this._applyFetchConcurrency();
 
         this.world = new MeshletWorld(this.device);
         this.world.poolBytes = poolBytes;
@@ -451,11 +595,7 @@ class MeshletDirector {
         this._capCarry?.forEach(scaleCarry);
         this._shadowCapCarry?.forEach(scaleCarry);
         if (this.world.streamed) {
-            this.residency = new MeshletResidency(this.device, this.world, carriedSlots);
-            this.rootsLoaded = this.residency.loadRoots();
-            if (this.world.textures) {
-                this.residency.onTexelRateMarks = marks => this.world.textures?.processMarks(marks);
-            }
+            this._startStreaming(carriedSlots);
         }
         return this.world;
     }
@@ -620,6 +760,7 @@ class MeshletDirector {
         // shared per-frame work: streaming, textures, budget - once, not per view
         this.residency?.frameUpdate();
         this.world.textures?.flush();
+        this._updatePlayable();
         // index starvation feeds the same controller as page pressure: both say the cut is
         // too fine for the memory it has, and the answer to both is to coarsen it
         const indexRatio = this._distributeIndexBudget();

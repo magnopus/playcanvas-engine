@@ -28,6 +28,7 @@ class MeshletTextureSource {
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
         this.resolveUrl = fetchOptions?.resolveUrl ?? null;
         this.credentials = fetchOptions?.credentials ?? null;
+        this.cacheVersion = fetchOptions?.cacheVersion ?? null;
         this.scheduler = scheduler ?? defaultFetchScheduler();
     }
 
@@ -66,6 +67,7 @@ class MeshletTextureSource {
         if (!promise) {
             promise = this.scheduler.fetchRange(url, byteOffset, byteLength, {
                 credentials: this.credentials,
+                cacheVersion: this.cacheVersion,
                 priority,
                 stillWanted
             }).then((bytes) => {

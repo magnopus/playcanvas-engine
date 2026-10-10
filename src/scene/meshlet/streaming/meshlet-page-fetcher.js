@@ -32,6 +32,7 @@ class MeshletPageFetcher {
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
         this.resolveUrl = fetchOptions?.resolveUrl ?? null;
         this.credentials = fetchOptions?.credentials ?? null;
+        this.cacheVersion = fetchOptions?.cacheVersion ?? null;
         this.scheduler = scheduler ?? defaultFetchScheduler();
 
         /** @type {string[]} - per-blob fetch URLs, resolved once. */
@@ -60,6 +61,7 @@ class MeshletPageFetcher {
     fetchRange(blobIndex, offset, length, priority = FETCH_PRIORITY_PAGES) {
         return this.scheduler.fetchRange(this._blobUrl(blobIndex), offset, length, {
             credentials: this.credentials,
+            cacheVersion: this.cacheVersion,
             priority
         });
     }
@@ -73,6 +75,7 @@ class MeshletPageFetcher {
     fetchBlob(blobIndex) {
         return this.scheduler.fetchAll(this._blobUrl(blobIndex), {
             credentials: this.credentials,
+            cacheVersion: this.cacheVersion,
             priority: FETCH_PRIORITY_ROOTS
         });
     }

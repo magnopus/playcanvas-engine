@@ -1,4 +1,5 @@
 import { MeshletCutData } from './meshlet-cut-data.js';
+import { meshletBakeStamp } from './streaming/meshlet-bake-stamp.js';
 import { Debug } from '../../core/debug.js';
 import { PickerId } from '../picker-id.js';
 import { Mat4 } from '../../core/math/mat4.js';
@@ -36,6 +37,8 @@ const KNOWN_LAYOUT_KEYS = new Set(['positions', 'normals', 'tangents', 'uvCompon
  * @property {((uri: string) => string)|null} [resolveUrl] - Maps a manifest URI to the URL it
  * is fetched from, in place of appending it to the resource's base URL.
  * @property {RequestCredentials|null} [credentials] - Fetch credentials mode for the requests.
+ * @property {string|null} [cacheVersion] - Versions the sidecars' persistent cache keys (see
+ * {@link MeshletFetchScheduler#byteCache}); the world sets it to the resource's bake stamp.
  */
 
 const _tmpMat = new Mat4();
@@ -814,7 +817,10 @@ class MeshletWorld {
         this.pickIdBase = PickerId.reserve(totalInstances);
         this._pickRecords = null;
 
-        for (const { resource, transform, shardBuffers, baseUrl, instances, fetchOptions } of pending) {
+        for (const { resource, transform, shardBuffers, baseUrl, instances, fetchOptions: options } of pending) {
+            // the bake stamp versions every sidecar's cache key, so a rebake over the same URLs
+            // can never be served the previous bake's cached pages or texture regions
+            const fetchOptions = { ...options, cacheVersion: meshletBakeStamp(resource) };
             const manifest = resource.manifest;
             const grid = manifest.positionGrid;
             const uvFloats = (manifest.attributeLayout.uvComponents ?? 0) * 2;

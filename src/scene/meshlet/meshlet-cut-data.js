@@ -2,7 +2,7 @@ import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import {
     MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT,
-    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA as O, OBJECT_DATA_U32S
+    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_SLOPPY, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA as O, OBJECT_DATA_U32S
 } from './constants.js';
 
 /**
@@ -66,6 +66,47 @@ function buildMeshletGroups(data) {
     return { groups, roots };
 }
 
+/**
+ * The pages a primitive needs resident before its coarsest presentable level can draw: the
+ * playable floor. A replacement group is tainted when its own simplification was sloppy
+ * ({@link MESHLET_FLAG_SLOPPY}) or any cluster it replaces is tainted - sloppy geometry stays in
+ * everything coarsened from it. The floor is every cluster that is a root or whose replacement
+ * group (parent) is tainted: the untainted level each branch first reaches, plus every tainted
+ * cluster above it, whose pages the cut must hold to refine down to it.
+ *
+ * @param {Uint32Array} source - The primitive's meshlet records.
+ * @param {{ start: number, count: number, level: number, children: number[] }[]} groups - Its
+ * replacement groups (see {@link buildMeshletGroups}).
+ * @param {Map<number, number>} pages - Floor pages, extended in place: page -> coarsest LOD level
+ * of a floor cluster on it.
+ * @ignore
+ */
+function collectFloorPages(source, groups, pages) {
+    const count = source.length / MESHLET_DATA_U32S;
+    // per cluster: its replacement group is tainted (level 0 clusters belong to none)
+    const tainted = new Uint8Array(count);
+    const ordered = groups.slice().sort((a, b) => a.level - b.level);
+    for (const group of ordered) {
+        let taint = false;
+        for (let m = group.start; m < group.start + group.count && !taint; m++) {
+            taint = (source[m * MESHLET_DATA_U32S + M.FLAGS] & MESHLET_FLAG_SLOPPY) !== 0;
+        }
+        for (let i = 0; i < group.children.length && !taint; i++) {
+            taint = tainted[group.children[i]] === 1;
+        }
+        if (taint) tainted.fill(1, group.start, group.start + group.count);
+    }
+    for (let m = 0; m < count; m++) {
+        const row = m * MESHLET_DATA_U32S;
+        const parent = source[row + M.PARENT];
+        if (parent === MESHLET_NO_PARENT || tainted[parent]) {
+            const page = source[row + M.PAGE];
+            const level = source[row + M.LOD_LEVEL];
+            if (!(pages.get(page) >= level)) pages.set(page, level);
+        }
+    }
+}
+
 /** GPU tables shared by every view's resident, capacity-bounded cut. @ignore */
 class MeshletCutData {
     /**
@@ -79,6 +120,7 @@ class MeshletCutData {
         const rootTasks = [];
         const primitives = new Map();
         const rootPages = new Set();
+        const floorPages = new Map();
         this.rootIndices = [0, 0, 0];
         this.rootRecords = 0;
         // Per primitive, in its meshlet index range: [first] = the lowest LOD level holding a root
@@ -112,6 +154,7 @@ class MeshletCutData {
                 }
                 levelStarts[first] = Number.isFinite(minRootLevel) ? minRootLevel : 0;
                 for (const root of roots) rootPages.add(source[root * MESHLET_DATA_U32S + M.PAGE]);
+                collectFloorPages(source, groups, floorPages);
                 for (let m = 0; m < count; m++) source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP] = MESHLET_NO_PARENT;
                 const tasks = [];
                 const costs = (members) => {
@@ -201,6 +244,13 @@ class MeshletCutData {
         if (levelStarts.length) this.levelStarts.write(0, levelStarts);
         this.levelStartsCpu = levelStarts;
         this.rootPages = Array.from(rootPages).sort((a, b) => a - b);
+        /**
+         * Global pages of the playable floor (see {@link collectFloorPages}), roots included,
+         * coarsest first - the order to load them in when the pool cannot hold them all.
+         *
+         * @type {number[]}
+         */
+        this.floorPages = Array.from(floorPages.keys()).sort((a, b) => (floorPages.get(b) - floorPages.get(a)) || (a - b));
     }
 
     destroy() {
@@ -211,4 +261,4 @@ class MeshletCutData {
     }
 }
 
-export { buildMeshletGroups, MeshletCutData };
+export { buildMeshletGroups, collectFloorPages, MeshletCutData };

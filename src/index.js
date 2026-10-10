@@ -133,6 +133,11 @@ export { getTouchTargetCoords, Touch, TouchEvent } from './platform/input/touch-
 
 // PLATFORM / NET
 export { http, Http } from './platform/net/http.js';
+export { ByteCache } from './platform/net/byte-cache.js';
+export { ByteStore } from './platform/net/byte-store.js';
+export { MemoryByteStore } from './platform/net/memory-byte-store.js';
+export { OpfsByteStore } from './platform/net/opfs-byte-store.js';
+export { CacheStorageByteStore } from './platform/net/cache-storage-byte-store.js';
 
 // PLATFORM / SOUND
 export * from './platform/sound/constants.js';

@@ -205,6 +205,17 @@ export const MESHLET_FLAG_DAG_ROOT = 1 << 1;
 export const MESHLET_FLAG_TWO_SIDED = 1 << 2;
 
 /**
+ * The cluster's replacement group was simplified by vertex clustering (meshopt
+ * simplifySloppy), which changes topology and reads as garbled up close. It and every coarser
+ * cluster derived from it are kept out of the playable floor (see
+ * {@link MeshletCutData#floorPages}). Only meaningful on bakes whose stream manifest sets
+ * `sloppyFlags`; older bakes never set it.
+ *
+ * @type {number}
+ */
+export const MESHLET_FLAG_SLOPPY = 1 << 3;
+
+/**
  * Draw buckets, in index-buffer order. One indirect draw per bucket per phase - they differ in
  * pipeline state, which cannot vary within a draw:
  * - 0 OPAQUE: backface culled, no alpha test (early-Z intact)

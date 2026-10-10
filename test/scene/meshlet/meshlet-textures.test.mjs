@@ -335,3 +335,18 @@ describe('MeshletTextures', function () {
     });
 
 });
+
+describe('MeshletTextures#tailStatus', function () {
+
+    it('reports tail progress for one resource\'s arrays only', function () {
+        const mine = {}, other = {};
+        const textures = Object.create(MeshletTextures.prototype);
+        textures._arrays = [
+            { owner: mine, tailDone: true, array: { tail: { byteLength: 100 } } },
+            { owner: mine, tailDone: false, array: { tail: { byteLength: 300 } } },
+            { owner: other, tailDone: false, array: { tail: { byteLength: 50 } } }
+        ];
+        expect(textures.tailStatus(mine)).to.deep.equal({ pending: 1, totalBytes: 400, loadedBytes: 100 });
+        expect(textures.tailStatus({})).to.deep.equal({ pending: 0, totalBytes: 0, loadedBytes: 0 });
+    });
+});
