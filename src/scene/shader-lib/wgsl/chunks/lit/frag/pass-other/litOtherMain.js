@@ -12,6 +12,7 @@ export default /* wgsl */`
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
+    #include "litEngineMainStartPS"
     #include "litUserMainStartPS"
 
     var output: FragmentOutput;
@@ -36,6 +37,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         output.color = float2vec4(vLinearDepth);
     #endif
 
+    #include "litEngineMainEndPS"
     #include "litUserMainEndPS"
 
     return output;

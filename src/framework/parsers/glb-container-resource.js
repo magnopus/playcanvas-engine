@@ -1,5 +1,6 @@
 import { Debug } from '../../core/debug.js';
 
+import { BLEND_NONE } from '../../scene/constants.js';
 import { GraphNode } from '../../scene/graph-node.js';
 import { MeshInstance } from '../../scene/mesh-instance.js';
 import { Model } from '../../scene/model.js';
@@ -65,6 +66,9 @@ class GlbContainerResource {
         this.animations = animations;
         this.gsplats = gsplats;
         this._meshGSplats = meshGSplats;
+
+        // streamed meshlet resources (MAG_meshlets_gpu v2) - raw resources, one per document
+        this.meshlets = data.meshlets ? [data.meshlets] : [];
     }
 
     get model() {
@@ -222,6 +226,17 @@ class GlbContainerResource {
 
                 // assign asset id without recreating mesh instances which are already set up with materials
                 entity.render.assignAsset(renderAsset);
+
+                // A blended or transmissive surface lets light through, but a shadow map can only
+                // record it as solid: such primitives do not cast. Glass-heavy scenes otherwise pay
+                // for it in every shadow face - 3,026 of the Bistro's 4,344 draw calls. Applied
+                // after the component, which sets every mesh instance from its own castShadows.
+                for (let i = 0; i < attachedMi.length; i++) {
+                    const material = attachedMi[i].material;
+                    if (material.blendType !== BLEND_NONE || material.refraction > 0) {
+                        attachedMi[i].castShadow = false;
+                    }
+                }
             }
 
             // recursively clone children
@@ -412,6 +427,11 @@ class GlbContainerResource {
             destroyAssets(this.gsplats);
             this.gsplats = null;
             this._meshGSplats = null;
+        }
+
+        if (this.meshlets) {
+            this.meshlets.forEach(resource => resource.destroy());
+            this.meshlets = null;
         }
 
         if (this._model) {

@@ -7,6 +7,7 @@ import { math } from '../../core/math/math.js';
 
 /**
  * @import { EventHandler } from '../../core/event-handler.js';
+ * @import { ByteCache } from './byte-cache.js';
  */
 
 /**
@@ -82,6 +83,18 @@ class Http {
      * @ignore
      */
     withCredentials = false;
+
+    /**
+     * Persistent cache for GET responses, or null for none. Asynchronous GET requests for URLs the
+     * cache accepts are answered from it when the whole response is stored, and stored in it when
+     * they succeed. Requests with `options.cache` or `options.byteCache` set to false, with a
+     * `Range` header, or for an XML document bypass it. Prefer setting it via
+     * {@link ResourceLoader#byteCache}.
+     *
+     * @type {ByteCache|null}
+     * @ignore
+     */
+    byteCache = null;
 
     /**
      * The configured concurrency limit. See {@link Http#maxConcurrentRequests}.
@@ -165,6 +178,7 @@ class Http {
      * @param {number} [options.maxRetries] - If options.retry is true this specifies the maximum number of retries. Defaults to 5.
      * @param {number} [options.maxRetryDelay] - If options.retry is true this specifies the maximum amount of time to wait between retries in milliseconds. Defaults to 5000.
      * @param {EventHandler} [options.progress] - Object to use for firing progress events.
+     * @param {boolean} [options.byteCache] - If false, the request bypasses {@link Http#byteCache}.
      * @param {HttpResponseCallback} callback - The callback used when the response has returned. Passed (err, data)
      * where data is the response (format depends on response type: text, Object, ArrayBuffer, XML) and
      * err is the error code.
@@ -504,11 +518,112 @@ class Http {
             }
         };
 
+        const cache = this._cacheFor(method, url, options, postdata, xhr.responseType);
+        if (cache) {
+            xhr._byteCacheUrl = url;
+            if (cache.hasFile(url)) {
+                cache.getFile(url).then((hit) => {
+                    if (hit) {
+                        this._onCacheHit(url, options, xhr, hit);
+                    } else {
+                        this._acquire(xhr, options, send);
+                    }
+                });
+                return xhr;
+            }
+        }
+
         // throttle the number of concurrent in-flight requests by deferring the actual send
         this._acquire(xhr, options, send);
 
         // Return the request object as it can be handy for blocking calls
         return xhr;
+    }
+
+    /**
+     * The byte cache a request reads and writes, if any.
+     *
+     * @param {string} method - The HTTP method.
+     * @param {string} url - The final request URL.
+     * @param {object} options - The request options.
+     * @param {any} postdata - The request body.
+     * @param {string} responseType - The XHR response type.
+     * @returns {ByteCache|null} The cache, or null when the request bypasses it.
+     * @private
+     */
+    _cacheFor(method, url, options, postdata, responseType) {
+        const cache = this.byteCache;
+        if (!cache || method !== 'GET' || options.async === false || options.cache === false ||
+            options.byteCache === false || postdata != null || responseType === Http.ResponseType.DOCUMENT) {
+            return null;
+        }
+        for (const header in options.headers) {
+            if (header.toLowerCase() === 'range') return null;
+        }
+        return cache.accepts(url) ? cache : null;
+    }
+
+    /**
+     * Completes a request from the byte cache, decoding the stored bytes the way
+     * {@link Http#_onSuccess} decodes a network response.
+     *
+     * @param {string} url - The request URL.
+     * @param {object} options - The request options.
+     * @param {XMLHttpRequest} xhr - The unsent request object.
+     * @param {{ data: ArrayBuffer, type: string }} hit - The stored response.
+     * @private
+     */
+    _onCacheHit(url, options, xhr, hit) {
+        const { data, type } = hit;
+        const responseType = xhr.responseType;
+        let response;
+        try {
+            if (responseType === Http.ResponseType.ARRAY_BUFFER) {
+                response = data;
+            } else if (responseType === Http.ResponseType.BLOB) {
+                response = new Blob([data], { type });
+            } else {
+                const text = new TextDecoder().decode(data);
+                const json = responseType === Http.ResponseType.JSON || type === Http.ContentType.JSON ||
+                    url.split('?')[0].endsWith('.json');
+                response = json ? JSON.parse(text) : text;
+            }
+        } catch (err) {
+            options.callback(err);
+            return;
+        }
+        options.progress?.fire('progress', data.byteLength, data.byteLength);
+        options.callback(null, response);
+    }
+
+    /**
+     * Stores a successful response in the byte cache. Runs before the response is handed to the
+     * callback, which may transfer its buffer.
+     *
+     * @param {string} url - The request URL.
+     * @param {XMLHttpRequest} xhr - The completed request.
+     * @param {string} contentType - The response's content type, or ''.
+     * @private
+     */
+    _storeInCache(url, xhr, contentType) {
+        const cache = this.byteCache;
+        const response = xhr.response;
+        if (!cache || response == null) return;
+        switch (xhr.responseType) {
+            case Http.ResponseType.ARRAY_BUFFER:
+                cache.putFile(url, response, contentType);
+                break;
+            case Http.ResponseType.BLOB:
+                response.arrayBuffer().then(data => cache.putFile(url, data, contentType || response.type), () => {});
+                break;
+            case Http.ResponseType.JSON:
+                cache.putFile(url, new TextEncoder().encode(JSON.stringify(response)), contentType);
+                break;
+            case Http.ResponseType.TEXT:
+            case '':
+                cache.putFile(url, new TextEncoder().encode(xhr.responseText), contentType);
+                break;
+        }
     }
 
     _guessResponseType(url) {
@@ -594,6 +709,11 @@ class Http {
             const parts = header.split(';');
             contentType = parts[0].trim();
         }
+        // only a complete response: a 206 is a partial one, and file:// responses arrive as status 0
+        if (xhr._byteCacheUrl && xhr.status === 200) {
+            this._storeInCache(xhr._byteCacheUrl, xhr, contentType ?? '');
+        }
+
         try {
             // Check the content type to see if we want to parse it
             if (this._isBinaryContentType(contentType) || this._isBinaryResponseType(xhr.responseType)) {

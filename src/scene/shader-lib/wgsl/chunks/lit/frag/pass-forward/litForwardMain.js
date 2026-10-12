@@ -6,6 +6,7 @@ export default /* wgsl */`
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
+    #include "litEngineMainStartPS"
     #include "litUserMainStartPS"
 
     dReflection = vec4f(0.0);
@@ -59,6 +60,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         writeSceneTextureDepth(&output, vLinearDepth, 1.0);
     #endif
 
+    #include "litEngineMainEndPS"
     #include "litUserMainEndPS"
 
     return output;

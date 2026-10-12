@@ -792,6 +792,9 @@ class ForwardRenderer extends Renderer {
      * @param {MeshInstance[]} [options.meshInstances] - The mesh instances to be rendered. Use
      * when layer is not provided.
      * @param {object} [options.splitLights] - The split lights to be used for clustered lighting.
+     * @param {Layer} [options.lightLayer] - When rendering options.meshInstances (no layer), a
+     * layer whose lights (splitLights default) and light hash shade the draws - borrowing the
+     * layer's lighting without its visibility or sorting.
      * @param {Function} [options.drawCallback] - Function called before each mesh instance is
      * rendered, with the mesh instance as the argument.
      * @param {UniformBufferFormat} [options.viewUniformFormat] - A custom view uniform buffer
@@ -834,7 +837,9 @@ class ForwardRenderer extends Renderer {
 
         } else {
             visible = options.meshInstances;
-            splitLights = options.splitLights ?? _noLights;
+            // options.lightLayer borrows a layer's lights (and its light hash for shader
+            // variants) without its visibility/sorting - used by the meshlet draw passes
+            splitLights = options.splitLights ?? options.lightLayer?.splitLights ?? _noLights;
         }
 
         Debug.assert(visible, 'Either layer or options.meshInstances must be provided');
@@ -889,7 +894,7 @@ class ForwardRenderer extends Renderer {
             splitLights,
             shaderPass,
             options.drawCallback ?? null,
-            layer,
+            layer ?? options.lightLayer ?? null,
             flipFaces,
             viewUniformFormat);
 
@@ -1026,7 +1031,15 @@ class ForwardRenderer extends Renderer {
                     if (mv) frameGraph.beginMultiView(this.device);
 
                     if (!isDepthOnly) {
-                        this.addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, i);
+                        // the meshlet director may take over the camera block: meshlet draw
+                        // phase 1 first (owning the camera clear), the opaque scene passes
+                        // loading on top, HZB + phase-2 before the transparent ones. Returns
+                        // false when inactive (or multiview), leaving the default path.
+                        const handled = !mv && this.meshletDirector?.buildCameraPasses(
+                            frameGraph, layerComposition, renderTarget, startIndex, i, camera);
+                        if (!handled) {
+                            this.addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, i);
+                        }
                     }
 
                     // depth layer triggers grab passes if enabled
@@ -1076,14 +1089,21 @@ class ForwardRenderer extends Renderer {
      * @param {FrameGraph} frameGraph - The frame graph.
      * @param {LayerComposition} layerComposition - The layer composition.
      */
-    addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, endIndex) {
+    addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, endIndex, stripClears = false) {
 
         const renderPass = new RenderPassForward(this.device, layerComposition, this.scene, this);
         renderPass.init(renderTarget);
 
         const renderActions = layerComposition._renderActions;
         for (let i = startIndex; i <= endIndex; i++) {
-            renderPass.addLayerRenderStep(this._layerRenderStepFromRenderAction(renderActions[i]));
+            const step = this._layerRenderStepFromRenderAction(renderActions[i]);
+            if (stripClears) {
+                // another pass (meshlet draw phase 1) owns the camera clear; this pass loads
+                step.clearColor = false;
+                step.clearDepth = false;
+                step.clearStencil = false;
+            }
+            renderPass.addLayerRenderStep(step);
         }
 
         frameGraph.addRenderPass(renderPass);
@@ -1131,9 +1151,16 @@ class ForwardRenderer extends Renderer {
         // update gsplat director
         this.gsplatDirector?.update(comp);
 
+        // update meshlet director - encodes the phase-1 culling compute ahead of the frame graph
+        this.meshletDirector?.update(comp);
+
         // light visibility culling, light atlas allocation and directional shadow light collection
         // (mesh-independent, so it can run before the frame graph is built in a later refactor)
         this.culler.updateLightVisibility(comp);
+
+        // reconcile the meshlet shadow-caster views. Needs cameraDirShadowLights (filled just
+        // above) and must precede cullComposition, which reads layer.shadowCasters.
+        this.meshletDirector?.updateShadowLights(comp);
     }
 
     /**
@@ -1154,6 +1181,11 @@ class ForwardRenderer extends Renderer {
         // light's shadow-camera frustum has been fitted, and before the frame graph renders the
         // shadow maps. Only the GPU-sort (hybrid) gsplat path uses this; the CPU-sort path self-casts.
         this.gsplatDirector?.updateShadows();
+
+        // Dispatch the meshlet directional shadow culls, for the same reason: cullComposition is
+        // where each cascade's shadow camera is positioned and its depth range fitted. Compute
+        // encoded here still executes ahead of every frame-graph pass.
+        this.meshletDirector?.updateShadows();
 
         // GPU update for visible objects requiring one
         this.gpuUpdate(this.culler.processingMeshInstances);

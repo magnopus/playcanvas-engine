@@ -58,9 +58,10 @@ class WebgpuBuffer {
 
     /**
      * @param {WebgpuGraphicsDevice} device - Graphics device.
-     * @param {*} storage -
+     * @param {*} storage - The CPU copy to upload, or null/undefined to allocate only.
+     * @param {number} [byteSize] - Size to allocate when there is no storage to size it from.
      */
-    unlock(device, storage) {
+    unlock(device, storage, byteSize) {
 
         const wgpu = device.wgpu;
 
@@ -70,7 +71,7 @@ class WebgpuBuffer {
         if (!this.buffer) {
             // size needs to be a multiple of 4
             // note: based on specs, descriptor.size must be a multiple of 4 if descriptor.mappedAtCreation is true
-            const size = (storage.byteLength + 3) & ~3;
+            const size = ((storage?.byteLength ?? byteSize) + 3) & ~3;
 
             this.usageFlags |= GPUBufferUsage.COPY_DST;
             this.allocate(device, size);
@@ -88,6 +89,10 @@ class WebgpuBuffer {
             // dest.set(src);
             // this.buffer.unmap();
         }
+
+        // nothing to upload: the buffer's contents are written on the GPU. Skipping this also
+        // skips the full-size staging copy below, which at meshlet scale is hundreds of MB.
+        if (!storage) return;
 
         // src size needs to be a multiple of 4 as well
         const srcOffset = storage.byteOffset ?? 0;

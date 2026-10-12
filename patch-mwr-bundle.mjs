@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 
-const target = '../magnopus-web-renderer/libs/overrides/playcanvas-engine/build/playcanvas.mjs';
+const target = '/Users/adrian.meredith/Documents/projects/magnopus-web-renderer/libs/overrides/playcanvas-engine/build/playcanvas.mjs';
 const anchor = '\tconst scriptType = function(args) {';
 const annotation = '  /** @type Class */\n';
 
