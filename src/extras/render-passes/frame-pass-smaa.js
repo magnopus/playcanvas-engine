@@ -279,6 +279,13 @@ class FramePassSmaa extends FramePass {
         );
         neighborhoodPass.init(targetRenderTarget);
 
+        /**
+         * The pass resolving SMAA to the output render target, writing the final image.
+         *
+         * @type {RenderPassShaderQuad}
+         */
+        this.neighborhoodPass = neighborhoodPass;
+
         this.beforePasses = [edgePass, weightsPass, neighborhoodPass];
     }
 
