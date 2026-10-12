@@ -18,6 +18,7 @@ import { SSAOTYPE_COMBINE, SSAOTYPE_LIGHTING, SSAOTYPE_NONE } from './constants.
 import { Debug } from '../../core/debug.js';
 import { RenderPassDownsample } from './render-pass-downsample.js';
 import { Color } from '../../core/math/color.js';
+import { Vec4 } from '../../core/math/vec4.js';
 
 /**
  * @import { CameraFrame } from './camera-frame.js'
@@ -117,6 +118,25 @@ class FramePassCameraFrame extends FramePass {
     volumetricFogPass;
 
     _renderTargetScale = 1;
+
+    /**
+     * The camera's viewport in pixels of the output render target, used by the pass writing the
+     * final image to it. The intermediate render targets are sized to the viewport and rendered
+     * whole, so the viewport is only applied at this last step.
+     *
+     * @type {Vec4}
+     * @private
+     */
+    _outputViewport = new Vec4();
+
+    /**
+     * True if the output viewport the passes are currently set up for covers only a part of the
+     * output render target, or null when the passes have not been set up for it yet.
+     *
+     * @type {boolean|null}
+     * @private
+     */
+    _outputViewportPartial = null;
 
     /**
      * True if the render pass needs to be re-created because layers have been added or removed.
@@ -260,6 +280,7 @@ class FramePassCameraFrame extends FramePass {
         this.scenePassHalf = null;
         this.dofPass = null;
         this.volumetricFogPass = null;
+        this._outputViewportPartial = null;
     }
 
     sanitizeOptions(options) {
@@ -366,13 +387,6 @@ class FramePassCameraFrame extends FramePass {
             return 'multi-sampling is enabled on the CameraFrame, which the scene depth cannot be rendered with';
         }
 
-        // a camera which does not clear the whole render target, or which is not the first one
-        // rendering to it, clears from inside the render pass, and that clear is not attachment aware
-        // - it would also clear the scene textures
-        if (!this.cameraComponent.camera.fullSizeClearRect) {
-            return 'this camera does not clear the whole render target, and the clear it uses instead would also clear the scene depth';
-        }
-
         // The depth prepass, which this camera needs as well, publishes its depth to the same uniform
         // as the scene textures do, and so the two have to store it the same way - the shaders sampling
         // it are generated once, from a single declaration of the encoding. They do not: the prepass
@@ -444,14 +458,80 @@ class FramePassCameraFrame extends FramePass {
 
     set renderTargetScale(value) {
         this._renderTargetScale = value;
-        if (this.scenePass) {
-            this.scenePass.scaleX = value;
-            this.scenePass.scaleY = value;
-        }
+        this.updateSceneScale();
     }
 
     get renderTargetScale() {
         return this._renderTargetScale;
+    }
+
+    /**
+     * Sizes the scene render target to the camera's viewport, scaled by the render target scale.
+     * The passes rendering the scene render to the whole of it, ignoring the camera's viewport,
+     * and the passes after them follow its size.
+     *
+     * @private
+     */
+    updateSceneScale() {
+        const options = this.sceneOptions;
+        if (options) {
+            const rect = this.cameraComponent.camera.rect;
+            options.scaleX = this._renderTargetScale * rect.z;
+            options.scaleY = this._renderTargetScale * rect.w;
+        }
+    }
+
+    /**
+     * Places the final image in the camera's viewport of the output render target. Only the
+     * pass writing to that render target is affected, as the intermediate ones are sized to the
+     * viewport.
+     *
+     * @private
+     */
+    updateOutputViewport() {
+        const { cameraComponent, device } = this;
+        const camera = cameraComponent.camera;
+        const rect = camera.rect;
+
+        let viewport;
+        if (rect.x !== 0 || rect.y !== 0 || rect.z !== 1 || rect.w !== 1) {
+            const target = cameraComponent.renderTarget;
+            const width = target ? target.width : device.width;
+            const height = target ? target.height : device.height;
+            viewport = this._outputViewport.set(
+                Math.floor(rect.x * width),
+                Math.floor(rect.y * height),
+                Math.floor(rect.z * width),
+                Math.floor(rect.w * height)
+            );
+        }
+
+        // the pass writing the final image to the output render target
+        const outputPass = this.smaaPass?.neighborhoodPass ?? this.composePass;
+        outputPass.viewport = viewport;
+
+        const partial = !!viewport;
+        if (partial !== this._outputViewportPartial) {
+            this._outputViewportPartial = partial;
+
+            // The output pass clears the whole output render target - the color to avoid loading it
+            // from memory, as the pass overwrites all of it, and the depth and stencil for the layers
+            // rendered after the composition, which test against them. With a partial viewport that
+            // would erase what other cameras rendered outside of it, so the output render target is
+            // loaded instead, and its depth cleared within the viewport alone - see below.
+            outputPass.setClearColor(partial ? undefined : Color.BLACK);
+            outputPass.setClearDepth(partial ? undefined : 1);
+            outputPass.setClearStencil(partial ? undefined : 0);
+        }
+
+        // The layers rendered after the composition depth test against the output render target's
+        // depth, which nothing has cleared within the viewport then - the first of them clears it
+        // from inside the render pass, limited to the viewport, as cameras without the CameraFrame do.
+        const step = this.afterPass.layerRenderSteps[0];
+        if (step) {
+            step.clearDepth = partial && cameraComponent.clearDepthBuffer;
+            step.clearStencil = partial && cameraComponent.clearStencilBuffer;
+        }
     }
 
     needsReset(options) {
@@ -593,6 +673,7 @@ class FramePassCameraFrame extends FramePass {
             scaleX: this.renderTargetScale,
             scaleY: this.renderTargetScale
         };
+        this.updateSceneScale();
 
         this.createPasses(options);
 
@@ -765,6 +846,7 @@ class FramePassCameraFrame extends FramePass {
         // matches the back-buffer size with the optional scale. Note that the scale parameters
         // allow us to render the 3d scene at lower resolution, improving performance.
         this.scenePass = new RenderPassForward(device, composition, scene, renderer);
+        this.scenePass.fullViewport = true;
         this.setupScenePassSettings(this.scenePass);
         this.scenePass.init(this.rt, this.sceneOptions);
 
@@ -789,6 +871,7 @@ class FramePassCameraFrame extends FramePass {
 
             // if grab pass is used, render the layers after it (otherwise they were already rendered)
             this.scenePassTransparent = new RenderPassForward(device, composition, scene, renderer);
+            this.scenePassTransparent.fullViewport = true;
             this.setupScenePassSettings(this.scenePassTransparent);
             this.scenePassTransparent.init(this.rt);
             ret.lastAddedIndex = this.addCameraLayers(this.scenePassTransparent, ret.lastAddedIndex, ret.clearRenderTarget, options.lastSceneLayerId, options.lastSceneLayerIsTransparent);
@@ -969,6 +1052,11 @@ class FramePassCameraFrame extends FramePass {
         if (this.layersDirty) {
             this.cameraFrame.update();
         }
+
+        // the camera's viewport can change any frame, size the render targets before the passes
+        // resize them
+        this.updateSceneScale();
+        this.updateOutputViewport();
 
         super.frameUpdate();
 
