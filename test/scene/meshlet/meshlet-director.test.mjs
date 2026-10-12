@@ -167,6 +167,7 @@ describe('MeshletDirector', function () {
         const view = director.views.get(cameraComponent);
         expect(view.culler.dagPixelThreshold).to.equal(2.5);
         expect(view.culler.pressureScale).to.equal(director.budget.pressureScale);
+        expect(view.culler.rootMinPixels, 'sub-pixel instances are not drawn by default').to.equal(3);
         expect(view.useOcclusion, 'backbuffer camera: no depth to test against').to.equal(false);
         expect(view._countersReadBusy, 'demand readback issued').to.equal(true);
         expect(director.isLightLayer(layer)).to.equal(true);
@@ -216,6 +217,53 @@ describe('MeshletDirector', function () {
         rt.destroy();
         colorBuffer.destroy();
         depthBuffer.destroy();
+    });
+
+    it('budgets camera views before shadow views, which coarsen under their own pressure', function () {
+        finalizeStreamed();
+        director.update(comp);
+        const [cam] = [...director.views.values()];
+        cam.lastRoots.admitted = [0, 0, 0];
+        director.world.deviceIndexCeiling = 0;
+        director.world.indexBudgetTotal = 1000;
+        const shadow = {
+            demand: 2000,
+            indexShare: 0,
+            indexDemand() {
+                return this.demand;
+            },
+            indexPressure() {
+                return this.demand / this.indexShare;
+            }
+        };
+        director.shadowRenderer.entries.set({}, { views: [shadow] });
+
+        // floor 125 each; the camera is budgeted for its whole demand at half occupancy first
+        cam.lastDemand = { indices: [300, 0, 0], records: 1 };
+        expect(director._distributeIndexBudget(), 'camera pressure only').to.be.closeTo(0.5, 1e-9);
+        expect(cam.indexShare).to.equal(600);
+        expect(shadow.indexShare, 'the shadow view splits what the camera left').to.equal(400);
+        expect(director._shadowIndexRatio).to.be.closeTo(2000 / 400, 1e-9);
+
+        // a coarsened camera whose demand fell under the floor still gets headroom to recover
+        cam.lastDemand = { indices: [100, 0, 0], records: 1 };
+        expect(director._distributeIndexBudget()).to.be.closeTo(0.5, 1e-9);
+        expect(cam.indexShare).to.equal(200);
+
+        cam.lastDemand = { indices: [3000, 0, 0], records: 1 };
+        director._distributeIndexBudget();
+        expect(cam.indexShare, 'a camera wanting everything takes it').to.equal(875);
+        expect(shadow.indexShare, 'the shadow view keeps only its floor').to.equal(125);
+
+        const budget = director.budget;
+        director._updateShadowPressure(budget.indexStarvedAt + 0.1);
+        expect(director.shadowPressureScale).to.be.closeTo(budget.raiseFast, 1e-9);
+        expect(budget.pressureScale, 'the camera controller is untouched').to.equal(1);
+        director._updateShadowPressure((budget.indexStarvedAt + budget.indexEasedAt) / 2);
+        expect(director.shadowPressureScale, 'held between the thresholds').to.be.closeTo(budget.raiseFast, 1e-9);
+        director._updateShadowPressure(0);
+        expect(director.shadowPressureScale).to.be.closeTo(budget.raiseFast * budget.decay, 1e-9);
+        director.shadowRenderer.entries.clear();
     });
 
     it('shares the index ceiling across views in proportion to demand, with a floor', function () {

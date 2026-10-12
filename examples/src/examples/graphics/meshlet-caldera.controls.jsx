@@ -38,6 +38,10 @@ export function Controls({ observer }) {
                         { v: 'docks', t: 'Docks' },
                         { v: 'caldera', t: 'Caldera' },
                         { v: 'subpen', t: 'Sub Pen' },
+                        { v: 'agricultural_center', t: 'Agricultural Center' },
+                        { v: 'village', t: 'Village' },
+                        { v: 'ruins', t: 'Ruins' },
+                        { v: 'airstrip', t: 'Airstrip' },
                         { v: 'hotel', t: 'Hotel' },
                         { v: 'power_station', t: 'Power Station' },
                         { v: 'terrain', t: 'Whole island' }

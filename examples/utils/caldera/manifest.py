@@ -17,12 +17,21 @@ ORDER = ['terrain', 'capital', 'airfield', 'phosphate_mine', 'beachhead', 'tile_
 CONTAINED = {'hotel': 'tile_p', 'power_station': 'tile_n'}
 # full-terrain tiles; the simple terrain is replaced once every tile is baked
 TILES = [f'st_{t}' for t in 'bcdefghijklnop']
-ORDER = ORDER + TILES
+# districts added after the first bakes: one per remaining map_tile_*, plus the named ones
+DISTRICTS = ['agricultural_center', 'village', 'ruins', 'gulags', 'airstrip'] + [f'tile_{t}' for t in 'bcdeghijklo']
+ORDER = ORDER + DISTRICTS + TILES
+# baked but left out of the scene unless named in CALDERA_INCLUDE (comma separated): gulags is six
+# ~110 m arenas under the sea at the map corners, 2.4 x 3.2 km of bounds for nothing playable
+OPTIONAL = {'gulags'}
+INCLUDE = set(filter(None, os.environ.get('CALDERA_INCLUDE', '').split(',')))
 LABELS = {'terrain': 'Terrain (simple)', 'capital': 'Capital (incl. restaurant)', 'airfield': 'Airfield',
           'phosphate_mine': 'Phosphate Mine', 'beachhead': 'Beachhead', 'hotel': 'Hotel',
           'power_station': 'Power Station', 'tile_n': 'Tile N (incl. power station)',
           'tile_p': 'Tile P (incl. hotel)', 'arsenal': 'Arsenal', 'tile_f': 'Tile F', 'docks': 'Docks',
           'caldera': 'Caldera', 'subpen': 'Sub Pen',
+          'agricultural_center': 'Agricultural Center', 'village': 'Village', 'ruins': 'Ruins', 'gulags': 'Gulags',
+          'airstrip': 'Airstrip',
+          **{f'tile_{t}': f'Tile {t.upper()}' for t in 'bcdeghijklo'},
           **{t: f'Terrain {t[3:].upper()} (full)' for t in TILES}}
 
 
@@ -61,6 +70,8 @@ for name in ORDER:
         raw = f'{RAW}/caldera_{name}_collision.glb'
     if not os.path.exists(raw):
         continue
+    if name in OPTIONAL and name not in INCLUDE:
+        continue
     if name in CONTAINED and os.path.exists(f'{OUT}/caldera_{CONTAINED[name]}.glb'):
         continue
     if name == 'terrain' and all(os.path.exists(f'{OUT}/caldera_{t}.glb') for t in TILES):
@@ -69,6 +80,8 @@ for name in ORDER:
     lo, hi = bounds(read_json(raw))
     entry = {'name': name, 'label': LABELS[name], 'url': f'caldera_{name}.glb',
              'baked': os.path.exists(baked), 'min': lo.round(2).tolist(), 'max': hi.round(2).tolist()}
+    if os.path.exists(f'{OUT}/caldera_{name}_clutter.glb'):
+        entry['clutter'] = f'caldera_{name}_clutter.glb'
     if os.path.exists(f'{OUT}/caldera_{name}_collision.glb'):
         entry['collision'] = f'caldera_{name}_collision.glb'
         entry['playerCollision'] = player_collision(OUT, name)
@@ -83,13 +96,18 @@ with open(f'{OUT}/caldera_scene.json', 'w') as f:
 identity = {'position': [0, 0, 0], 'rotation': [0, 0, 0, 1], 'scale': [1, 1, 1]}
 # Positions are glTF Y-up metres, as the example uses them. Entities also carry their player
 # collision and world bounds, which the scene streams in by proximity; `teleports` frame the regions.
-entities = []
-for n, r in enumerate(x for x in regions if x['baked']):
-    e = {'id': n + 1, 'parentId': None, 'name': r['label'], **identity,
-         'models': [{'name': r['name'], 'url': f"caldera/{r['url']}", **identity,
-                     'visible': True, 'shadowCaster': True}],
-         'bounds': {'min': r['min'], 'max': r['max']}}
-    entities.append(e)
+def build_entities(with_clutter):
+    entities = []
+    for n, r in enumerate(x for x in regions if x['baked']):
+        models = [{'name': r['name'], 'url': f"caldera/{r['url']}", **identity, 'visible': True, 'shadowCaster': True}]
+        if with_clutter and r.get('clutter'):
+            models.append({'name': r['name'] + '_clutter', 'url': f"caldera/{r['clutter']}", **identity,
+                           'visible': True, 'shadowCaster': True})
+        entities.append({'id': n + 1, 'parentId': None, 'name': r['label'], **identity, 'models': models,
+                         'bounds': {'min': r['min'], 'max': r['max']}})
+    return entities
+
+
 # region centres, dropped a little above the highest point so the player lands on top
 teleports = [{'name': r['label'], 'position': [round((r['min'][0] + r['max'][0]) / 2, 2), round(r['max'][1] + 2, 2),
                                                  round((r['min'][2] + r['max'][2]) / 2, 2)]}
@@ -98,9 +116,17 @@ scene = {'version': 1, 'source': {'generator': 'caldera manifest.py'},
          'start': {'position': [206.73, 232.20, -408.06], 'rotation': [0, 0, 0, 1]},
          'teleports': teleports, 'farClip': 6000,
          # ~1.2M instances: the meshlet world's fixed tables alone are ~1.4 GB, past MWR's 768 MB default
-         'meshletPoolMiB': 4096, 'entities': entities}
+         'meshletPoolMiB': 4096, 'entities': build_entities(False)}
 # island-wide player collision, chunked for streaming (collision_chunks.py)
 if os.path.exists(f'{OUT}/collision_chunks/index.json'):
     scene['collisionChunks'] = 'caldera/collision_chunks/index.json'
 with open(f'{OUT}/scene.json', 'w') as f:
     json.dump(scene, f, indent=1)
+# the same scene with the optional terrain clutter in; only written once some is baked, so the
+# default scene.json never depends on it
+variant = f'{OUT}/scene.clutter.json'
+if any(r.get('clutter') for r in regions):
+    with open(variant, 'w') as f:
+        json.dump({**scene, 'entities': build_entities(True)}, f, indent=1)
+elif os.path.exists(variant):
+    os.remove(variant)

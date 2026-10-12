@@ -1185,6 +1185,24 @@ const createNodes = (gltf, options, nodeInstancingMap) => {
     return nodes;
 };
 
+/**
+ * Whether the document is a pure streamed-meshlet bake: every mesh primitive is a meshlet
+ * placeholder, and nothing (skins, animations, lights, cameras) needs the node hierarchy. Such a
+ * document renders only through its meshlets, which carry their own placements, so building a
+ * GraphNode per glTF node would only hold heap - 184k nodes for one Caldera district, about 1.5M
+ * (several GB) for the island.
+ *
+ * @param {object} gltf - The glTF document.
+ * @returns {boolean} True when the node hierarchy can be skipped.
+ */
+const isMeshletOnlyDocument = (gltf) => {
+    if (!gltf.meshes?.length || gltf.skins?.length || gltf.animations?.length || gltf.cameras?.length ||
+        gltf.extensions?.KHR_lights_punctual?.lights?.length) {
+        return false;
+    }
+    return gltf.meshes.every(mesh => mesh.primitives?.every(hasMeshletExtension));
+};
+
 const createScenes = (gltf, nodes) => {
     const scenes = [];
     const count = gltf.scenes.length;
@@ -1281,8 +1299,10 @@ const createResources = async (device, gltf, bufferViews, textures, options, app
     }
 
     const nodeInstancingMap = new Map();
-    const nodes = createNodes(gltf, options, nodeInstancingMap);
-    const scenes = createScenes(gltf, nodes);
+    // a pure meshlet bake keeps an empty root per scene instead of its (placement-only) nodes
+    const meshletOnly = isMeshletOnlyDocument(gltf);
+    const nodes = meshletOnly ? [] : createNodes(gltf, options, nodeInstancingMap);
+    const scenes = meshletOnly ? (gltf.scenes ?? []).map(scene => new GraphNode(scene.name)) : createScenes(gltf, nodes);
     const lights = createLights(gltf, nodes, options, app);
     const cameras = createCameras(gltf, nodes, options, app);
     const variants = createVariants(gltf);

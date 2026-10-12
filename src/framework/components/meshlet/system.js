@@ -289,7 +289,8 @@ class MeshletComponentSystem extends ComponentSystem {
 
     /**
      * Sets whether two-phase HZB occlusion culling is enabled. Requires the camera to render
-     * into a render target with a depth texture. Defaults to false.
+     * into a render target with a depth texture. Falls back to single-phase culling
+     * without one. Defaults to true.
      *
      * @type {boolean}
      */
@@ -358,6 +359,39 @@ class MeshletComponentSystem extends ComponentSystem {
 
     get shadowThresholdScale() {
         return this.director?.shadowThresholdScale ?? 4;
+    }
+
+    /**
+     * Projected size on screen, in pixels, below which an instance is not drawn. Every drawn
+     * instance costs at least its coarsest level, so wide views of worlds with very many small
+     * placements are bound by that floor; raising this trades sub-pixel scatter for speed. An
+     * instance already drawn stays until it is half this size, to avoid popping. 0 draws every
+     * visible instance. Defaults to 3.
+     *
+     * @type {number}
+     */
+    set rootMinPixels(value) {
+        if (this.director) this.director.rootMinPixels = value;
+    }
+
+    get rootMinPixels() {
+        return this.director?.rootMinPixels ?? 3;
+    }
+
+    /**
+     * Projected size on screen, in pixels, below which an instance casts no meshlet shadow.
+     * Far-reaching shadow cascades cover most of the world, and every caster they admit costs at
+     * least its coarsest level; skipping casters this small keeps them from taking the index
+     * budget the camera needs. 0 lets every visible instance cast. Defaults to 2.
+     *
+     * @type {number}
+     */
+    set shadowRootMinPixels(value) {
+        if (this.director) this.director.shadowRootMinPixels = value;
+    }
+
+    get shadowRootMinPixels() {
+        return this.director?.shadowRootMinPixels ?? 2;
     }
 
     initializeComponentData(component, data, properties) {

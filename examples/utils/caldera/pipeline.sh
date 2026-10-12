@@ -1,5 +1,8 @@
 #!/bin/zsh
 # convert (if needed) -> bake -> drop the raw render GLB. Collision GLBs are copied next to the bake.
+# Optional terrain clutter (grass, plants, rocks, trees; not part of the default scene):
+#   CLUTTER=trees|all           also bake caldera_<r>_clutter.glb, which manifest.py lists in scene.clutter.json
+#   CLUTTER=trees CLUTTER_ONLY=1  bake only that, leaving the district's existing bake alone
 set -u
 setopt pipefail
 # CALDERA: Caldera checkout, GLTF_TOOLS: gltf-tools checkout, PY: python with usd-core + numpy
@@ -14,6 +17,7 @@ for r in "$@"; do
     echo "== $r $(date +%T)"
     free_gb=$(df -g ${RAW:h} | awk 'NR==2 {print $4}')
     if (( free_gb < 3 )); then echo "STOPPING: only ${free_gb} GB free before $r"; break; fi
+    if [[ -z "${CLUTTER_ONLY:-}" ]]; then
     # the previous bake goes first: disk is the constraint, and it is being replaced
     [[ -z "${NOBAKE:-}" ]] && rm -rf $OUT/caldera_$r.glb $OUT/caldera_${r}_meshlets $OUT/caldera_${r}_textures
     if [[ ! -f $RAW/caldera_$r.glb || -n "${RECONVERT:-}" ]]; then
@@ -26,6 +30,18 @@ for r in "$@"; do
             | grep -E "streamed .* page|Processed|real|peak memory|rror|failed|mesh=.* prim=[0-9]+:") || echo "BAKE FAILED $r"
         [[ -f $OUT/caldera_$r.glb ]] && $PY $HERE/manifest.py 2>/dev/null
         [[ -f $OUT/caldera_$r.glb && -z "${KEEPRAW:-}" && $r != terrain ]] && rm -f $RAW/caldera_$r.glb
+    fi
+    fi
+    if [[ -n "${CLUTTER:-}" ]]; then
+        rm -rf $OUT/caldera_${r}_clutter.glb $OUT/caldera_${r}_clutter_meshlets $OUT/caldera_${r}_clutter_textures
+        $PY -u $HERE/usd2glb.py --clutter $CLUTTER --clutter-only --out $RAW $r 2>&1 | grep -v "^ *[0-9]* meshes" || echo "CLUTTER CONVERT FAILED $r"
+        if [[ -f $RAW/caldera_${r}_clutter.glb ]]; then
+            (cd $TOOLS && /usr/bin/time -l gltf-transform streamed-meshlets $RAW/caldera_${r}_clutter.glb $OUT/caldera_${r}_clutter.glb \
+                --strip-source-geometry --no-tangents --config ./gltf-tools-plugin.js 2>&1 \
+                | grep -E "streamed .* page|Processed|real|peak memory|rror|failed") || echo "CLUTTER BAKE FAILED $r"
+            [[ -f $OUT/caldera_${r}_clutter.glb ]] && $PY $HERE/manifest.py 2>/dev/null
+            [[ -f $OUT/caldera_${r}_clutter.glb && -z "${KEEPRAW:-}" ]] && rm -f $RAW/caldera_${r}_clutter.glb
+        fi
     fi
     df -h ~ | tail -1 | awk '{print "  disk free", $4}'
 done

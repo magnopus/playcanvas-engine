@@ -107,6 +107,34 @@ function collectFloorPages(source, groups, pages) {
     }
 }
 
+/**
+ * A Uint32Array that grows by doubling. The cut tables reach tens of millions of words on large
+ * worlds; plain arrays of numbers take 8 bytes a word and copy themselves while growing, which
+ * ran a 1.5M-instance world out of JS heap during a rebuild.
+ *
+ * @ignore
+ */
+class U32Builder {
+    data = new Uint32Array(1024);
+
+    length = 0;
+
+    /** @param {...number} values - Words to append. */
+    push(...values) {
+        if (this.length + values.length > this.data.length) {
+            const grown = new Uint32Array(Math.max(this.data.length * 2, this.length + values.length));
+            grown.set(this.data.subarray(0, this.length));
+            this.data = grown;
+        }
+        for (let i = 0; i < values.length; i++) this.data[this.length++] = values[i];
+    }
+
+    /** @returns {Uint32Array} The words pushed so far. */
+    view() {
+        return this.data.subarray(0, this.length);
+    }
+}
+
 /** GPU tables shared by every view's resident, capacity-bounded cut. @ignore */
 class MeshletCutData {
     /**
@@ -115,9 +143,10 @@ class MeshletCutData {
      * @param {Uint32Array} objects - World instance records.
      */
     constructor(device, meshlets, objects) {
-        const words = [];
-        const levels = [];
-        const rootTasks = [];
+        const words = new U32Builder();
+        // task pairs (instance, group offset) per LOD level, counted first so the task table is
+        // allocated once and filled in place
+        const levelCounts = [];
         const primitives = new Map();
         const rootPages = new Set();
         const floorPages = new Map();
@@ -128,7 +157,8 @@ class MeshletCutData {
         // (level-major order). Compaction starts each instance at the finer of its cut's finest
         // level and that root level, instead of scanning every LOD.
         const levelStarts = new Uint32Array(meshlets.length / MESHLET_DATA_U32S);
-        for (let instance = 0; instance < objects.length / OBJECT_DATA_U32S; instance++) {
+        const instanceCount = objects.length / OBJECT_DATA_U32S;
+        for (let instance = 0; instance < instanceCount; instance++) {
             const first = objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET];
             const count = objects[instance * OBJECT_DATA_U32S + O.MESHLET_COUNT];
             let primitive = primitives.get(first);
@@ -208,28 +238,42 @@ class MeshletCutData {
                 primitive = { tasks, rootOffset, rootCost, bucket };
                 primitives.set(first, primitive);
             }
-            rootTasks.push(instance, primitive.rootOffset);
             this.rootIndices[primitive.bucket] += primitive.rootCost[0];
             this.rootRecords += primitive.rootCost[1];
             for (const task of primitive.tasks) {
-                const list = levels[task.level] ?? (levels[task.level] = []);
-                list.push(instance, task.offset);
+                levelCounts[task.level] = (levelCounts[task.level] ?? 0) + 1;
             }
         }
-        const tasks = rootTasks;
-        this.levels = [{ start: 0, count: rootTasks.length / 2, root: true }];
-        for (let level = levels.length - 1; level > 0; level--) {
-            const list = levels[level];
-            if (!list?.length) continue;
-            this.levels.push({ start: tasks.length / 2, count: list.length / 2, root: false });
-            for (const word of list) tasks.push(word);
+        // Layout: one root task per instance, then the levels coarsest first.
+        this.levels = [{ start: 0, count: instanceCount, root: true }];
+        const levelCursor = [];
+        let taskCount = instanceCount;
+        for (let level = levelCounts.length - 1; level > 0; level--) {
+            const count = levelCounts[level];
+            if (!count) continue;
+            this.levels.push({ start: taskCount, count, root: false });
+            levelCursor[level] = taskCount;
+            taskCount += count;
+        }
+        const tasks = new Uint32Array(taskCount * 2);
+        for (let instance = 0; instance < instanceCount; instance++) {
+            const primitive = primitives.get(objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET]);
+            tasks[instance * 2] = instance;
+            tasks[instance * 2 + 1] = primitive.rootOffset;
+            for (const task of primitive.tasks) {
+                const slot = levelCursor[task.level];
+                if (slot === undefined) continue;
+                tasks[slot * 2] = instance;
+                tasks[slot * 2 + 1] = task.offset;
+                levelCursor[task.level] = slot + 1;
+            }
         }
         const create = (values) => {
-            const buffer = new StorageBuffer(device, Math.max(values.length * 4, 16), BUFFERUSAGE_COPY_DST);
-            if (values.length) buffer.write(0, new Uint32Array(values));
+            const buffer = new StorageBuffer(device, Math.max(values.byteLength, 16), BUFFERUSAGE_COPY_DST);
+            if (values.length) buffer.write(0, values);
             return buffer;
         };
-        this.groups = create(words);
+        this.groups = create(words.view());
         this.tasks = create(tasks);
         // Compaction scans every LOD. Keep its two links contiguous instead of fetching
         // them from 128-byte geometry records for every instance of a primitive.

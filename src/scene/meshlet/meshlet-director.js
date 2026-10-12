@@ -41,7 +41,15 @@ const CARRY_GROWTH_MARGIN = 1.35;
 // that is momentarily empty can grow back without waiting for a redistribution.
 const SHARE_FLOOR_FRACTION = 0.25;
 
+// Occupancy camera views are budgeted at before shadow views get any index budget: under the
+// budget manager's indexEasedAt, so a camera that is given its full want never reads as tight.
+const CAMERA_SHARE_OCCUPANCY = 0.5;
+
 const BYTES_PER_MB = 1024 * 1024;
+
+// Every culled view (camera or shadow face) takes MESHLET_ROOT_BANDS + 4 indirect dispatch slots
+// a frame - one per root admission band - so the device default of 256 runs out at a dozen views.
+const MIN_INDIRECT_DISPATCH_SLOTS = 1024;
 
 /**
  * Orchestrates the GPU-driven meshlet pipeline: per-frame culling compute (encoded ahead of the
@@ -85,7 +93,7 @@ class MeshletDirector {
     renderer = null;
 
     /** @type {boolean} - two-phase HZB occlusion culling, see {@link occlusionEnabled}. */
-    _occlusionEnabled = false;
+    _occlusionEnabled = true;
 
     /** @type {Float32Array} */
     _frustumPlanes = new Float32Array(24);
@@ -144,6 +152,42 @@ class MeshletDirector {
      * @type {number}
      */
     shadowThresholdScale = 4;
+
+    /**
+     * Projected size on screen, in pixels, below which an instance is not drawn at all. Every
+     * drawn instance costs at least its coarsest level, so a wide view of a world with very many
+     * small placements is bound by that floor however coarse the cut gets - on a 1.5M-instance
+     * island seen from above, 1.15M instances are under a pixel. An instance already drawn stays
+     * until it is half this size, so the cut does not pop while the camera moves. 0 draws every
+     * visible instance.
+     *
+     * @type {number}
+     */
+    rootMinPixels = 3;
+
+    /**
+     * Projected size on screen, in pixels, below which an instance casts no meshlet shadow. A
+     * cascade reaching far from the camera covers most of the world, and every instance it
+     * admits costs at least its root - so without this cut the far cascades' root floor alone
+     * outgrows the camera's whole index budget. A caster this small on screen throws a shadow
+     * no wider than it.
+     *
+     * @type {number}
+     */
+    shadowRootMinPixels = 2;
+
+    /**
+     * Shadow views' own LOD pressure, on top of the camera's. Shadow views are budgeted after
+     * the camera (see _distributeIndexBudget), so a starved cascade coarsens its own casters
+     * instead of the scene the camera sees.
+     *
+     * @type {number}
+     * @ignore
+     */
+    shadowPressureScale = 1;
+
+    /** @type {number} - worst shadow-view demand/share ratio from the last distribution. @private */
+    _shadowIndexRatio = 0;
 
     /** @private */
     _transcode = null;
@@ -445,6 +489,7 @@ class MeshletDirector {
      */
     constructor(device) {
         this.device = device;
+        device.maxIndirectDispatchCount = Math.max(device.maxIndirectDispatchCount, MIN_INDIRECT_DISPATCH_SLOTS);
         this.world = new MeshletWorld(device);
         this.world.fetchScheduler = this.fetchScheduler;
         this.cullShaders = new MeshletCullShaders(device);
@@ -765,6 +810,7 @@ class MeshletDirector {
         // too fine for the memory it has, and the answer to both is to coarsen it
         const indexRatio = this._distributeIndexBudget();
         this.budget.update(this.residency, indexRatio);
+        this._updateShadowPressure(this._shadowIndexRatio);
         this._checkBudgetFeasible(indexRatio);
 
         // resolve this frame's camera set
@@ -820,6 +866,7 @@ class MeshletDirector {
         view._passesAdded = false;
         view.syncMaterials();
         view.culler.pressureScale = this.budget.pressureScale;
+        view.culler.rootMinPixels = this.rootMinPixels;
         view.culler.forceSubmitBoundaries = this.forceSubmitBoundaries;
         // grow first, then read demand: buffers must not change once the frame is encoding
         view.applyPendingGrowth();
@@ -925,42 +972,84 @@ class MeshletDirector {
     }
 
     /**
-     * Shares the world's index budget across every live view in proportion to what each is
-     * asking for, and returns the worst per-view pressure.
+     * Shares the world's index budget across every live view, camera views first, and returns
+     * the worst camera-view pressure.
      *
-     * An equal split is the wrong default: views want wildly different amounts. On the Bistro a
-     * shadow cascade wanted 1.2x an equal share while the camera used 0.16x of its own - and
-     * because index pressure feeds one global LOD controller, that one starved cascade drove
-     * the whole scene to maximum coarseness.
+     * Every view keeps a growth floor. Camera views are then budgeted for their demand at
+     * CAMERA_SHARE_OCCUPANCY, and shadow views split what is left in proportion to their
+     * demand. A plain proportional split let far cascades - which cover most of the world, so
+     * their root floor alone can exceed the camera's demand - take most of the budget, and
+     * because index pressure feeds the camera's LOD controller, the shadows coarsened and
+     * dropped what the camera sees. Shadow views report to their own controller instead
+     * ({@link shadowPressureScale}).
      *
-     * @returns {number} Highest demand/share ratio across views.
+     * @returns {number} Highest demand/share ratio across camera views.
      * @private
      */
     _distributeIndexBudget() {
+        this._shadowIndexRatio = 0;
         const ceiling = this.world.indexCeiling;
         if (!(ceiling > 0) || !Number.isFinite(ceiling)) return 0;
 
-        const all = [];
-        this.views.forEach(v => all.push(v));
-        this.shadowRenderer?.entries.forEach((entry) => {
-            entry.views.forEach(v => all.push(v));
-        });
-        if (!all.length) return 0;
+        const cameras = [];
+        this.views.forEach(v => cameras.push(v));
+        const shadows = this.shadowRenderer ? this.shadowRenderer.views : [];
+        const count = cameras.length + shadows.length;
+        if (!count) return 0;
 
         // Draw capacity belongs to the active working set, not all scene roots. Charge
         // the growth floor before distributing the rest so shares stay inside the budget.
-        const floor = Math.floor((ceiling / all.length) * SHARE_FLOOR_FRACTION);
-        const remaining = ceiling - floor * all.length;
-        let total = 0;
-        for (const v of all) total += Math.max(v.indexDemand() - floor, 0);
+        const floor = Math.floor((ceiling / count) * SHARE_FLOOR_FRACTION);
+        const remaining = ceiling - floor * count;
+        const want = v => Math.max(v.indexDemand() - floor, 0);
+        // A camera is budgeted for its whole demand at the target occupancy, so it always has
+        // headroom - budgeting only the part above the floor left a coarsened camera whose
+        // demand had fallen under the floor at ~0.8 occupancy, where the controller holds and
+        // never restores quality.
+        // (Without shadow views nothing competes, and cameras split by demand above the floor.)
+        const cameraWantOf = shadows.length ?
+            v => Math.max(v.indexDemand() / CAMERA_SHARE_OCCUPANCY - floor, 0) :
+            want;
+
+        let cameraWant = 0;
+        for (const v of cameras) cameraWant += cameraWantOf(v);
+        // without shadow views the cameras keep the whole budget, as before
+        const cameraGive = shadows.length ? Math.min(cameraWant, remaining) : remaining;
+        let shadowWant = 0;
+        for (const v of shadows) shadowWant += want(v);
+        const shadowGive = remaining - cameraGive;
+
         let worst = 0;
-        for (const v of all) {
-            v.indexShare = floor + (total > 0 ?
-                Math.floor(remaining * (Math.max(v.indexDemand() - floor, 0) / total)) :
-                Math.floor(remaining / all.length));
+        for (const v of cameras) {
+            v.indexShare = floor + (cameraWant > 0 ?
+                Math.floor(cameraGive * cameraWantOf(v) / cameraWant) :
+                Math.floor(cameraGive / cameras.length));
             worst = Math.max(worst, v.indexPressure());
         }
+        for (const v of shadows) {
+            v.indexShare = floor + (shadowWant > 0 ?
+                Math.floor(shadowGive * want(v) / shadowWant) :
+                Math.floor(shadowGive / shadows.length));
+            this._shadowIndexRatio = Math.max(this._shadowIndexRatio, v.indexPressure());
+        }
         return worst;
+    }
+
+    /**
+     * Shadow views' LOD controller: the budget manager's index response (raise past
+     * indexStarvedAt, decay under indexEasedAt, hold between), driven by the shadow views' own
+     * demand against what the cameras left them.
+     *
+     * @param {number} ratio - Worst shadow-view demand/share ratio.
+     * @private
+     */
+    _updateShadowPressure(ratio) {
+        const budget = this.budget;
+        if (ratio > budget.indexStarvedAt) {
+            this.shadowPressureScale = Math.min(this.shadowPressureScale * budget.raiseFast, budget.maxScale);
+        } else if (ratio < budget.indexEasedAt) {
+            this.shadowPressureScale = Math.max(this.shadowPressureScale * budget.decay, 1);
+        }
     }
 
     /**
@@ -1258,7 +1347,7 @@ class MeshletDirector {
      * newly visible. Needs a scene depth the HZB can sample - a depth texture on the camera's
      * render target, or a CameraFrame rendering the scene depth (which it does on request, see
      * {@link wantsSceneDepth}). Falls back to single-phase culling when neither is available.
-     * Defaults to false.
+     * Defaults to true.
      *
      * @type {boolean}
      */

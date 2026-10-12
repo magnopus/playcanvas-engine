@@ -1,5 +1,6 @@
 import {
-    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH, OBJECT_FLAG_HIDDEN,
+    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH,
+    MESHLET_ROOT_BANDS, OBJECT_FLAG_HIDDEN,
     OBJECT_FLAG_NO_SHADOW, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
@@ -29,6 +30,8 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
     var<storage, read> claimBits: array<u32>;
     var<storage, read_write> counters: array<atomic<u32>>;
     var<storage, read_write> rootList: array<u32>;
+    // per-band entry counts (see ROOT_BANDS_WORDS)
+    var<storage, read_write> rootBands: array<atomic<u32>>;
 
     @compute @workgroup_size(64)
     fn main(@builtin(global_invocation_id) gid: vec3u) {
@@ -50,26 +53,84 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
         let bands = cullParams[${CULL_PARAMS.ROOT_BANDS}u];
         let gap = max(distance(center, priority.xyz) - radius, 1e-4);
         let pixels = radius * priority.w / gap;
-        if (pixels < bands.w) {
+        let incumbent = uniform.hasPrevious != 0u &&
+            (claimBits[uniform.prevBase + (instance >> 5u)] & (1u << (instance & 31u))) != 0u;
+        // an instance admitted last frame stays until it is half the size cut, so the size
+        // cut does not pop instances in and out while the camera moves
+        if (pixels < select(bands.w, bands.w * 0.5, incumbent)) {
             atomicAdd(&counters[${MESHLET_COUNTER.ROOT_SUBPIXEL}u], 1u);
             return;
         }
         let bandCount = u32(bands.z);
         var band = u32(clamp(floor(log2(bands.x / max(pixels, 1e-6)) * bands.y), 0.0, f32(bandCount - 1u)));
-        if (uniform.hasPrevious != 0u &&
-            (claimBits[uniform.prevBase + (instance >> 5u)] & (1u << (instance & 31u))) != 0u) {
+        if (incumbent) {
             band = max(band, 1u) - 1u;
         }
         let slot = atomicAdd(&counters[${MESHLET_COUNTER.ROOT_CANDIDATES}u], 1u);
         if (slot < arrayLength(&rootList)) {
             rootList[slot] = instance | (band << ${BAND_SHIFT}u);
+            atomicAdd(&rootBands[band], 1u);
         }
     }
 `;
 
 /**
- * Root admission for one priority band, one thread per root list entry: entries of other bands
- * return at once, the rest check their root pages and reserve their root indices and records
+ * One thread: turns the per-band counts into each band's start in the band-sorted root list
+ * (an exclusive prefix sum) and writes each band's admission dispatch to its own indirect slot,
+ * so a band pass only visits its own entries.
+ *
+ * @ignore
+ */
+export const meshletRootBandArgsWGSL = /* wgsl */ `
+    uniform firstSlot: u32;
+
+    var<storage, read_write> rootBands: array<u32>;
+    var<storage, read_write> indirectDispatch: array<u32>;
+
+    @compute @workgroup_size(1)
+    fn main() {
+        var start = 0u;
+        for (var band = 0u; band < ${MESHLET_ROOT_BANDS}u; band++) {
+            let count = rootBands[band];
+            rootBands[${2 * MESHLET_ROOT_BANDS}u + band] = start;
+            start += count;
+            let groups = (count + 63u) / 64u;
+            let base = (uniform.firstSlot + band) * ${INDIRECT_DISPATCH_U32S}u;
+            indirectDispatch[base + 0u] = min(groups, ${MESHLET_DISPATCH_WIDTH}u);
+            indirectDispatch[base + 1u] = (groups + ${MESHLET_DISPATCH_WIDTH - 1}u) / ${MESHLET_DISPATCH_WIDTH}u;
+            indirectDispatch[base + 2u] = 1u;
+        }
+    }
+`;
+
+/**
+ * One thread per root list entry: copies it into its band's range of the band-sorted list,
+ * which follows the classify order list at word `sortedBase`.
+ *
+ * @ignore
+ */
+export const meshletRootScatterWGSL = /* wgsl */ `
+    uniform sortedBase: u32;
+
+    var<storage, read_write> counters: array<atomic<u32>>;
+    var<storage, read_write> rootList: array<u32>;
+    var<storage, read_write> rootBands: array<atomic<u32>>;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+        let index = (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * 64u + lane.x;
+        if (index >= min(atomicLoad(&counters[${MESHLET_COUNTER.ROOT_CANDIDATES}u]), uniform.sortedBase)) { return; }
+        let entry = rootList[index];
+        let band = entry >> ${BAND_SHIFT}u;
+        let slot = atomicLoad(&rootBands[${2 * MESHLET_ROOT_BANDS}u + band]) +
+            atomicAdd(&rootBands[${MESHLET_ROOT_BANDS}u + band], 1u);
+        rootList[uniform.sortedBase + slot] = entry;
+    }
+`;
+
+/**
+ * Root admission for one priority band, one thread per entry of that band's range of the
+ * band-sorted root list: each checks its root pages and reserve their root indices and records
  * against the view's capacity. Bands dispatch in order, so larger instances claim capacity
  * first. Accepted and rejected root cost both count as demand (the capacity grows to the full
  * pre-cull cut); rejected and unready instances are counted for the budget report.
@@ -85,6 +146,8 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     uniform indexCapacity0: u32;
     uniform indexCapacity1: u32;
     uniform indexCapacity2: u32;
+    // word base of the band-sorted root list
+    uniform sortedBase: u32;
     var<storage, read> cutGroups: array<u32>;
     var<storage, read> cutTasks: array<vec2u>;
     var<storage, read> residency: array<u32>;
@@ -94,13 +157,13 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     var<storage, read_write> cutBudget: array<atomic<u32>>;
     var<storage, read_write> counters: array<atomic<u32>>;
     var<storage, read> rootList: array<u32>;
+    var<storage, read> rootBands: array<u32>;
 
     @compute @workgroup_size(64)
     fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
         let index = (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * 64u + lane.x;
-        if (index >= min(atomicLoad(&counters[${MESHLET_COUNTER.ROOT_CANDIDATES}u]), arrayLength(&rootList))) { return; }
-        let entry = rootList[index];
-        if ((entry >> ${BAND_SHIFT}u) != uniform.rootBand) { return; }
+        if (index >= rootBands[uniform.rootBand]) { return; }
+        let entry = rootList[uniform.sortedBase + rootBands[${2 * MESHLET_ROOT_BANDS}u + uniform.rootBand] + index];
         let instance = entry & ${INSTANCE_MASK}u;
         // root tasks come first in the task list, one per instance in instance order
         let offset = cutTasks[instance].y;

@@ -348,7 +348,15 @@ class MeshletShadowRenderer {
     cull() {
         const { director } = this;
         this.entries.forEach((entry) => {
+            // A cached shadow map (SHADOWUPDATE_NONE) is not re-rendered this frame, so its cull
+            // chains would be pure cost: root admission alone scales with the casters inside each
+            // cascade, ~10 ms for four far cascades over a ~1M-instance world. The mode is read
+            // before the renderer consumes SHADOWUPDATE_THISFRAME, so a requested update still culls.
+            const { light } = entry;
+            if (light.shadowUpdateMode === SHADOWUPDATE_NONE) return;
+            const overrides = light.shadowUpdateOverrides;
             for (let c = 0; c < entry.views.length; c++) {
+                if (overrides?.[c] === SHADOWUPDATE_NONE) continue;
                 this._cullView(entry, entry.views[c], director);
             }
         });
@@ -393,7 +401,9 @@ class MeshletShadowRenderer {
         culler.cullFlags = CULL_FLAG_NO_TEXEL_RATE | CULL_FLAG_SHADOW_VIEW;
         culler.viewDir = _viewDir.copy(node.forward);
         culler.dagPixelThreshold = director.dagPixelThreshold * director.shadowThresholdScale;
-        culler.pressureScale = director.budget.pressureScale;
+        culler.pressureScale = director.budget.pressureScale * director.shadowPressureScale;
+        // casters tiny on screen cast nothing, or the far cascades' root floor swamps the budget
+        culler.rootMinPixels = director.shadowRootMinPixels;
         culler.forceSubmitBoundaries = director.forceSubmitBoundaries;
         // rank casters by what they cover on screen, not in the light's (orthographic) view;
         // before the scene camera has culled, the face ranks by its own projection

@@ -4,7 +4,7 @@ import { Mat4 } from '../../../src/core/math/mat4.js';
 import { Vec3 } from '../../../src/core/math/vec3.js';
 import { BoundingBox } from '../../../src/core/shape/bounding-box.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
-import { LAYERID_WORLD, LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI, LIGHTTYPE_SPOT } from '../../../src/scene/constants.js';
+import { LAYERID_WORLD, LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI, LIGHTTYPE_SPOT, SHADOWUPDATE_NONE, SHADOWUPDATE_REALTIME, SHADOWUPDATE_THISFRAME } from '../../../src/scene/constants.js';
 import { GraphNode } from '../../../src/scene/graph-node.js';
 import { ShaderMaterial } from '../../../src/scene/materials/shader-material.js';
 import { CULL_FLAG_NO_TEXEL_RATE, MESHLET_BUCKET_COUNT, WORK_ITEM_U32S } from '../../../src/scene/meshlet/constants.js';
@@ -306,6 +306,38 @@ describe('MeshletShadowRenderer', function () {
         const expected = new Mat4().mul2(projectionMatrix, shadowNode.getWorldTransform().clone().invert());
         expect(Array.from(viewProj)).to.deep.equal(Array.from(expected.data));
         expect(hzb).to.equal(null);
+    });
+
+    it('skips the cull for a cached shadow map and for cascades overridden to not update', function () {
+        const shadowCamera = {
+            _node: new GraphNode(),
+            projectionMatrix: new Mat4().setOrtho(-32, 32, -32, 32, 0.1, 200),
+            orthoHeight: 32,
+            renderTarget: { height: 2048 }
+        };
+        const shadowViewport = { w: 1 };
+        const renderData = { 0: { shadowCamera, shadowViewport }, 1: { shadowCamera, shadowViewport } };
+        const sun = makeLight({ faces: 2, renderData });
+        director.renderer.culler.cameraDirShadowLights.set(sceneCamera, [sun]);
+        renderer.syncLights(comp);
+
+        const faces = [];
+        renderer.entries.get(sun).views.forEach((view) => {
+            view.culler.beginFrame = () => faces.push(view.face);
+            view.readbackPool.read = () => new Promise(() => {});
+        });
+        const cullWith = (mode, overrides = null) => {
+            sun.shadowUpdateMode = mode;
+            sun.shadowUpdateOverrides = overrides;
+            faces.length = 0;
+            renderer.cull();
+            return faces.slice();
+        };
+
+        expect(cullWith(SHADOWUPDATE_REALTIME)).to.deep.equal([0, 1]);
+        expect(cullWith(SHADOWUPDATE_THISFRAME), 'a requested update still culls').to.deep.equal([0, 1]);
+        expect(cullWith(SHADOWUPDATE_NONE), 'cached map').to.deep.equal([]);
+        expect(cullWith(SHADOWUPDATE_REALTIME, [SHADOWUPDATE_REALTIME, SHADOWUPDATE_NONE])).to.deep.equal([0]);
     });
 
     it('releases every view, caster and shared buffer on reset', function () {

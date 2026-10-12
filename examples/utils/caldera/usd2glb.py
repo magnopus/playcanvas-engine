@@ -7,6 +7,11 @@ Per region it writes:
                         Flat palette materials derived from the material-bind subset names.
   <name>_collision.glb  world-space collision soup (POSITION + indices), one node per class/cell.
 
+With --clutter the terrain tiles' PointInstancers (grass, plants, rocks, trees) are also written,
+as <name>_clutter.glb: one prototype mesh per USD prototype, one node per point. They are not
+collidable. --clutter-only skips everything else, so a tile's clutter can be tried without
+reconverting its geometry.
+
 Coordinates: USD is Z-up inches, glTF output is Y-up metres. Every mesh is recentred on its own
 bounds (offset folded into the node matrix) because the meshlet bake quantises positions on a grid
 sized from the union of mesh-local bounds.
@@ -23,7 +28,7 @@ import time
 from collections import defaultdict
 
 import numpy as np
-from pxr import Gf, Sdf, Usd, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdSkel, Vt
 
 from overlays import overlay_mask
 
@@ -46,6 +51,12 @@ REGIONS = {
     'docks': (GEO + '/map_docks', ['map_docks']),
     'caldera': (GEO + '/map_caldera', ['map_caldera']),
     'subpen': (GEO + '/map_subpen', ['map_subpen']),
+    'agricultural_center': (GEO + '/map_agricultural_center', ['map_agricultural_center']),
+    'village': (GEO + '/map_village', ['map_village']),
+    'ruins': (GEO + '/map_ruins', ['map_ruins']),
+    'gulags': (GEO + '/map_gulags', ['map_gulags']),
+    'airstrip': (GEO + '/map_airstrip', ['map_airstrip']),
+    **{f'tile_{t}': (GEO + f'/map_tile_{t}', [f'map_tile_{t}']) for t in 'bcdeghijklo'},
     'terrain': (GEO + '/st_main', []),
     # full terrain, one region per tile (heightfield, cliffs, rocks, roads; clutter skipped)
     **{f'st_{t}': (GEO + f'/st_main/st_{t}', [f'st_main/st_{t}']) for t in 'bcdefghijklnop'},
@@ -68,6 +79,9 @@ DEDUPE_MERGE_TRIS = 5000
 OVERLAY_NAME = re.compile(r'rvl|_rev\b|_rev_|puddle|stain|grunge|grime|dust|wear|leak|peel|crease|seam|'
                           r'macro|dirty|_wet|footprint|overlay|blend')
 
+# --clutter trees: PointInstancer prototypes whose name reads as a tree / large plant
+CLUTTER_TREES = re.compile(r'tree|palm|bush|shrub|banana|mangrove|cordyline|albizia|oak|broadleaf')
+
 # ---------------------------------------------------------------------------------------------
 # material classification
 
@@ -89,7 +103,7 @@ PALETTE = [
      r'weed|cactus|bamboo|agave', 'foliage', (0.22, 0.34, 0.14), 0.8, 0.0, True),
     (r'sand|beach', 'sand', (0.72, 0.64, 0.48), 0.95, 0.0, False),
     (r'dirt|mud|soil|ground|terra|gravel|pebble|earth|dust', 'dirt', (0.43, 0.35, 0.26), 0.95, 0.0, False),
-    (r'rock|stone|cliff|boulder|basalt|lava|volcan|cobble', 'rock', (0.40, 0.38, 0.35), 0.9, 0.0, False),
+    (r'rock|stone|cliff|boulder|basalt|lava|volcan|cobble|river_?bed', 'rock', (0.40, 0.38, 0.35), 0.9, 0.0, False),
     (r'asphalt|road|tarmac|runway', 'asphalt', (0.18, 0.18, 0.19), 0.9, 0.0, False),
     (r'concrete|cement|cinder|curb|sidewalk|pavement', 'concrete', (0.55, 0.54, 0.51), 0.9, 0.0, False),
     (r'brick', 'brick', (0.52, 0.30, 0.24), 0.85, 0.0, False),
@@ -301,9 +315,22 @@ class GeoBucket:
         return sum(len(i) for i in self.idx) // 3
 
 
+class ClutterSet:
+    """Prototype meshes and per-point placements of PointInstancer clutter; shaped like the part
+    of Exporter that write_render reads."""
+
+    def __init__(self):
+        self.protos = {}
+        self.placements = defaultdict(list)
+        self.cells = {}
+
+
 class Exporter:
-    def __init__(self, is_terrain):
+    def __init__(self, is_terrain, clutter=None, clutter_only=False):
         self.is_terrain = is_terrain
+        self.clutter = clutter            # None, 'trees' or 'all'
+        self.clutter_only = clutter_only
+        self.clutter_set = ClutterSet()
         self.protos = {}           # prototype path -> {material: GeoBucket}
         self.placements = defaultdict(list)  # prototype path -> [4x4 world (inches)]
         self.cells = defaultdict(lambda: defaultdict(GeoBucket))  # cell -> material -> bucket
@@ -311,6 +338,8 @@ class Exporter:
         self.unknown_guide = defaultdict(int)
         self.stats = defaultdict(int)
         self.xcache = UsdGeom.XformCache(Usd.TimeCode.EarliestTime())
+        self.skel_cache = UsdSkel.Cache()
+        self.skel_roots = set()
         # brush / patch render geometry, per prototype (None = unique), resolved for coplanar
         # overlay layers once the traversal has seen all of it
         self.deferred = defaultdict(list)
@@ -321,6 +350,33 @@ class Exporter:
 
     def world(self, prim):
         return gf_to_np(self.xcache.GetLocalToWorldTransform(prim))
+
+    def skin(self, prim, pts, normals, world):
+        """Skinned meshes (SkelRoot content) are authored in bind pose: their joints move them, e.g.
+        the river-bed dirt piles sit metres from their raw points. Returns the points posed at the
+        skeleton's first time sample, in skeleton space, with the skeleton's world matrix. Meshes the
+        skeleton leaves where they are come back untouched."""
+        root = UsdSkel.Root.Find(prim)
+        if not root:
+            return pts, normals, world
+        skel_prim = UsdSkel.BindingAPI(prim).GetInheritedSkeleton()
+        if not skel_prim:
+            return pts, normals, world
+        if root.GetPath() not in self.skel_roots:
+            self.skel_cache.Populate(root, Usd.TraverseInstanceProxies())
+            self.skel_roots.add(root.GetPath())
+        query = self.skel_cache.GetSkinningQuery(prim)
+        time = Usd.TimeCode.EarliestTime()
+        xforms = self.skel_cache.GetSkelQuery(skel_prim).ComputeSkinningTransforms(time)
+        posed = Vt.Vec3fArray.FromNumpy(pts.astype(np.float32))
+        if not query.ComputeSkinnedPoints(xforms, posed, time):
+            return pts, normals, world
+        posed = np.asarray(posed, dtype=np.float64)
+        if np.abs(posed - pts).max() < 1e-3:
+            return pts, normals, world
+        self.stats['skinned_moved'] += 1
+        # authored normals describe the bind pose; build_geometry derives them from the new points
+        return posed, None, self.world(skel_prim.GetPrim())
 
     def instance_root(self, prim):
         q = prim.GetParent()
@@ -345,7 +401,7 @@ class Exporter:
         if data is None:
             return
         pts, fvc, fvi, normals, face_mat, left = data
-        world = self.world(prim)
+        pts, normals, world = self.skin(prim, pts, normals, self.world(prim))
 
         if purpose == 'guide':
             classes = np.array([classify_collision(m) or '' for m in face_mat])
@@ -405,6 +461,55 @@ class Exporter:
             g = build_geometry(pts, fvc, fvi, normals, tri, left, full)
             if g is not None:
                 self.cells[cell][int(m)].add(*g)
+
+    def add_clutter(self, inst):
+        """Builds each used prototype once, relative to its root, and places it at every point."""
+        pi = UsdGeom.PointInstancer(inst)
+        idx = attr_value(pi.GetProtoIndicesAttr())
+        targets = pi.GetPrototypesRel().GetTargets()
+        if idx is None or not len(idx) or not targets:
+            return
+        idx = np.asarray(idx, dtype=np.int64)
+        time = Usd.TimeCode.EarliestTime()
+        mask = pi.ComputeMaskAtTime(time)
+        alive = np.asarray(mask, dtype=bool) if len(mask) == len(idx) else np.ones(len(idx), bool)
+        xforms = np.asarray(pi.ComputeInstanceTransformsAtTime(
+            time, time, UsdGeom.PointInstancer.ExcludeProtoXform), dtype=np.float64)
+        xforms = xforms.transpose(0, 2, 1)  # row-vector -> column-vector convention
+        inst_world = self.world(inst)
+        stage = inst.GetStage()
+        placed = 0
+        for i, target in enumerate(targets):
+            if self.clutter == 'trees' and not CLUTTER_TREES.search(target.name):
+                continue
+            sel = np.nonzero((idx == i) & alive)[0]
+            proto = stage.GetPrimAtPath(target)
+            if not len(sel) or not proto:
+                continue
+            key = f'{inst.GetPath()}/{target.name}'
+            bucket = self.clutter_set.protos.setdefault(key, {})
+            inv = np.linalg.inv(self.world(proto))
+            for q in Usd.PrimRange(proto, Usd.TraverseInstanceProxies()):
+                if not q.IsA(UsdGeom.Mesh) or UsdGeom.Imageable(q).ComputePurpose() not in ('default', 'render'):
+                    continue
+                # prototype roots are authored invisible so they do not draw at the origin; only the
+                # mesh's own opinion counts
+                if UsdGeom.Imageable(q).GetVisibilityAttr().Get() == UsdGeom.Tokens.invisible:
+                    continue
+                data = read_mesh(q)
+                if data is None:
+                    continue
+                pts, fvc, fvi, normals, face_mat, left = data
+                pts, normals, qworld = self.skin(q, pts, normals, self.world(q))
+                mats = np.array([classify_render(m, False) for m in face_mat])
+                local = CONV @ inv @ qworld
+                for m in np.unique(mats[mats >= 0]):
+                    g = build_geometry(pts, fvc, fvi, normals, triangulate(fvc, mats == m)[0], left, local)
+                    if g is not None:
+                        bucket.setdefault(int(m), GeoBucket()).add(*g)
+            self.clutter_set.placements[key].extend(inst_world @ xforms[sel])
+            placed += len(sel)
+        self.stats['clutter_points'] += placed
 
     def resolve_dedupe(self):
         """Content-identical meshes become one prototype placed at each world matrix; small
@@ -507,8 +612,13 @@ class Exporter:
             if prim.IsA(UsdGeom.PointInstancer):
                 # terrain clutter: its prototypes live under it and are placed per point, so
                 # traversing them as plain meshes would draw each once at its authored origin
-                self.stats['point_instancers_skipped'] += 1
+                if self.clutter:
+                    self.add_clutter(prim)
+                else:
+                    self.stats['point_instancers_skipped'] += 1
                 it.PruneChildren()
+                continue
+            if self.clutter_only:
                 continue
             if prim.IsInstance():
                 root = prim
@@ -522,9 +632,15 @@ class Exporter:
             n += 1
             if n % 20000 == 0:
                 print(f'  {n} meshes, {len(self.protos)} prototypes, {time.time() - t:.0f}s', flush=True)
-        print(f'  traversed {n} meshes in {time.time() - t:.0f}s', flush=True)
+        print(f'  traversed {n} meshes in {time.time() - t:.0f}s, '
+              f"{self.stats['skinned_moved']} posed by their skeleton", flush=True)
+        if self.clutter_only:
+            print(f"  clutter points: {self.stats['clutter_points']}", flush=True)
+            return
         self.resolve_deferred()
         self.resolve_dedupe()
+        if self.clutter:
+            print(f"  clutter points: {self.stats['clutter_points']}", flush=True)
         if self.stats['point_instancers_skipped']:
             print(f"  point instancers skipped (clutter): {self.stats['point_instancers_skipped']}", flush=True)
 
@@ -740,6 +856,11 @@ def open_stage(region):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('regions', nargs='+', choices=list(REGIONS))
+    ap.add_argument('--clutter', choices=['trees', 'all'],
+                    help='also write PointInstancer clutter to <name>_clutter.glb (trees: tree / palm / bush '
+                         'prototypes only)')
+    ap.add_argument('--clutter-only', action='store_true',
+                    help='write only the clutter GLB (implies --clutter all unless --clutter is given)')
     ap.add_argument('--out', default=os.environ.get('CALDERA_RAW', 'caldera-raw'))
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -748,10 +869,14 @@ def main():
         print(f'== {r}', flush=True)
         stage, root_path = open_stage(r)
         print(f'  stage open+load {time.time() - t:.0f}s', flush=True)
-        ex = Exporter(is_terrain=(r == 'terrain'))
+        clutter = args.clutter or ('all' if args.clutter_only else None)
+        ex = Exporter(is_terrain=(r == 'terrain'), clutter=clutter, clutter_only=args.clutter_only)
         ex.run(stage, root_path)
-        write_render(ex, f'{args.out}/caldera_{r}.glb', r)
-        write_collision(ex, f'{args.out}/caldera_{r}_collision.glb', r)
+        if not args.clutter_only:
+            write_render(ex, f'{args.out}/caldera_{r}.glb', r)
+            write_collision(ex, f'{args.out}/caldera_{r}_collision.glb', r)
+        if clutter and ex.clutter_set.protos:
+            write_render(ex.clutter_set, f'{args.out}/caldera_{r}_clutter.glb', r + '_clutter')
         if ex.unknown_guide:
             top = sorted(ex.unknown_guide.items(), key=lambda kv: -kv[1])[:25]
             print('  guide materials not treated as collision:', top, flush=True)

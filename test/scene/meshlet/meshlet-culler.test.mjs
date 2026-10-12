@@ -30,7 +30,11 @@ const makeDevice = () => {
     device.computeDispatch = (computes, name) => log.dispatches.push({ name, computes: computes.map(c => c.name) });
     device.submit = () => log.submits++;
     device.getIndirectDrawSlot = () => log.drawSlot++;
-    device.getIndirectDispatchSlot = () => log.dispatchSlot++;
+    device.getIndirectDispatchSlot = (count = 1) => {
+        const slot = log.dispatchSlot;
+        log.dispatchSlot += count;
+        return slot;
+    };
     return { device, log };
 };
 
@@ -48,7 +52,7 @@ const makeWorld = () => ({
     cut: { levels: [{ start: 0, count: 130, root: true }, { start: 130, count: 50, root: false }], groups: storage(), tasks: storage(), selectionTopology: storage() },
     totalPairs: 1000,
     instanceCount: 130,
-    workItemCapacity: 80,
+    workItemCapacity: 130,
     pageSizeBytes: 65536,
     totalPages: 12,
     objectDataBuffer: storage(),
@@ -144,10 +148,16 @@ describe('MeshletCuller', function () {
         culler.beginFrame(planes, camera, 640, viewProj, null);
         expect(log.dispatches[0].name).to.equal('MeshletRootAdmit');
         expect(log.dispatches[0].computes).to.deep.equal(['MeshletrootClassify', 'MeshletdispatchArgs',
+            'MeshletrootBandArgs', 'MeshletrootScatter',
             ...Array.from({ length: MESHLET_ROOT_BANDS }, (_, band) => `MeshletRootAdmit${band}`)]);
-        for (const compute of culler.rootAdmit) {
-            expect(compute.indirectSlotIndex).to.equal(culler.rootArgs.getParameter('dispatchSlot'));
-        }
+        // the scatter walks every candidate; each band pass only its own band's range
+        expect(culler.rootScatter.indirectSlotIndex).to.equal(culler.rootArgs.getParameter('dispatchSlot'));
+        const firstBandSlot = culler.rootBandArgs.getParameter('firstSlot');
+        culler.rootAdmit.forEach((compute, band) => {
+            expect(compute.indirectSlotIndex).to.equal(firstBandSlot + band);
+            expect(compute.getParameter('sortedBase')).to.equal(130);
+        });
+        expect(culler.rootScatter.getParameter('sortedBase')).to.equal(130);
         culler.destroy();
     });
 
@@ -231,7 +241,7 @@ describe('MeshletCuller', function () {
 
         const base = claimPersistBase(1000, 130);
         expect(log.clears, 'counters, transient claim bits, this frame\'s admissions; never the requests buffer')
-        .to.deep.equal([MESHLET_COUNTER_U32S * 4, base * 4, Math.ceil(130 / 32) * 4]);
+        .to.deep.equal([MESHLET_COUNTER_U32S * 4, 3 * MESHLET_ROOT_BANDS * 4, base * 4, Math.ceil(130 / 32) * 4]);
         expect(log.dispatches).to.have.lengthOf(4);
         expect(log.dispatches[0].name).to.equal('MeshletRootAdmit');
         expect(log.dispatches[1].name).to.equal('MeshletResidentCut');

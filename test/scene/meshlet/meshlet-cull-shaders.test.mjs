@@ -14,7 +14,7 @@ import {
 } from '../../../src/scene/meshlet/shaders/meshlet-cull-wgsl.js';
 import { meshletCutWGSL } from '../../../src/scene/meshlet/shaders/meshlet-cut-wgsl.js';
 import * as pageWGSL from '../../../src/scene/meshlet/shaders/meshlet-page-wgsl.js';
-import { meshletRootAdmitWGSL, meshletRootClassifyWGSL } from '../../../src/scene/meshlet/shaders/meshlet-root-admit-wgsl.js';
+import { meshletRootAdmitWGSL, meshletRootClassifyWGSL, meshletRootScatterWGSL } from '../../../src/scene/meshlet/shaders/meshlet-root-admit-wgsl.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
 // The cull shaders cannot run headless, but their text is a contract with the JS that binds
@@ -76,7 +76,13 @@ describe('meshlet cull shaders', function () {
         expect(meshletRootClassifyWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.ROOT_SUBPIXEL}u], 1u)`);
         // an incumbent is promoted one band, never past band 0
         expect(meshletRootClassifyWGSL).to.include('band = max(band, 1u) - 1u');
-        expect(meshletRootAdmitWGSL).to.include('if ((entry >> 27u) != uniform.rootBand) { return; }');
+        // and keeps its place until it is half the size cut, so the cut does not pop
+        expect(meshletRootClassifyWGSL).to.include('select(bands.w, bands.w * 0.5, incumbent)');
+        // classify counts each band; the scatter sorts the list by band, so a band pass reads only its range
+        expect(meshletRootClassifyWGSL).to.include('atomicAdd(&rootBands[band], 1u)');
+        expect(meshletRootScatterWGSL).to.include('rootList[uniform.sortedBase + slot] = entry');
+        expect(meshletRootAdmitWGSL).to.include('if (index >= rootBands[uniform.rootBand]) { return; }');
+        expect(meshletRootAdmitWGSL).to.not.include('!= uniform.rootBand');
         expect(meshletRootAdmitWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.ROOT_UNREADY_INSTANCES}u], 1u)`);
         expect(meshletRootAdmitWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.ROOT_REJECTED_INSTANCES}u], 1u)`);
         // a rejected root refunds its charge but keeps its records as demand

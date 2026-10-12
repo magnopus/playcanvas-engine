@@ -1,4 +1,6 @@
 import { Compute } from '../../platform/graphics/compute.js';
+import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
+import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import {
     CULL_FLAG_HZB_LINEAR, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_CULL_SLICE,
     MESHLET_COMPACT_SLICE, MESHLET_INSTANCE_CULL_WORKGROUP, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS,
@@ -36,6 +38,10 @@ const bindCapacities = (compute, view) => {
         compute.setParameter(`indexCapacity${b}`, view.indexCapacity[b]);
     }
 };
+
+// root band words: entry counts per band, scatter cursors per band, then each band's start in
+// the band-sorted root list
+const ROOT_BANDS_WORDS = 3 * MESHLET_ROOT_BANDS;
 
 class MeshletCuller {
     /** @type {GraphicsDevice} */
@@ -169,13 +175,15 @@ class MeshletCuller {
             compute.setupDispatch(Math.min(groups, 65535), Math.ceil(groups / 65535));
             return compute;
         });
-        // Root admission: classify every instance into priority bands (one pass), then admit
-        // band by band - largest on screen first - from the compacted candidate list. The list
-        // lives in the work-item buffer, which is unused until the instance cull fills it.
+        // Root admission: classify every instance into priority bands (one pass), sort the
+        // candidates by band, then admit band by band - largest on screen first - each pass over
+        // its own band's range only. Both the classify-order list and the band-sorted copy after
+        // it live in the work-item buffer, which is unused until the instance cull fills it.
         const rootListWords = world.workItemCapacity * WORK_ITEM_U32S;
-        if (rootListWords < world.instanceCount) {
-            throw new Error(`MeshletCuller: work items (${rootListWords} words) cannot hold the root list of ${world.instanceCount} instances.`);
+        if (rootListWords < 2 * world.instanceCount) {
+            throw new Error(`MeshletCuller: work items (${rootListWords} words) cannot hold the root lists of ${world.instanceCount} instances.`);
         }
+        this.rootBandsBuffer = new StorageBuffer(device, ROOT_BANDS_WORDS * 4, BUFFERUSAGE_COPY_DST);
         this.persistBase = claimPersistBase(world.totalPairs, world.instanceCount);
         this.persistWords = Math.ceil(world.instanceCount / 32);
         this.rootClassify = makeCompute('rootClassify');
@@ -185,6 +193,7 @@ class MeshletCuller {
         this.rootClassify.setParameter('claimBits', view.claimBitsBuffer);
         this.rootClassify.setParameter('counters', view.countersBuffer);
         this.rootClassify.setParameter('rootList', view.workItemsBuffer);
+        this.rootClassify.setParameter('rootBands', this.rootBandsBuffer);
         const classifyGroups = Math.ceil(world.instanceCount / 64);
         this.rootClassify.setupDispatch(Math.min(classifyGroups, 65535), Math.ceil(classifyGroups / 65535));
         this.rootArgs = makeCompute('dispatchArgs');
@@ -193,6 +202,14 @@ class MeshletCuller {
         this.rootArgs.setParameter('workItemCapacity', world.instanceCount);
         this.rootArgs.setParameter('counters', view.countersBuffer);
         this.rootArgs.setupDispatch(1);
+        this.rootBandArgs = makeCompute('rootBandArgs');
+        this.rootBandArgs.setParameter('rootBands', this.rootBandsBuffer);
+        this.rootBandArgs.setupDispatch(1);
+        this.rootScatter = makeCompute('rootScatter');
+        this.rootScatter.setParameter('sortedBase', world.instanceCount);
+        this.rootScatter.setParameter('counters', view.countersBuffer);
+        this.rootScatter.setParameter('rootList', view.workItemsBuffer);
+        this.rootScatter.setParameter('rootBands', this.rootBandsBuffer);
         // one instance per band: uniform writes land before the frame's command buffer
         this.rootAdmit = [];
         for (let band = 0; band < MESHLET_ROOT_BANDS; band++) {
@@ -209,6 +226,8 @@ class MeshletCuller {
             compute.setParameter('cutBudget', view.cutBudgetBuffer);
             compute.setParameter('counters', view.countersBuffer);
             compute.setParameter('rootList', view.workItemsBuffer);
+            compute.setParameter('rootBands', this.rootBandsBuffer);
+            compute.setParameter('sortedBase', world.instanceCount);
             this.rootAdmit.push(compute);
         }
 
@@ -344,6 +363,8 @@ class MeshletCuller {
         if (this._ownsShaders) {
             this.shaders.destroy();
         }
+        this.rootBandsBuffer?.destroy();
+        this.rootBandsBuffer = null;
         this.shaders = null;
         this.dummyHzb = null;
     }
@@ -402,6 +423,7 @@ class MeshletCuller {
         view.cutBudgetBuffer.write(0, view.cutBudgetInitial);
         const encoder = device.getCommandEncoder();
         encoder.clearBuffer(view.countersBuffer.impl.buffer, 0, view.countersBuffer.byteSize);
+        encoder.clearBuffer(this.rootBandsBuffer.impl.buffer, 0, this.rootBandsBuffer.byteSize);
         // Claim bits clear on the GPU (one bit per instance-meshlet pair reaches tens of MB),
         // all but last frame's persistent admission region, which the root classify reads for
         // hysteresis. This frame's region is cleared for the admission to fill.
@@ -425,6 +447,7 @@ class MeshletCuller {
         }
         this._dispatchSlotCull = device.getIndirectDispatchSlot();
         this._dispatchSlotRoots = device.getIndirectDispatchSlot();
+        this._dispatchSlotBands = device.getIndirectDispatchSlot(MESHLET_ROOT_BANDS);
         this._dispatchSlotSelected = device.getIndirectDispatchSlot();
         this._dispatchSlotWrite = device.getIndirectDispatchSlot();
 
@@ -433,7 +456,12 @@ class MeshletCuller {
 
         this.rootArgs.setParameter('dispatchSlot', this._dispatchSlotRoots);
         this.rootArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
-        for (const compute of this.rootAdmit) compute.setupIndirectDispatch(this._dispatchSlotRoots);
+        this.rootBandArgs.setParameter('firstSlot', this._dispatchSlotBands);
+        this.rootBandArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
+        this.rootScatter.setupIndirectDispatch(this._dispatchSlotRoots);
+        for (let band = 0; band < MESHLET_ROOT_BANDS; band++) {
+            this.rootAdmit[band].setupIndirectDispatch(this._dispatchSlotBands + band);
+        }
         this.dispatchArgs.setParameter('dispatchSlot', this._dispatchSlotCull);
         this.dispatchArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
         this.selectedArgs.setParameter('dispatchSlot', this._dispatchSlotSelected);
@@ -458,11 +486,13 @@ class MeshletCuller {
         this.indexWrite.setupIndirectDispatch(this._dispatchSlotWrite);
 
         if (this.forceSubmitBoundaries) {
-            device.computeDispatch([this.rootClassify, this.rootArgs], 'MeshletRootClassify');
+            device.computeDispatch([this.rootClassify, this.rootArgs, this.rootBandArgs], 'MeshletRootClassify');
             device.submit();
-            device.computeDispatch(this.rootAdmit, 'MeshletRootAdmit');
+            device.computeDispatch([this.rootScatter, ...this.rootAdmit], 'MeshletRootAdmit');
         } else {
-            device.computeDispatch([this.rootClassify, this.rootArgs, ...this.rootAdmit], 'MeshletRootAdmit');
+            device.computeDispatch([
+                this.rootClassify, this.rootArgs, this.rootBandArgs, this.rootScatter, ...this.rootAdmit
+            ], 'MeshletRootAdmit');
         }
         if (this.cutStages.length) device.computeDispatch(this.cutStages, 'MeshletResidentCut');
 

@@ -1,5 +1,7 @@
 import { meshletCutWGSL } from './shaders/meshlet-cut-wgsl.js';
-import { meshletRootAdmitWGSL, meshletRootClassifyWGSL } from './shaders/meshlet-root-admit-wgsl.js';
+import {
+    meshletRootAdmitWGSL, meshletRootBandArgsWGSL, meshletRootClassifyWGSL, meshletRootScatterWGSL
+} from './shaders/meshlet-root-admit-wgsl.js';
 import { PIXELFORMAT_R32F, SHADERLANGUAGE_WGSL } from '../../platform/graphics/constants.js';
 import { Shader } from '../../platform/graphics/shader.js';
 import { Texture } from '../../platform/graphics/texture.js';
@@ -31,6 +33,8 @@ class MeshletCullShaders {
 
         this.cut = make('Cut', meshletCutWGSL);
         this.rootClassify = make('RootClassify', meshletRootClassifyWGSL);
+        this.rootBandArgs = make('RootBandArgs', meshletRootBandArgsWGSL);
+        this.rootScatter = make('RootScatter', meshletRootScatterWGSL);
         this.rootAdmit = make('RootAdmit', meshletRootAdmitWGSL);
         this.instanceCull = make('InstanceCull', instanceCullWGSL);
         this.compactMeshlets = make('CompactMeshlets', compactMeshletsWGSL);
@@ -49,6 +53,8 @@ class MeshletCullShaders {
     destroy() {
         this.cut?.destroy();
         this.rootClassify?.destroy();
+        this.rootBandArgs?.destroy();
+        this.rootScatter?.destroy();
         this.rootAdmit?.destroy();
         this.instanceCull?.destroy();
         this.compactMeshlets?.destroy();

@@ -47,7 +47,10 @@ const BASE = './assets/meshlets/caldera/';
  */
 /** @type {{ regions: Region[] }} */
 const manifest = await fetch(`${BASE}caldera_scene.json`).then(r => r.json());
-const regions = manifest.regions.filter(r => r.baked);
+// ?regions=tile_p,docks loads only those; ?pos=x,y,z&look=x,y,z starts the camera there (glTF metres)
+const params = new URLSearchParams(location.search);
+const only = params.get('regions')?.split(',');
+const regions = manifest.regions.filter(r => r.baked && (!only || only.includes(r.name)));
 
 const device = await createGraphicsDevice(canvas, { deviceTypes: [deviceType], antialias: false });
 device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
@@ -92,7 +95,8 @@ const loadContainer = (name, url) => new Promise((resolve, reject) => {
 });
 
 // every region shares one meshlet world, so the pool covers the sum of their resident sets
-app.systems.meshlet.poolBytes = 2048 * 1024 * 1024;
+// ?pool=<MiB>: the whole island needs ~4096; the default suits a handful of regions
+app.systems.meshlet.poolBytes = (Number(params.get('pool')) || 2048) * 1024 * 1024;
 app.systems.meshlet.occlusion = true;
 
 const scene = new Entity('Caldera');
@@ -229,6 +233,19 @@ const firstPoi = regions.find(r => r.name !== 'terrain') ?? regions[0];
 if (firstPoi) {
     data.set('data.region', firstPoi.name);
     frameRegion(firstPoi);
+}
+
+/**
+ * @param {string} key - Query parameter holding `x,y,z`.
+ * @returns {Vec3|null} The parsed vector, or null when absent or malformed.
+ */
+const vecParam = (key) => {
+    const v = params.get(key)?.split(',').map(Number);
+    return v?.length === 3 && v.every(Number.isFinite) ? new Vec3(v) : null;
+};
+const startPos = vecParam('pos');
+if (startPos) {
+    cc.reset(vecParam('look') ?? startPos.clone().add(Vec3.FORWARD), startPos);
 }
 
 let statFrames = 0;

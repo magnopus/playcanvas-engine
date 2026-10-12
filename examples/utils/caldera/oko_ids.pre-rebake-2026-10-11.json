@@ -1,0 +1,38 @@
+{
+  "caldera_st_b": {
+    "collectionId": "6ac7ede6237f1a7dd6881f7e",
+    "assetId": "6ac7ede60d02d03985dc815f"
+  },
+  "caldera_capital": {
+    "collectionId": "6ac7f1b4237f1a7dd6881fed",
+    "assetId": "6ac7f1b40d02d03985dc81c3"
+  },
+  "caldera_airfield": {
+    "collectionId": "6ac7f284237f1a7dd6882002",
+    "assetId": "6ac7f285a40cadf0756a041e"
+  },
+  "caldera_phosphate_mine": {
+    "collectionId": "6ac7f335237f1a7dd6882018",
+    "assetId": "6ac7f3350d02d03985dc81dc"
+  },
+  "caldera_beachhead": {
+    "collectionId": "6ac7f3b1a40cadf0756a0433",
+    "assetId": "6ac7f3b20d02d03985dc81ee"
+  },
+  "caldera_tile_n": {
+    "collectionId": "6ac7f4120d02d03985dc81f5",
+    "assetId": "6ac7f413a40cadf0756a043f"
+  },
+  "caldera_tile_p": {
+    "collectionId": "6ac7f447237f1a7dd688203b",
+    "assetId": "6ac7f4470d02d03985dc81ff"
+  },
+  "caldera_arsenal": {
+    "collectionId": "6ac7f4bea40cadf0756a0455",
+    "assetId": "6ac7f4be237f1a7dd6882049"
+  },
+  "caldera_tile_f": {
+    "collectionId": "6ac7f51ca40cadf0756a046d",
+    "assetId": "6ac7f51c237f1a7dd688205b"
+  }
+}
