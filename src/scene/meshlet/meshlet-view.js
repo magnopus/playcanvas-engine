@@ -6,7 +6,7 @@ import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { WebgpuReadbackPool } from '../../platform/graphics/webgpu/webgpu-readback-pool.js';
 import { Debug } from '../../core/debug.js';
 import {
-    CULL_PARAMS_VEC4S, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, RECORD_U32S, WORK_ITEM_U32S
+    CULL_PARAMS_VEC4S, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, WORK_ITEM_U32S
 } from './constants.js';
 import { GraphNode } from '../graph-node.js';
 import { Mesh } from '../mesh.js';
@@ -214,7 +214,10 @@ class MeshletView {
         // admission bits (see meshletCutWGSL)
         const claimWords = claimWordCount(world.totalPairs, world.instanceCount);
         this.cullParamsBuffer = new StorageBuffer(device, CULL_PARAMS_VEC4S * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
-        this.countersBuffer = new StorageBuffer(device, MESHLET_COUNTER_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
+        // the counters, then this frame's visible-cell and visible-chunk lists (see
+        // MESHLET_VISIBLE_CELLS_BASE)
+        const counterWords = MESHLET_VISIBLE_CELLS_BASE + (world.cells?.cellCount ?? 0) + (world.cut?.totalChunks ?? 0);
+        this.countersBuffer = new StorageBuffer(device, counterWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
         // demand readbacks go through a pooled staging buffer, the same way the residency's
         // request-marks readback does, rather than allocating a staging buffer per read
         this.readbackPool = new WebgpuReadbackPool(device);

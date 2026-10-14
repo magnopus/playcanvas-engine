@@ -1,8 +1,9 @@
 import {
-    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH,
+    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH,
     MESHLET_ROOT_BANDS, OBJECT_FLAG_HIDDEN,
     OBJECT_FLAG_NO_SHADOW, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
+import { meshletVisibleCellWGSL } from './meshlet-cull-wgsl.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
 // band index in the top bits of a root list entry, instance id below
@@ -10,11 +11,11 @@ const BAND_SHIFT = 27;
 const INSTANCE_MASK = (1 << BAND_SHIFT) - 1;
 
 /**
- * Root classification, one thread per instance: drops hidden (and, in a shadow view,
- * non-casting) instances and those outside the frustum, ranks the rest by projected size - the
- * LOD metric - into priority bands, and appends them to the root list for admission. An instance
- * admitted last frame is promoted one band (hysteresis), so admission does not flicker at the
- * budget's edge.
+ * Root classification, one workgroup per visible cell and one thread per instance of it: drops
+ * hidden (and, in a shadow view, non-casting) instances and those outside the frustum, ranks the
+ * rest by projected size - the LOD metric - into priority bands, and appends them to the root
+ * list for admission. An instance admitted last frame is promoted one band (hysteresis), so
+ * admission does not flicker at the budget's edge.
  *
  * @ignore
  */
@@ -32,11 +33,18 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
     var<storage, read_write> rootList: array<u32>;
     // per-band entry counts (see ROOT_BANDS_WORDS)
     var<storage, read_write> rootBands: array<atomic<u32>>;
+    // instance ids in cell order
+    var<storage, read> cellInstances: array<u32>;
 
-    @compute @workgroup_size(64)
-    fn main(@builtin(global_invocation_id) gid: vec3u) {
-        let instance = gid.x + gid.y * (65535u * 64u);
-        if (instance >= uniform.instanceCount) { return; }
+    ${meshletVisibleCellWGSL}
+
+    @compute @workgroup_size(${MESHLET_CELL_SIZE})
+    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+        let cell = meshletVisibleCell(group);
+        if (cell == 0xFFFFFFFFu) { return; }
+        let position = cell * ${MESHLET_CELL_SIZE}u + lane.x;
+        if (position >= uniform.instanceCount) { return; }
+        let instance = cellInstances[position];
         let object = objectData[instance];
         let shadow = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_SHADOW_VIEW}u) != 0u;
         if ((object.flags & ${OBJECT_FLAG_HIDDEN}u) != 0u ||

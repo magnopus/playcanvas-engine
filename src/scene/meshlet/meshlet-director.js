@@ -47,7 +47,7 @@ const CAMERA_SHARE_OCCUPANCY = 0.5;
 
 const BYTES_PER_MB = 1024 * 1024;
 
-// Every culled view (camera or shadow face) takes MESHLET_ROOT_BANDS + 4 indirect dispatch slots
+// Every culled view (camera or shadow face) takes MESHLET_ROOT_BANDS + 5 indirect dispatch slots
 // a frame - one per root admission band - so the device default of 256 runs out at a dozen views.
 const MIN_INDIRECT_DISPATCH_SLOTS = 1024;
 

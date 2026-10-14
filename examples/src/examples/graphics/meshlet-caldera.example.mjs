@@ -13,6 +13,7 @@ import {
     AppOptions,
     Asset,
     BLEND_NORMAL,
+    ByteCache,
     CameraComponentSystem,
     CameraFrame,
     Color,
@@ -22,6 +23,7 @@ import {
     Keyboard,
     LightComponentSystem,
     MeshletComponentSystem,
+    OpfsByteStore,
     Mouse,
     RenderComponentSystem,
     RESOLUTION_AUTO,
@@ -74,6 +76,15 @@ app.init(createOptions);
 
 app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
 app.setCanvasResolution(RESOLUTION_AUTO);
+
+// ?cache=1 keeps fetched bytes (containers, meshlet pages, texture tails) in an OPFS cache, so a
+// reload reads them from disk instead of the network. The whole island fetches ~2.2 GB, past the
+// default 2 GiB cap, which would evict on every load.
+if (params.get('cache') === '1') {
+    const byteCache = new ByteCache(new OpfsByteStore('caldera'), { maxBytes: 4 * 1024 * 1024 * 1024 });
+    app.loader.byteCache = byteCache;
+    app.systems.meshlet.byteCache = byteCache;
+}
 
 const resize = () => app.resizeCanvas();
 window.addEventListener('resize', resize);

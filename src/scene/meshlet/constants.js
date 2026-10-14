@@ -173,6 +173,15 @@ export const CULL_FLAG_SHADOW_VIEW = 1 << 2;
 /** Threads per workgroup of the instance cull (one thread per instance). @type {number} */
 export const MESHLET_INSTANCE_CULL_WORKGROUP = 64;
 
+/**
+ * Instances per spatial cell (see MeshletCells). The per-instance passes - root classify and
+ * instance cull - run one workgroup per visible cell, one lane per instance, so this is also
+ * their workgroup size.
+ *
+ * @type {number}
+ */
+export const MESHLET_CELL_SIZE = 64;
+
 /** Threads per workgroup of the index-write pass (one workgroup per record). @type {number} */
 export const MESHLET_INDEX_WRITE_WORKGROUP = 64;
 
@@ -238,11 +247,12 @@ export const MESHLET_BUCKET_MASKED = 2;
 /**
  * Counter buffer words: [0] workItemCount, [1] recordCount, then three MESHLET_BUCKET_COUNT
  * blocks - index cursors, committed ends, unclamped index demand - then the frame's rendered
- * meshlet count across both phases and peak per-phase record demand.
+ * meshlet count across both phases and peak per-phase record demand, the root admission
+ * counters and the visible cell count.
  *
  * @type {number}
  */
-export const MESHLET_COUNTER_U32S = 24;
+export const MESHLET_COUNTER_U32S = 28;
 
 /**
  * Word offsets into the counter buffer; the three per-bucket blocks are indexed as
@@ -264,8 +274,49 @@ export const MESHLET_COUNTER = {
     ROOT_REJECTED_BASE: 18,       // root indices per bucket that did not fit
     ROOT_REJECTED_INSTANCES: 21,  // instances whose roots did not fit
     ROOT_UNREADY_INSTANCES: 22,   // instances whose root pages were not resident
-    ROOT_SUBPIXEL: 23             // instances below the admission size threshold
+    ROOT_SUBPIXEL: 23,            // instances below the admission size threshold
+    VISIBLE_CELLS: 24             // cells the cell cull appended to the visible list
 };
+
+/**
+ * Tasks per cut chunk: one cut-stage workgroup serves one chunk of one cell's tasks at a level,
+ * a lane per task. See MeshletCutData.
+ *
+ * @type {number}
+ */
+export const MESHLET_CUT_CHUNK = 64;
+
+/**
+ * Most cut stages (non-root DAG levels) a world may have; the counter buffer reserves one
+ * chunk counter per stage.
+ *
+ * @type {number}
+ */
+export const MESHLET_MAX_CUT_STAGES = 32;
+
+/**
+ * Word offset of the per-stage visible-chunk counters in the counter buffer.
+ *
+ * @type {number}
+ */
+export const MESHLET_STAGE_CHUNKS_BASE = MESHLET_COUNTER_U32S;
+
+/**
+ * Leading counter-buffer words cleared every frame: the counters, then the per-stage chunk
+ * counters. The lists after them are written up to their counts and need no clear.
+ *
+ * @type {number}
+ */
+export const MESHLET_COUNTER_CLEAR_U32S = MESHLET_STAGE_CHUNKS_BASE + MESHLET_MAX_CUT_STAGES;
+
+/**
+ * Word offset of the visible-cell list in the counter buffer, followed by the per-stage
+ * visible-chunk lists. They live there rather than in buffers of their own because the cut
+ * stage already binds the per-stage limit of storage buffers, and it binds this one.
+ *
+ * @type {number}
+ */
+export const MESHLET_VISIBLE_CELLS_BASE = MESHLET_COUNTER_CLEAR_U32S;
 
 /** @type {number} - material record word 11, bit 0. */
 export const MATERIAL_FLAG_DOUBLE_SIDED = 1 << 0;

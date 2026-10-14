@@ -1,19 +1,18 @@
 import {
-    CULL_PARAMS, MESHLET_COUNTER, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED,
-    PAGE_NOT_RESIDENT, PAGE_REQUEST, MESHLET_LEVEL_BIAS
+    CULL_PARAMS, MESHLET_COUNTER, MESHLET_CUT_CHUNK, MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED,
+    MESHLET_FLAG_TWO_SIDED, MESHLET_STAGE_CHUNKS_BASE, PAGE_NOT_RESIDENT, PAGE_REQUEST, MESHLET_LEVEL_BIAS
 } from '../constants.js';
 import { meshletStructsWGSL, meshletDataWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
 /**
- * Select complete replacements from coarse to fine, reserving capacity before refinement. The
- * roots are admitted beforehand (meshletRootAdmitWGSL); a stage runs one DAG level's groups.
+ * Shared declarations and the per-task body of the cut stage: `cutTask(taskIndex)` selects one
+ * replacement group (an index into cutTasks). The entry points below decide which tasks run.
  *
- * @ignore
+ * @param {string} entry - Extra declarations and the `main` entry point.
+ * @returns {string} The shader source.
  */
-export const meshletCutWGSL = /* wgsl */ `
+const cutShader = entry => /* wgsl */ `
     ${meshletStructsWGSL}
-    uniform taskStart: u32;
-    uniform taskCount: u32;
     uniform totalPairs: u32;
     // bit base of the off-frustum refinement flags, after the pair and admission bits
     uniform freeBase: u32;
@@ -49,11 +48,8 @@ export const meshletCutWGSL = /* wgsl */ `
         return true;
     }
 
-    @compute @workgroup_size(64)
-    fn main(@builtin(global_invocation_id) gid: vec3u) {
-        let index = gid.x + gid.y * (65535u * 64u);
-        if (index >= uniform.taskCount) { return; }
-        let task = cutTasks[uniform.taskStart + index];
+    fn cutTask(taskIndex: u32) {
+        let task = cutTasks[taskIndex];
         let instance = task.x;
         let admissionBit = uniform.totalPairs + instance;
         if (!bitSet(admissionBit)) { return; }
@@ -141,4 +137,52 @@ export const meshletCutWGSL = /* wgsl */ `
         let childLevel = meshletData[first].lodLevel - 1u;
         atomicMax(&claimBits[uniform.levelBase + instance], ${MESHLET_LEVEL_BIAS}u - childLevel);
     }
+
+    ${entry}
 `;
+
+/**
+ * Select complete replacements from coarse to fine, reserving capacity before refinement. The
+ * roots are admitted beforehand (meshletRootAdmitWGSL); a stage runs one DAG level's groups,
+ * one thread per task of the level.
+ *
+ * @ignore
+ */
+export const meshletCutWGSL = cutShader(/* wgsl */ `
+    uniform taskStart: u32;
+    uniform taskCount: u32;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) gid: vec3u) {
+        let index = gid.x + gid.y * (65535u * 64u);
+        if (index >= uniform.taskCount) { return; }
+        cutTask(uniform.taskStart + index);
+    }
+`);
+
+/**
+ * The cut stage over the visible cells only: one workgroup per chunk of a visible cell's tasks
+ * at this level (see cellExpandWGSL), a lane per task. An instance outside the visible cells
+ * was never admitted, so its tasks would only early-out; skipping them is what keeps a shadow
+ * cascade from paying for the whole world.
+ *
+ * @ignore
+ */
+export const meshletCutChunksWGSL = cutShader(/* wgsl */ `
+    uniform stage: u32;
+    // word base in cutGroups of this stage's chunk -> first task row
+    uniform chunkTaskBase: u32;
+    // word base in counters of this stage's visible-chunk list
+    uniform listBase: u32;
+
+    @compute @workgroup_size(${MESHLET_CUT_CHUNK})
+    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+        let slot = group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x;
+        if (slot >= atomicLoad(&counters[${MESHLET_STAGE_CHUNKS_BASE}u + uniform.stage])) { return; }
+        let chunk = atomicLoad(&counters[uniform.listBase + slot]);
+        let task = cutGroups[uniform.chunkTaskBase + chunk] + lane.x;
+        if (task < cutGroups[uniform.chunkTaskBase + chunk + 1u]) {
+            cutTask(task);
+        }
+    }
+`);

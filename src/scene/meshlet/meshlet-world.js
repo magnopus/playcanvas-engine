@@ -1,3 +1,4 @@
+import { MeshletCells } from './meshlet-cells.js';
 import { MeshletCutData } from './meshlet-cut-data.js';
 import { meshletBakeStamp } from './streaming/meshlet-bake-stamp.js';
 import { Debug } from '../../core/debug.js';
@@ -99,6 +100,9 @@ class MeshletWorld {
 
     /** @type {MeshletCutData|null} */
     cut = null;
+
+    /** @type {MeshletCells|null} - spatial instance cells the views cull before their instances. */
+    cells = null;
 
 
     objectDataBuffer = null;
@@ -203,6 +207,7 @@ class MeshletWorld {
         this.dummyBits?.destroy();
         this.meshletDataBuffer?.destroy();
         this.cut?.destroy();
+        this.cells?.destroy();
         this.objectDataBuffer?.destroy();
         this.materialTableBuffer?.destroy();
         this.lightmapBuffer?.destroy();
@@ -1075,7 +1080,8 @@ class MeshletWorld {
             this.indexCapacity = this.indexCapacity.map(c => Math.floor(c * s));
         }
 
-        this.cut = new MeshletCutData(device, meshletData, objectData);
+        this.cells = new MeshletCells(device, objectDataF, this.instanceCount);
+        this.cut = new MeshletCutData(device, meshletData, objectData, this.cells.instanceOrder);
         this.meshletDataBuffer = new StorageBuffer(device, meshletData.byteLength, BUFFERUSAGE_COPY_DST);
         this.meshletDataBuffer.write(0, meshletData);
         this.objectDataBuffer = new StorageBuffer(device, objectData.byteLength, BUFFERUSAGE_COPY_DST);
@@ -1323,6 +1329,7 @@ class MeshletWorld {
         }
         this._worldBoundsDirty = true;
         this.objectVersion++;
+        this.cells?.refit(objectDataF, instanceBase + start, count);
         this._uploadObjectRows(instanceBase + start, count);
     }
 

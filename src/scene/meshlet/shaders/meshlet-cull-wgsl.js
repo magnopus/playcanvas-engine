@@ -24,9 +24,9 @@
 
 import { OBJECT_FLAG_NO_SHADOW, CULL_FLAG_SHADOW_VIEW,
     CULL_FLAG_HZB_LINEAR, CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
-    MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_COMPACT_SLICE,
+    MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_COMPACT_SLICE,
     MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP,
-    MESHLET_INSTANCE_CULL_WORKGROUP, MESHLET_NO_PARENT, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HIDDEN,
+    MESHLET_NO_PARENT, MESHLET_STAGE_CHUNKS_BASE, MESHLET_VISIBLE_CELLS_BASE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HIDDEN,
     PAGE_REQUEST, TEXEL_RATE_PER_MIP, MESHLET_LEVEL_BIAS } from '../constants.js';
 import {
     meshletDataWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL,
@@ -34,8 +34,117 @@ import {
 } from './meshlet-page-wgsl.js';
 
 /**
- * Instance culling: one thread per instance. World-sphere frustum test, then fan the instance's
- * meshlets out into fixed-size slice work items with a single atomicAdd.
+ * Cell culling: one thread per spatial cell (see MeshletCells). Appends the cells whose
+ * bounding sphere touches the frustum to the view's visible-cell list, which the per-instance
+ * and per-task passes then dispatch over - one workgroup per visible cell.
+ */
+export const cellCullWGSL = /* wgsl */ `
+    uniform cellCount : u32;
+
+    var<storage, read> cellBounds : array<vec4f>;
+    var<storage, read> cullParams : array<vec4f>;
+    var<storage, read_write> counters : array<atomic<u32>>;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) gid : vec3u) {
+        let cell = gid.x + gid.y * (65535u * 64u);
+        if (cell >= uniform.cellCount) {
+            return;
+        }
+        let sphere = cellBounds[cell];
+        for (var p = 0u; p < ${CULL_PARAMS.PLANE_COUNT}u; p++) {
+            let plane = cullParams[${CULL_PARAMS.PLANES}u + p];
+            if (dot(plane.xyz, sphere.xyz) + plane.w < -sphere.w) {
+                return;
+            }
+        }
+        let slot = atomicAdd(&counters[${MESHLET_COUNTER.VISIBLE_CELLS}u], 1u);
+        atomicStore(&counters[${MESHLET_VISIBLE_CELLS_BASE}u + slot], cell);
+    }
+`;
+
+/**
+ * Chunk expansion: one thread per visible cell, appending the cell's cut chunks of every stage
+ * to that stage's visible-chunk list (see MeshletCutData), so each cut stage then dispatches
+ * one balanced workgroup per chunk. Lists and their counters sit in the counter buffer.
+ */
+export const cellExpandWGSL = /* wgsl */ `
+    uniform stageCount : u32;
+    // word base in cutGroups of the stage table: [cell chunk row, chunk task row, list offset, chunks]
+    uniform stageTableBase : u32;
+    // word base in counters of the first stage's visible-chunk list
+    uniform listsBase : u32;
+
+    var<storage, read> cutGroups : array<u32>;
+    var<storage, read_write> counters : array<atomic<u32>>;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(workgroup_id) group : vec3u, @builtin(local_invocation_id) lane : vec3u) {
+        let slot = (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * 64u + lane.x;
+        if (slot >= atomicLoad(&counters[${MESHLET_COUNTER.VISIBLE_CELLS}u])) {
+            return;
+        }
+        let cell = atomicLoad(&counters[${MESHLET_VISIBLE_CELLS_BASE}u + slot]);
+        for (var stage = 0u; stage < uniform.stageCount; stage++) {
+            let row = uniform.stageTableBase + stage * 4u;
+            let cellChunks = cutGroups[row];
+            let first = cutGroups[cellChunks + cell];
+            let count = cutGroups[cellChunks + cell + 1u] - first;
+            if (count == 0u) {
+                continue;
+            }
+            let base = atomicAdd(&counters[${MESHLET_STAGE_CHUNKS_BASE}u + stage], count);
+            let list = uniform.listsBase + cutGroups[row + 2u] + base;
+            for (var k = 0u; k < count; k++) {
+                atomicStore(&counters[list + k], first + k);
+            }
+        }
+    }
+`;
+
+/**
+ * One thread: writes each cut stage's indirect dispatch - one workgroup per visible chunk - to
+ * consecutive slots from `firstSlot`.
+ */
+export const stageArgsWGSL = /* wgsl */ `
+    uniform firstSlot : u32;
+    uniform stageCount : u32;
+
+    var<storage, read_write> counters : array<atomic<u32>>;
+    var<storage, read_write> indirectDispatch : array<u32>;
+
+    @compute @workgroup_size(1)
+    fn main() {
+        for (var stage = 0u; stage < uniform.stageCount; stage++) {
+            let count = atomicLoad(&counters[${MESHLET_STAGE_CHUNKS_BASE}u + stage]);
+            let base = (uniform.firstSlot + stage) * ${INDIRECT_DISPATCH_U32S}u;
+            indirectDispatch[base + 0u] = min(count, ${MESHLET_DISPATCH_WIDTH}u);
+            indirectDispatch[base + 1u] = (count + ${MESHLET_DISPATCH_WIDTH - 1}u) / ${MESHLET_DISPATCH_WIDTH}u;
+            indirectDispatch[base + 2u] = 1u;
+        }
+    }
+`;
+
+/**
+ * The visible cell a workgroup of a cell-driven pass serves, or 0xFFFFFFFF past the end of the
+ * list (the 2D dispatch grid rounds up). The list sits after the counters in the counter buffer.
+ *
+ * @ignore
+ */
+export const meshletVisibleCellWGSL = /* wgsl */ `
+    fn meshletVisibleCell(group: vec3u) -> u32 {
+        let slot = group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x;
+        if (slot >= atomicLoad(&counters[${MESHLET_COUNTER.VISIBLE_CELLS}u])) {
+            return 0xFFFFFFFFu;
+        }
+        return atomicLoad(&counters[${MESHLET_VISIBLE_CELLS_BASE}u + slot]);
+    }
+`;
+
+/**
+ * Instance culling: one workgroup per visible cell, one thread per instance of it. World-sphere
+ * frustum test, then fan the instance's meshlets out into fixed-size slice work items with a
+ * single atomicAdd.
  */
 export const instanceCullWGSL = /* wgsl */ `
     ${meshletStructsWGSL}
@@ -54,13 +163,22 @@ export const instanceCullWGSL = /* wgsl */ `
     // per primitive at its first meshlet: [0] lowest root level, [level] start of that level
     var<storage, read> levelStarts : array<u32>;
     var<storage, read_write> counters : array<atomic<u32>>;
+    // instance ids in cell order
+    var<storage, read> cellInstances : array<u32>;
 
-    @compute @workgroup_size(${MESHLET_INSTANCE_CULL_WORKGROUP})
-    fn main(@builtin(global_invocation_id) gid : vec3u) {
-        let instance = gid.x;
-        if (instance >= uniform.instanceCount) {
+    ${meshletVisibleCellWGSL}
+
+    @compute @workgroup_size(${MESHLET_CELL_SIZE})
+    fn main(@builtin(workgroup_id) group : vec3u, @builtin(local_invocation_id) lane : vec3u) {
+        let cell = meshletVisibleCell(group);
+        if (cell == 0xFFFFFFFFu) {
             return;
         }
+        let position = cell * ${MESHLET_CELL_SIZE}u + lane.x;
+        if (position >= uniform.instanceCount) {
+            return;
+        }
+        let instance = cellInstances[position];
         let admission = uniform.totalPairs + instance;
         if ((admittedBits[admission >> 5u] & (1u << (admission & 31u))) == 0u) {
             return;

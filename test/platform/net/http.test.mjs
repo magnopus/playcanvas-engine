@@ -311,6 +311,20 @@ describe('Http', function () {
             expect(http._acquire.callCount).to.equal(2);
         });
 
+        it('waits for a reopened cache\'s index instead of refetching what it holds', async function () {
+            await get('/test/assets/test.bin', { responseType: Http.ResponseType.ARRAY_BUFFER });
+            await settle();
+            await cache.flush();
+
+            // a new session over the same store: its index is still loading when the request is made
+            const reopened = new ByteCache(cache.store, { flushDelay: 1e6 });
+            http.byteCache = reopened;
+            const data = await get('/test/assets/test.bin', { responseType: Http.ResponseType.ARRAY_BUFFER });
+            expect(http._acquire.callCount, 'only the first session fetched').to.equal(1);
+            expect(reopened.hits).to.equal(1);
+            expect(data.byteLength).to.be.above(0);
+        });
+
         it('does not store a failed response', async function () {
             await get('/someurl.json').catch(() => {});
             await settle();

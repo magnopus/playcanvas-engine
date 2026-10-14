@@ -521,16 +521,24 @@ class Http {
         const cache = this._cacheFor(method, url, options, postdata, xhr.responseType);
         if (cache) {
             xhr._byteCacheUrl = url;
-            if (cache.hasFile(url)) {
-                cache.getFile(url).then((hit) => {
-                    if (hit) {
-                        this._onCacheHit(url, options, xhr, hit);
-                    } else {
-                        this._acquire(xhr, options, send);
-                    }
-                });
-                return xhr;
-            }
+            const lookup = () => {
+                if (cache.hasFile(url)) {
+                    cache.getFile(url).then((hit) => {
+                        if (hit) {
+                            this._onCacheHit(url, options, xhr, hit);
+                        } else {
+                            this._acquire(xhr, options, send);
+                        }
+                    });
+                } else {
+                    this._acquire(xhr, options, send);
+                }
+            };
+            // Every lookup misses until the stored index has loaded, and an application's first
+            // requests - its scene and containers, usually the largest files - are made right
+            // after the cache is created. Wait for the index rather than refetch them.
+            cache.ready.then(lookup, () => this._acquire(xhr, options, send));
+            return xhr;
         }
 
         // throttle the number of concurrent in-flight requests by deferring the actual send

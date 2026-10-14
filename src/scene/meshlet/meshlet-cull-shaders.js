@@ -1,4 +1,4 @@
-import { meshletCutWGSL } from './shaders/meshlet-cut-wgsl.js';
+import { meshletCutChunksWGSL } from './shaders/meshlet-cut-wgsl.js';
 import {
     meshletRootAdmitWGSL, meshletRootBandArgsWGSL, meshletRootClassifyWGSL, meshletRootScatterWGSL
 } from './shaders/meshlet-root-admit-wgsl.js';
@@ -6,7 +6,7 @@ import { PIXELFORMAT_R32F, SHADERLANGUAGE_WGSL } from '../../platform/graphics/c
 import { Shader } from '../../platform/graphics/shader.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import {
-    instanceCullWGSL, compactMeshletsWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL
+    cellCullWGSL, cellExpandWGSL, stageArgsWGSL, instanceCullWGSL, compactMeshletsWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL
 } from './shaders/meshlet-cull-wgsl.js';
 
 /**
@@ -31,7 +31,10 @@ class MeshletCullShaders {
             cshader: code
         });
 
-        this.cut = make('Cut', meshletCutWGSL);
+        this.cellCull = make('CellCull', cellCullWGSL);
+        this.cellExpand = make('CellExpand', cellExpandWGSL);
+        this.stageArgs = make('StageArgs', stageArgsWGSL);
+        this.cut = make('Cut', meshletCutChunksWGSL);
         this.rootClassify = make('RootClassify', meshletRootClassifyWGSL);
         this.rootBandArgs = make('RootBandArgs', meshletRootBandArgsWGSL);
         this.rootScatter = make('RootScatter', meshletRootScatterWGSL);
@@ -51,6 +54,9 @@ class MeshletCullShaders {
     }
 
     destroy() {
+        this.cellCull?.destroy();
+        this.cellExpand?.destroy();
+        this.stageArgs?.destroy();
         this.cut?.destroy();
         this.rootClassify?.destroy();
         this.rootBandArgs?.destroy();

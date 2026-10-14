@@ -5,7 +5,7 @@ import { BoundingBox } from '../../../src/core/shape/bounding-box.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { ShaderMaterial } from '../../../src/scene/materials/shader-material.js';
 import {
-    CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, RECORD_U32S, WORK_ITEM_U32S
+    CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, WORK_ITEM_U32S
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
 import { MeshletShadowView } from '../../../src/scene/meshlet/meshlet-shadow-view.js';
@@ -41,7 +41,8 @@ const makeWorld = (device, overrides = {}) => {
     return {
         totalPairs: PAIRS,
         workItemCapacity: 50,
-        cut: { rootIndices: [0, 0, 0], rootRecords: 0, levels: [] },
+        cut: { rootIndices: [0, 0, 0], rootRecords: 0, levels: [], stageTableBase: 0, stageTable: [], totalChunks: 0 },
+        cells: { cellCount: 1, boundsBuffer: {}, instancesBuffer: {} },
         recordCapacity: 4000,
         initialRecords: 100,
         instanceCount: 7,
@@ -110,7 +111,8 @@ describe('MeshletView', function () {
         const view = makeView();
         const pairWords = Math.ceil(PAIRS / 32);
         expect(view.cullParamsBuffer.byteSize).to.equal(CULL_PARAMS_VEC4S * 16);
-        expect(view.countersBuffer.byteSize).to.equal(MESHLET_COUNTER_U32S * 4);
+        // the counters, then the visible-cell list (one cell in the mock world) and no chunks
+        expect(view.countersBuffer.byteSize).to.equal((MESHLET_VISIBLE_CELLS_BASE + 1) * 4);
         expect(view.workItemsBuffer.byteSize).to.equal(50 * WORK_ITEM_U32S * 4);
         expect(view.recordCapacity, 'starts at the initial record count').to.equal(100);
         expect(view.recordsBuffer.byteSize).to.equal(100 * RECORD_U32S * 4);

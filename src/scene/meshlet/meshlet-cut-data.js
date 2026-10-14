@@ -1,7 +1,7 @@
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import {
-    MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT,
+    MESHLET_CELL_SIZE, MESHLET_CUT_CHUNK, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_MAX_CUT_STAGES, MESHLET_NO_PARENT,
     MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_SLOPPY, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA as O, OBJECT_DATA_U32S
 } from './constants.js';
 
@@ -141,8 +141,13 @@ class MeshletCutData {
      * @param {import('../../platform/graphics/graphics-device.js').GraphicsDevice} device - Device.
      * @param {Uint32Array} meshlets - World records; reserved words receive primitive-local birth representatives.
      * @param {Uint32Array} objects - World instance records.
+     * @param {Uint32Array|null} [instanceOrder] - Instance ids in spatial cell order (see
+     * MeshletCells), chunked into cells of `cellSize`. Each level's tasks are laid out in this
+     * order so a cell's tasks at a level are contiguous; omitted, instances run in id order as
+     * one cell per `cellSize` ids.
+     * @param {number} [cellSize] - Instances per cell.
      */
-    constructor(device, meshlets, objects) {
+    constructor(device, meshlets, objects, instanceOrder = null, cellSize = MESHLET_CELL_SIZE) {
         const words = new U32Builder();
         // task pairs (instance, group offset) per LOD level, counted first so the task table is
         // allocated once and filled in place
@@ -255,8 +260,24 @@ class MeshletCutData {
             levelCursor[level] = taskCount;
             taskCount += count;
         }
+        // Per cut stage (non-root level, in this.levels order), where each cell's tasks start:
+        // cellCount + 1 entries, the last closing the final cell. Root tasks stay in instance
+        // order - the root admission indexes them by instance id.
+        const stageLevels = [];
+        for (let level = levelCounts.length - 1; level > 0; level--) {
+            if (levelCounts[level]) stageLevels.push(level);
+        }
+        const cellCount = Math.ceil(instanceCount / cellSize);
+        const cellTaskStarts = new Uint32Array(stageLevels.length * (cellCount + 1));
         const tasks = new Uint32Array(taskCount * 2);
-        for (let instance = 0; instance < instanceCount; instance++) {
+        for (let position = 0; position < instanceCount; position++) {
+            if (position % cellSize === 0) {
+                const cell = position / cellSize;
+                for (let s = 0; s < stageLevels.length; s++) {
+                    cellTaskStarts[s * (cellCount + 1) + cell] = levelCursor[stageLevels[s]];
+                }
+            }
+            const instance = instanceOrder ? instanceOrder[position] : position;
             const primitive = primitives.get(objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET]);
             tasks[instance * 2] = instance;
             tasks[instance * 2 + 1] = primitive.rootOffset;
@@ -268,6 +289,55 @@ class MeshletCutData {
                 levelCursor[task.level] = slot + 1;
             }
         }
+        for (let s = 0; s < stageLevels.length; s++) {
+            cellTaskStarts[s * (cellCount + 1) + cellCount] = levelCursor[stageLevels[s]];
+        }
+        this.cellCount = cellCount;
+        this.cellTaskStartsCpu = cellTaskStarts;
+
+        // Each stage's tasks are split into chunks of MESHLET_CUT_CHUNK within a cell, so a cell
+        // holding thousands of fine groups (a cell of terrain tiles) spreads over many
+        // workgroups instead of looping in one. Per stage the groups table gets two rows:
+        // - cell -> first chunk (cellCount + 1 entries)
+        // - chunk -> first task (chunkCount + 1 entries; a chunk ends where the next begins,
+        //   because cells' task ranges are themselves contiguous)
+        // and a stage table row: [cell chunk row, chunk task row, list offset, chunk count],
+        // the list offset placing the stage's per-frame visible-chunk list (see MeshletCuller).
+        if (stageLevels.length > MESHLET_MAX_CUT_STAGES) {
+            throw new Error(`MeshletCutData: ${stageLevels.length} LOD levels exceed the ${MESHLET_MAX_CUT_STAGES} supported.`);
+        }
+        const stageRows = [];
+        let listOffset = 0;
+        for (let s = 0; s < stageLevels.length; s++) {
+            const row = s * (cellCount + 1);
+            const cellChunkBase = words.length;
+            let chunks = 0;
+            for (let c = 0; c < cellCount; c++) {
+                words.push(chunks);
+                chunks += Math.ceil((cellTaskStarts[row + c + 1] - cellTaskStarts[row + c]) / MESHLET_CUT_CHUNK);
+            }
+            words.push(chunks);
+            const chunkTaskBase = words.length;
+            for (let c = 0; c < cellCount; c++) {
+                for (let task = cellTaskStarts[row + c]; task < cellTaskStarts[row + c + 1]; task += MESHLET_CUT_CHUNK) {
+                    words.push(task);
+                }
+            }
+            words.push(cellTaskStarts[row + cellCount]);
+            stageRows.push(cellChunkBase, chunkTaskBase, listOffset, chunks);
+            listOffset += chunks;
+        }
+        this.stageTableBase = words.length;
+        for (const value of stageRows) words.push(value);
+        /**
+         * Per cut stage: [cell chunk row, chunk task row, list offset, chunk count] - the same
+         * rows the GPU reads from the groups table at {@link stageTableBase}.
+         *
+         * @type {number[]}
+         */
+        this.stageTable = stageRows;
+        /** @type {number} - chunks over every stage: the capacity of a view's chunk lists. */
+        this.totalChunks = listOffset;
         const create = (values) => {
             const buffer = new StorageBuffer(device, Math.max(values.byteLength, 16), BUFFERUSAGE_COPY_DST);
             if (values.length) buffer.write(0, values);

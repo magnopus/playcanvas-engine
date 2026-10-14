@@ -3,7 +3,7 @@ import { expect } from 'chai';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import {
-    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_INSTANCE_CULL_WORKGROUP,
+    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE,
     MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS, MESHLET_ROOT_BAND_OCTAVES, claimPersistBase
 } from '../../../src/scene/meshlet/constants.js';
 import { FramePassMeshletCompute } from '../../../src/scene/meshlet/frame-pass-meshlet-compute.js';
@@ -49,7 +49,17 @@ const storage = (byteSize = 16) => ({
 });
 
 const makeWorld = () => ({
-    cut: { levels: [{ start: 0, count: 130, root: true }, { start: 130, count: 50, root: false }], groups: storage(), tasks: storage(), selectionTopology: storage() },
+    cut: {
+        levels: [{ start: 0, count: 130, root: true }, { start: 130, count: 50, root: false }],
+        groups: storage(),
+        tasks: storage(),
+        selectionTopology: storage(),
+        // one stage: cell chunk row at 300, chunk task row at 310, list offset 0, 2 chunks
+        stageTableBase: 400,
+        stageTable: [300, 310, 0, 2],
+        totalChunks: 2
+    },
+    cells: { cellCount: 3, boundsBuffer: storage(), instancesBuffer: storage() },
     totalPairs: 1000,
     instanceCount: 130,
     workItemCapacity: 130,
@@ -132,7 +142,13 @@ describe('MeshletCuller', function () {
         const world = makeWorld();
         const culler = new MeshletCuller(device, world, view, shaders);
         expect(culler.cutStages, 'the root level is admitted, not cut').to.have.lengthOf(1);
-        expect(culler.cutStages[0].getParameter('taskStart')).to.equal(130);
+        // the stage reads its chunk -> task row from the stage table, and its chunk list after
+        // the three-cell visible list in the counters
+        expect(culler.cutStages[0].getParameter('stage')).to.equal(0);
+        expect(culler.cutStages[0].getParameter('chunkTaskBase')).to.equal(310);
+        expect(culler.cutStages[0].getParameter('listBase')).to.equal(MESHLET_VISIBLE_CELLS_BASE + 3);
+        expect(culler.cellExpand.getParameter('stageTableBase')).to.equal(400);
+        expect(culler.cellExpand.getParameter('stageCount')).to.equal(1);
         expect(culler.rootAdmit).to.have.lengthOf(MESHLET_ROOT_BANDS);
         culler.rootAdmit.forEach((compute, band) => {
             expect(compute.getParameter('rootBand')).to.equal(band);
@@ -146,8 +162,17 @@ describe('MeshletCuller', function () {
         expect(culler.rootArgs.getParameter('counterIndex')).to.equal(MESHLET_COUNTER.ROOT_CANDIDATES);
 
         culler.beginFrame(planes, camera, 640, viewProj, null);
-        expect(log.dispatches[0].name).to.equal('MeshletRootAdmit');
-        expect(log.dispatches[0].computes).to.deep.equal(['MeshletrootClassify', 'MeshletdispatchArgs',
+        expect(log.dispatches[0].name).to.equal('MeshletCellCull');
+        expect(log.dispatches[0].computes).to.deep.equal(['MeshletcellCull', 'MeshletdispatchArgs', 'MeshletdispatchArgs',
+            'MeshletcellExpand', 'MeshletstageArgs']);
+        // the per-instance passes run one workgroup per visible cell, the cut stages one per chunk
+        const cellSlot = culler.cellArgs.getParameter('dispatchSlot');
+        expect(culler.rootClassify.indirectSlotIndex).to.equal(cellSlot);
+        expect(culler.instanceCull.indirectSlotIndex).to.equal(cellSlot);
+        expect(culler.cellExpand.indirectSlotIndex).to.equal(culler.cellThreadArgs.getParameter('dispatchSlot'));
+        expect(culler.cutStages[0].indirectSlotIndex).to.equal(culler.stageArgs.getParameter('firstSlot'));
+        expect(log.dispatches[1].name).to.equal('MeshletRootAdmit');
+        expect(log.dispatches[1].computes).to.deep.equal(['MeshletrootClassify', 'MeshletdispatchArgs',
             'MeshletrootBandArgs', 'MeshletrootScatter',
             ...Array.from({ length: MESHLET_ROOT_BANDS }, (_, band) => `MeshletRootAdmit${band}`)]);
         // the scatter walks every candidate; each band pass only its own band's range
@@ -241,16 +266,17 @@ describe('MeshletCuller', function () {
 
         const base = claimPersistBase(1000, 130);
         expect(log.clears, 'counters, transient claim bits, this frame\'s admissions; never the requests buffer')
-        .to.deep.equal([MESHLET_COUNTER_U32S * 4, 3 * MESHLET_ROOT_BANDS * 4, base * 4, Math.ceil(130 / 32) * 4]);
-        expect(log.dispatches).to.have.lengthOf(4);
-        expect(log.dispatches[0].name).to.equal('MeshletRootAdmit');
-        expect(log.dispatches[1].name).to.equal('MeshletResidentCut');
-        expect(log.dispatches[1].computes).to.deep.equal(['Meshletcut']);
-        expect(log.dispatches[2].name).to.equal('MeshletCompact');
-        expect(log.dispatches[2].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs', 'MeshletcompactMeshlets', 'MeshletdispatchArgs']);
-        expect(log.dispatches[3].name).to.equal('MeshletCullPhase1');
-        expect(log.dispatches[3].computes).to.deep.equal(['MeshletmeshletCull', 'MeshletfinalizeArgs', 'MeshletindexWrite']);
-        expect(culler.instanceCull.countX).to.equal(Math.ceil(130 / MESHLET_INSTANCE_CULL_WORKGROUP));
+        .to.deep.equal([MESHLET_COUNTER_CLEAR_U32S * 4, 3 * MESHLET_ROOT_BANDS * 4, base * 4, Math.ceil(130 / 32) * 4]);
+        expect(log.dispatches).to.have.lengthOf(5);
+        expect(log.dispatches[0].name).to.equal('MeshletCellCull');
+        expect(log.dispatches[1].name).to.equal('MeshletRootAdmit');
+        expect(log.dispatches[2].name).to.equal('MeshletResidentCut');
+        expect(log.dispatches[2].computes).to.deep.equal(['Meshletcut']);
+        expect(log.dispatches[3].name).to.equal('MeshletCompact');
+        expect(log.dispatches[3].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs', 'MeshletcompactMeshlets', 'MeshletdispatchArgs']);
+        expect(log.dispatches[4].name).to.equal('MeshletCullPhase1');
+        expect(log.dispatches[4].computes).to.deep.equal(['MeshletmeshletCull', 'MeshletfinalizeArgs', 'MeshletindexWrite']);
+        expect(culler.cellCull.countX, 'one thread per cell').to.equal(1);
         expect(culler.meshletCull.getParameter('phase'), 'no HZB: single phase').to.equal(0);
         expect(culler.meshletCull.getParameter('hzbTexture')).to.equal(shaders.dummyHzb);
         // one draw slot per bucket per phase, phase-1 slots handed to the view's mesh instances
@@ -276,8 +302,8 @@ describe('MeshletCuller', function () {
         expect(Array.from(view.cullParamsBuffer.writes[0].data.subarray(CULL_PARAMS.LOD * 4 + 1, CULL_PARAMS.LOD * 4 + 4))).to.deep.equal([320, 200, 9]);
 
         culler.dispatchPhase2();
-        expect(log.dispatches[4].name).to.equal('MeshletCullPhase2');
-        expect(log.dispatches[4].computes[0], 'counters reset first').to.equal('MeshletresetPhase2');
+        expect(log.dispatches[5].name).to.equal('MeshletCullPhase2');
+        expect(log.dispatches[5].computes[0], 'counters reset first').to.equal('MeshletresetPhase2');
         expect(culler.meshletCullPhase2.getParameter('hzbTexture')).to.equal(hzb.texture);
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             expect(culler.finalizeArgsPhase2.getParameter(`drawSlot${b}`)).to.equal(MESHLET_BUCKET_COUNT + b);
@@ -298,8 +324,8 @@ describe('MeshletCuller', function () {
         const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
         culler.forceSubmitBoundaries = true;
         culler.beginFrame(planes, camera, 640, viewProj, null);
-        expect(log.dispatches.map(d => d.name)).to.deep.equal(['MeshletRootClassify', 'MeshletRootAdmit', 'MeshletResidentCut', 'MeshletCompacta', 'MeshletCompactb', 'MeshletCullPhase1b', 'MeshletCullPhase1c']);
-        expect(log.submits).to.equal(4);
+        expect(log.dispatches.map(d => d.name)).to.deep.equal(['MeshletCellCull', 'MeshletRootClassify', 'MeshletRootAdmit', 'MeshletResidentCut', 'MeshletCompacta', 'MeshletCompactb', 'MeshletCullPhase1b', 'MeshletCullPhase1c']);
+        expect(log.submits).to.equal(5);
         culler.destroy();
     });
 
