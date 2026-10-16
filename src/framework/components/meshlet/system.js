@@ -88,6 +88,18 @@ class MeshletComponentSystem extends ComponentSystem {
     _rebuildMaxWaitMs = 2000;
 
     /**
+     * Hold a pending rebuild while an enabled component's asset is still loading, once the world
+     * shows something. Every rebuild re-finalizes the whole world - seconds of main thread on a
+     * world of millions of instances - so building again as each asset of a burst lands costs
+     * far more than waiting for the burst to finish. The first assets still build at once, so
+     * there is something to show. Set false to rebuild on the quiet window and
+     * {@link rebuildMaxWaitMs} regardless, showing regions as they arrive. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    deferRebuildWhileLoading = true;
+
+    /**
      * Components contributing to the current world, in placement order.
      *
      * @type {MeshletComponent[]}
@@ -598,7 +610,9 @@ class MeshletComponentSystem extends ComponentSystem {
             const quiet = now - this._dirtyLast >= this._rebuildQuietMs;
             const overdue = now - this._dirtySince >= this._rebuildMaxWaitMs;
             // a world with nothing built yet has nothing to show either way: build at once
-            if (quiet || overdue || !this.director.world.finalized) {
+            const built = this.director.world.finalized;
+            const waiting = built && this.deferRebuildWhileLoading && this._hasPendingAssets();
+            if (!built || (!waiting && (quiet || overdue))) {
                 this._rebuild();
             }
         }
@@ -660,20 +674,27 @@ class MeshletComponentSystem extends ComponentSystem {
                     merged = [];
                     for (let mi = 0; mi < members.length; mi++) merged.push(...resource.instances);
                 }
+                // The build bakes each member's current transform and the default state (shown,
+                // casting), so the first sync after it only rewrites what actually differs - not
+                // every row of a world of millions of instances.
+                const transforms = [];
                 for (let mi = 0; mi < members.length; mi++) {
                     const component = members[mi];
                     component._placementIndex = gi;
                     component._placedResource = resource;
                     component._subBase = mi * per;
                     component._subCount = per;
-                    component._transformDirty = true;
-                    component._hiddenApplied = null;
-                    component._castShadowsApplied = null;
+                    const wt = component.entity.getWorldTransform();
+                    component._lastTransform.copy(wt);
+                    component._transformDirty = false;
+                    transforms.push(component._lastTransform);
+                    component._hiddenApplied = false;
+                    component._castShadowsApplied = true;
                     component.onWorldDirty();
                     component._queueState();
                     components.push(component);
                 }
-                world.addStreamedResource(resource, null, baseUrl, merged, fetchOptions);
+                world.addStreamedResource(resource, transforms, baseUrl, merged, fetchOptions);
             }
         });
         this._activeComponents = components;

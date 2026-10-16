@@ -113,15 +113,17 @@ app.systems.meshlet.occlusion = true;
 const scene = new Entity('Caldera');
 app.root.addChild(scene);
 
-// regions arrive independently; the meshlet world rebuilds once their loads go quiet
+// Every region's component exists up front and loads its own asset, so the meshlet system can
+// see which are still loading: the first region builds at once, the rest wait for the burst to
+// finish and join in a single rebuild (?progressive=1 instead rebuilds as regions arrive)
+app.systems.meshlet.deferRebuildWhileLoading = params.get('progressive') !== '1';
 for (const region of regions) {
-    loadContainer(region.label, BASE + region.url).then((asset) => {
-        const entity = new Entity(region.label);
-        entity.addComponent('meshlet', { asset });
-        scene.addChild(entity);
-    }).catch((err) => {
-        console.error(`Caldera: failed to load ${region.url}`, err);
-    });
+    const asset = new Asset(region.label, 'container', { url: BASE + region.url });
+    asset.once('error', err => console.error(`Caldera: failed to load ${region.url}`, err));
+    app.assets.add(asset);
+    const entity = new Entity(region.label);
+    entity.addComponent('meshlet', { asset });
+    scene.addChild(entity);
 }
 
 const light = new Entity('Sun');

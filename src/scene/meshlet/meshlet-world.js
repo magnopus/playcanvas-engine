@@ -71,7 +71,7 @@ class MeshletWorld {
     /** @type {GraphicsDevice} */
     device;
 
-    /** @type {Array<{ resource: MeshletResource, transform: Mat4|null, shardBuffers: ArrayBuffer[] }>} */
+    /** @type {Array<{ resource: MeshletResource, transform: Mat4|Mat4[]|null, shardBuffers: ArrayBuffer[] }>} */
     _pending = [];
 
     finalized = false;
@@ -449,7 +449,8 @@ class MeshletWorld {
      * Adds a resource whose pages stream on demand over HTTP Range requests.
      *
      * @param {MeshletResource} resource - The parsed asset.
-     * @param {Mat4|null} transform - Root transform applied to the asset's placements.
+     * @param {Mat4|Mat4[]|null} transform - Root transform applied to the asset's placements, or
+     * one per run of the resource's instance list when `instances` repeats it (a merged placement).
      * @param {string} baseUrl - URL directory the manifest's blob URIs are relative to.
      * @param {Array<{ primIndex: number, matrix: Float32Array }>|null} [instances] - Optional
      * placement list replacing the resource's own - many instances share one set of pages.
@@ -655,19 +656,18 @@ class MeshletWorld {
         let budgetCutTasks = 0;
         // replacement groups per primitive (distinct parent representatives): the cut dispatches
         // one task per (instance, group), far fewer than one per (instance, meshlet)
-        const groupCounts = new Map();
+        // Both are cached on the primitive, which is immutable once parsed, so a rebuild that
+        // re-adds the same resources does not rescan their meshlets.
         const groupCount = (prim) => {
-            let groups = groupCounts.get(prim);
-            if (groups === undefined) {
+            if (prim._groupCount === undefined) {
                 const parents = new Set();
                 for (let m = 0; m < prim.meshletCount; m++) {
                     const parent = prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.PARENT];
                     if (parent !== MESHLET_NO_PARENT) parents.add(parent);
                 }
-                groups = parents.size;
-                groupCounts.set(prim, groups);
+                prim._groupCount = parents.size;
             }
-            return groups;
+            return prim._groupCount;
         };
         // unique root pages per resource (the pages of meshlets without a parent): pinned for
         // the resource's lifetime, so the pool is sized to hold them before anything else
@@ -684,12 +684,16 @@ class MeshletWorld {
                 budgetCutTasks += groupCount(prim) + 1;
                 if (!rootScanned.has(prim)) {
                     rootScanned.add(prim);
-                    for (let m = 0; m < n; m++) {
-                        const row = m * MESHLET_DATA_U32S;
-                        if (prim.meshletData[row + MESHLET_DATA.PARENT] === MESHLET_NO_PARENT) {
-                            roots.add(prim.meshletData[row + MESHLET_DATA.PAGE]);
+                    if (!prim._rootPages) {
+                        prim._rootPages = [];
+                        for (let m = 0; m < n; m++) {
+                            const row = m * MESHLET_DATA_U32S;
+                            if (prim.meshletData[row + MESHLET_DATA.PARENT] === MESHLET_NO_PARENT) {
+                                prim._rootPages.push(prim.meshletData[row + MESHLET_DATA.PAGE]);
+                            }
                         }
                     }
+                    for (const page of prim._rootPages) roots.add(page);
                 }
             }
         }
@@ -972,11 +976,15 @@ class MeshletWorld {
                 primBucketCorners.push(primCorners);
             }
 
-            // instances
-            for (const inst of instList) {
+            // instances. A transform list holds one root transform per run of the resource's own
+            // instance list (a merged placement repeats it, once per member).
+            const per = resource.instances.length || 1;
+            for (let i = 0; i < instList.length; i++) {
+                const inst = instList[i];
                 const prim = resource.primitives[inst.primIndex];
+                const root = Array.isArray(transform) ? transform[Math.floor(i / per)] : transform;
                 _tmpMat.set(inst.matrix);
-                if (transform) _tmpMat.mul2(transform, _tmpMat);
+                if (root) _tmpMat.mul2(root, _tmpMat);
                 const matrix = _tmpMat.data;
 
                 // the objectData row (OBJECT_DATA.* words; the shaders read it as MeshletObjectData)
