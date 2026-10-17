@@ -45,12 +45,16 @@ import { data, deviceType } from 'examples/context';
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
+const params = new URLSearchParams(location.search);
+// ?chunk=018 picks another baked Zorah chunk; ?bake=zorah-smooth another linked bake directory
+const zorahChunk = (params.get('chunk') ?? '003').padStart(3, '0');
+const zorahBake = (params.get('bake') ?? 'zorah').replace(/[^\w-]/g, '');
 const models = {
     bunny: { name: 'Bunny', url: './assets/meshlets/bunny-v2.glb' },
-    zorah: { name: 'Zorah chunk 003', url: './assets/meshlets/zorah/chunk_003.streamed.glb' },
+    zorah: { name: `Zorah chunk ${zorahChunk}`, url: `./assets/meshlets/${zorahBake}/chunk_${zorahChunk}.streamed.glb` },
     magoffice: { name: 'MagOffice', url: './assets/meshlets/magoffice_streamed.glb' }
 };
-const requestedAsset = new URLSearchParams(location.search).get('asset') ?? '';
+const requestedAsset = params.get('asset') ?? '';
 const assetName = Object.hasOwn(models, requestedAsset) ? requestedAsset : 'bunny';
 const selectedModel = models[assetName];
 
@@ -171,23 +175,33 @@ data.on('data.threshold:set', (value) => {
 let framed = false;
 let statFrames = 0;
 app.on('framerender', () => {
-    const director = app.systems.meshlet.director;
-    const world = director?.world;
+    const world = app.systems.meshlet.director?.world;
     if (!world?.finalized) {
         return;
     }
-    // The view reads its counters back each frame to size its buffers; reuse them. The index
-    // demand covers the whole LOD cut before occlusion, so it does not change when occlusion is
-    // toggled - the drawn meshlet count does.
-    const view = director.views.get(camera.camera);
-    if (view?.lastDemand && ++statFrames % 30 === 0) {
-        const tris = Math.round(view.lastDemand.indices.reduce((a, b) => a + b, 0) / 3);
-        const res = director.residency;
-        data.set('data.stats', `${view.renderedMeshlets} meshlets drawn, cut ${(tris / 1e6).toFixed(2)}M tris, ` +
-            `${res ? res.residentPages : 0}/${world.totalPages} pages`);
-    }
+    // The views read their counters back each frame to size their buffers; reuse them. The
+    // index demand covers the whole LOD cut before occlusion, so it does not change when
+    // occlusion is toggled - the drawn meshlet count does. An asset past maxWorldMeshlets is
+    // split across several worlds, so their stats are summed.
+    const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
     const visualization = data.get('data.visualization');
-    world.setColorMode(visualization === 'meshlet' ? 2 : visualization === 'lod' ? 1 : 0);
+    const colorMode = visualization === 'meshlet' ? 2 : visualization === 'lod' ? 1 : 0;
+    let meshlets = 0, indices = 0, resident = 0, pages = 0, demand = false;
+    for (const director of directors) {
+        director.world.setColorMode(colorMode);
+        const view = director.views.get(camera.camera);
+        if (view?.lastDemand) {
+            demand = true;
+            meshlets += view.renderedMeshlets;
+            indices += view.lastDemand.indices.reduce((a, b) => a + b, 0);
+        }
+        resident += director.residency?.residentPages ?? 0;
+        pages += director.world.totalPages;
+    }
+    if (demand && ++statFrames % 30 === 0) {
+        data.set('data.stats', `${meshlets} meshlets drawn, cut ${(indices / 3e6).toFixed(2)}M tris, ` +
+            `${resident}/${pages} pages`);
+    }
     if (!framed) {
         const bounds = world.worldBounds;
         const radius = bounds.halfExtents.length();

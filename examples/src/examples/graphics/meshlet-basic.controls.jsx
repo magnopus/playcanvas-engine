@@ -28,7 +28,7 @@ export function Controls({ observer }) {
                     link={{ observer, path: 'data.asset' }}
                     options={[
                         { v: 'bunny', t: 'Bunny' },
-                        { v: 'zorah', t: 'Zorah chunk 003 (local)' },
+                        { v: 'zorah', t: 'Zorah chunk (local, ?chunk=NNN)' },
                         { v: 'magoffice', t: 'MagOffice (local)' }
                     ]}
                 />

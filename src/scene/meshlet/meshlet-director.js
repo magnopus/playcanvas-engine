@@ -25,6 +25,7 @@ import { MAX_CONCURRENT_FETCHES, MeshletFetchScheduler } from './streaming/meshl
  * @import { Layer } from '../layer.js'
  * @import { LayerComposition } from '../composition/layer-composition.js'
  * @import { MeshInstance } from '../mesh-instance.js'
+ * @import { MeshletDirectorGroup } from './meshlet-director-group.js'
  * @import { MeshletTranscodeFn } from './textures/meshlet-ktx2.js'
  * @import { RenderTarget } from '../../platform/graphics/render-target.js'
  * @import { StorageBuffer } from '../../platform/graphics/storage-buffer.js'
@@ -285,6 +286,11 @@ class MeshletDirector {
 
     /** @private */
     _applyFetchConcurrency() {
+        // a shared scheduler is fast while any of the group's worlds is
+        if (this.group) {
+            this.group._applyFetchConcurrency();
+            return;
+        }
         const fast = !!this.residency?.fastLoad;
         this.fetchScheduler.maxConcurrent = fast ?
             Math.max(this._maxConcurrentFetches, this.fastLoadConcurrentFetches) :
@@ -485,14 +491,39 @@ class MeshletDirector {
     _shadowCapCarry = null;
 
     /**
-     * @param {GraphicsDevice} device - The graphics device.
+     * The group this director is one world of, or null when it drives the renderer on its own.
+     * A group shares one HZB per camera across its directors, emits their passes together, and
+     * owns the fetch concurrency.
+     *
+     * @type {MeshletDirectorGroup|null}
+     * @ignore
      */
-    constructor(device) {
+    group = null;
+
+    /** @type {boolean} - false when {@link fetchScheduler} is shared with a group. @private */
+    _ownsFetchScheduler = true;
+
+    /** @type {boolean} - false when {@link cullShaders} are shared with a group. @private */
+    _ownsCullShaders = true;
+
+    /**
+     * @param {GraphicsDevice} device - The graphics device.
+     * @param {object} [options] - Shared state, for a director that is one world of a group.
+     * @param {MeshletFetchScheduler} [options.fetchScheduler] - Fetch scheduler to share instead of
+     * creating one, so every world's requests go through one priority queue and concurrency cap.
+     * @param {MeshletCullShaders} [options.cullShaders] - Compiled cull shaders to share.
+     */
+    constructor(device, options = {}) {
         this.device = device;
         device.maxIndirectDispatchCount = Math.max(device.maxIndirectDispatchCount, MIN_INDIRECT_DISPATCH_SLOTS);
+        if (options.fetchScheduler) {
+            this.fetchScheduler = options.fetchScheduler;
+            this._ownsFetchScheduler = false;
+        }
         this.world = new MeshletWorld(device);
         this.world.fetchScheduler = this.fetchScheduler;
-        this.cullShaders = new MeshletCullShaders(device);
+        this.cullShaders = options.cullShaders ?? new MeshletCullShaders(device);
+        this._ownsCullShaders = !options.cullShaders;
         this.shadowRenderer = new MeshletShadowRenderer(device, this);
     }
 
@@ -503,11 +534,11 @@ class MeshletDirector {
         this._destroyViews();
         this._dropVisCarry();
         this.residency?.destroy();
-        this.fetchScheduler.clear();
+        if (this._ownsFetchScheduler) this.fetchScheduler.clear();
         this.world.destroy();
         this.shadowRenderer?.destroy();
         this.shadowRenderer = null;
-        this.cullShaders?.destroy();
+        if (this._ownsCullShaders) this.cullShaders?.destroy();
         this.cullShaders = null;
     }
 
@@ -922,7 +953,13 @@ class MeshletDirector {
             }
         });
         if (useOcclusion) {
-            view.hzb ??= new MeshletHzb(this.device);
+            // in a group every world's view of this camera culls against the one pyramid
+            if (this.group) {
+                view.hzb = this.group.hzbFor(cameraComponent);
+                view._ownsHzb = false;
+            } else {
+                view.hzb ??= new MeshletHzb(this.device);
+            }
             // the frame's scene textures are replaced when it rebuilds, which can happen between
             // this update and the pass executing - so the pass resolves its source as it runs
             view._hzbSource ??= () => {

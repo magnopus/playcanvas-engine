@@ -87,6 +87,15 @@ class MeshletWorld {
     /** @type {number} - first id of this world's reserved per-instance picker block. */
     pickIdBase = 0;
 
+    /**
+     * Global index of this world's first instance. A director group splits a scene across
+     * several worlds and numbers their instances consecutively, so pick records and outline
+     * selections use one index space across them. 0 for a world on its own.
+     *
+     * @type {number}
+     */
+    instanceOffset = 0;
+
     /** @type {Array<object>|null} - lazily built; see {@link pickRecords}. */
     _pickRecords = null;
 
@@ -1266,7 +1275,7 @@ class MeshletWorld {
                     pickId: this.pickIdBase + placement.instanceBase + i,
                     placement,
                     resource: placement.resource,
-                    instanceIndex: placement.instanceBase + i,
+                    instanceIndex: this.instanceOffset + placement.instanceBase + i,
                     primIndex: inst.primIndex,
                     matrix: inst.matrix
                 });
@@ -1411,7 +1420,8 @@ class MeshletWorld {
         const objectData = this.objectDataCpu;
         let lo = Infinity;
         let hi = -Infinity;
-        for (const index of instanceIndices) {
+        for (const globalIndex of instanceIndices) {
+            const index = globalIndex - this.instanceOffset;
             if (index < 0 || index >= this.instanceCount) continue;
             const flagsWord = index * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS;
             objectData[flagsWord] = outlined ? (objectData[flagsWord] | flag) : (objectData[flagsWord] & ~flag);

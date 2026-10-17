@@ -123,6 +123,15 @@ class MeshletComponent extends Component {
      */
     _placementIndex = -1;
 
+    /**
+     * Index of the world (the system's director group member) holding this component's
+     * placement, managed by the system.
+     *
+     * @type {number}
+     * @ignore
+     */
+    _partition = 0;
+
     /** @ignore */
     _subBase = 0;
 

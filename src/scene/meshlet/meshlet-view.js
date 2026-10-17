@@ -65,6 +65,14 @@ class MeshletView {
     hzb = null;
 
     /**
+     * False when {@link hzb} is borrowed - a director group builds one pyramid per camera and
+     * hands it to every world's view of that camera.
+     *
+     * @type {boolean}
+     */
+    _ownsHzb = true;
+
+    /**
      * Resolves the HZB's depth source as its mip 0 pass executes - see MeshletHzb#resize.
      *
      * @type {(() => Texture|null)|null}
@@ -327,7 +335,7 @@ class MeshletView {
     destroy() {
         this.culler?.destroy();
         this.culler = null;
-        this.hzb?.destroy();
+        if (this._ownsHzb) this.hzb?.destroy();
         this.hzb = null;
         this.readbackPool?.destroy();
         this.cullParamsBuffer?.destroy();

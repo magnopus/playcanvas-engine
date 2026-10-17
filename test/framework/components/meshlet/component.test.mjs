@@ -57,7 +57,9 @@ describe('MeshletComponent', function () {
         expect(system.shadowThresholdScale).to.equal(4);
         expect(system.camera).to.equal(null);
         expect(system.cameras).to.deep.equal([]);
-        expect(system.texturePoolBytes).to.equal(0);
+        expect(system.texturePoolBytes).to.equal(96 * 1024 * 1024);
+        expect(system.maxWorldMeshlets).to.equal(12 * 1024 * 1024);
+        expect(system.directors).to.deep.equal([]);
         expect(system.poolBytes).to.equal(256 * 1024 * 1024);
         system.poolBytes = 128 * 1024 * 1024;
         expect(system.poolBytes).to.equal(128 * 1024 * 1024);

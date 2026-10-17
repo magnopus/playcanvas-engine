@@ -108,6 +108,8 @@ const loadContainer = (name, url) => new Promise((resolve, reject) => {
 // every region shares one meshlet world, so the pool covers the sum of their resident sets
 // ?pool=<MiB>: the whole island needs ~4096; the default suits a handful of regions
 app.systems.meshlet.poolBytes = (Number(params.get('pool')) || 2048) * 1024 * 1024;
+// ?worldMeshlets=<millions>: split the content across worlds of at most this many meshlets
+if (params.get('worldMeshlets')) app.systems.meshlet.maxWorldMeshlets = Number(params.get('worldMeshlets')) * 1e6;
 app.systems.meshlet.occlusion = true;
 
 const scene = new Entity('Caldera');
@@ -263,17 +265,27 @@ if (startPos) {
 
 let statFrames = 0;
 app.on('framerender', () => {
-    const director = app.systems.meshlet.director;
-    const world = director?.world;
-    if (!world?.finalized) return;
+    // content past maxWorldMeshlets is split across several worlds: sum their stats
+    const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
+    if (!directors.length) return;
     const visualization = data.get('data.visualization');
-    world.setColorMode(visualization === 'meshlet' ? 2 : visualization === 'lod' ? 1 : 0);
-    const view = director.views.get(camera.camera);
-    if (view?.lastDemand && ++statFrames % 30 === 0) {
-        const tris = Math.round(view.lastDemand.indices.reduce((a, b) => a + b, 0) / 3);
-        const res = director.residency;
-        data.set('data.stats', `${view.renderedMeshlets} meshlets, cut ${(tris / 1e6).toFixed(2)}M tris, ` +
-            `${res ? res.residentPages : 0}/${world.totalPages} pages`);
+    const colorMode = visualization === 'meshlet' ? 2 : visualization === 'lod' ? 1 : 0;
+    let meshlets = 0, indices = 0, resident = 0, pages = 0, demand = false;
+    for (const director of directors) {
+        director.world.setColorMode(colorMode);
+        const view = director.views.get(camera.camera);
+        if (view?.lastDemand) {
+            demand = true;
+            meshlets += view.renderedMeshlets;
+            indices += view.lastDemand.indices.reduce((a, b) => a + b, 0);
+        }
+        resident += director.residency?.residentPages ?? 0;
+        pages += director.world.totalPages;
+    }
+    if (demand && ++statFrames % 30 === 0) {
+        const worlds = directors.length > 1 ? ` (${directors.length} worlds)` : '';
+        data.set('data.stats', `${meshlets} meshlets, cut ${(indices / 3e6).toFixed(2)}M tris, ` +
+            `${resident}/${pages} pages${worlds}`);
     }
 });
 

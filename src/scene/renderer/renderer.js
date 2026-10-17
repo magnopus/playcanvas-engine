@@ -182,9 +182,10 @@ class Renderer {
     gsplatDirector = null;
 
     /**
-     * A meshlet director for GPU-driven meshlet rendering.
+     * A meshlet director for GPU-driven meshlet rendering - one director, or a group driving
+     * several meshlet worlds as one pipeline.
      *
-     * @type {import('../meshlet/meshlet-director.js').MeshletDirector|null}
+     * @type {import('../meshlet/meshlet-director.js').MeshletDirector|import('../meshlet/meshlet-director-group.js').MeshletDirectorGroup|null}
      */
     meshletDirector = null;
 
