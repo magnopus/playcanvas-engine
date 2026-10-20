@@ -1,5 +1,8 @@
 import { LAYERID_SKYBOX, LAYERID_IMMEDIATE, TONEMAP_NONE, GAMMA_NONE, SCENETEXTURE_DEPTH } from '../../scene/constants.js';
-import { ADDRESS_CLAMP_TO_EDGE, FILTER_LINEAR, PIXELFORMAT_R16F, PIXELFORMAT_R32F, PIXELFORMAT_RGBA8 } from '../../platform/graphics/constants.js';
+import {
+    ADDRESS_CLAMP_TO_EDGE, FILTER_LINEAR, PIXELFORMAT_111110F, PIXELFORMAT_R16F, PIXELFORMAT_R32F, PIXELFORMAT_RGB16F,
+    PIXELFORMAT_RGB32F, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA8
+} from '../../platform/graphics/constants.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { FramePass } from '../../platform/graphics/frame-pass.js';
 import { FramePassColorGrab } from '../../scene/graphics/frame-pass-color-grab.js';
@@ -85,6 +88,12 @@ const _defaultOptions = new CameraFrameOptions();
 
 // the formats the scene depth can be rendered to, in the order of preference
 const _sceneDepthFormats = [PIXELFORMAT_R32F, PIXELFORMAT_R16F];
+
+// output color formats which can store values above 1, and so carry an HDR image to the display
+const _hdrOutputFormats = [PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGB16F, PIXELFORMAT_RGB32F, PIXELFORMAT_111110F];
+
+// the formats the SMAA color input can use when the output is HDR, in the order of preference
+const _smaaHdrFormats = [PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F];
 
 /**
  * Render pass implementation of a common camera frame rendering with integrated post-processing
@@ -897,17 +906,22 @@ class FramePassCameraFrame extends FramePass {
         this.composePass.blurTexture = this.dofPass?.blurTexture;
         this.composePass.blurTextureUpscale = !this.dofPass?.highQuality;
 
-        // With SMAA, compose writes a gamma-encoded LDR image into a non-sRGB intermediate target.
-        // This is the representation expected by the SMAA edge detection pass.
+        // With SMAA, compose writes a gamma-encoded image into a non-sRGB intermediate target.
+        // This is the representation expected by the SMAA edge detection pass. When the final
+        // output is HDR (for example an HDR display backbuffer), the intermediate needs to be a
+        // float format too, otherwise values above 1 get clipped and the image ends up as SDR.
         const cameraComponent = this.cameraComponent;
         const targetRenderTarget = cameraComponent.renderTarget;
         let composeRenderTarget = targetRenderTarget;
         if (options.smaaEnabled) {
+            const smaaFormat = this.isHdrOutput(targetRenderTarget) ?
+                (this.device.getRenderableHdrFormat(_smaaHdrFormats, true) ?? PIXELFORMAT_RGBA8) :
+                PIXELFORMAT_RGBA8;
             const texture = new Texture(this.device, {
                 name: 'SmaaColor',
                 width: 4,
                 height: 4,
-                format: PIXELFORMAT_RGBA8,
+                format: smaaFormat,
                 mipmaps: false,
                 minFilter: FILTER_LINEAR,
                 magFilter: FILTER_LINEAR,
@@ -930,6 +944,22 @@ class FramePassCameraFrame extends FramePass {
 
         // ssao texture as needed
         this.composePass.ssaoTexture = options.ssaoType === SSAOTYPE_COMBINE ? this.ssaoPass.ssaoTexture : null;
+    }
+
+    /**
+     * Returns true if the specified render target (or the backbuffer when null) can store values
+     * above 1.
+     *
+     * @param {RenderTarget|null} renderTarget - The render target.
+     * @returns {boolean} True if the output is HDR.
+     * @private
+     */
+    isHdrOutput(renderTarget) {
+        if (!renderTarget) {
+            return this.device.isHdr;
+        }
+        const format = renderTarget.colorBuffer?.format;
+        return format !== undefined && _hdrOutputFormats.includes(format);
     }
 
     setupSmaaPass(options) {
