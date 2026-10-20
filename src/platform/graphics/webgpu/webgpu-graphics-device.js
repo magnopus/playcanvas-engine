@@ -49,6 +49,10 @@ const _indirectEntryByteSize = 5 * 4;
 // size of indirect dispatch entry in bytes, 3 x 32bit (x, y, z workgroup counts)
 const _indirectDispatchEntryByteSize = 3 * 4;
 
+// Largest single queue.writeBuffer for storage buffers; bigger writes are sliced (see
+// writeStorageBuffer). A multiple of 8, so every slice stays 4-byte aligned for any element size.
+const MAX_WRITE_BUFFER_BYTES = 64 * 1024 * 1024;
+
 // WebGPU color formats a swapchain or WebXR projection layer can present, mapped to the matching
 // engine PIXELFORMAT_* constant. Used to align device.backBufferFormat with the color format the
 // WebXR runtime actually renders into while immersive (see WebgpuGraphicsDevice#setXrBackBufferFormat).
@@ -1568,7 +1572,21 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
     writeStorageBuffer(storageBuffer, bufferOffset = 0, data, dataOffset = 0, size) {
         Debug.assert(storageBuffer.buffer);
         Debug.assert(data);
-        this.wgpu.queue.writeBuffer(storageBuffer.buffer, bufferOffset, data, dataOffset, size);
+        // Offsets and sizes are in elements for a typed array, in bytes otherwise.
+        const elementBytes = /** @type {any} */ (data).BYTES_PER_ELEMENT ?? 1;
+        const elements = size ?? ((elementBytes === 1 ? data.byteLength : /** @type {any} */ (data).length) - dataOffset);
+        if (elements * elementBytes <= MAX_WRITE_BUFFER_BYTES) {
+            this.wgpu.queue.writeBuffer(storageBuffer.buffer, bufferOffset, data, dataOffset, size);
+            return;
+        }
+        // Chrome stages each writeBuffer through shared memory mapped into both the page and the
+        // GPU process, sized to the write. A multi-GB upload (a large meshlet world's tables) left
+        // that much memory mapped in both, so big writes go through in bounded slices instead.
+        const step = Math.floor(MAX_WRITE_BUFFER_BYTES / elementBytes);
+        for (let done = 0; done < elements; done += step) {
+            const count = Math.min(step, elements - done);
+            this.wgpu.queue.writeBuffer(storageBuffer.buffer, bufferOffset + done * elementBytes, data, dataOffset + done, count);
+        }
     }
 
     /**

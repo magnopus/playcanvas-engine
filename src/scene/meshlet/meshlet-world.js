@@ -42,6 +42,9 @@ const KNOWN_LAYOUT_KEYS = new Set(['positions', 'normals', 'tangents', 'uvCompon
  * {@link MeshletFetchScheduler#byteCache}); the world sets it to the resource's bake stamp.
  */
 
+// meshlet records (128 bytes each) gathered per upload while building a world: 16 MB
+const RECORD_UPLOAD_BATCH = 128 * 1024;
+
 const _tmpMat = new Mat4();
 const _tmpBox = new BoundingBox();
 const _tmpLocalBox = new BoundingBox();
@@ -784,8 +787,12 @@ class MeshletWorld {
         this.residencyBuffer = new StorageBuffer(device, this.residency.byteLength, BUFFERUSAGE_COPY_DST);
         this.residencyBuffer.write(0, this.residency);
 
-        // meshletData (page indices rebased), per-prim global meshlet bases
-        const meshletData = new Uint32Array(totalMeshlets * MESHLET_DATA_U32S);
+        // meshletData is not assembled on the CPU: a world of millions of meshlets would hold a
+        // GB-scale copy of records its resources already carry. Each primitive's records are
+        // copied, rebased and stamped only as the cut tables consume them, then uploaded into
+        // place (see recordsOf below). This keeps, per global first meshlet, how to rebuild them.
+        /** @type {Map<number, { prim: object, pageBase: number, bucketBits: number }>} */
+        const primRecords = new Map();
         const objectData = new Uint32Array(totalInstances * OBJECT_DATA_U32S);
         const objectDataF = new Float32Array(objectData.buffer);
         const lightmapData = anyLightmaps ? new Float32Array(totalInstances * 16) : null;
@@ -934,12 +941,16 @@ class MeshletWorld {
             for (let primIndex = 0; primIndex < resource.primitives.length; primIndex++) {
                 const prim = resource.primitives[primIndex];
                 primBases.push(meshletBase);
-                const src = prim.meshletData;
-                const dstBase = meshletBase * MESHLET_DATA_U32S;
-                meshletData.set(src, dstBase);
-                for (let m = 0; m < prim.meshletCount; m++) {
-                    meshletData[dstBase + m * MESHLET_DATA_U32S + MESHLET_DATA.PAGE] += pageBase;
+                // what the build needs of the records besides the copy recordsOf makes, kept on
+                // the primitive so a resource whose records were released can still be laid out
+                if (prim._indexCount === undefined) {
+                    const src = prim.meshletData;
+                    let triangles = 0;
+                    for (let m = 0; m < prim.meshletCount; m++) triangles += src[m * MESHLET_DATA_U32S + MESHLET_DATA.TRIANGLE_COUNT];
+                    prim._indexCount = triangles * 3;
+                    prim._firstFlags = prim.meshletCount ? src[MESHLET_DATA.FLAGS] : 0;
                 }
+                const primFirst = meshletBase;
                 meshletBase += prim.meshletCount;
 
                 if (baked) {
@@ -965,7 +976,7 @@ class MeshletWorld {
                         ((matFlags & MATERIAL_FLAG_DOUBLE_SIDED) ? MESHLET_BUCKET_OPAQUE_TWO_SIDED :
                             MESHLET_BUCKET_OPAQUE);
                 } else {
-                    const meshletFlags = src[MESHLET_DATA.FLAGS];
+                    const meshletFlags = prim._firstFlags;
                     bucket = (meshletFlags & MESHLET_FLAG_ALPHA_MASKED) ? MESHLET_BUCKET_MASKED :
                         ((meshletFlags & MESHLET_FLAG_TWO_SIDED) ? MESHLET_BUCKET_OPAQUE_TWO_SIDED :
                             MESHLET_BUCKET_OPAQUE);
@@ -973,15 +984,13 @@ class MeshletWorld {
                 const bucketBits = (bucket === MESHLET_BUCKET_MASKED ? MESHLET_FLAG_ALPHA_MASKED : 0) |
                     (bucket === MESHLET_BUCKET_OPAQUE ? 0 : MESHLET_FLAG_TWO_SIDED);
 
-                // stamp the bucket onto every meshlet, and total the worst-case index count per
-                // bucket once per PRIMITIVE - the per-instance loop below then just adds these,
-                // instead of re-walking every meshlet for each of (on the jungle) 41k instances
+                // the bucket is stamped onto every meshlet as its records are copied (recordsOf);
+                // total the worst-case index count per bucket once per PRIMITIVE - the
+                // per-instance loop below then just adds these, instead of re-walking every
+                // meshlet for each of (on the jungle) 41k instances
+                primRecords.set(primFirst, { prim, pageBase, bucketBits });
                 const primCorners = [0, 0, 0];
-                for (let m = 0; m < prim.meshletCount; m++) {
-                    const flagsWord = dstBase + m * MESHLET_DATA_U32S + MESHLET_DATA.FLAGS;
-                    meshletData[flagsWord] = (meshletData[flagsWord] & ~(MESHLET_FLAG_ALPHA_MASKED | MESHLET_FLAG_TWO_SIDED)) | bucketBits;
-                    primCorners[bucket] += src[m * MESHLET_DATA_U32S + MESHLET_DATA.TRIANGLE_COUNT] * 3;
-                }
+                primCorners[bucket] = prim._indexCount;
                 primBucketCorners.push(primCorners);
             }
 
@@ -1098,9 +1107,51 @@ class MeshletWorld {
         }
 
         this.cells = new MeshletCells(device, objectDataF, this.instanceCount);
-        this.cut = new MeshletCutData(device, meshletData, objectData, this.cells.instanceOrder);
-        this.meshletDataBuffer = new StorageBuffer(device, meshletData.byteLength, BUFFERUSAGE_COPY_DST);
-        this.meshletDataBuffer.write(0, meshletData);
+        const recordBytes = MESHLET_DATA_U32S * 4;
+        this.meshletDataBuffer = new StorageBuffer(device, Math.max(totalMeshlets * recordBytes, 16), BUFFERUSAGE_COPY_DST);
+        // One primitive's records at a time: a copy of the resource's (which stay untouched for
+        // later rebuilds) with page indices rebased and the draw bucket stamped, handed to the
+        // cut tables to complete, then uploaded to their place. Only primitives some instance
+        // uses are visited; nothing reads the records of the rest.
+        const meshletDataBuffer = this.meshletDataBuffer;
+        // Uploads are batched: primitives are mostly visited in meshlet order, so consecutive
+        // ones gather in a staging array and go up in one write. A world of many small
+        // primitives (an island of props) would otherwise issue a write per primitive.
+        const staging = new Uint32Array(Math.min(totalMeshlets, RECORD_UPLOAD_BATCH) * MESHLET_DATA_U32S);
+        let stagedFirst = 0;
+        let stagedCount = 0;
+        const flush = () => {
+            if (stagedCount) meshletDataBuffer.write(stagedFirst * recordBytes, staging, 0, stagedCount * MESHLET_DATA_U32S);
+            stagedCount = 0;
+        };
+        const recordsOf = {
+            count: totalMeshlets,
+            get: (first) => {
+                const { prim, pageBase, bucketBits } = primRecords.get(first);
+                Debug.assert(prim.meshletData, 'MeshletWorld: building with released meshlet records - restore them first');
+                const records = prim.meshletData.slice();
+                for (let m = 0; m < prim.meshletCount; m++) {
+                    const row = m * MESHLET_DATA_U32S;
+                    records[row + MESHLET_DATA.PAGE] += pageBase;
+                    records[row + MESHLET_DATA.FLAGS] = (records[row + MESHLET_DATA.FLAGS] & ~(MESHLET_FLAG_ALPHA_MASKED | MESHLET_FLAG_TWO_SIDED)) | bucketBits;
+                }
+                return records;
+            },
+            done: (first, records) => {
+                const count = records.length / MESHLET_DATA_U32S;
+                if (count > RECORD_UPLOAD_BATCH) {
+                    flush();
+                    meshletDataBuffer.write(first * recordBytes, records);
+                    return;
+                }
+                if (stagedCount && (first !== stagedFirst + stagedCount || stagedCount + count > RECORD_UPLOAD_BATCH)) flush();
+                if (!stagedCount) stagedFirst = first;
+                staging.set(records, stagedCount * MESHLET_DATA_U32S);
+                stagedCount += count;
+            }
+        };
+        this.cut = new MeshletCutData(device, recordsOf, objectData, this.cells.instanceOrder);
+        flush();
         this.objectDataBuffer = new StorageBuffer(device, objectData.byteLength, BUFFERUSAGE_COPY_DST);
         this.objectDataBuffer.write(0, objectData);
         // CPU mirror kept for per-placement transform updates

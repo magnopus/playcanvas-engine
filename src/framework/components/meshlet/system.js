@@ -2,6 +2,7 @@ import { Debug } from '../../../core/debug.js';
 import { basisTranscode } from '../../handlers/basis.js';
 import { MESHLET_DATA_U32S } from '../../../scene/meshlet/constants.js';
 import { MeshletDirectorGroup } from '../../../scene/meshlet/meshlet-director-group.js';
+import { restoreMeshletRecords } from '../../parsers/glb/extensions/mag-meshlets.js';
 import { ComponentSystem } from '../system.js';
 import { MeshletComponent } from './component.js';
 
@@ -16,6 +17,10 @@ const _properties = ['asset', 'resource', 'baseUrl'];
 
 // draw indices a fresh world's views start with; demand grows them from there
 const INITIAL_DRAW_INDICES = 2 * 1024 * 1024;
+
+
+// how long a split scene must go without a rebuild before its worlds' records are released
+const RECORD_RELEASE_DELAY_MS = 5000;
 
 /**
  * Allows an Entity to render streamed meshlet assets through the GPU-driven meshlet pipeline.
@@ -173,6 +178,37 @@ class MeshletComponentSystem extends ComponentSystem {
 
     /** @private */
     _maxWorldMeshlets = 12 * 1024 * 1024;
+
+    /**
+     * Per world, what it was last built with (resource groups and their components, budgets,
+     * settings), so a rebuild can leave unchanged worlds alone.
+     *
+     * @type {object[]}
+     * @private
+     */
+    _partitionStates = [];
+
+    /**
+     * Where each resource whose records were released reloads them from.
+     *
+     * @type {Map<object, { url: string, credentials: RequestCredentials|null }>}
+     * @private
+     */
+    _recordSources = new Map();
+
+    /**
+     * Record restores in flight, by resource.
+     *
+     * @type {Map<object, Promise<void>>}
+     * @private
+     */
+    _restoring = new Map();
+
+    /** @type {number} - performance.now() of the last world rebuild. @private */
+    _lastRebuild = 0;
+
+    /** @type {number} - {@link _lastRebuild} as of the last record release. @private */
+    _recordsReleasedAt = -1;
 
     /**
      * Create a new MeshletComponentSystem.
@@ -680,6 +716,7 @@ class MeshletComponentSystem extends ComponentSystem {
             }
         }
         this._syncTransforms();
+        this._releaseSettledRecords();
 
         // the director's state is from last frame's update: a transition fires one frame late.
         // Once playable, a new asset marks the system dirty when assigned, so the per-component
@@ -694,22 +731,16 @@ class MeshletComponentSystem extends ComponentSystem {
 
     /** @private */
     _rebuild() {
-        this._dirty = false;
-        this._dirtySince = 0;
-        this._dirtyLast = 0;
-        this.rebuildCount++;
-
         // group components by (resource, baseUrl): each unique resource is added ONCE, with a
         // merged instance list - N components share one set of pages, records and textures.
         // Disabled components are included (hidden via the per-instance hide bit) so a later
         // enable is a buffer write, not a rebuild.
+        /** @type {Array<{ resource: object, baseUrl: string, fetchOptions: object, components: MeshletComponent[] }>} */
         const groups = [];
         for (const guid in this.store) {
             const component = this.store[guid].entity.meshlet;
             if (!component) continue;
-            // left at -1 unless this rebuild places it, so the sync skips unplaced components
-            component._placementIndex = -1;
-            component._placedResource = null;
+            // a component no world places is reset to -1 after the build, so the sync skips it
             if (!component._effectiveResource) continue;
             if (!component._effectiveBaseUrl) {
                 Debug.warnOnce('MeshletComponent: no stream base URL - assign an asset with an http(s) file URL (not a blob: or data: URL), or set baseUrl with the resource.');
@@ -748,28 +779,182 @@ class MeshletComponentSystem extends ComponentSystem {
             totalTextured += p.texturedMeshlets;
         }
 
-        const components = [];
-        this.group.resize(partitions.length);
-        for (let pi = 0; pi < partitions.length; pi++) {
-            const partition = partitions[pi];
-            // budgets are divided by meshlet count: the fixed per-meshlet tables dominate a
-            // world's cost, and its page count follows its meshlets
+        // Budget shares and what each world keeps, decided before anything is built: a world
+        // that must rebuild needs its resources' records, and records released after an earlier
+        // build are fetched back first - the rebuild stays pending (dirty) until they arrive.
+        const previous = this._partitionStates;
+        const plans = partitions.map((partition, pi) => {
             const poolBytes = partitions.length > 1 && this._poolBytes > 0 ?
                 Math.floor(this._poolBytes * partition.meshlets / Math.max(totalMeshlets, 1)) :
                 this._poolBytes;
             const texturePoolBytes = partitions.length > 1 ?
                 Math.floor(this._texturePoolBytes * partition.texturedMeshlets / Math.max(totalTextured, 1)) :
                 this._texturePoolBytes;
-            this.group.directors[pi].rebuild((world) => {
+            const state = { groups: partition.groups.map(g => ({ ...g, components: g.components.slice() })), poolBytes, texturePoolBytes, settings: this._worldSettingsKey() };
+            const director = this.group.directors[pi];
+            return { partition, state, keep: !!director && this._canKeepPartition(previous[pi], state, director) };
+        });
+        let restoring = false;
+        for (const plan of plans) {
+            if (plan.keep) continue;
+            for (const group of plan.partition.groups) {
+                if (!group.resource.recordsResident) {
+                    this._restoreRecords(group.resource);
+                    restoring = true;
+                }
+            }
+        }
+        if (restoring) {
+            this._dirty = true;
+            return;
+        }
+
+        this._dirty = false;
+        this._dirtySince = 0;
+        this._dirtyLast = 0;
+        this.rebuildCount++;
+
+        const components = [];
+        const placed = new Set();
+        const states = [];
+        let rebuilt = 0;
+        this.group.resize(partitions.length);
+        for (let pi = 0; pi < partitions.length; pi++) {
+            // budgets are divided by meshlet count: the fixed per-meshlet tables dominate a
+            // world's cost, and its page count follows its meshlets
+            const { partition, state, keep } = plans[pi];
+            const { poolBytes, texturePoolBytes } = state;
+            const director = this.group.directors[pi];
+            if (keep) {
+                // unchanged content and budget: the world, its streaming and its placements stay
+                states.push(previous[pi]);
+                for (const g of partition.groups) {
+                    for (const component of g.components) {
+                        placed.add(component);
+                        components.push(component);
+                    }
+                }
+                continue;
+            }
+            rebuilt++;
+            director.rebuild((world) => {
                 this._applyWorldSettings(world, poolBytes, texturePoolBytes);
                 this._buildPartition(world, partition.groups, pi, components);
             });
+            for (const g of partition.groups) {
+                for (const component of g.components) placed.add(component);
+            }
+            states.push(state);
+        }
+        this._lastRebuild = performance.now();
+        this._partitionStates = states;
+        // components no longer in any world (removed asset, no base URL) stop syncing
+        for (const component of this._activeComponents) {
+            if (!placed.has(component)) {
+                component._placementIndex = -1;
+                component._placedResource = null;
+            }
         }
         this.group.assignInstanceOffsets();
         if (partitions.length > 1) {
-            Debug.log(`MeshletComponentSystem: ${totalMeshlets} meshlets split across ${partitions.length} worlds (limit ${limit} each).`);
+            Debug.log(`MeshletComponentSystem: ${totalMeshlets} meshlets in ${partitions.length} worlds (limit ${limit} each), ${rebuilt} rebuilt.`);
         }
         this._activeComponents = components;
+    }
+
+    /**
+     * Whether a world can keep its current build: the same resource groups with the same
+     * components in the same order, the same world settings, and a built world. Its budget
+     * share is not compared: shares follow the scene total, which every added resource moves,
+     * and rebuilding every world (re-fetching released records) for a slightly different page
+     * pool would cost far more than the pool difference. A kept world keeps the share it was
+     * built with; changing the budget setting itself rebuilds them all.
+     *
+     * @param {object|undefined} previous - The partition's state at its last build.
+     * @param {object} next - The state it would be built with now.
+     * @param {MeshletDirector} director - The partition's director.
+     * @returns {boolean} True when the world needs no rebuild.
+     * @private
+     */
+    _canKeepPartition(previous, next, director) {
+        if (!previous || !director.world.finalized) return false;
+        if (previous.settings !== next.settings) return false;
+        if (previous.groups.length !== next.groups.length) return false;
+        for (let i = 0; i < next.groups.length; i++) {
+            const a = previous.groups[i], b = next.groups[i];
+            if (a.resource !== b.resource || a.baseUrl !== b.baseUrl || a.components.length !== b.components.length) return false;
+            for (let c = 0; c < b.components.length; c++) {
+                if (a.components[c] !== b.components[c]) return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @returns {string} The world settings a partition is built with, other than its budgets.
+     * @private
+     */
+    _worldSettingsKey() {
+        return `${this._poolBytes}|${this._texturePoolBytes}|${this._maxFineTextureSize}|${this._maxDrawIndices}`;
+    }
+
+    /**
+     * Once a split scene has settled - no asset loading, no rebuild pending, none for
+     * RECORD_RELEASE_DELAY_MS - drops the resources' own copies of their meshlet records (nearly
+     * all of each GLB) for every world but the last: each world has uploaded its own. The last
+     * world takes newly added resources, so it keeps them for the rebuilds that brings. Releasing
+     * earlier, while assets still arrive, only has them fetched straight back when a world's
+     * budget share moves.
+     *
+     * @private
+     */
+    _releaseSettledRecords() {
+        const states = this._partitionStates;
+        if (states.length < 2 || this._dirty || this._restoring.size) return;
+        if (performance.now() - this._lastRebuild < RECORD_RELEASE_DELAY_MS) return;
+        if (this._recordsReleasedAt === this._lastRebuild || this._hasPendingAssets()) return;
+        this._recordsReleasedAt = this._lastRebuild;
+        for (let pi = 0; pi < states.length - 1; pi++) {
+            for (const group of states[pi].groups) this._releaseRecords(group);
+        }
+    }
+
+    /**
+     * Releases a resource group's meshlet records when they can be fetched back: the resource
+     * came from an asset with a file URL. A direct resource has nowhere to reload from.
+     *
+     * @param {{ resource: object, components: MeshletComponent[] }} group - The group.
+     * @private
+     */
+    _releaseRecords(group) {
+        const component = group.components[0];
+        const url = component._assetReference.asset?.getFileUrl();
+        if (!url || !group.resource.recordsResident) return;
+        this._recordSources.set(group.resource, { url, credentials: component._effectiveFetchOptions?.credentials ?? null });
+        group.resource.releaseRecords();
+    }
+
+    /**
+     * Starts fetching a released resource's records back, once.
+     *
+     * @param {object} resource - The MeshletResource.
+     * @private
+     */
+    _restoreRecords(resource) {
+        if (this._restoring.has(resource)) return;
+        const source = this._recordSources.get(resource);
+        if (!source) {
+            Debug.error('MeshletComponentSystem: a resource\'s meshlet records were released with no source to restore them from.');
+            return;
+        }
+        const promise = restoreMeshletRecords(source.url, resource, source.credentials).then(() => {
+            this._restoring.delete(resource);
+            this._markDirty();
+        }).catch((err) => {
+            // left released: its world keeps its last build and the rebuild stays pending
+            Debug.error(`MeshletComponentSystem: restoring meshlet records from ${source.url} failed`, err);
+        });
+        this._restoring.set(resource, promise);
     }
 
     /**

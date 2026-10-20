@@ -139,7 +139,9 @@ const createMeshlets = (device, gltf, bufferViews) => {
         return null;
     }
 
-    const pageTable = readU32Accessor(manifestDef.pagesAccessor, gltf.accessors, bufferViews);
+    // copied: a view would keep the whole GLB buffer alive after the meshlet records, the bulk of
+    // it, are released (MeshletResource#releaseRecords)
+    const pageTable = readU32Accessor(manifestDef.pagesAccessor, gltf.accessors, bufferViews)?.slice();
     if (!pageTable) {
         Debug.error(`glTF ${streamExtensionName} manifest has no readable page table accessor.`);
         return null;
@@ -287,7 +289,8 @@ const createMeshlets = (device, gltf, bufferViews) => {
         const table = readU32Accessor(rootGpuDef.materialTable, gltf.accessors, bufferViews);
         const count = rootGpuDef.materialCount ?? 0;
         if (table && table.length === count * 32) {
-            resource.materialTable = table;
+            // copied, as the page table is
+            resource.materialTable = table.slice();
             resource.materialCount = count;
         } else {
             Debug.error(`glTF ${gpuExtensionName} root material table is unreadable or mis-sized (${table?.length} words for ${count} materials), ignored.`);
@@ -297,4 +300,35 @@ const createMeshlets = (device, gltf, bufferViews) => {
     return resource;
 };
 
-export { createMeshlets, hasMeshletExtension };
+/**
+ * Fetches a streamed-meshlet GLB again and hands its primitives' meshlet records back to the
+ * resource parsed from it, after {@link MeshletResource#releaseRecords} dropped them. The records
+ * are found through the glTF JSON (mesh, primitive, accessor), not remembered byte offsets, so the
+ * way the file was first delivered does not matter.
+ *
+ * @param {string} url - The GLB's URL.
+ * @param {MeshletResource} resource - The resource parsed from it.
+ * @param {RequestCredentials|null} [credentials] - Fetch credentials mode.
+ * @returns {Promise<void>} Resolves once the records are restored.
+ * @ignore
+ */
+const restoreMeshletRecords = async (url, resource, credentials = null) => {
+    const response = await fetch(url, credentials ? { credentials } : {});
+    if (!response.ok) throw new Error(`meshlet records fetch failed (${response.status}): ${url}`);
+    const buffer = await response.arrayBuffer();
+    const view = new DataView(buffer);
+    if (view.getUint32(0, true) !== 0x46546C67) throw new Error(`meshlet records: ${url} is not a GLB`);
+    const jsonLength = view.getUint32(12, true);
+    const gltf = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 20, jsonLength)));
+    const binStart = 20 + jsonLength + 8;
+    const records = resource.primitives.map((prim) => {
+        const ext = gltf.meshes?.[prim.meshIndex]?.primitives?.[prim.primIndex]?.extensions?.[gpuExtensionName];
+        const accessor = gltf.accessors?.[ext?.accessors?.meshletData];
+        const bufferView = gltf.bufferViews?.[accessor?.bufferView];
+        if (!bufferView) throw new Error(`meshlet records: ${url} no longer matches its parsed resource`);
+        return new Uint32Array(buffer, binStart + (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0), accessor.count);
+    });
+    resource.restoreRecords(records);
+};
+
+export { createMeshlets, hasMeshletExtension, restoreMeshletRecords };

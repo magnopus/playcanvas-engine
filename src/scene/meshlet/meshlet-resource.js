@@ -19,10 +19,15 @@ import { MESHLET_DATA_U32S, PAGE_TABLE_FIELDS } from './constants.js';
  * @ignore
  */
 class MeshletPrimitive {
-    /** @type {Uint32Array} - meshletData records, MESHLET_DATA_U32S words per meshlet. */
+    /**
+     * meshletData records, MESHLET_DATA_U32S words per meshlet; null while released (see
+     * {@link MeshletResource#releaseRecords}).
+     *
+     * @type {Uint32Array|null}
+     */
     meshletData;
 
-    /** @type {Float32Array} - f32 view aliasing meshletData. */
+    /** @type {Float32Array|null} - f32 view aliasing meshletData. */
     meshletDataF32;
 
     /** @type {number} */
@@ -141,6 +146,44 @@ class MeshletResource {
     destroy() {
         this.primitives = [];
         this.manifest = null;
+    }
+
+    /**
+     * Whether every primitive's meshlet records are in memory. A world reads them only while it
+     * builds (it uploads its own rebased copy), so they can be released between builds - see
+     * {@link releaseRecords}.
+     *
+     * @type {boolean}
+     */
+    get recordsResident() {
+        return this.primitives.every(p => !!p.meshletData);
+    }
+
+    /**
+     * Drops every primitive's meshlet records - views into the parsed GLB, and almost all of its
+     * bytes - so the file's buffer can be collected. A large scene otherwise holds a second copy
+     * of every record it has uploaded. Restore them with {@link restoreRecords} before the
+     * resource joins another world build.
+     */
+    releaseRecords() {
+        for (const prim of this.primitives) {
+            prim.meshletData = null;
+            prim.meshletDataF32 = null;
+        }
+    }
+
+    /**
+     * Restores the records {@link releaseRecords} dropped, one array per primitive.
+     *
+     * @param {Uint32Array[]} records - Each primitive's records, in primitive order.
+     */
+    restoreRecords(records) {
+        Debug.assert(records.length === this.primitives.length, 'MeshletResource: restored record count does not match the primitives');
+        this.primitives.forEach((prim, i) => {
+            Debug.assert(records[i].length === prim.meshletCount * MESHLET_DATA_U32S, 'MeshletResource: restored records do not match the primitive');
+            prim.meshletData = records[i];
+            prim.meshletDataF32 = new Float32Array(records[i].buffer, records[i].byteOffset, records[i].length);
+        });
     }
 }
 

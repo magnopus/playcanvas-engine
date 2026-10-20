@@ -135,11 +135,38 @@ class U32Builder {
     }
 }
 
+/**
+ * Supplies a world's meshlet records one primitive at a time, so the cut tables can be built
+ * without the whole world's records in memory at once.
+ *
+ * @typedef {object} MeshletRecordSource
+ * @property {number} count - Meshlets in the world.
+ * @property {(first: number, count: number) => Uint32Array} get - The world records of the
+ * primitive starting at meshlet `first`; the cut writes its derived words into them.
+ * @property {(first: number, records: Uint32Array) => void} done - Called once per primitive with
+ * the records as the cut left them, ready to upload.
+ * @ignore
+ */
+
+/**
+ * @param {Uint32Array|MeshletRecordSource} meshlets - Whole-world records, or a per-primitive source.
+ * @returns {MeshletRecordSource} A per-primitive source.
+ */
+function recordSource(meshlets) {
+    if (!(meshlets instanceof Uint32Array)) return meshlets;
+    return {
+        count: meshlets.length / MESHLET_DATA_U32S,
+        get: (first, count) => meshlets.subarray(first * MESHLET_DATA_U32S, (first + count) * MESHLET_DATA_U32S),
+        done: () => {}
+    };
+}
+
 /** GPU tables shared by every view's resident, capacity-bounded cut. @ignore */
 class MeshletCutData {
     /**
      * @param {import('../../platform/graphics/graphics-device.js').GraphicsDevice} device - Device.
-     * @param {Uint32Array} meshlets - World records; reserved words receive primitive-local birth representatives.
+     * @param {Uint32Array|MeshletRecordSource} meshlets - World records, whole or one primitive at
+     * a time; reserved words receive primitive-local birth representatives.
      * @param {Uint32Array} objects - World instance records.
      * @param {Uint32Array|null} [instanceOrder] - Instance ids in spatial cell order (see
      * MeshletCells), chunked into cells of `cellSize`. Each level's tasks are laid out in this
@@ -148,6 +175,7 @@ class MeshletCutData {
      * @param {number} [cellSize] - Instances per cell.
      */
     constructor(device, meshlets, objects, instanceOrder = null, cellSize = MESHLET_CELL_SIZE) {
+        const records = recordSource(meshlets);
         const words = new U32Builder();
         // task pairs (instance, group offset) per LOD level, counted first so the task table is
         // allocated once and filled in place
@@ -161,14 +189,17 @@ class MeshletCutData {
         // (terminal groups leave roots below the top), [first + level] = where that level starts
         // (level-major order). Compaction starts each instance at the finer of its cut's finest
         // level and that root level, instead of scanning every LOD.
-        const levelStarts = new Uint32Array(meshlets.length / MESHLET_DATA_U32S);
+        const levelStarts = new Uint32Array(records.count);
+        // Compaction scans every LOD. Keep its two links contiguous instead of fetching
+        // them from 128-byte geometry records for every instance of a primitive.
+        const topology = new Uint32Array(records.count * 2);
         const instanceCount = objects.length / OBJECT_DATA_U32S;
         for (let instance = 0; instance < instanceCount; instance++) {
             const first = objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET];
             const count = objects[instance * OBJECT_DATA_U32S + O.MESHLET_COUNT];
             let primitive = primitives.get(first);
             if (!primitive) {
-                const source = meshlets.subarray(first * MESHLET_DATA_U32S, (first + count) * MESHLET_DATA_U32S);
+                const source = records.get(first, count);
                 // Older foliage bakes cap real geometry with synthetic empty roots. Empty
                 // geometry cannot cover a missing page up close: retain and pin the real
                 // coarse level instead. Such bakes consequently need a larger resident set.
@@ -240,6 +271,11 @@ class MeshletCutData {
                 // so the root admission needs no meshlet record
                 words.push(first, 0, rootOffset + 8, pages.size, rootCost[0], bucket, rootCost[1], 0);
                 for (const page of pages) words.push(page);
+                for (let m = 0; m < count; m++) {
+                    topology[(first + m) * 2] = source[m * MESHLET_DATA_U32S + M.PARENT];
+                    topology[(first + m) * 2 + 1] = source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP];
+                }
+                records.done(first, source);
                 primitive = { tasks, rootOffset, rootCost, bucket };
                 primitives.set(first, primitive);
             }
@@ -345,13 +381,6 @@ class MeshletCutData {
         };
         this.groups = create(words.view());
         this.tasks = create(tasks);
-        // Compaction scans every LOD. Keep its two links contiguous instead of fetching
-        // them from 128-byte geometry records for every instance of a primitive.
-        const topology = new Uint32Array(meshlets.length / MESHLET_DATA_U32S * 2);
-        for (let m = 0; m < topology.length / 2; m++) {
-            topology[m * 2] = meshlets[m * MESHLET_DATA_U32S + M.PARENT];
-            topology[m * 2 + 1] = meshlets[m * MESHLET_DATA_U32S + M.BIRTH_GROUP];
-        }
         this.selectionTopology = new StorageBuffer(device, Math.max(topology.byteLength, 16), BUFFERUSAGE_COPY_DST);
         if (topology.length) this.selectionTopology.write(0, topology);
         this.levelStarts = new StorageBuffer(device, Math.max(levelStarts.byteLength, 16), BUFFERUSAGE_COPY_DST);
