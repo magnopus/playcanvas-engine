@@ -1654,7 +1654,13 @@ const loadBuffers = (gltf, binaryChunk, loadUrlBase, originalUrlBase, registry, 
 
                     http.get(
                         resolvedUrl.load,
-                        { cache: true, responseType: 'arraybuffer', retry: false },
+                        {
+                            cache: true,
+                            responseType: 'arraybuffer',
+                            retry: false,
+                            // Magnopus patched - add withCredentials option
+                            withCredentials: options?.crossOrigin === 'use-credentials'
+                        },
                         (err, result) => {
                             if (err) {
                                 reject(err);
