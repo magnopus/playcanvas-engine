@@ -45,6 +45,11 @@ import { NullGraphicsDevice } from './null/null-graphics-device.js';
  * - 'low-power': Prioritizes power saving over rendering performance.
  *
  * Defaults to 'default'.
+ * @param {boolean} [options.reverseZ] - Enables reverse-z depth buffering, which maps the
+ * camera near plane to depth=1 and the far plane to depth=0. This significantly improves
+ * floating-point depth precision over large view distances and reduces z-fighting at the far
+ * plane. WebGPU only — ignored on WebGL2. Defaults to false. Custom shaders that sample the
+ * depth buffer with hard-coded forward-z formulas will need updating before opting in.
  * @param {boolean} [options.transientColor] - Boolean that requests the multi-sampled (MSAA)
  * color attachment of the back-buffer to be allocated as a transient ("memoryless") attachment,
  * allowing tile-based GPUs to keep its contents in on-chip memory and avoid VRAM allocation.

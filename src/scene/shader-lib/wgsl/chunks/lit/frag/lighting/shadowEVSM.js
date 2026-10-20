@@ -46,7 +46,13 @@ fn VSM16(tex: texture_2d<f32>, texSampler: sampler, texCoords: vec2f, resolution
 }
 
 fn getShadowVSM16(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, shadowCoord: vec3f, shadowParams: vec4f, exponent: f32) -> f32 {
-    return VSM16(shadowMap, shadowMapSampler, shadowCoord.xy, shadowParams.x, shadowCoord.z, shadowParams.y, exponent);
+    #ifdef REVERSE_Z
+        // the shadow map stores forward depth
+        let Z: f32 = 1.0 - shadowCoord.z;
+    #else
+        let Z: f32 = shadowCoord.z;
+    #endif
+    return VSM16(shadowMap, shadowMapSampler, shadowCoord.xy, shadowParams.x, Z, shadowParams.y, exponent);
 }
 
 fn getShadowSpotVSM16(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, shadowCoord: vec3f, shadowParams: vec4f, exponent: f32, lightDir: vec3f) -> f32 {
@@ -78,7 +84,13 @@ fn VSM32(tex: texture_2d<f32>, texSampler: sampler, texCoords_in: vec2f, resolut
 }
 
 fn getShadowVSM32(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, shadowCoord: vec3f, shadowParams: vec4f, exponent: f32) -> f32 {
-    return VSM32(shadowMap, shadowMapSampler, shadowCoord.xy, shadowParams.x, shadowCoord.z, shadowParams.y, exponent);
+    #ifdef REVERSE_Z
+        // the shadow map stores forward depth
+        let Z: f32 = 1.0 - shadowCoord.z;
+    #else
+        let Z: f32 = shadowCoord.z;
+    #endif
+    return VSM32(shadowMap, shadowMapSampler, shadowCoord.xy, shadowParams.x, Z, shadowParams.y, exponent);
 }
 
 fn getShadowSpotVSM32(shadowMap: texture_2d<f32>, shadowMapSampler: sampler, shadowCoord: vec3f, shadowParams: vec4f, exponent: f32, lightDir: vec3f) -> f32 {

@@ -453,6 +453,9 @@ class GSplatProjector {
         if (stereo) {
             cdefines.set('GSPLAT_XR', '');
         }
+        if (this.device.isReverseZ) {
+            cdefines.set('REVERSE_Z', '');
+        }
 
         // Format-specific defines.
         const colorStream = wbFormat.getStream('dataColor');
@@ -721,6 +724,7 @@ class GSplatProjector {
         const cameraComponent = cameraNode.camera;
         const cam = cameraComponent.camera;
         const webgpu = this.device.isWebGPU;
+        const reverseZ = this.device.isReverseZ;
         let focal;
         if (stereoMode) {
             // XR stereo: use the per-eye matrices the forward path uses (raw projViewOffMat — NO
@@ -738,7 +742,7 @@ class GSplatProjector {
             // canonical (unflipped) projection - the cache stores canonical clip positions, and
             // the raster VS applies the per-pass target flip using the projectionFlipY uniform
             const view = cam.viewMatrix;
-            _viewProjMat.mul2(Camera.applyShaderProjectionTransform(cam.projectionMatrix, _shaderProjMat, false, webgpu), view);
+            _viewProjMat.mul2(Camera.applyShaderProjectionTransform(cam.projectionMatrix, _shaderProjMat, false, webgpu, reverseZ), view);
             _viewProjData.set(_viewProjMat.data);
             _viewData.set(view.data);
             focal = viewportWidth * _shaderProjMat.data[0];

@@ -39,14 +39,23 @@ export default /* wgsl */`
             let cascadeIndex: i32 = i32(min(dot(comparisons, vec4f(1.0)), uniform.uFogShadowParams.x - 1.0));
 
             let shadowCoord: vec3f = (uniform.uFogShadowMatrixPalette[cascadeIndex] * vec4f(worldPos, 1.0)).xyz;
-            let z: f32 = shadowCoord.z - uniform.uFogShadowParams.y;
+            #ifdef REVERSE_Z
+                // the bias pushes the receiver towards the light, which is greater z when reversed
+                let z: f32 = shadowCoord.z + uniform.uFogShadowParams.y;
+            #else
+                let z: f32 = shadowCoord.z - uniform.uFogShadowParams.y;
+            #endif
 
             #ifdef FOG_SHADOW_PCF
                 // hardware comparison on the depth format shadow map
                 return textureSampleCompareLevel(uFogShadowMap, uFogShadowMapSampler, shadowCoord.xy, z);
             #else
                 // manual comparison on the color format shadow map storing depth (PCSS / VSM)
-                return step(z, textureSampleLevel(uFogShadowMap, uFogShadowMapSampler, shadowCoord.xy, 0.0).r);
+                #ifdef REVERSE_Z
+                    return step(textureSampleLevel(uFogShadowMap, uFogShadowMapSampler, shadowCoord.xy, 0.0).r, z);
+                #else
+                    return step(z, textureSampleLevel(uFogShadowMap, uFogShadowMapSampler, shadowCoord.xy, 0.0).r);
+                #endif
             #endif
         }
     #endif

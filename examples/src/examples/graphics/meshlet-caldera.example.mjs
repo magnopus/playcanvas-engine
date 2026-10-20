@@ -54,7 +54,13 @@ const params = new URLSearchParams(location.search);
 const only = params.get('regions')?.split(',');
 const regions = manifest.regions.filter(r => r.baked && (!only || only.includes(r.name)));
 
-const device = await createGraphicsDevice(canvas, { deviceTypes: [deviceType], antialias: false });
+// ?reverseZ=1 renders with a reversed depth buffer (near = 1, far = 0) for float precision across
+// the island's view distance; WebGPU only
+const device = await createGraphicsDevice(canvas, {
+    deviceTypes: [deviceType],
+    antialias: false,
+    reverseZ: params.get('reverseZ') === '1'
+});
 device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
 const createOptions = new AppOptions();

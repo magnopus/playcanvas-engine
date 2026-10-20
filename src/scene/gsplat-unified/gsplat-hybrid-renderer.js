@@ -720,15 +720,17 @@ class GSplatHybridRenderer extends GSplatRenderer {
         if (this.fisheyeProj.enabled) {
             const near = cam.nearClip;
             const far = cam.farClip;
+            // the cached depth is (linear - near) / (far - near), or its complement with reverse-z
+            const reverseZ = this.device.isReverseZ;
             dst[0] = 0;
             dst[1] = 0;
-            dst[2] = far - near;
-            dst[3] = near;
+            dst[2] = reverseZ ? near - far : far - near;
+            dst[3] = reverseZ ? far : near;
             return;
         }
         // canonical (unflipped) projection - matches the projector cache; the raster-time flip
         // (projectionFlipY) is applied to the output position only and does not affect depth
-        _invProjMat.copy(Camera.applyShaderProjectionTransform(cam.projectionMatrix, _shaderProjMat, false, this.device.isWebGPU)).invert();
+        _invProjMat.copy(Camera.applyShaderProjectionTransform(cam.projectionMatrix, _shaderProjMat, false, this.device.isWebGPU, this.device.isReverseZ)).invert();
         const d = _invProjMat.data;
         dst[0] = -d[2];
         dst[1] = -d[6];

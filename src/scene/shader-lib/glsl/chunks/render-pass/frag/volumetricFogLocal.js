@@ -76,6 +76,10 @@ export default /* glsl */`
             // light as the depth
             vec2 uv = getCubemapAtlasCoordinates(uVolLightAtlas.xyz, shadowAtlasParams.y, shadowAtlasParams.x, lightVec);
             float shadowZ = length(lightVec) / uVolLightPosRange.w + uVolLightAtlas.w;
+            // the omni atlas stores the distance reversed, as the surface shading reads it
+            #ifdef REVERSE_Z
+                shadowZ = 1.0 - shadowZ;
+            #endif
             return textureShadow(shadowAtlasTexture, vec3(uv + tapOffset, shadowZ));
         }
     #endif

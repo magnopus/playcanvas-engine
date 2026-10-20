@@ -35,14 +35,23 @@ export default /* glsl */`
             int cascadeIndex = int(min(dot(comparisons, vec4(1.0)), uFogShadowParams.x - 1.0));
 
             vec3 shadowCoord = (uFogShadowMatrixPalette[cascadeIndex] * vec4(worldPos, 1.0)).xyz;
-            float z = shadowCoord.z - uFogShadowParams.y;
+            #ifdef REVERSE_Z
+                // the bias pushes the receiver towards the light, which is greater z when reversed
+                float z = shadowCoord.z + uFogShadowParams.y;
+            #else
+                float z = shadowCoord.z - uFogShadowParams.y;
+            #endif
 
             #ifdef FOG_SHADOW_PCF
                 // hardware comparison on the depth format shadow map
                 return textureShadow(uFogShadowMap, vec3(shadowCoord.xy, z));
             #else
                 // manual comparison on the color format shadow map storing depth (PCSS / VSM)
-                return step(z, texture2D(uFogShadowMap, shadowCoord.xy).r);
+                #ifdef REVERSE_Z
+                    return step(texture2D(uFogShadowMap, shadowCoord.xy).r, z);
+                #else
+                    return step(z, texture2D(uFogShadowMap, shadowCoord.xy).r);
+                #endif
             #endif
         }
     #endif

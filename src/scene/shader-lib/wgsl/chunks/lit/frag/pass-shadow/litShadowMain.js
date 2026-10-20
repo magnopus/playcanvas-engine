@@ -39,6 +39,11 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
     #if SHADOW_TYPE == VSM_16F || SHADOW_TYPE == VSM_32F
 
+        // the VSM comparison expects forward depth, but the rasterized depth is reversed
+        #if defined(PERSPECTIVE_DEPTH) && defined(REVERSE_Z)
+            depth = 1.0 - depth;
+        #endif
+
         // Rasterization of degenerate triangles, which animated meshes can generate, can supply
         // depth outside of the [0, 1] range or even NaN. The exponential warp below turns those
         // into huge values, which the VSM blur then spreads over a large area, generating visible
@@ -64,7 +69,11 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         #else
             #ifdef MODIFIED_DEPTH
                 // If we end up using modified depth, it needs to be explicitly written to gl_FragDepth
-                output.fragDepth = depth;
+                #ifdef REVERSE_Z
+                    output.fragDepth = 1.0 - depth;
+                #else
+                    output.fragDepth = depth;
+                #endif
             #endif
 
             // just the simplest code, color is not written anyway

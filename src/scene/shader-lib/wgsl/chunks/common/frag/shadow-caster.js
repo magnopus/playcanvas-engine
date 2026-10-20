@@ -13,6 +13,11 @@ fn getShadowOutput() -> vec4f {
 
     #if SHADOW_TYPE == VSM_16F || SHADOW_TYPE == VSM_32F
 
+        // the VSM comparison expects forward depth, but the rasterized depth is reversed
+        #ifdef REVERSE_Z
+            depth = 1.0 - depth;
+        #endif
+
         // Rasterization of degenerate triangles, which animated meshes can generate, can supply
         // depth outside of the [0, 1] range or even NaN. The exponential warp below turns those
         // into huge values, which the VSM blur then spreads over a large area, generating visible

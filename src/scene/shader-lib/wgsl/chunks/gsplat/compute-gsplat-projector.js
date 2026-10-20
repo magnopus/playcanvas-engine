@@ -179,10 +179,13 @@ fn main(
             let neg_z = -viewCenter.z;
             let ndcX = proj.screen.x / uniforms.viewportWidth * 2.0 - 1.0;
             let ndcY = proj.screen.y / uniforms.viewportHeight * 2.0 - 1.0;
-            let depthNdc = clamp(
+            var depthNdc = clamp(
                 (neg_z - uniforms.nearClip) / (uniforms.farClip - uniforms.nearClip),
                 0.0, 1.0
             );
+            #ifdef REVERSE_Z
+                depthNdc = 1.0 - depthNdc;
+            #endif
             clipPos = vec4f(ndcX, ndcY, depthNdc, 1.0);
         #else
             clipPos = uniforms.viewProj * vec4f(center, 1.0);

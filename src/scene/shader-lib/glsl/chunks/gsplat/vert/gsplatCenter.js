@@ -48,6 +48,9 @@ bool initCenter(vec3 modelCenter, inout SplatCenter center) {
             float linearDepth = neg_z;
             #if WEBGPU
                 float depthNdc = clamp((linearDepth - near) / (far - near), 0.0, 1.0);
+                #ifdef REVERSE_Z
+                    depthNdc = 1.0 - depthNdc;
+                #endif
             #else
                 float depthNdc = clamp(2.0 * (linearDepth - near) / (far - near) - 1.0, -1.0, 1.0);
             #endif

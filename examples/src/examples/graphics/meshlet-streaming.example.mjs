@@ -70,7 +70,9 @@ const assets = {
 };
 
 const gfxOptions = {
-    deviceTypes: [deviceType]
+    deviceTypes: [deviceType],
+    // ?reverseZ=1 renders with a reversed depth buffer; the occlusion HZB is built from it
+    reverseZ: new URLSearchParams(location.search).get('reverseZ') === '1'
 };
 
 const device = await createGraphicsDevice(canvas, gfxOptions);

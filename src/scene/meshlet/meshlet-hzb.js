@@ -29,7 +29,13 @@ const mip0DepthWGSL = /* wgsl */ `
         var depth = 0.0;
         for (var y = 0; y < extent.y; y++) {
             for (var x = 0; x < extent.x; x++) {
-                depth = max(depth, textureLoad(uDepthMap, min(src + vec2i(x, y), size - 1), 0));
+                var texel = textureLoad(uDepthMap, min(src + vec2i(x, y), size - 1), 0);
+                // a reverse-z buffer holds 1 at the near plane: flip it, so the pyramid stays a
+                // max-reduce of forward depth (farthest = largest) for the cull's comparison
+                #ifdef REVERSE_Z
+                    texel = 1.0 - texel;
+                #endif
+                depth = max(depth, texel);
             }
         }
         output.color = vec4f(depth, 0.0, 0.0, 1.0);
