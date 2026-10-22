@@ -1,0 +1,360 @@
+{
+ "purpose": "Visual reference for mapping Caldera material names to free PBR sets. Source look from official Warzone Pacific screenshots (Activision, reference only, not to be committed).",
+ "status": "asset ids confirmed on ambientCG API (search results); licence and visual match not yet verified",
+ "palette_source": "examples/utils/caldera/usd2glb.py PALETTE",
+ "classes": [
+  {
+   "class": "rock",
+   "palette_rgb": [
+    0.4,
+    0.38,
+    0.35
+   ],
+   "roughness": 0.9,
+   "metallic": 0.0,
+   "visual": "Dark volcanic and grey-brown cliffs, weathered, with moss and scrub in cracks",
+   "regions_seen": [
+    "coast cliffs",
+    "mountain road",
+    "cliff compound"
+   ],
+   "extra": "add moss/lichen overlay for vegetated faces",
+   "pbr_search": [
+    "ambientCG Rock volcanic",
+    "ambientCG Rock cliff",
+    "ambientCG Lava rock"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Rock category)"
+   ],
+   "pbr_asset": "Rock064",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "alt Rock063, Rock058; volcanic look not checked"
+  },
+  {
+   "class": "dirt",
+   "palette_rgb": [
+    0.43,
+    0.35,
+    0.26
+   ],
+   "roughness": 0.95,
+   "metallic": 0.0,
+   "visual": "Packed tan dirt roads and paths, dust on verges",
+   "regions_seen": [
+    "village",
+    "gas station",
+    "mountain road"
+   ],
+   "pbr_search": [
+    "ambientCG Ground dirt packed",
+    "ambientCG Ground road dirt"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Ground category)"
+   ],
+   "pbr_asset": "Ground111",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "alt Ground112, Ground110"
+  },
+  {
+   "class": "foliage",
+   "palette_rgb": [
+    0.22,
+    0.34,
+    0.14
+   ],
+   "roughness": 0.8,
+   "metallic": 0.0,
+   "visual": "Palms, banana plants, lush and dry yellow-green grass. Foliage is usually geometry, so this class is mostly for ground cover",
+   "regions_seen": [
+    "everywhere"
+   ],
+   "extra": "split into lush and dry grass if the palette allows",
+   "pbr_search": [
+    "ambientCG Grass",
+    "ambientCG Ground grass dry"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Ground / Grass)"
+   ],
+   "pbr_asset": null,
+   "licence": "n/a",
+   "pbr_alt": "grass/ground cover not searched yet; foliage is mostly geometry"
+  },
+  {
+   "class": "plaster",
+   "palette_rgb": [
+    0.76,
+    0.72,
+    0.64
+   ],
+   "roughness": 0.85,
+   "metallic": 0.0,
+   "visual": "Off-white and cream painted stucco walls, weathered, chipped in places",
+   "regions_seen": [
+    "airport terminal",
+    "hangar",
+    "bunker",
+    "shops"
+   ],
+   "pbr_search": [
+    "ambientCG Plaster",
+    "ambientCG Stucco white",
+    "ambientCG Plaster painted"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Plaster / Stucco)"
+   ],
+   "pbr_asset": "Plaster001",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "alt Plaster002, PaintedPlaster017"
+  },
+  {
+   "class": "stucco_warm",
+   "palette_rgb": [
+    0.8,
+    0.62,
+    0.55
+   ],
+   "roughness": 0.85,
+   "metallic": 0.0,
+   "visual": "Pink and peach stucco hotel walls, tan stone town hall facade",
+   "regions_seen": [
+    "pink hotel",
+    "town hall"
+   ],
+   "note": "NEW class, not yet in usd2glb.py PALETTE. Needs a regex entry (e.g. hotel, pink, villa) before use.",
+   "pbr_search": [
+    "ambientCG Plaster pink",
+    "ambientCG Stucco warm",
+    "ambientCG Plaster beige"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Plaster / Stucco)"
+   ],
+   "pbr_asset": "Plaster001",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "reuse plaster asset, tint pink/tan via palette_rgb (no separate ambientCG set)"
+  },
+  {
+   "class": "concrete",
+   "palette_rgb": [
+    0.55,
+    0.54,
+    0.51
+   ],
+   "roughness": 0.9,
+   "metallic": 0.0,
+   "visual": "Raw grey concrete, precast quay walls, bunker and docks, lightly weathered",
+   "regions_seen": [
+    "docks",
+    "bunker",
+    "quay walls"
+   ],
+   "pbr_search": [
+    "ambientCG Concrete",
+    "ambientCG Concrete raw"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Concrete)"
+   ],
+   "pbr_asset": "Concrete034",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "alt Concrete036, Concrete048"
+  },
+  {
+   "class": "rust",
+   "palette_rgb": [
+    0.45,
+    0.28,
+    0.18
+   ],
+   "roughness": 0.8,
+   "metallic": 0.4,
+   "visual": "Corrugated metal with rust, ship hull rust-red, gas station roof",
+   "regions_seen": [
+    "ship wreck",
+    "gas station roof"
+   ],
+   "extra": "rust over corrugated metal; pair with metal class",
+   "pbr_search": [
+    "ambientCG Metal rust corrugated",
+    "ambientCG Metal rusty"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Metal)"
+   ],
+   "pbr_asset": "CorrugatedSteel009",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "corrugated steel; rust tint via palette_rgb"
+  },
+  {
+   "class": "metal",
+   "palette_rgb": [
+    0.56,
+    0.57,
+    0.58
+   ],
+   "roughness": 0.45,
+   "metallic": 0.9,
+   "visual": "Shipping containers (green, tan, orange painted), cranes, forklifts, railings",
+   "regions_seen": [
+    "docks",
+    "yards"
+   ],
+   "extra": "painted metal: use colour tint per container",
+   "pbr_search": [
+    "ambientCG Metal painted",
+    "ambientCG Metal corrugated"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Metal)"
+   ],
+   "pbr_asset": "Metal063",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "alt Metal049A, Metal055A; painted containers by colour tint"
+  },
+  {
+   "class": "roof",
+   "palette_rgb": [
+    0.5,
+    0.26,
+    0.2
+   ],
+   "roughness": 0.8,
+   "metallic": 0.0,
+   "visual": "Terracotta roof tiles, red-orange, on towns and village buildings",
+   "regions_seen": [
+    "town",
+    "village"
+   ],
+   "pbr_search": [
+    "ambientCG Roof tiles terracotta",
+    "ambientCG Tiles clay roof"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Tiles / Roof)"
+   ],
+   "pbr_asset": "Tiles139",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "generic tile set, terracotta colour via palette_rgb; not visually checked"
+  },
+  {
+   "class": "thatch",
+   "palette_rgb": [
+    0.55,
+    0.5,
+    0.36
+   ],
+   "roughness": 0.95,
+   "metallic": 0.0,
+   "visual": "Palm-leaf thatch, grey-green weathered, mossy in places. Appears on every village building and the hotel courtyard huts",
+   "regions_seen": [
+    "stilt village",
+    "hotel courtyard"
+   ],
+   "note": "NEW class, not yet in usd2glb.py PALETTE. Highest-priority addition. Needs a regex entry (e.g. thatch, palm_roof, reed) before use.",
+   "pbr_search": [
+    "ambientCG Thatch",
+    "ambientCG Reed roof",
+    "Poly Haven thatch reed"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Thatch / Roof)",
+    "https://polyhaven.com (search: thatch, reed)"
+   ],
+   "pbr_asset": "ThatchedRoof001A",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "lead": "architextures.org lists a reed thatch texture credited to Poly Haven (https://architextures.org/textures/1839). Not confirmed as CC0 on polyhaven.com.",
+   "pbr_alt": "alt ThatchedRoof002A, 001B, 002B"
+  },
+  {
+   "class": "wood",
+   "palette_rgb": [
+    0.45,
+    0.31,
+    0.19
+   ],
+   "roughness": 0.75,
+   "metallic": 0.0,
+   "visual": "Dark weathered wood planks, bridges, stilt legs, crates",
+   "regions_seen": [
+    "stilt village",
+    "rope bridges",
+    "crates"
+   ],
+   "pbr_search": [
+    "ambientCG Wood planks weathered",
+    "ambientCG Wood planks dark"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Wood)"
+   ],
+   "pbr_asset": "Wood096",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "alt Wood095, Wood094; planks not visually checked"
+  },
+  {
+   "class": "water",
+   "palette_rgb": [
+    0.1,
+    0.24,
+    0.3
+   ],
+   "roughness": 0.05,
+   "metallic": 0.0,
+   "visual": "Turquoise river and ocean, foam at rocks",
+   "regions_seen": [
+    "river",
+    "coast"
+   ],
+   "extra": "water is usually a shader, not a texture. Keep the palette colour and add foam via vertex colour",
+   "pbr_search": [],
+   "candidate_sources": [],
+   "pbr_asset": null,
+   "licence": "n/a",
+   "pbr_alt": "no texture; use PlayCanvas water example (see note)",
+   "note_water": "Use PlayCanvas water example (examples/src/examples/graphics/water.example.mjs, scripts/esm/water.mjs) for ocean and river surfaces. Planar reflection is a second scene pass; see notes."
+  },
+  {
+   "class": "asphalt",
+   "palette_rgb": [
+    0.18,
+    0.18,
+    0.19
+   ],
+   "roughness": 0.9,
+   "metallic": 0.0,
+   "visual": "Dark asphalt roads with yellow lines, airstrip",
+   "regions_seen": [
+    "roads",
+    "airstrip"
+   ],
+   "pbr_search": [
+    "ambientCG Asphalt",
+    "ambientCG Asphalt worn"
+   ],
+   "candidate_sources": [
+    "https://ambientcg.com (Asphalt)"
+   ],
+   "pbr_asset": "Asphalt033",
+   "licence": "CC0 expected (ambientCG default). Not returned by API; verify on ambientcg.com/view?id=ASSET",
+   "pbr_alt": "alt Asphalt031, Road007"
+  }
+ ],
+ "region_hints": {
+  "north-west market": "N.W. Thompson Food Market, white-washed with dark wood door",
+  "gas station": "GAS sign, corrugated roof, terracotta and rust mix",
+  "stilt village": "thatch huts on wood stilts over river, rope bridges",
+  "docks": "concrete quay, shipping containers, cranes",
+  "airstrip": "white terminal, hangar, asphalt, control tower",
+  "pink hotel": "pink stucco, thatch courtyard huts",
+  "town hall": "tan stone, blue and yellow flags",
+  "cliff compound": "concrete bunker on volcanic rock, wood crates, scrub",
+  "ship wreck": "rusted hull, dark wood decking"
+ },
+ "sources_checked": [
+  "https://ambientcg.com/api/v2/full_json (type=Material)"
+ ]
+}

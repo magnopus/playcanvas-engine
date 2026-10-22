@@ -99,10 +99,14 @@ PALETTE = [
     # (regex, name, rgb, roughness, metallic, doubleSided)
     (r'water|ocean|puddle', 'water', (0.10, 0.24, 0.30), 0.05, 0.0, False),
     (r'glass|window_pane|windshield', 'glass', (0.45, 0.55, 0.60), 0.05, 0.3, True),
+    # before foliage: 'palm_roof' and 'reed_roof' must not fall through to the palm/reed foliage match
+    (r'thatch|palm_roof|reed_roof|straw', 'thatch', (0.55, 0.50, 0.36), 0.95, 0.0, False),
     (r'foliage|leaf|leaves|grass|tree|palm|bush|shrub|plant|vine|ivy|hedge|fern|flower|moss|reed|'
      r'weed|cactus|bamboo|agave', 'foliage', (0.22, 0.34, 0.14), 0.8, 0.0, True),
     (r'sand|beach', 'sand', (0.72, 0.64, 0.48), 0.95, 0.0, False),
     (r'dirt|mud|soil|ground|terra|gravel|pebble|earth|dust', 'dirt', (0.43, 0.35, 0.26), 0.95, 0.0, False),
+    # before rock: 'tan_stone' town hall facade would otherwise match the 'stone' rock rule
+    (r'pink|stucco_warm|tan_stone|villa', 'stucco_warm', (0.80, 0.62, 0.55), 0.85, 0.0, False),
     (r'rock|stone|cliff|boulder|basalt|lava|volcan|cobble|river_?bed', 'rock', (0.40, 0.38, 0.35), 0.9, 0.0, False),
     (r'asphalt|road|tarmac|runway', 'asphalt', (0.18, 0.18, 0.19), 0.9, 0.0, False),
     (r'concrete|cement|cinder|curb|sidewalk|pavement', 'concrete', (0.55, 0.54, 0.51), 0.9, 0.0, False),
@@ -182,6 +186,17 @@ def read_mesh(prim):
     fvc = np.asarray(fvc, dtype=np.int64)
     fvi = np.asarray(fvi, dtype=np.int64)
 
+    uv = None
+    stv = UsdGeom.PrimvarsAPI(prim).GetPrimvar('st')
+    if stv and stv.HasAuthoredValue():
+        val = attr_value(stv.GetAttr())
+        if val is not None and len(val):
+            val = np.asarray(val, dtype=np.float64)
+            idx = attr_value(stv.GetIndicesAttr()) if stv.IsIndexed() else None
+            if idx is not None:
+                val = val[np.asarray(idx, dtype=np.int64)]
+            uv = (stv.GetInterpolation(), val)
+
     normals = None
     pv = UsdGeom.PrimvarsAPI(prim).GetPrimvar('normals')
     if pv and pv.HasAuthoredValue():
@@ -210,7 +225,7 @@ def read_mesh(prim):
                 face_mat[f] = nm
 
     left = mesh.GetOrientationAttr().Get() == UsdGeom.Tokens.leftHanded
-    return pts, fvc, fvi, normals, face_mat, left
+    return pts, fvc, fvi, normals, uv, face_mat, left
 
 
 def triangulate(fvc, keep_faces):
@@ -229,9 +244,9 @@ def triangulate(fvc, keep_faces):
     return tri, face_of_tri
 
 
-def build_geometry(pts, fvc, fvi, normals, tri_corners, left, xform):
+def build_geometry(pts, fvc, fvi, normals, uv, tri_corners, left, xform):
     """Expand to per-corner vertices, transform, generate normals if absent, weld.
-    Returns (positions (V,3) f32, normals (V,3) f32, indices (T*3) u32)."""
+    Returns (positions (V,3) f32, normals (V,3) f32, indices (T*3) u32, uvs (V,2) f32 or None)."""
     if left:
         tri_corners = tri_corners[:, [0, 2, 1]]
     corners = tri_corners.reshape(-1)
@@ -286,12 +301,26 @@ def build_geometry(pts, fvc, fvi, normals, tri_corners, left, xform):
 
     # weld identical (position, quantised normal)
     qn = np.round(nrm * 1024).astype(np.int32)
-    key = np.concatenate([p.view(np.int64).reshape(len(p), 3) if p.dtype == np.float64 else p,
-                          qn.astype(np.int64)], axis=1)
+    parts = [p.view(np.int64).reshape(len(p), 3) if p.dtype == np.float64 else p, qn.astype(np.int64)]
+    uvc = None
+    if uv is not None:
+        interp, val = uv
+        try:
+            if interp == 'faceVarying' and len(val) == len(fvi):
+                uvc = val[corners]
+            elif interp in ('vertex', 'varying') and len(val) == len(pts):
+                uvc = val[vid]
+        except IndexError:
+            uvc = None
+    if uvc is not None:
+        # weld on quantised uv too, so seams stay split where the texture is discontinuous
+        parts.append(np.round(uvc * 65536).astype(np.int64))
+    key = np.concatenate(parts, axis=1)
     uniq, first, inverse = np.unique(key, axis=0, return_index=True, return_inverse=True)
     pos = p[first].astype(np.float32)
     nor = nrm[first].astype(np.float32)
-    return pos, nor, inverse.reshape(-1).astype(np.uint32)
+    tex = uvc[first].astype(np.float32) if uvc is not None else None
+    return pos, nor, inverse.reshape(-1).astype(np.uint32), tex
 
 
 # ---------------------------------------------------------------------------------------------
@@ -299,15 +328,17 @@ def build_geometry(pts, fvc, fvi, normals, tri_corners, left, xform):
 
 class GeoBucket:
     """Concatenates geometry chunks for one glTF primitive."""
-    __slots__ = ('pos', 'nor', 'idx', 'nv')
+    __slots__ = ('pos', 'nor', 'idx', 'uv', 'nv')
 
     def __init__(self):
-        self.pos, self.nor, self.idx, self.nv = [], [], [], 0
+        self.pos, self.nor, self.idx, self.uv, self.nv = [], [], [], [], 0
 
-    def add(self, pos, nor, idx):
+    def add(self, pos, nor, idx, uv=None):
         self.pos.append(pos)
         if nor is not None:
             self.nor.append(nor)
+        if uv is not None:
+            self.uv.append(uv)
         self.idx.append(idx + self.nv)
         self.nv += len(pos)
 
@@ -400,7 +431,7 @@ class Exporter:
         data = read_mesh(prim)
         if data is None:
             return
-        pts, fvc, fvi, normals, face_mat, left = data
+        pts, fvc, fvi, normals, uv, face_mat, left = data
         pts, normals, world = self.skin(prim, pts, normals, self.world(prim))
 
         if purpose == 'guide':
@@ -428,7 +459,7 @@ class Exporter:
                                   mats.astype(np.int8).tobytes(), digest_size=16).digest()
             entry = self.dedupe.get(key)
             if entry is None:
-                self.dedupe[key] = ((pts, fvc, fvi, normals, mats, left), [world])
+                self.dedupe[key] = ((pts, fvc, fvi, normals, uv, mats, left), [world])
             else:
                 entry[1].append(world)
             return
@@ -439,12 +470,12 @@ class Exporter:
                 return
             local = CONV @ np.linalg.inv(self.world(root)) @ world
             if is_brush and not self.is_terrain:
-                self.deferred[proto_key].append((pts, fvc, fvi, normals, face_mat, mats, left, world, local, None))
+                self.deferred[proto_key].append((pts, fvc, fvi, normals, uv, face_mat, mats, left, world, local, None))
                 return
             bucket = self.protos.setdefault(proto_key, {})
             for m in np.unique(mats[mats >= 0]):
                 tri, _ = triangulate(fvc, mats == m)
-                g = build_geometry(pts, fvc, fvi, normals, tri, left, local)
+                g = build_geometry(pts, fvc, fvi, normals, uv, tri, left, local)
                 if g is not None:
                     bucket.setdefault(int(m), GeoBucket()).add(*g)
             return
@@ -454,11 +485,11 @@ class Exporter:
         cell = tuple(np.floor(c[:2] / CELL).astype(int)) if not self.is_terrain else ('tile', str(prim.GetPath()))
         full = CONV @ world
         if is_brush and not self.is_terrain:
-            self.deferred[None].append((pts, fvc, fvi, normals, face_mat, mats, left, world, full, cell))
+            self.deferred[None].append((pts, fvc, fvi, normals, uv, face_mat, mats, left, world, full, cell))
             return
         for m in np.unique(mats[mats >= 0]):
             tri, _ = triangulate(fvc, mats == m)
-            g = build_geometry(pts, fvc, fvi, normals, tri, left, full)
+            g = build_geometry(pts, fvc, fvi, normals, uv, tri, left, full)
             if g is not None:
                 self.cells[cell][int(m)].add(*g)
 
@@ -499,12 +530,12 @@ class Exporter:
                 data = read_mesh(q)
                 if data is None:
                     continue
-                pts, fvc, fvi, normals, face_mat, left = data
+                pts, fvc, fvi, normals, uv, face_mat, left = data
                 pts, normals, qworld = self.skin(q, pts, normals, self.world(q))
                 mats = np.array([classify_render(m, False) for m in face_mat])
                 local = CONV @ inv @ qworld
                 for m in np.unique(mats[mats >= 0]):
-                    g = build_geometry(pts, fvc, fvi, normals, triangulate(fvc, mats == m)[0], left, local)
+                    g = build_geometry(pts, fvc, fvi, normals, uv, triangulate(fvc, mats == m)[0], left, local)
                     if g is not None:
                         bucket.setdefault(int(m), GeoBucket()).add(*g)
             self.clutter_set.placements[key].extend(inst_world @ xforms[sel])
@@ -515,7 +546,7 @@ class Exporter:
         """Content-identical meshes become one prototype placed at each world matrix; small
         singletons merge into their spatial cell like brushes do."""
         repeated = placed = 0
-        for n, ((pts, fvc, fvi, normals, mats, left), worlds) in enumerate(self.dedupe.values()):
+        for n, ((pts, fvc, fvi, normals, uv, mats, left), worlds) in enumerate(self.dedupe.values()):
             keep = mats >= 0
             tris = int((fvc[keep] - 2).clip(min=0).sum())
             if tris == 0:
@@ -526,14 +557,14 @@ class Exporter:
                 cell = tuple(np.floor(c[:2] / CELL).astype(int))
                 xf = CONV @ world
                 for m in np.unique(mats[keep]):
-                    g = build_geometry(pts, fvc, fvi, normals, triangulate(fvc, mats == m)[0], left, xf)
+                    g = build_geometry(pts, fvc, fvi, normals, uv, triangulate(fvc, mats == m)[0], left, xf)
                     if g is not None:
                         self.cells[cell][int(m)].add(*g)
                 continue
             key = f'mesh_{n}'
             bucket = self.protos.setdefault(key, {})
             for m in np.unique(mats[keep]):
-                g = build_geometry(pts, fvc, fvi, normals, triangulate(fvc, mats == m)[0], left, CONV)
+                g = build_geometry(pts, fvc, fvi, normals, uv, triangulate(fvc, mats == m)[0], left, CONV)
                 if g is not None:
                     bucket.setdefault(int(m), GeoBucket()).add(*g)
             self.placements[key].extend(worlds)
@@ -547,7 +578,7 @@ class Exporter:
         """Drop coplanar overlay layers within each deferred group, then add the rest."""
         for key, recs in self.deferred.items():
             tris, owner, rank, per = [], [], [], []
-            for oid, (pts, fvc, fvi, normals, face_mat, mats, left, world, xf, cell) in enumerate(recs):
+            for oid, (pts, fvc, fvi, normals, uv, face_mat, mats, left, world, xf, cell) in enumerate(recs):
                 tri, fid = triangulate(fvc, mats >= 0)
                 per.append((tri, fid))
                 if not len(tri):
@@ -564,7 +595,7 @@ class Exporter:
             self.overlay_dropped += int(drop.sum())
             self.overlay_total += len(drop)
             start = 0
-            for (pts, fvc, fvi, normals, face_mat, mats, left, world, xf, cell), (tri, fid) in zip(recs, per):
+            for (pts, fvc, fvi, normals, uv, face_mat, mats, left, world, xf, cell), (tri, fid) in zip(recs, per):
                 if not len(tri):
                     continue
                 keep = ~drop[start:start + len(tri)]
@@ -572,7 +603,7 @@ class Exporter:
                 tm = mats[fid]
                 for m in np.unique(tm[keep]):
                     sel = tri[keep & (tm == m)]
-                    g = build_geometry(pts, fvc, fvi, normals, sel, left, xf)
+                    g = build_geometry(pts, fvc, fvi, normals, uv, sel, left, xf)
                     if g is None:
                         continue
                     if key is None:
@@ -680,13 +711,30 @@ class GlbWriter:
         self.gltf['accessors'].append(acc)
         return len(self.gltf['accessors']) - 1
 
+    def image(self, path, mime):
+        """Embeds an image file in the binary chunk and returns its texture index."""
+        data = np.fromfile(path, dtype=np.uint8)
+        pad = (-self.offset) % 4
+        if pad:
+            self.bin.write(b'\0' * pad)
+            self.offset += pad
+        self.bin.write(data.tobytes())
+        self.gltf['bufferViews'].append({'buffer': 0, 'byteOffset': self.offset, 'byteLength': data.nbytes})
+        self.offset += data.nbytes
+        self.gltf.setdefault('images', []).append(
+            {'bufferView': len(self.gltf['bufferViews']) - 1, 'mimeType': mime})
+        self.gltf.setdefault('textures', []).append({'source': len(self.gltf['images']) - 1})
+        return len(self.gltf['textures']) - 1
+
     def mesh(self, name, prims):
-        """prims: list of (material index or None, pos, nor or None, idx)."""
+        """prims: list of (material index or None, pos, nor or None, idx, uv or None)."""
         out = []
-        for mat, pos, nor, idx in prims:
+        for mat, pos, nor, idx, uv in prims:
             attrs = {'POSITION': self.accessor(pos, 34962, 'VEC3', True)}
             if nor is not None:
                 attrs['NORMAL'] = self.accessor(nor, 34962, 'VEC3')
+            if uv is not None:
+                attrs['TEXCOORD_0'] = self.accessor(uv, 34962, 'VEC2')
             p = {'attributes': attrs, 'indices': self.accessor(idx, 34963, 'SCALAR'), 'mode': 4}
             if mat is not None:
                 p['material'] = mat
@@ -739,7 +787,9 @@ def concat(bucket):
     pos = np.concatenate(bucket.pos)
     nor = np.concatenate(bucket.nor) if bucket.nor else None
     idx = np.concatenate(bucket.idx)
-    return pos, nor, idx
+    # a bucket mixing meshes with and without 'st' cannot carry a uv accessor of the right length
+    uv = np.concatenate(bucket.uv) if bucket.uv and len(bucket.uv) == len(bucket.pos) else None
+    return pos, nor, idx, uv
 
 
 def recentre(pos):
@@ -753,6 +803,30 @@ def translate(c):
     return m
 
 
+# palette class -> free PBR set (ambientCG CC0). Files are read from CALDERA_TEXTURES/<set>/x/, where
+# <set> is the extracted zip folder. Only classes listed here get textures; the rest stay flat colour.
+TEXTURE_SETS = {
+    'plaster': 'Plaster001',
+    'concrete': 'Concrete034',
+    'asphalt': 'Asphalt033',
+    'dirt': 'Ground111',
+    'rock': 'Rock064',
+    'thatch': 'ThatchedRoof001A',
+    'wood': 'Wood096',
+}
+
+
+def texture_files(set_id):
+    root = os.environ.get('CALDERA_TEXTURES')
+    if not root:
+        return None
+    base = os.path.join(root, set_id, 'x', f'{set_id}_2K-JPG')
+    color, normal = f'{base}_Color.jpg', f'{base}_NormalGL.jpg'
+    if not (os.path.exists(color) and os.path.exists(normal)):
+        raise FileNotFoundError(f'texture set {set_id} missing under {root}')
+    return color, normal
+
+
 def write_render(ex, path, name):
     w = GlbWriter(path)
     for n in MATERIAL_NAMES:
@@ -763,8 +837,15 @@ def write_render(ex, path, name):
             rgb, rough, metal, ds = (0.42, 0.38, 0.30), 0.95, 0.0, False
         else:
             rgb, rough, metal, ds = (0.60, 0.58, 0.55), 0.8, 0.0, False
-        mat = {'name': n, 'pbrMetallicRoughness': {'baseColorFactor': [*rgb, 1.0],
-                                                    'metallicFactor': metal, 'roughnessFactor': rough}}
+        pbr = {'baseColorFactor': [*rgb, 1.0], 'metallicFactor': metal, 'roughnessFactor': rough}
+        mat = {'name': n, 'pbrMetallicRoughness': pbr}
+        files = texture_files(TEXTURE_SETS[n]) if n in TEXTURE_SETS else None
+        if files:
+            color, normal = files
+            # textured: white factor so the image shows unscaled
+            pbr['baseColorFactor'] = [1.0, 1.0, 1.0, 1.0]
+            pbr['baseColorTexture'] = {'index': w.image(color, 'image/jpeg')}
+            mat['normalTexture'] = {'index': w.image(normal, 'image/jpeg')}
         if ds:
             mat['doubleSided'] = True
         w.gltf['materials'].append(mat)
@@ -785,8 +866,8 @@ def write_render(ex, path, name):
         lo = np.min([p.min(axis=0) for p in allpos], axis=0).astype(np.float64)
         hi = np.max([p.max(axis=0) for p in allpos], axis=0).astype(np.float64)
         c = (lo + hi) * 0.5
-        prims = [(m, (p - c).astype(np.float32), nr, i) for m, p, nr, i in prims]
-        t = sum(len(i) for *_, i in prims) // 3
+        prims = [(m, (p - c).astype(np.float32), nr, i, uv) for m, p, nr, i, uv in prims]
+        t = sum(len(x[3]) for x in prims) // 3
         tris_unique += t
         tris_instanced += t * len(places)
         mi = w.mesh(key.split('/')[-1], prims)
@@ -802,8 +883,8 @@ def write_render(ex, path, name):
         lo = np.min([p.min(axis=0) for p in allpos], axis=0).astype(np.float64)
         hi = np.max([p.max(axis=0) for p in allpos], axis=0).astype(np.float64)
         c = (lo + hi) * 0.5
-        prims = [(m, (p - c).astype(np.float32), nr, i) for m, p, nr, i in prims]
-        t = sum(len(i) for *_, i in prims) // 3
+        prims = [(m, (p - c).astype(np.float32), nr, i, uv) for m, p, nr, i, uv in prims]
+        t = sum(len(x[3]) for x in prims) // 3
         tris_unique += t
         tris_instanced += t
         cname = 'cell_' + '_'.join(str(x).split('/')[-1] for x in cell)
@@ -824,10 +905,10 @@ def write_collision(ex, path, name):
     for cls, cells in sorted(ex.coll.items()):
         kids = []
         for cell, b in sorted(cells.items()):
-            pos, _, idx = concat(b)
+            pos, _, idx, _ = concat(b)
             pos, c = recentre(pos)
             total += len(idx) // 3
-            mi = w.mesh(f'{cls}_{cell[0]}_{cell[1]}', [(None, pos, None, idx)])
+            mi = w.mesh(f'{cls}_{cell[0]}_{cell[1]}', [(None, pos, None, idx, None)])
             kids.append(w.node(f'{cls}_{cell[0]}_{cell[1]}', mi, translate(c)))
         groups.append(w.node(cls, children=kids))
     w.node(name + '_collision', children=groups, root=True)

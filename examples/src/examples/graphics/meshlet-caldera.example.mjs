@@ -13,6 +13,8 @@ import {
     AppOptions,
     Asset,
     BLEND_NORMAL,
+    basisInitialize,
+    Picker,
     ByteCache,
     CameraComponentSystem,
     CameraFrame,
@@ -30,6 +32,7 @@ import {
     SHADERPASS_WORLDNORMAL,
     ScriptComponentSystem,
     StandardMaterial,
+    TextureHandler,
     TouchDevice,
     Vec3,
     createGraphicsDevice
@@ -41,7 +44,15 @@ import { data, deviceType } from 'examples/context';
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
-const BASE = './assets/meshlets/caldera/';
+// KTX2 textures in the bake are Basis-compressed, so the Basis transcoder must be ready before load
+basisInitialize({
+    glueUrl: './assets/wasm/basis/basis.wasm.js',
+    wasmUrl: './assets/wasm/basis/basis.wasm.wasm',
+    fallbackUrl: './assets/wasm/basis/basis.js'
+});
+
+// ?base=<dir>/ loads a different bake folder (e.g. a single-region test bake)
+const BASE = new URLSearchParams(location.search).get('base') ?? './assets/meshlets/caldera/';
 
 /**
  * @typedef {{ name: string, label: string, url: string, baked: boolean, collision?: string,
@@ -54,12 +65,12 @@ const params = new URLSearchParams(location.search);
 const only = params.get('regions')?.split(',');
 const regions = manifest.regions.filter(r => r.baked && (!only || only.includes(r.name)));
 
-// ?reverseZ=1 renders with a reversed depth buffer (near = 1, far = 0) for float precision across
+// reverse-z is on by default (?reverseZ=0 turns it off) and renders with a reversed depth buffer (near = 1, far = 0) for float precision across
 // the island's view distance; WebGPU only
 const device = await createGraphicsDevice(canvas, {
     deviceTypes: [deviceType],
     antialias: false,
-    reverseZ: params.get('reverseZ') === '1'
+    reverseZ: params.get('reverseZ') !== '0'
 });
 device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
@@ -75,7 +86,7 @@ createOptions.componentSystems = [
     ScriptComponentSystem,
     MeshletComponentSystem
 ];
-createOptions.resourceHandlers = [ContainerHandler];
+createOptions.resourceHandlers = [ContainerHandler, TextureHandler];
 
 const app = new AppBase(canvas);
 app.init(createOptions);
@@ -166,6 +177,36 @@ cameraFrame.rendering.samples = 1;
 cameraFrame.bloom.enabled = false;
 cameraFrame.update();
 app.on('destroy', () => cameraFrame.destroy());
+
+// orbit pivot: the world point under the screen centre, from the meshlet depth. It is picked once
+// when an orbit drag starts (left or middle button), not every frame: a pick costs a meshlet pick pass
+// and a GPU readback. The pick is queued from pointerdown and run from postrender, because meshlet draw
+// args are cleared at the end of each frame and a pick issued earlier finds nothing to draw.
+const PICK_SCALE = 0.5;
+const picker = new Picker(app, Math.round(device.width * PICK_SCALE), Math.round(device.height * PICK_SCALE), true);
+const pivotTarget = new Vec3();
+let pickRequested = false;
+let pickInFlight = false;
+window.addEventListener('pointerdown', (e) => {
+    // left and middle start an orbit in CameraControls; right button starts fly, which keeps its own look
+    if (e.button === 0 || e.button === 1) pickRequested = true;
+});
+app.on('destroy', () => picker.destroy());
+app.on('postrender', () => {
+    if (!pickRequested || pickInFlight) return;
+    pickRequested = false;
+    pickInFlight = true;
+    picker.prepare(camera.camera, app.scene);
+    picker.getWorldPointAsync(picker.width * 0.5, picker.height * 0.5).then((point) => {
+        // setting focusPoint re-aims the camera, so it is set once per orbit start and only when hit
+        if (point) {
+            pivotTarget.copy(point);
+            cc.focusPoint = pivotTarget;
+        }
+    }).finally(() => {
+        pickInFlight = false;
+    });
+});
 
 /**
  * @param {Region} region - Region to frame.
