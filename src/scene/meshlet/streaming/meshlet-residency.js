@@ -22,8 +22,53 @@ export const MAX_IN_FLIGHT_RUNS = 8;
  */
 const DEMAND_SLOT_RESERVE = 64;
 
+/** Multiplier packing a slot index below its last-used frame in an eviction-queue key. */
+const EVICT_SLOT_RANGE = 1 << 24;
+
 /** Consecutive settled request readbacks that make a view count as converged. */
 const SETTLED_READBACKS = 2;
+
+/**
+ * The pages one request readback wanted, as a set with O(1) clear: each page holds the id of the
+ * last readback that marked it. A Set rebuilt every readback costs more than the scan it serves.
+ *
+ * @ignore
+ */
+class WantedPages {
+    /** @type {Uint32Array} */
+    stamps;
+
+    id = 1;
+
+    /**
+     * @param {number} count - Pages in the world.
+     */
+    constructor(count) {
+        this.stamps = new Uint32Array(count);
+    }
+
+    clear() {
+        if (++this.id === 0xFFFFFFFF) {
+            this.stamps.fill(0);
+            this.id = 1;
+        }
+    }
+
+    /**
+     * @param {number} page - The page.
+     */
+    add(page) {
+        this.stamps[page] = this.id;
+    }
+
+    /**
+     * @param {number} page - The page.
+     * @returns {boolean} Whether the page was wanted.
+     */
+    has(page) {
+        return this.stamps[page] === this.id;
+    }
+}
 
 /**
  * Streaming residency for a meshlet world: reads back the GPU's per-frame page request marks
@@ -73,6 +118,29 @@ class MeshletResidency {
 
     _arrivedHead = 0;
 
+    /** @type {WantedPages|null} - pages the latest request readback wanted. @private */
+    _wanted = null;
+
+    /**
+     * Pages eviction must not touch: those the latest request readback wanted.
+     *
+     * @type {{ has: (page: number) => boolean }|undefined}
+     * @private
+     */
+    _protected = undefined;
+
+    /** @type {Float64Array|null} - eviction candidates, oldest first (see _buildEvictQueue). @private */
+    _evictQueue = null;
+
+    /** @type {number} - next unread entry of {@link _evictQueue}. @private */
+    _evictHead = 0;
+
+    /** @type {number} - valid entries in {@link _evictQueue}. @private */
+    _evictCount = 0;
+
+    /** @type {number} - frame {@link _evictQueue} was last built, or -1. @private */
+    _evictBuiltFrame = -1;
+
     /**
      * Upload budget per frame for freshly streamed pages. Arrivals are lumpy - one coalesced
      * range can carry hundreds of pages - so they install over several frames instead of
@@ -115,6 +183,12 @@ class MeshletResidency {
     _requestData = null;
 
     _residencyDirty = false;
+
+    /** @type {number} - lowest page whose residency entry changed since the last upload. @private */
+    _dirtyMin = Infinity;
+
+    /** @type {number} - highest page whose residency entry changed since the last upload. @private */
+    _dirtyMax = -1;
 
     /** @type {boolean} - demand streaming initialized (root pages may still be arriving). */
     rootsResident = false;
@@ -401,20 +475,56 @@ class MeshletResidency {
         return true;
     }
 
+    /**
+     * Collects the slots that may be evicted (resident, unpinned, not wanted by the latest
+     * request readback), oldest first, into {@link _evictQueue}. Each entry packs the slot's
+     * last-used frame above its index so a native numeric sort orders by age.
+     *
+     * @param {{ has: (page: number) => boolean }|undefined} protectedSet - Pages the GPU wanted
+     * recently.
+     * @private
+     */
+    _buildEvictQueue(protectedSet) {
+        const { slotPage, slotPinned, slotLastUsed } = this;
+        const count = slotPage.length;
+        let queue = this._evictQueue;
+        if (!queue || queue.length < count) queue = this._evictQueue = new Float64Array(count);
+        let n = 0;
+        for (let s = 0; s < count; s++) {
+            const page = slotPage[s];
+            if (page === PAGE_NOT_RESIDENT || slotPinned[s] || protectedSet?.has(page)) continue;
+            queue[n++] = slotLastUsed[s] * EVICT_SLOT_RANGE + s;
+        }
+        this._evictCount = n;
+        this._evictHead = 0;
+        this._evictBuiltFrame = this.frame;
+        // the sort needs a view of exactly the filled range
+        queue.subarray(0, n).sort();
+    }
+
     _allocSlot(protectedSet) {
         if (this.freeSlots.length) {
             return this.freeSlots.pop();
         }
-        // evict the least recently wanted non-pinned, non-protected slot
+        // Evict the least recently wanted non-pinned, non-protected slot. A queue built once is
+        // consumed over many installs (rescanning every slot per install made a full pool cost
+        // milliseconds per streamed page); entries made stale since it was built are skipped.
         let best = -1;
-        let bestUsed = Infinity;
-        for (let s = 0; s < this.slotPage.length; s++) {
-            if (this.slotPinned[s]) continue;
-            if (protectedSet?.has(this.slotPage[s])) continue;
-            if (this.slotLastUsed[s] < bestUsed) {
-                bestUsed = this.slotLastUsed[s];
+        for (let rebuilt = false; ;) {
+            while (this._evictHead < this._evictCount) {
+                const key = this._evictQueue[this._evictHead++];
+                const lastUsed = Math.floor(key / EVICT_SLOT_RANGE);
+                const s = key - lastUsed * EVICT_SLOT_RANGE;
+                const page = this.slotPage[s];
+                if (page === PAGE_NOT_RESIDENT || this.slotPinned[s] || this.slotLastUsed[s] !== lastUsed || protectedSet?.has(page)) continue;
                 best = s;
+                break;
             }
+            // at most one rebuild per frame: a pool that is entirely wanted would otherwise
+            // rescan on every failed install
+            if (best >= 0 || rebuilt || this._evictBuiltFrame === this.frame) break;
+            this._buildEvictQueue(protectedSet);
+            rebuilt = true;
         }
         if (best >= 0) {
             const page = this.slotPage[best];
@@ -423,7 +533,7 @@ class MeshletResidency {
             this.slotPage[best] = PAGE_NOT_RESIDENT;
             this.residentPages--;
             this.evictedPages++;
-            this._residencyDirty = true;
+            this._markDirty(page);
         }
         return best;
     }
@@ -448,7 +558,7 @@ class MeshletResidency {
         this.slotLastUsed[slot] = this.frame;
         this.residentPages++;
         if (!pinned) this.fetchedPages++;
-        this._residencyDirty = true;
+        this._markDirty(globalPage);
     }
 
     /**
@@ -495,10 +605,25 @@ class MeshletResidency {
         }
     }
 
+    /**
+     * @param {number} page - A page whose residency entry changed.
+     * @private
+     */
+    _markDirty(page) {
+        this._residencyDirty = true;
+        if (page < this._dirtyMin) this._dirtyMin = page;
+        if (page > this._dirtyMax) this._dirtyMax = page;
+    }
+
     _flushResidency() {
         if (this._residencyDirty) {
-            this.world.residencyBuffer.write(0, this.world.residency);
+            // only the span that changed: the table is a word per page of the whole world
+            // (~0.5 MB on Caldera), and most frames install a few dozen pages
+            const first = this._dirtyMin;
+            this.world.residencyBuffer.write(first * 4, this.world.residency, first, this._dirtyMax - first + 1);
             this._residencyDirty = false;
+            this._dirtyMin = Infinity;
+            this._dirtyMax = -1;
         }
     }
 
@@ -709,7 +834,7 @@ class MeshletResidency {
     _processRequests(marks, afterRoots = true) {
         if (this._destroyed) return;
         const world = this.world;
-        const wanted = this._protected ?? new Set();
+        const wanted = this._wanted ??= new WantedPages(world.totalPages);
         wanted.clear();
 
         // PAGE_REQUEST.USED = resident page the GPU used this frame (touch + protect),

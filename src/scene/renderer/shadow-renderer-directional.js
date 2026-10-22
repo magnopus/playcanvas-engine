@@ -4,7 +4,7 @@ import { Vec3 } from '../../core/math/vec3.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { BoundingBox } from '../../core/shape/bounding-box.js';
 import {
-    LIGHTTYPE_DIRECTIONAL, SHADOWUPDATE_NONE
+    LIGHTTYPE_DIRECTIONAL, SHADOWUPDATE_NONE, SHADOWUPDATE_REALTIME, SHADOWUPDATE_THISFRAME
 } from '../constants.js';
 import { ShadowMap } from './shadow-map.js';
 import { RenderPassShadowDirectional } from './render-pass-shadow-directional.js';
@@ -27,7 +27,18 @@ const _unionSceneAabb = new BoundingBox();
 const _cascadeAabbs = [new BoundingBox(), new BoundingBox(), new BoundingBox(), new BoundingBox()];
 const _cascadeAabbValid = [false, false, false, false];
 const _cascadeRadii = [0, 0, 0, 0];
+const _cascadeActive = [false, false, false, false];
 const center = new Vec3();
+const _lightDir = new Vec3();
+
+// Cascade reuse (Light#cascadeUpdateIntervals): a skipped cascade is refreshed early once its
+// frustum slice's bounding sphere has moved, or changed size, by more than this fraction of the
+// sphere it was fitted to. The sphere is a loose bound on the slice, so a small drift still leaves
+// the visible part of the slice inside the cached map.
+const CASCADE_REUSE_DRIFT = 0.1;
+
+// ... or once the light direction has turned further than this (cosine of ~0.25 degrees)
+const CASCADE_REUSE_LIGHT_DOT = 0.99999;
 const shadowCamView = new Mat4();
 
 const aabbPoints = [
@@ -99,7 +110,13 @@ class ShadowRendererDirectional {
         const nearDist = camera._nearClip;
         this.generateSplitDistances(light, nearDist, Math.min(camera._farClip, light.shadowDistance));
 
-        const shadowUpdateOverrides = light.shadowUpdateOverrides;
+        // a cascade update schedule owns the overrides: it decides per cascade, per frame
+        const intervals = light.cascadeUpdateIntervals;
+        let shadowUpdateOverrides = light.shadowUpdateOverrides;
+        if (intervals && (!shadowUpdateOverrides || shadowUpdateOverrides.length < light.numCascades)) {
+            shadowUpdateOverrides = light.shadowUpdateOverrides = new Array(light.numCascades).fill(SHADOWUPDATE_REALTIME);
+        }
+        _lightDir.copy(light._node.forward);
         let numActiveCascades = 0;
 
         // PASS 1: per-cascade culling + per-cascade visible-caster AABB building. Defers the depth-range
@@ -108,32 +125,10 @@ class ShadowRendererDirectional {
         // visible-caster bounds.
         for (let cascade = 0; cascade < light.numCascades; cascade++) {
 
-            // if manually controlling cascade rendering and the cascade does not render this frame
-            if (shadowUpdateOverrides?.[cascade] === SHADOWUPDATE_NONE) {
-                break;
-            }
+            _cascadeActive[cascade] = false;
+            _cascadeAabbValid[cascade] = false;
 
             const lightRenderData = light.getRenderData(camera, cascade);
-            const shadowCam = lightRenderData.shadowCamera;
-
-            // assign render target
-            // Note: this is done during rendering for all shadow maps, but do it here for the case shadow rendering for the directional light
-            // is disabled - we need shadow map to be assigned for rendering to work even in this case. This needs further refactoring - as when
-            // shadow rendering is set to SHADOWUPDATE_NONE, we should not even execute shadow map culling
-            shadowCam.renderTarget = light._shadowMap.renderTargets[0];
-
-            // viewport
-            lightRenderData.shadowViewport.copy(light.cascades[cascade]);
-            lightRenderData.shadowScissor.copy(light.cascades[cascade]);
-
-            const shadowCamNode = shadowCam._node;
-            const lightNode = light._node;
-
-            shadowCamNode.setPosition(lightNode.getPosition());
-
-            // Camera looks down the negative Z, and directional light points down the negative Y
-            shadowCamNode.setRotation(lightNode.getRotation());
-            shadowCamNode.rotateLocal(-90, 0, 0);
 
             // get camera's frustum corners for the cascade, convert them to world space and find their center
             const frustumNearDist = cascade === 0 ? nearDist : light._shadowCascadeDistances[cascade - 1];
@@ -155,6 +150,47 @@ class ShadowRendererDirectional {
                     radius = dist;
                 }
             }
+
+            if (intervals) {
+                const interval = Math.max(1, intervals[cascade] | 0);
+                if (!this._cascadeDue(lightRenderData, interval, radius)) {
+                    // keep the cached map: its shadow camera, and so its matrix, stay as fitted
+                    shadowUpdateOverrides[cascade] = SHADOWUPDATE_NONE;
+                    continue;
+                }
+                // first fit: stagger the cascades, so ones on the same interval do not all
+                // refresh on the same frame
+                lightRenderData.fitAge = lightRenderData.fitValid ? 0 : -(cascade % interval);
+                lightRenderData.fitValid = true;
+                lightRenderData.fitCenter.copy(center);
+                lightRenderData.fitRadius = radius;
+                lightRenderData.fitLightDir.copy(_lightDir);
+                shadowUpdateOverrides[cascade] = interval > 1 ? SHADOWUPDATE_THISFRAME : SHADOWUPDATE_REALTIME;
+            } else if (shadowUpdateOverrides?.[cascade] === SHADOWUPDATE_NONE) {
+                // manually controlled, and the cascade does not render this frame
+                continue;
+            }
+
+            const shadowCam = lightRenderData.shadowCamera;
+
+            // assign render target
+            // Note: this is done during rendering for all shadow maps, but do it here for the case shadow rendering for the directional light
+            // is disabled - we need shadow map to be assigned for rendering to work even in this case. This needs further refactoring - as when
+            // shadow rendering is set to SHADOWUPDATE_NONE, we should not even execute shadow map culling
+            shadowCam.renderTarget = light._shadowMap.renderTargets[0];
+
+            // viewport
+            lightRenderData.shadowViewport.copy(light.cascades[cascade]);
+            lightRenderData.shadowScissor.copy(light.cascades[cascade]);
+
+            const shadowCamNode = shadowCam._node;
+            const lightNode = light._node;
+
+            shadowCamNode.setPosition(lightNode.getPosition());
+
+            // Camera looks down the negative Z, and directional light points down the negative Y
+            shadowCamNode.setRotation(lightNode.getRotation());
+            shadowCamNode.rotateLocal(-90, 0, 0);
 
             // axis of light coordinate system
             const right = shadowCamNode.right;
@@ -212,6 +248,7 @@ class ShadowRendererDirectional {
 
             _cascadeAabbValid[cascade] = numVisibleCasters > 0;
             _cascadeRadii[cascade] = radius;
+            _cascadeActive[cascade] = true;
             numActiveCascades++;
         }
 
@@ -222,8 +259,8 @@ class ShadowRendererDirectional {
         // skip this — they don't use depthRange in the shader and benefit from per-cascade
         // tightening for depth precision.
         let useUnion = false;
-        if (light._isPcss) {
-            for (let cascade = 0; cascade < numActiveCascades; cascade++) {
+        if (light._isPcss && numActiveCascades) {
+            for (let cascade = 0; cascade < light.numCascades; cascade++) {
                 if (!_cascadeAabbValid[cascade]) continue;
                 if (!useUnion) {
                     _unionSceneAabb.copy(_cascadeAabbs[cascade]);
@@ -238,7 +275,8 @@ class ShadowRendererDirectional {
         // (cascade-stable; tightens every cascade including ones with no own casters, so that
         // cascade 0's near/far — which the shader reads via cameraParams — is always sensible).
         // Non-PCSS uses the per-cascade AABB and skips cascades with no casters (nothing to render).
-        for (let cascade = 0; cascade < numActiveCascades; cascade++) {
+        for (let cascade = 0; cascade < light.numCascades; cascade++) {
+            if (!_cascadeActive[cascade]) continue;
             let aabbSource;
             if (useUnion) {
                 aabbSource = _unionSceneAabb;
@@ -263,6 +301,27 @@ class ShadowRendererDirectional {
 
             lightRenderData.projectionCompensation = _cascadeRadii[cascade];
         }
+    }
+
+    /**
+     * Whether a cascade on an update schedule must refresh this frame: it has no fit yet, its
+     * interval is up, the view has drifted out of what it was fitted to, or the light has turned.
+     *
+     * @param {object} lightRenderData - The cascade's render data.
+     * @param {number} interval - Frames between refreshes.
+     * @param {number} radius - This frame's frustum-slice bounding sphere radius (its center is
+     * in `center`).
+     * @returns {boolean} True when the cascade refreshes.
+     * @private
+     */
+    _cascadeDue(lightRenderData, interval, radius) {
+        if (interval <= 1 || !lightRenderData.fitValid) return true;
+        if (++lightRenderData.fitAge >= interval) return true;
+        const fitRadius = lightRenderData.fitRadius;
+        const drift = CASCADE_REUSE_DRIFT * fitRadius;
+        return center.distance(lightRenderData.fitCenter) > drift ||
+            Math.abs(radius - fitRadius) > drift ||
+            _lightDir.dot(lightRenderData.fitLightDir) < CASCADE_REUSE_LIGHT_DOT;
     }
 
     // function to generate frustum split distances

@@ -93,6 +93,15 @@ class LightRenderData {
         // depth range compensation for PCSS with directional lights
         this.projectionCompensation = 0;
 
+        // Cascade reuse (see Light#cascadeUpdateIntervals), directional cascades only: what the
+        // cascade was last fitted to, so a skipped cascade can tell when the view has outgrown
+        // it. fitAge counts frames since that fit; it starts negative to stagger cascades.
+        this.fitValid = false;
+        this.fitAge = 0;
+        this.fitCenter = new Vec3();
+        this.fitRadius = 0;
+        this.fitLightDir = new Vec3();
+
         // face index, value is based on light type:
         // - spot: always 0
         // - omni: cubemap face, 0..5
@@ -269,6 +278,19 @@ class Light {
         this._normalOffsetBias = 0.0;
         this.shadowUpdateMode = SHADOWUPDATE_REALTIME;
         this.shadowUpdateOverrides = null;
+
+        /**
+         * Frames between refreshes of each directional shadow cascade, or null to refresh every
+         * cascade every frame. A cascade that is not refreshed keeps its last shadow map and the
+         * matrix that goes with it, and costs no culling or rendering: far cascades cover the most
+         * geometry and change the least, so they can wait several frames. A cascade is refreshed
+         * early when the camera has moved or turned far enough that the view has left what the
+         * cascade was fitted to, or when the light has turned. While set, this manages
+         * {@link Light#shadowUpdateOverrides}.
+         *
+         * @type {number[]|null}
+         */
+        this.cascadeUpdateIntervals = null;
         this._isVsm = false;
         this._isPcf = true;
         this._isPcss = false;
@@ -899,6 +921,9 @@ class Light {
 
         if (this.shadowUpdateOverrides) {
             clone.shadowUpdateOverrides = this.shadowUpdateOverrides.slice();
+        }
+        if (this.cascadeUpdateIntervals) {
+            clone.cascadeUpdateIntervals = this.cascadeUpdateIntervals.slice();
         }
 
         // Spot properties
