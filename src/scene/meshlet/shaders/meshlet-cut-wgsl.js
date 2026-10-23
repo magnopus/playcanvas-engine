@@ -79,7 +79,18 @@ const cutShader = entry => /* wgsl */ `
             let ortho = cullParams[${CULL_PARAMS.STREAMING}u].y;
             let distanceToGroup = max(distance(center, cullParams[${CULL_PARAMS.CAMERA}u].xyz) - radius, 1e-5);
             let scale = select(cullParams[${CULL_PARAMS.CAMERA}u].w / distanceToGroup, ortho, ortho > 0.0);
-            if (group.clusterError * object.maxScale * scale <= cullParams[${CULL_PARAMS.LOD}u].x) { return; }
+            let worldError = group.clusterError * object.maxScale;
+            var refine = worldError * scale > cullParams[${CULL_PARAMS.LOD}u].x;
+            // Shadow views also refine as far as the viewing camera does. A far cascade's texel
+            // spans metres, and a caster simplified to a few of them stands proud of the surface
+            // the camera draws - which then shadows itself in broad blotches no bias covers.
+            let cameraLod = cullParams[${CULL_PARAMS.VIEW_DIR}u].w;
+            if (!refine && cameraLod > 0.0) {
+                let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
+                let cameraDistance = max(distance(center, priority.xyz) - radius, 1e-5);
+                refine = worldError * priority.w / cameraDistance > cameraLod;
+            }
+            if (!refine) { return; }
             // An off-frustum group still refines by distance, otherwise an on-screen
             // replacement depending on it (a DAG group straddling the screen edge) stays
             // coarse up close. Its finer members are never drawn - compaction skips children

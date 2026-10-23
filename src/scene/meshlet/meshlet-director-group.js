@@ -173,6 +173,7 @@ class MeshletDirectorGroup {
         shadowThresholdScale: 4,
         rootMinPixels: 3,
         shadowRootMinPixels: 2,
+        shadowMatchCameraLod: true,
         fastLoad: true,
         forceSubmitBoundaries: false,
         transcode: /** @type {MeshletTranscodeFn|null} */ (null)
@@ -241,6 +242,7 @@ class MeshletDirectorGroup {
         director.shadowThresholdScale = s.shadowThresholdScale;
         director.rootMinPixels = s.rootMinPixels;
         director.shadowRootMinPixels = s.shadowRootMinPixels;
+        director.shadowMatchCameraLod = s.shadowMatchCameraLod;
         director.fastLoad = s.fastLoad;
         director.forceSubmitBoundaries = s.forceSubmitBoundaries;
         director.transcode = s.transcode;
@@ -326,6 +328,15 @@ class MeshletDirectorGroup {
 
     get shadowRootMinPixels() {
         return this._settings.shadowRootMinPixels;
+    }
+
+    /** @type {boolean} */
+    set shadowMatchCameraLod(value) {
+        this._set('shadowMatchCameraLod', value);
+    }
+
+    get shadowMatchCameraLod() {
+        return this._settings.shadowMatchCameraLod;
     }
 
     /** @type {boolean} */

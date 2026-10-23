@@ -117,6 +117,9 @@ class ShadowRendererDirectional {
             shadowUpdateOverrides = light.shadowUpdateOverrides = new Array(light.numCascades).fill(SHADOWUPDATE_REALTIME);
         }
         _lightDir.copy(light._node.forward);
+        // the schedule's clock: cascade c on interval n refreshes when (frame + c) % n == 0, so
+        // cascades sharing an interval take turns instead of landing on the same frame
+        const scheduleFrame = intervals ? light._cascadeScheduleFrame++ : 0;
         let numActiveCascades = 0;
 
         // PASS 1: per-cascade culling + per-cascade visible-caster AABB building. Defers the depth-range
@@ -153,14 +156,11 @@ class ShadowRendererDirectional {
 
             if (intervals) {
                 const interval = Math.max(1, intervals[cascade] | 0);
-                if (!this._cascadeDue(lightRenderData, interval, radius)) {
+                if (!this._cascadeDue(lightRenderData, interval, (scheduleFrame + cascade) % interval === 0, radius)) {
                     // keep the cached map: its shadow camera, and so its matrix, stay as fitted
                     shadowUpdateOverrides[cascade] = SHADOWUPDATE_NONE;
                     continue;
                 }
-                // first fit: stagger the cascades, so ones on the same interval do not all
-                // refresh on the same frame
-                lightRenderData.fitAge = lightRenderData.fitValid ? 0 : -(cascade % interval);
                 lightRenderData.fitValid = true;
                 lightRenderData.fitCenter.copy(center);
                 lightRenderData.fitRadius = radius;
@@ -304,19 +304,19 @@ class ShadowRendererDirectional {
     }
 
     /**
-     * Whether a cascade on an update schedule must refresh this frame: it has no fit yet, its
-     * interval is up, the view has drifted out of what it was fitted to, or the light has turned.
+     * Whether a cascade on an update schedule must refresh this frame: it has no fit yet, it is
+     * its turn, the view has drifted out of what it was fitted to, or the light has turned.
      *
      * @param {object} lightRenderData - The cascade's render data.
      * @param {number} interval - Frames between refreshes.
+     * @param {boolean} scheduled - This frame is the cascade's turn.
      * @param {number} radius - This frame's frustum-slice bounding sphere radius (its center is
      * in `center`).
      * @returns {boolean} True when the cascade refreshes.
      * @private
      */
-    _cascadeDue(lightRenderData, interval, radius) {
-        if (interval <= 1 || !lightRenderData.fitValid) return true;
-        if (++lightRenderData.fitAge >= interval) return true;
+    _cascadeDue(lightRenderData, interval, scheduled, radius) {
+        if (interval <= 1 || scheduled || !lightRenderData.fitValid) return true;
         const fitRadius = lightRenderData.fitRadius;
         const drift = CASCADE_REUSE_DRIFT * fitRadius;
         return center.distance(lightRenderData.fitCenter) > drift ||

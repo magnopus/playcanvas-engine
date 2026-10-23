@@ -48,7 +48,13 @@ fn fadeShadow(shadowCoord_in: vec3f, shadowCascadeDistances: vec4f) -> vec3f {
     var shadowCoord: vec3f = shadowCoord_in;
     let depth: f32 = 1.0 / pcPosition.w;
     if (depth > shadowCascadeDistances.w) {
-        shadowCoord.z = -9999999.0;
+        // a receiver depth that passes every comparison: nearest to the light in the buffer's
+        // convention, which reverse-z flips
+        #ifdef REVERSE_Z
+            shadowCoord.z = 9999999.0;
+        #else
+            shadowCoord.z = -9999999.0;
+        #endif
     }
 
     return shadowCoord;

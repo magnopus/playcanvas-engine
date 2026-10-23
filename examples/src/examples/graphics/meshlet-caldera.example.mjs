@@ -155,16 +155,22 @@ light.setEulerAngles(50, 35, 0);
 app.root.addChild(light);
 
 // ?shadows=1: the sun casts four cascaded shadows over the whole island, meshlets included.
-// ?cascadeIntervals=1,1,2,4 (the default) refreshes the far cascades every second and fourth
-// frame; 1,1,1,1 refreshes every cascade every frame
+// ?cascadeIntervals=1,1,2,2 (the default) refreshes the two far cascades on alternate frames,
+// which keeps frame times even; 1,1,2,4 is cheaper on average but lumpier; 1,1,1,1 refreshes
+// every cascade every frame
 if (params.get('shadows') === '1') {
     app.systems.meshlet.shadows = true;
     light.light.castShadows = true;
     light.light.numCascades = 4;
     light.light.shadowResolution = 2048;
     light.light.shadowDistance = 1500;
-    const intervals = (params.get('cascadeIntervals') ?? '1,1,2,4').split(',').map(Number);
+    const intervals = (params.get('cascadeIntervals') ?? '1,1,2,2').split(',').map(Number);
     light.light.cascadeUpdateIntervals = intervals.some(v => v > 1) ? intervals : null;
+    // ?shadowLod=<multiplier on the LOD error threshold for casters> (4) and
+    // ?shadowRootMin=<screen px below which an instance casts no meshlet shadow> (2)
+    const group = app.systems.meshlet.group;
+    if (group && params.get('shadowLod')) group.shadowThresholdScale = Number(params.get('shadowLod'));
+    if (group && params.get('shadowRootMin')) group.shadowRootMinPixels = Number(params.get('shadowRootMin'));
 }
 
 app.scene.ambientLight = new Color(0.32, 0.36, 0.42);

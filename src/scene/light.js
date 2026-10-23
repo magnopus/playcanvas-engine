@@ -94,10 +94,8 @@ class LightRenderData {
         this.projectionCompensation = 0;
 
         // Cascade reuse (see Light#cascadeUpdateIntervals), directional cascades only: what the
-        // cascade was last fitted to, so a skipped cascade can tell when the view has outgrown
-        // it. fitAge counts frames since that fit; it starts negative to stagger cascades.
+        // cascade was last fitted to, so a skipped cascade can tell when the view has outgrown it
         this.fitValid = false;
-        this.fitAge = 0;
         this.fitCenter = new Vec3();
         this.fitRadius = 0;
         this.fitLightDir = new Vec3();
@@ -291,6 +289,9 @@ class Light {
          * @type {number[]|null}
          */
         this.cascadeUpdateIntervals = null;
+
+        // frames counted by the cascade update schedule (see ShadowRendererDirectional#cull)
+        this._cascadeScheduleFrame = 0;
         this._isVsm = false;
         this._isPcf = true;
         this._isPcss = false;

@@ -167,6 +167,18 @@ class MeshletDirector {
     rootMinPixels = 3;
 
     /**
+     * Shadow casters refine at least as far as the camera's own cut does. The shadow cut is
+     * otherwise measured in shadow-map texels, and a far cascade's texel spans metres: terrain
+     * simplified to a few of them stands that far proud of the surface the camera draws and
+     * shadows it in broad blotches that no depth bias covers. Matching the camera's cut keeps
+     * each caster's error under a pixel or so of what is on screen. Set false to use the texel
+     * test alone (cheaper, coarser).
+     *
+     * @type {boolean}
+     */
+    shadowMatchCameraLod = true;
+
+    /**
      * Projected size on screen, in pixels, below which an instance casts no meshlet shadow. A
      * cascade reaching far from the camera covers most of the world, and every instance it
      * admits costs at least its root - so without this cut the far cascades' root floor alone

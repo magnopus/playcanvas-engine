@@ -105,6 +105,16 @@ class MeshletCuller {
      */
     orthoScale = 0;
 
+    /**
+     * A second LOD test for shadow views, in pixels of the viewing camera (its position and
+     * projection are {@link priorityOrigin} and {@link priorityProjScale}), or 0 for none. A group
+     * refines when either its shadow-map texel error or its error as the camera sees it is over
+     * threshold, so a caster is never coarser than the surface the camera draws for it.
+     *
+     * @type {number}
+     */
+    cameraLodThreshold = 0;
+
     /** @type {number} - CULL_FLAG_* bits (CULL_FLAG_NO_TEXEL_RATE for orthographic views). */
     cullFlags = 0;
 
@@ -133,6 +143,14 @@ class MeshletCuller {
      * @type {boolean}
      */
     forceSubmitBoundaries = false;
+
+    /**
+     * Appended to this culler's GPU pass names, so views sharing the chain (shadow faces)
+     * profile apart.
+     *
+     * @type {string}
+     */
+    passSuffix = '';
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
@@ -448,6 +466,7 @@ class MeshletCuller {
         params[row(CULL_PARAMS.VIEW_DIR) + 0] = this.viewDir?.x ?? 0;
         params[row(CULL_PARAMS.VIEW_DIR) + 1] = this.viewDir?.y ?? 0;
         params[row(CULL_PARAMS.VIEW_DIR) + 2] = this.viewDir?.z ?? 1;
+        params[row(CULL_PARAMS.VIEW_DIR) + 3] = this.priorityOrigin ? this.cameraLodThreshold : 0;
         // root admission: projected size from the priority origin, ranked into log bands
         const origin = this.priorityOrigin ?? cameraPos;
         params[row(CULL_PARAMS.ROOT_PRIORITY) + 0] = origin.x;
@@ -546,32 +565,32 @@ class MeshletCuller {
         this.indexWrite.setupIndirectDispatch(this._dispatchSlotWrite);
 
         if (this.forceSubmitBoundaries) {
-            device.computeDispatch([this.cellCull, this.cellArgs, this.cellThreadArgs], 'MeshletCellCull');
+            device.computeDispatch([this.cellCull, this.cellArgs, this.cellThreadArgs], `MeshletCellCull${this.passSuffix}`);
             device.submit();
-            device.computeDispatch([this.cellExpand, this.stageArgs, this.rootClassify, this.rootArgs, this.rootBandArgs], 'MeshletRootClassify');
+            device.computeDispatch([this.cellExpand, this.stageArgs, this.rootClassify, this.rootArgs, this.rootBandArgs], `MeshletRootClassify${this.passSuffix}`);
             device.submit();
-            device.computeDispatch([this.rootScatter, ...this.rootAdmit], 'MeshletRootAdmit');
+            device.computeDispatch([this.rootScatter, ...this.rootAdmit], `MeshletRootAdmit${this.passSuffix}`);
         } else {
-            device.computeDispatch([this.cellCull, this.cellArgs, this.cellThreadArgs, this.cellExpand, this.stageArgs], 'MeshletCellCull');
+            device.computeDispatch([this.cellCull, this.cellArgs, this.cellThreadArgs, this.cellExpand, this.stageArgs], `MeshletCellCull${this.passSuffix}`);
             device.computeDispatch([
                 this.rootClassify, this.rootArgs, this.rootBandArgs, this.rootScatter, ...this.rootAdmit
-            ], 'MeshletRootAdmit');
+            ], `MeshletRootAdmit${this.passSuffix}`);
         }
-        if (this.cutStages.length) device.computeDispatch(this.cutStages, 'MeshletResidentCut');
+        if (this.cutStages.length) device.computeDispatch(this.cutStages, `MeshletResidentCut${this.passSuffix}`);
 
         if (this.forceSubmitBoundaries) {
-            device.computeDispatch([this.instanceCull, this.dispatchArgs], 'MeshletCompacta');
+            device.computeDispatch([this.instanceCull, this.dispatchArgs], `MeshletCompacta${this.passSuffix}`);
             device.submit();
-            device.computeDispatch([this.compactMeshlets, this.selectedArgs], 'MeshletCompactb');
+            device.computeDispatch([this.compactMeshlets, this.selectedArgs], `MeshletCompactb${this.passSuffix}`);
             device.submit();
-            device.computeDispatch([this.meshletCull, this.finalizeArgs], 'MeshletCullPhase1b');
+            device.computeDispatch([this.meshletCull, this.finalizeArgs], `MeshletCullPhase1b${this.passSuffix}`);
             device.submit();
-            device.computeDispatch([this.indexWrite], 'MeshletCullPhase1c');
+            device.computeDispatch([this.indexWrite], `MeshletCullPhase1c${this.passSuffix}`);
         } else {
-            device.computeDispatch([this.instanceCull, this.dispatchArgs, this.compactMeshlets, this.selectedArgs], 'MeshletCompact');
-            device.computeDispatch([
-                this.meshletCull, this.finalizeArgs, this.indexWrite
-            ], 'MeshletCullPhase1');
+            device.computeDispatch([this.instanceCull, this.dispatchArgs, this.compactMeshlets, this.selectedArgs], `MeshletCompact${this.passSuffix}`);
+            device.computeDispatch([this.meshletCull, this.finalizeArgs], `MeshletCullPhase1${this.passSuffix}`);
+            // its own pass so the profiler separates triangle emission from the cluster cull
+            device.computeDispatch([this.indexWrite], `MeshletIndexWrite${this.passSuffix}`);
         }
 
         for (let i = 0; i < view.meshInstances.length; i++) {
@@ -601,13 +620,13 @@ class MeshletCuller {
         this.indexWritePhase2.setupIndirectDispatch(this._dispatchSlotWrite);
 
         if (this.forceSubmitBoundaries) {
-            device.computeDispatch([this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2], 'MeshletCullPhase2a');
+            device.computeDispatch([this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2], `MeshletCullPhase2a${this.passSuffix}`);
             device.submit();
-            device.computeDispatch([this.indexWritePhase2], 'MeshletCullPhase2b');
+            device.computeDispatch([this.indexWritePhase2], `MeshletCullPhase2b${this.passSuffix}`);
         } else {
             device.computeDispatch([
                 this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2, this.indexWritePhase2
-            ], 'MeshletCullPhase2');
+            ], `MeshletCullPhase2${this.passSuffix}`);
         }
     }
 }

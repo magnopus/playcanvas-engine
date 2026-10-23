@@ -411,6 +411,10 @@ class MeshletShadowRenderer {
             culler.priorityOrigin = director.priorityOrigin;
             culler.priorityProjScale = director.priorityProjScale;
         }
+        // casters refine at least as far as the camera's own cut, so they match the receivers
+        // the camera draws (backed off by the shadow pressure when the shadow budget is tight)
+        culler.cameraLodThreshold = director.shadowMatchCameraLod ?
+            director.dagPixelThreshold * director.budget.pressureScale * director.shadowPressureScale : 0;
         // the faces share one claim buffer, so its persistent admission bits would mix
         culler.hysteresis = !this._claimBits;
 

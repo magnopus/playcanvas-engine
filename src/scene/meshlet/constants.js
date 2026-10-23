@@ -107,7 +107,7 @@ export const WORK_ITEM_U32S = 2;
  * the cull shaders read. PLANES are the six world frustum planes (xyz normal, w distance);
  * CAMERA = (position.xyz, projScale); LOD = (dagPixelThreshold, hzbWidth, hzbHeight,
  * hzbMipCount); VIEW_PROJ = four matrix columns; STREAMING = (texelRateMarkBase, orthoScale,
- * cullFlags, -); VIEW_DIR = (direction.xyz, -). Scalars that the shader reads as integers are
+ * cullFlags, -); VIEW_DIR = (direction.xyz, camera LOD threshold or 0). Scalars that the shader reads as integers are
  * float-encoded and converted with u32().
  *
  * @ignore

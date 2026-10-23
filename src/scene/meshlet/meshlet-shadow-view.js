@@ -72,6 +72,7 @@ class MeshletShadowView extends MeshletView {
         this.light = light;
         this.face = face;
         this.sceneCamera = sceneCamera;
+        this.culler.passSuffix = `Shadow${face}`;
 
         // Route each caster to exactly one face. The shadow camera object is resolved lazily
         // rather than captured: getRenderData is idempotent but the render data does not exist
