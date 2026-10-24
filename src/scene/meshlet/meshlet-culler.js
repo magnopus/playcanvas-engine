@@ -115,6 +115,18 @@ class MeshletCuller {
      */
     cameraLodThreshold = 0;
 
+    /**
+     * Extra cull planes tested after the frustum's (xyz normal, w distance; inside when
+     * `dot(n, p) + w >= -radius`), {@link casterPlaneCount} of them. A shadow face fills these
+     * with its caster volume.
+     *
+     * @type {Float32Array}
+     */
+    casterPlanes = new Float32Array(CULL_PARAMS.MAX_CASTER_PLANES * 4);
+
+    /** @type {number} - planes in use in {@link casterPlanes}. */
+    casterPlaneCount = 0;
+
     /** @type {number} - CULL_FLAG_* bits (CULL_FLAG_NO_TEXEL_RATE for orthographic views). */
     cullFlags = 0;
 
@@ -463,6 +475,8 @@ class MeshletCuller {
         params[row(CULL_PARAMS.STREAMING) + 0] = world.totalPages;
         params[row(CULL_PARAMS.STREAMING) + 1] = this.orthoScale;
         params[row(CULL_PARAMS.STREAMING) + 2] = this.cullFlags | (this.hzbLinear ? CULL_FLAG_HZB_LINEAR : 0);
+        params[row(CULL_PARAMS.STREAMING) + 3] = this.casterPlaneCount;
+        params.set(this.casterPlanes, row(CULL_PARAMS.CASTER_PLANES));
         params[row(CULL_PARAMS.VIEW_DIR) + 0] = this.viewDir?.x ?? 0;
         params[row(CULL_PARAMS.VIEW_DIR) + 1] = this.viewDir?.y ?? 0;
         params[row(CULL_PARAMS.VIEW_DIR) + 2] = this.viewDir?.z ?? 1;

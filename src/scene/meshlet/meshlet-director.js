@@ -46,6 +46,14 @@ const SHARE_FLOOR_FRACTION = 0.25;
 // budget manager's indexEasedAt, so a camera that is given its full want never reads as tight.
 const CAMERA_SHARE_OCCUPANCY = 0.5;
 
+// Shadow LOD controller (see MeshletDirector#_updateShadowPressure): the per-frame step is the
+// demand ratio's distance outside the hold band raised to this power, and limited to these
+// bounds - about x2 a second up and x0.6 a second down at 60 fps, against x18 and x0.74 for the
+// camera's controller.
+const SHADOW_PRESSURE_GAIN = 0.1;
+const SHADOW_PRESSURE_MAX_RAISE = 1.012;
+const SHADOW_PRESSURE_MAX_DECAY = 0.992;
+
 const BYTES_PER_MB = 1024 * 1024;
 
 // Every culled view (camera or shadow face) takes MESHLET_ROOT_BANDS + 5 indirect dispatch slots
@@ -1094,11 +1102,17 @@ class MeshletDirector {
      */
     _updateShadowPressure(ratio) {
         const budget = this.budget;
+        // Proportional and rate-limited, unlike the camera's: the scale moves every shadow
+        // caster's cut at once, and a fast ramp (x1.05 a frame) overshot by tens of times on
+        // demand that lags the change by a readback or two, then decayed back over seconds - a
+        // whole-island shadow LOD sawtooth that showed as popping and lurching frame times.
+        let step = 1;
         if (ratio > budget.indexStarvedAt) {
-            this.shadowPressureScale = Math.min(this.shadowPressureScale * budget.raiseFast, budget.maxScale);
+            step = Math.min((ratio / budget.indexStarvedAt) ** SHADOW_PRESSURE_GAIN, SHADOW_PRESSURE_MAX_RAISE);
         } else if (ratio < budget.indexEasedAt) {
-            this.shadowPressureScale = Math.max(this.shadowPressureScale * budget.decay, 1);
+            step = Math.max((ratio / budget.indexEasedAt) ** SHADOW_PRESSURE_GAIN, SHADOW_PRESSURE_MAX_DECAY);
         }
+        this.shadowPressureScale = Math.min(Math.max(this.shadowPressureScale * step, 1), budget.maxScale);
     }
 
     /**

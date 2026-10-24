@@ -7,7 +7,7 @@ import { Frustum } from '../../core/shape/frustum.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { math } from '../../core/math/math.js';
 import { Vec3 } from '../../core/math/vec3.js';
-import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, WORK_ITEM_U32S, claimWordCount } from './constants.js';
+import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, WORK_ITEM_U32S, claimWordCount } from './constants.js';
 import { MeshletShadowView } from './meshlet-shadow-view.js';
 
 /**
@@ -34,6 +34,54 @@ const _viewDir = new Vec3();
 const _center = new Vec3();
 const _tmp = new Vec3();
 const _casterBox = new BoundingBox();
+
+// caster volume scratch (see _setCasterVolume)
+const _sliceCorners = Array.from({ length: 8 }, () => new Vec3());
+const _lightDir = new Vec3();
+const _axisU = new Vec3();
+const _axisV = new Vec3();
+const _polyA = [];
+const _polyB = [];
+const _hullPoints = [];
+const _hullOrder = [];
+const _hull = [];
+
+// the six faces of a frustum slice, as corner indices of Camera#getFrustumCorners (near 0-3,
+// far 4-7, each in the same winding)
+const SLICE_FACES = [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+
+// PCF filter reach plus a little, in shadow-map texels: receivers this close outside the slice's
+// outline still sample casters inside it
+const CASTER_VOLUME_TEXELS = 4;
+
+// matches the drift a reused cascade tolerates before it refreshes (CASCADE_REUSE_DRIFT in
+// shadow-renderer-directional.js), as a fraction of the slice's bounding-sphere radius
+const CASCADE_REUSE_DRIFT = 0.1;
+
+/**
+ * Clips a convex polygon (flat xyz triplets) to one side of an axis-aligned plane.
+ *
+ * @param {number[]} src - Input polygon.
+ * @param {number[]} dst - Output polygon, overwritten.
+ * @param {number} axis - 0, 1 or 2.
+ * @param {number} value - The plane's coordinate on that axis.
+ * @param {number} sign - 1 keeps the side below the plane, -1 the side above it.
+ */
+const clipPolygon = (src, dst, axis, value, sign) => {
+    dst.length = 0;
+    const n = src.length / 3;
+    for (let i = 0; i < n; i++) {
+        const a = i * 3;
+        const b = ((i + 1) % n) * 3;
+        const da = sign * (src[a + axis] - value);
+        const db = sign * (src[b + axis] - value);
+        if (da <= 0) dst.push(src[a], src[a + 1], src[a + 2]);
+        if ((da <= 0) !== (db <= 0)) {
+            const t = da / (da - db);
+            dst.push(src[a] + (src[b] - src[a]) * t, src[a + 1] + (src[b + 1] - src[a + 1]) * t, src[a + 2] + (src[b + 2] - src[a + 2]) * t);
+        }
+    }
+};
 
 /**
  * @typedef {object} ShadowLightEntry
@@ -118,6 +166,17 @@ class MeshletShadowRenderer {
      * @private
      */
     _workItems = null;
+
+    /**
+     * Cull each directional cascade's casters against its caster volume: the part of the
+     * camera's view slice the cascade shades (clipped to the world), extruded towards the light.
+     * A caster outside it cannot shadow anything that cascade is sampled for. Without it a
+     * cascade culls against its whole light-space box, which encloses the slice's bounding
+     * sphere - including ground behind and beside the camera, and the sky above the world.
+     *
+     * @type {boolean}
+     */
+    tightCasterVolume = true;
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
@@ -418,11 +477,146 @@ class MeshletShadowRenderer {
         // the faces share one claim buffer, so its persistent admission bits would mix
         culler.hysteresis = !this._claimBits;
 
+        this._setCasterVolume(entry, view, projection.orthoScale, culler);
+
         view.applyPendingGrowth();
         view.syncMaterials();
         view.monitorIndexDemand();
 
         culler.beginFrame(_planes, node.getPosition(), projection.projScale, _viewProj.data, null);
+    }
+
+    /**
+     * Fills the culler's caster planes with a directional cascade's caster volume, or clears them
+     * (local lights, no camera, or a volume too complex to express - the light-space box alone
+     * then culls). The volume is the convex hull of the cascade's view slice, clipped to the
+     * world bounds, projected along the light: one plane per hull edge, parallel to the light,
+     * plus one rejecting casters beyond the slice's farthest point along the light. It is grown
+     * by the shadow filter's reach, the receivers' normal offset and, for a reused cascade, the
+     * drift it tolerates before it refreshes.
+     *
+     * @param {ShadowLightEntry} entry - The light entry.
+     * @param {MeshletShadowView} view - The cascade view.
+     * @param {number} orthoScale - Shadow-map texels per world unit.
+     * @param {import('./meshlet-culler.js').MeshletCuller} culler - The face's culler.
+     * @private
+     */
+    _setCasterVolume(entry, view, orthoScale, culler) {
+        culler.casterPlaneCount = 0;
+        const { light, camera } = entry;
+        if (!this.tightCasterVolume || light._type !== LIGHTTYPE_DIRECTIONAL || !camera || !(orthoScale > 0)) return;
+
+        const cascade = view.face;
+        const dists = light._shadowCascadeDistances;
+        const far = dists?.[cascade] ?? 0;
+        // a pixel in the blend band before this cascade's start may already sample it
+        const near = cascade === 0 ? camera._nearClip : (dists?.[cascade - 1] ?? 0) * (1 - light.cascadeBlend);
+        if (!(far > near)) return;
+
+        const pts = camera.getFrustumCorners(near, far);
+        const camWorld = camera.node.getWorldTransform();
+        _center.set(0, 0, 0);
+        for (let i = 0; i < 8; i++) {
+            camWorld.transformPoint(pts[i], _sliceCorners[i]);
+            _center.add(_sliceCorners[i]);
+        }
+        _center.mulScalar(1 / 8);
+        let radius = 0;
+        for (let i = 0; i < 8; i++) radius = Math.max(radius, _tmp.sub2(_sliceCorners[i], _center).length());
+
+        // light-space axes: the light's travel direction and two perpendiculars
+        _lightDir.copy(view.shadowCamera._node.forward).normalize();
+        _axisU.cross(Math.abs(_lightDir.y) < 0.99 ? Vec3.UP : Vec3.RIGHT, _lightDir).normalize();
+        _axisV.cross(_lightDir, _axisU);
+
+        // clip every face of the slice to the world, and project what is left
+        const world = this.director.world.worldBounds;
+        const wmin = world.getMin();
+        const wmax = world.getMax();
+        _hullPoints.length = 0;
+        let maxDepth = -Infinity;
+        for (const face of SLICE_FACES) {
+            let src = _polyA;
+            let dst = _polyB;
+            src.length = 0;
+            for (const index of face) {
+                const p = _sliceCorners[index];
+                src.push(p.x, p.y, p.z);
+            }
+            for (let axis = 0; axis < 3 && src.length; axis++) {
+                const lo = axis === 0 ? wmin.x : axis === 1 ? wmin.y : wmin.z;
+                const hi = axis === 0 ? wmax.x : axis === 1 ? wmax.y : wmax.z;
+                clipPolygon(src, dst, axis, hi, 1);
+                [src, dst] = [dst, src];
+                clipPolygon(src, dst, axis, lo, -1);
+                [src, dst] = [dst, src];
+            }
+            for (let i = 0; i < src.length; i += 3) {
+                const x = src[i], y = src[i + 1], z = src[i + 2];
+                _hullPoints.push(
+                    _axisU.x * x + _axisU.y * y + _axisU.z * z,
+                    _axisV.x * x + _axisV.y * y + _axisV.z * z
+                );
+                maxDepth = Math.max(maxDepth, _lightDir.x * x + _lightDir.y * y + _lightDir.z * z);
+            }
+        }
+
+        const planes = culler.casterPlanes;
+        if (_hullPoints.length < 6) {
+            // the slice lies outside the world: nothing it shades exists, so nothing casts
+            planes.fill(0, 0, 4);
+            planes[3] = -1e30;
+            culler.casterPlaneCount = 1;
+            return;
+        }
+
+        // convex hull of the projected points (Andrew's monotone chain, counter-clockwise)
+        const count = _hullPoints.length / 2;
+        _hullOrder.length = count;
+        for (let i = 0; i < count; i++) _hullOrder[i] = i;
+        _hullOrder.sort((a, b) => (_hullPoints[a * 2] - _hullPoints[b * 2]) || (_hullPoints[a * 2 + 1] - _hullPoints[b * 2 + 1]));
+        const cross = (o, a, b) => (_hullPoints[a * 2] - _hullPoints[o * 2]) * (_hullPoints[b * 2 + 1] - _hullPoints[o * 2 + 1]) -
+            (_hullPoints[a * 2 + 1] - _hullPoints[o * 2 + 1]) * (_hullPoints[b * 2] - _hullPoints[o * 2]);
+        _hull.length = 0;
+        for (let pass = 0; pass < 2; pass++) {
+            const start = _hull.length;
+            for (let k = 0; k < count; k++) {
+                const i = _hullOrder[pass === 0 ? k : count - 1 - k];
+                while (_hull.length >= start + 2 && cross(_hull[_hull.length - 2], _hull[_hull.length - 1], i) <= 0) _hull.pop();
+                _hull.push(i);
+            }
+            _hull.pop();
+        }
+        const edges = _hull.length;
+        if (edges < 3 || edges + 1 > CULL_PARAMS.MAX_CASTER_PLANES) return;
+
+        let margin = CASTER_VOLUME_TEXELS / orthoScale + Math.max(light._normalOffsetBias, 0);
+        if ((light.cascadeUpdateIntervals?.[cascade] ?? 1) > 1) margin += CASCADE_REUSE_DRIFT * radius;
+
+        for (let e = 0; e < edges; e++) {
+            const a = _hull[e];
+            const b = _hull[(e + 1) % edges];
+            const ax = _hullPoints[a * 2], ay = _hullPoints[a * 2 + 1];
+            // inward (left) normal of a counter-clockwise edge
+            let nx = -(_hullPoints[b * 2 + 1] - ay);
+            let ny = _hullPoints[b * 2] - ax;
+            const len = Math.hypot(nx, ny);
+            if (!(len > 0)) return;
+            nx /= len;
+            ny /= len;
+            const o = e * 4;
+            planes[o] = nx * _axisU.x + ny * _axisV.x;
+            planes[o + 1] = nx * _axisU.y + ny * _axisV.y;
+            planes[o + 2] = nx * _axisU.z + ny * _axisV.z;
+            planes[o + 3] = -(nx * ax + ny * ay) + margin;
+        }
+        // casters beyond every receiver along the light shadow nothing in the slice
+        const o = edges * 4;
+        planes[o] = -_lightDir.x;
+        planes[o + 1] = -_lightDir.y;
+        planes[o + 2] = -_lightDir.z;
+        planes[o + 3] = maxDepth + margin;
+        culler.casterPlaneCount = edges + 1;
     }
 
     /**

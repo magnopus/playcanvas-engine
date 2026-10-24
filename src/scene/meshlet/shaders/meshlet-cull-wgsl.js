@@ -38,7 +38,29 @@ import {
  * bounding sphere touches the frustum to the view's visible-cell list, which the per-instance
  * and per-task passes then dispatch over - one workgroup per visible cell.
  */
+/**
+ * The cull volume test every pass shares: the view's frustum planes, then any extra planes the
+ * view adds (a shadow face's caster volume, see MeshletShadowRenderer). Reads `cullParams`.
+ *
+ * @ignore
+ */
+export const meshletCullVolumeWGSL = /* wgsl */ `
+    fn meshletInCullVolume(center: vec3f, radius: f32) -> bool {
+        for (var p = 0u; p < ${CULL_PARAMS.PLANE_COUNT}u; p++) {
+            let plane = cullParams[${CULL_PARAMS.PLANES}u + p];
+            if (dot(plane.xyz, center) + plane.w < -radius) { return false; }
+        }
+        let extra = u32(cullParams[${CULL_PARAMS.STREAMING}u].w);
+        for (var p = 0u; p < extra; p++) {
+            let plane = cullParams[${CULL_PARAMS.CASTER_PLANES}u + p];
+            if (dot(plane.xyz, center) + plane.w < -radius) { return false; }
+        }
+        return true;
+    }
+`;
+
 export const cellCullWGSL = /* wgsl */ `
+    ${meshletCullVolumeWGSL}
     uniform cellCount : u32;
 
     var<storage, read> cellBounds : array<vec4f>;
@@ -52,11 +74,8 @@ export const cellCullWGSL = /* wgsl */ `
             return;
         }
         let sphere = cellBounds[cell];
-        for (var p = 0u; p < ${CULL_PARAMS.PLANE_COUNT}u; p++) {
-            let plane = cullParams[${CULL_PARAMS.PLANES}u + p];
-            if (dot(plane.xyz, sphere.xyz) + plane.w < -sphere.w) {
-                return;
-            }
+        if (!meshletInCullVolume(sphere.xyz, sphere.w)) {
+            return;
         }
         let slot = atomicAdd(&counters[${MESHLET_COUNTER.VISIBLE_CELLS}u], 1u);
         atomicStore(&counters[${MESHLET_VISIBLE_CELLS_BASE}u + slot], cell);
@@ -147,6 +166,7 @@ export const meshletVisibleCellWGSL = /* wgsl */ `
  * single atomicAdd.
  */
 export const instanceCullWGSL = /* wgsl */ `
+    ${meshletCullVolumeWGSL}
     ${meshletStructsWGSL}
 
     uniform instanceCount : u32;
@@ -197,11 +217,8 @@ export const instanceCullWGSL = /* wgsl */ `
         let radius = localSphere.w * objectData[instance].maxScale;
         let center = (worldMatrix * vec4f(localSphere.xyz, 1.0)).xyz;
 
-        for (var planeIndex = 0u; planeIndex < ${CULL_PARAMS.PLANE_COUNT}u; planeIndex++) {
-            let plane = cullParams[${CULL_PARAMS.PLANES}u + planeIndex];
-            if (dot(plane.xyz, center) + plane.w < -radius) {
-                return;
-            }
+        if (!meshletInCullVolume(center, radius)) {
+            return;
         }
 
         // Selected meshlets lie no finer than the cut's finest refined level (the cut records it
@@ -323,6 +340,7 @@ export const dispatchArgsWGSL = /* wgsl */ `
  * append a record.
  */
 export const meshletCullWGSL = /* wgsl */ `
+    ${meshletCullVolumeWGSL}
     ${meshletStructsWGSL}
 
     uniform recordCapacity : u32;
@@ -452,11 +470,8 @@ export const meshletCullWGSL = /* wgsl */ `
         let localSphere = meshletData[meshlet].sphere;
         let radius = localSphere.w * maxScale;
         let center = (worldMatrix * vec4f(localSphere.xyz, 1.0)).xyz;
-        for (var planeIndex = 0u; planeIndex < ${CULL_PARAMS.PLANE_COUNT}u; planeIndex++) {
-            let plane = cullParams[${CULL_PARAMS.PLANES}u + planeIndex];
-            if (dot(plane.xyz, center) + plane.w < -radius) {
-                return;
-            }
+        if (!meshletInCullVolume(center, radius)) {
+            return;
         }
 
         let flags = meshletData[meshlet].flags;

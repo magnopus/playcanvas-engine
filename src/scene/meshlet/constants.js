@@ -107,7 +107,9 @@ export const WORK_ITEM_U32S = 2;
  * the cull shaders read. PLANES are the six world frustum planes (xyz normal, w distance);
  * CAMERA = (position.xyz, projScale); LOD = (dagPixelThreshold, hzbWidth, hzbHeight,
  * hzbMipCount); VIEW_PROJ = four matrix columns; STREAMING = (texelRateMarkBase, orthoScale,
- * cullFlags, -); VIEW_DIR = (direction.xyz, camera LOD threshold or 0). Scalars that the shader reads as integers are
+ * cullFlags, casterPlaneCount); VIEW_DIR = (direction.xyz, camera LOD threshold or 0);
+ * CASTER_PLANES = up to MAX_CASTER_PLANES more planes, tested after the frustum's (a shadow
+ * view's caster volume, see MeshletShadowRenderer). Scalars that the shader reads as integers are
  * float-encoded and converted with u32().
  *
  * @ignore
@@ -124,11 +126,13 @@ export const CULL_PARAMS = {
     ROOT_PRIORITY: 14,
     // root admission bands: largest projected size (px), bands per octave, band count, and the
     // projected size below which an instance is not admitted (0 = never)
-    ROOT_BANDS: 15
+    ROOT_BANDS: 15,
+    CASTER_PLANES: 16,
+    MAX_CASTER_PLANES: 12
 };
 
 /** vec4 rows in the cull parameter buffer. @type {number} */
-export const CULL_PARAMS_VEC4S = 16;
+export const CULL_PARAMS_VEC4S = 28;
 
 /**
  * Priority bands of GPU root admission. Instances are ranked by projected size - the quantity

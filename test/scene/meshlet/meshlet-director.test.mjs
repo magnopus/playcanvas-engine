@@ -255,14 +255,19 @@ describe('MeshletDirector', function () {
         expect(cam.indexShare, 'a camera wanting everything takes it').to.equal(875);
         expect(shadow.indexShare, 'the shadow view keeps only its floor').to.equal(125);
 
+        // the shadow controller steps in proportion to how far outside the hold band the ratio is,
+        // rate-limited per frame
         const budget = director.budget;
+        const up = ((budget.indexStarvedAt + 0.1) / budget.indexStarvedAt) ** 0.1;
         director._updateShadowPressure(budget.indexStarvedAt + 0.1);
-        expect(director.shadowPressureScale).to.be.closeTo(budget.raiseFast, 1e-9);
+        expect(director.shadowPressureScale).to.be.closeTo(up, 1e-9);
         expect(budget.pressureScale, 'the camera controller is untouched').to.equal(1);
         director._updateShadowPressure((budget.indexStarvedAt + budget.indexEasedAt) / 2);
-        expect(director.shadowPressureScale, 'held between the thresholds').to.be.closeTo(budget.raiseFast, 1e-9);
+        expect(director.shadowPressureScale, 'held between the thresholds').to.be.closeTo(up, 1e-9);
+        director._updateShadowPressure(100);
+        expect(director.shadowPressureScale, 'a large overshoot still only raises by the rate limit').to.be.closeTo(up * 1.012, 1e-9);
         director._updateShadowPressure(0);
-        expect(director.shadowPressureScale).to.be.closeTo(budget.raiseFast * budget.decay, 1e-9);
+        expect(director.shadowPressureScale, 'and decays by the rate limit').to.be.closeTo(up * 1.012 * 0.992, 1e-9);
         director.shadowRenderer.entries.clear();
     });
 

@@ -2,6 +2,7 @@ import {
     CULL_PARAMS, MESHLET_COUNTER, MESHLET_CUT_CHUNK, MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED,
     MESHLET_FLAG_TWO_SIDED, MESHLET_STAGE_CHUNKS_BASE, PAGE_NOT_RESIDENT, PAGE_REQUEST, MESHLET_LEVEL_BIAS
 } from '../constants.js';
+import { meshletCullVolumeWGSL } from './meshlet-cull-wgsl.js';
 import { meshletStructsWGSL, meshletDataWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
 /**
@@ -40,12 +41,9 @@ const cutShader = entry => /* wgsl */ `
     fn markBit(bit: u32) {
         atomicOr(&claimBits[bit >> 5u], 1u << (bit & 31u));
     }
+    ${meshletCullVolumeWGSL}
     fn inFrustum(center: vec3f, radius: f32) -> bool {
-        for (var p = 0u; p < ${CULL_PARAMS.PLANE_COUNT}u; p++) {
-            let plane = cullParams[${CULL_PARAMS.PLANES}u + p];
-            if (dot(plane.xyz, center) + plane.w < -radius) { return false; }
-        }
-        return true;
+        return meshletInCullVolume(center, radius);
     }
 
     fn cutTask(taskIndex: u32) {

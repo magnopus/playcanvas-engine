@@ -3,7 +3,7 @@ import {
     MESHLET_ROOT_BANDS, OBJECT_FLAG_HIDDEN,
     OBJECT_FLAG_NO_SHADOW, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
-import { meshletVisibleCellWGSL } from './meshlet-cull-wgsl.js';
+import { meshletCullVolumeWGSL, meshletVisibleCellWGSL } from './meshlet-cull-wgsl.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
 // band index in the top bits of a root list entry, instance id below
@@ -37,6 +37,7 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
     var<storage, read> cellInstances: array<u32>;
 
     ${meshletVisibleCellWGSL}
+    ${meshletCullVolumeWGSL}
 
     @compute @workgroup_size(${MESHLET_CELL_SIZE})
     fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
@@ -51,10 +52,7 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
             (shadow && (object.flags & ${OBJECT_FLAG_NO_SHADOW}u) != 0u)) { return; }
         let center = (object.worldMatrix * vec4f(object.sphere.xyz, 1.0)).xyz;
         let radius = object.sphere.w * object.maxScale;
-        for (var p = 0u; p < ${CULL_PARAMS.PLANE_COUNT}u; p++) {
-            let plane = cullParams[${CULL_PARAMS.PLANES}u + p];
-            if (dot(plane.xyz, center) + plane.w < -radius) { return; }
-        }
+        if (!meshletInCullVolume(center, radius)) { return; }
 
         // projected size from the priority origin (the viewing camera, also for shadow views)
         let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
