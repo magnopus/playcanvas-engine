@@ -122,7 +122,7 @@ class WebgpuTexture {
             size: {
                 width: texture.width,
                 height: texture.height,
-                depthOrArrayLayers: texture.cubemap ? 6 : (texture.array ? texture.arrayLength : 1)
+                depthOrArrayLayers: texture.cubemap ? 6 : (texture.array ? texture.arrayLength : (texture.volume ? texture.depth : 1))
             },
             format: this.format,
             mipLevelCount: numLevels,
@@ -241,7 +241,7 @@ class WebgpuTexture {
             baseMipLevel: options.baseMipLevel ?? 0,
             mipLevelCount: options.mipLevelCount ?? textureDescr.mipLevelCount,
             baseArrayLayer: options.baseArrayLayer ?? 0,
-            arrayLayerCount: options.arrayLayerCount ?? textureDescr.depthOrArrayLayers
+            arrayLayerCount: options.arrayLayerCount ?? (texture.volume ? 1 : textureDescr.depthOrArrayLayers)
         };
 
         const view = this.gpuTexture.createView(desc);
@@ -408,7 +408,13 @@ class WebgpuTexture {
 
                     } else if (texture._volume) {
 
-                        Debug.warn('Volume texture data upload is not supported yet', this.texture);
+                        // volume texture - a single typed array holding all depth slices
+                        if (ArrayBuffer.isView(mipObject) && !texture._compressed) {
+                            this.uploadTypedArrayData(device, mipObject, mipLevel, 0);
+                            anyUploads = true;
+                        } else {
+                            Debug.warn('Volume texture data upload only supports uncompressed typed arrays', this.texture);
+                        }
 
                     } else if (texture.array) { // texture array
 
@@ -568,8 +574,11 @@ class WebgpuTexture {
         const width = TextureUtils.calcLevelDimension(texture.width, mipLevel);
         const height = TextureUtils.calcLevelDimension(texture.height, mipLevel);
 
+        // volume textures upload all depth slices at once
+        const depth = texture._volume ? TextureUtils.calcLevelDimension(texture.depth, mipLevel) : 1;
+
         // data sizes
-        const byteSize = TextureUtils.calcLevelGpuSize(width, height, 1, texture.format);
+        const byteSize = TextureUtils.calcLevelGpuSize(width, height, depth, texture.format);
         Debug.assert(byteSize === data.byteLength,
             `Error uploading data to texture, the data byte size of ${data.byteLength} does not match required ${byteSize}`, texture);
 
@@ -589,7 +598,8 @@ class WebgpuTexture {
             };
             size = {
                 width: width,
-                height: height
+                height: height,
+                depthOrArrayLayers: depth
             };
         } else if (formatInfo.blockSize) {
             // compressed format
