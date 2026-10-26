@@ -259,15 +259,15 @@ describe('MeshletDirector', function () {
         // rate-limited per frame
         const budget = director.budget;
         const up = ((budget.indexStarvedAt + 0.1) / budget.indexStarvedAt) ** 0.1;
-        director._updateShadowPressure(budget.indexStarvedAt + 0.1);
-        expect(director.shadowPressureScale).to.be.closeTo(up, 1e-9);
+        let scale = director._stepShadowPressure(1, budget.indexStarvedAt + 0.1);
+        expect(scale).to.be.closeTo(up, 1e-9);
         expect(budget.pressureScale, 'the camera controller is untouched').to.equal(1);
-        director._updateShadowPressure((budget.indexStarvedAt + budget.indexEasedAt) / 2);
-        expect(director.shadowPressureScale, 'held between the thresholds').to.be.closeTo(up, 1e-9);
-        director._updateShadowPressure(100);
-        expect(director.shadowPressureScale, 'a large overshoot still only raises by the rate limit').to.be.closeTo(up * 1.012, 1e-9);
-        director._updateShadowPressure(0);
-        expect(director.shadowPressureScale, 'and decays by the rate limit').to.be.closeTo(up * 1.012 * 0.992, 1e-9);
+        scale = director._stepShadowPressure(scale, (budget.indexStarvedAt + budget.indexEasedAt) / 2);
+        expect(scale, 'held between the thresholds').to.be.closeTo(up, 1e-9);
+        scale = director._stepShadowPressure(scale, 100);
+        expect(scale, 'a large overshoot still only raises by the rate limit').to.be.closeTo(up * 1.012, 1e-9);
+        scale = director._stepShadowPressure(scale, 0);
+        expect(scale, 'and decays by the rate limit').to.be.closeTo(up * 1.012 * 0.992, 1e-9);
         director.shadowRenderer.entries.clear();
     });
 

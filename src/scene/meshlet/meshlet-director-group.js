@@ -173,7 +173,7 @@ class MeshletDirectorGroup {
         shadowThresholdScale: 4,
         rootMinPixels: 3,
         shadowRootMinPixels: 2,
-        shadowMatchCameraLod: true,
+        shadowMatchCameraLod: false,
         fastLoad: true,
         forceSubmitBoundaries: false,
         transcode: /** @type {MeshletTranscodeFn|null} */ (null)

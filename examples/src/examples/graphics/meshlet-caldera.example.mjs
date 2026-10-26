@@ -608,14 +608,75 @@ const runBenchmark = async () => {
         await sleep(250);
     }
 
+    // hand the camera back to the controls where the benchmark left it
+    cc.reset(target, position);
+    cc.enabled = true;
+
     window.__benchmark = { done: true, results };
     console.log(`BENCHMARK_RESULT ${JSON.stringify(results)}`);
 };
 
 /* eslint-enable no-await-in-loop */
 
+// ?gpuStats=1: an on-screen table of GPU time per render pass, averaged over two seconds - for
+// devices without remote debugging. Needs the 'timestamp-query' WebGPU feature.
+if (params.get('gpuStats') === '1') {
+    const panel = document.createElement('pre');
+    Object.assign(panel.style, {
+        position: 'absolute',
+        left: '8px',
+        bottom: '8px',
+        margin: '0',
+        padding: '6px 8px',
+        zIndex: '10',
+        font: '11px/1.3 monospace',
+        color: '#fff',
+        background: 'rgba(0, 0, 0, 0.65)',
+        pointerEvents: 'none'
+    });
+    document.body.appendChild(panel);
+    const profiler = device.gpuProfiler;
+    const sums = new Map();
+    let frames = 0;
+    let gpuTotal = 0;
+    let started = performance.now();
+    if (!device.supportsTimestampQuery || !profiler) {
+        panel.textContent = 'GPU timings unavailable: no timestamp-query support on this device';
+    } else {
+        profiler.enabled = true;
+        app.on('frameend', () => {
+            if (profiler._frameTime) {
+                frames++;
+                gpuTotal += profiler._frameTime;
+                profiler.passTimings.forEach((ms, name) => sums.set(name, (sums.get(name) ?? 0) + ms));
+            }
+            const now = performance.now();
+            if (now - started < 2000 || !frames) return;
+            const avg = ms => (ms / frames).toFixed(2).padStart(6);
+            let camera = 0, shadow = 0;
+            sums.forEach((ms, name) => {
+                if (/Shadow/.test(name)) shadow += ms;
+                else if (/^Meshlet/.test(name)) camera += ms;
+            });
+            const rows = [...sums.entries()].sort((a, b) => b[1] - a[1]).slice(0, 18)
+            .map(([name, ms]) => `${avg(ms)}  ${name}`);
+            panel.textContent = [
+                `GPU ${avg(gpuTotal)} ms/frame (${frames} frames)`,
+                `meshlet camera ${avg(camera)}  shadows ${avg(shadow)}`,
+                '',
+                ...rows
+            ].join('\n');
+            sums.clear();
+            frames = 0;
+            gpuTotal = 0;
+            started = now;
+        });
+    }
+}
+
 if (params.get('benchmark') === '1') {
     runBenchmark().catch((err) => {
+        cc.enabled = true;
         window.__benchmark = { done: true, error: String(err?.stack ?? err) };
         console.error(`BENCHMARK_ERROR ${err?.stack ?? err}`);
     });

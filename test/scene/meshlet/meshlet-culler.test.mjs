@@ -171,10 +171,11 @@ describe('MeshletCuller', function () {
         expect(culler.instanceCull.indirectSlotIndex).to.equal(cellSlot);
         expect(culler.cellExpand.indirectSlotIndex).to.equal(culler.cellThreadArgs.getParameter('dispatchSlot'));
         expect(culler.cutStages[0].indirectSlotIndex).to.equal(culler.stageArgs.getParameter('firstSlot'));
-        expect(log.dispatches[1].name).to.equal('MeshletRootAdmit');
+        expect(log.dispatches[1].name).to.equal('MeshletRootClassify');
         expect(log.dispatches[1].computes).to.deep.equal(['MeshletrootClassify', 'MeshletdispatchArgs',
-            'MeshletrootBandArgs', 'MeshletrootScatter',
-            ...Array.from({ length: MESHLET_ROOT_BANDS }, (_, band) => `MeshletRootAdmit${band}`)]);
+            'MeshletrootBandArgs', 'MeshletrootScatter']);
+        expect(log.dispatches[2].name).to.equal('MeshletRootAdmit');
+        expect(log.dispatches[2].computes).to.deep.equal(Array.from({ length: MESHLET_ROOT_BANDS }, (_, band) => `MeshletRootAdmit${band}`));
         // the scatter walks every candidate; each band pass only its own band's range
         expect(culler.rootScatter.indirectSlotIndex).to.equal(culler.rootArgs.getParameter('dispatchSlot'));
         const firstBandSlot = culler.rootBandArgs.getParameter('firstSlot');
@@ -267,17 +268,16 @@ describe('MeshletCuller', function () {
         const base = claimPersistBase(1000, 130);
         expect(log.clears, 'counters, transient claim bits, this frame\'s admissions; never the requests buffer')
         .to.deep.equal([MESHLET_COUNTER_CLEAR_U32S * 4, 3 * MESHLET_ROOT_BANDS * 4, base * 4, Math.ceil(130 / 32) * 4]);
-        expect(log.dispatches).to.have.lengthOf(6);
-        expect(log.dispatches[0].name).to.equal('MeshletCellCull');
-        expect(log.dispatches[1].name).to.equal('MeshletRootAdmit');
-        expect(log.dispatches[2].name).to.equal('MeshletResidentCut');
-        expect(log.dispatches[2].computes).to.deep.equal(['Meshletcut']);
-        expect(log.dispatches[3].name).to.equal('MeshletCompact');
-        expect(log.dispatches[3].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs', 'MeshletcompactMeshlets', 'MeshletdispatchArgs']);
-        expect(log.dispatches[4].name).to.equal('MeshletCullPhase1');
-        expect(log.dispatches[4].computes).to.deep.equal(['MeshletmeshletCull', 'MeshletfinalizeArgs']);
-        expect(log.dispatches[5].name, 'triangle emission profiles as its own pass').to.equal('MeshletIndexWrite');
-        expect(log.dispatches[5].computes).to.deep.equal(['MeshletindexWrite']);
+        // each stage profiles as its own pass
+        expect(log.dispatches.map(d => d.name)).to.deep.equal([
+            'MeshletCellCull', 'MeshletRootClassify', 'MeshletRootAdmit', 'MeshletResidentCut',
+            'MeshletInstanceCull', 'MeshletCompact', 'MeshletCullPhase1', 'MeshletIndexWrite'
+        ]);
+        expect(log.dispatches[3].computes).to.deep.equal(['Meshletcut']);
+        expect(log.dispatches[4].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs']);
+        expect(log.dispatches[5].computes).to.deep.equal(['MeshletcompactMeshlets', 'MeshletdispatchArgs']);
+        expect(log.dispatches[6].computes).to.deep.equal(['MeshletmeshletCull', 'MeshletfinalizeArgs']);
+        expect(log.dispatches[7].computes).to.deep.equal(['MeshletindexWrite']);
         expect(culler.cellCull.countX, 'one thread per cell').to.equal(1);
         expect(culler.meshletCull.getParameter('phase'), 'no HZB: single phase').to.equal(0);
         expect(culler.meshletCull.getParameter('hzbTexture')).to.equal(shaders.dummyHzb);
@@ -304,8 +304,8 @@ describe('MeshletCuller', function () {
         expect(Array.from(view.cullParamsBuffer.writes[0].data.subarray(CULL_PARAMS.LOD * 4 + 1, CULL_PARAMS.LOD * 4 + 4))).to.deep.equal([320, 200, 9]);
 
         culler.dispatchPhase2();
-        expect(log.dispatches[6].name).to.equal('MeshletCullPhase2');
-        expect(log.dispatches[6].computes[0], 'counters reset first').to.equal('MeshletresetPhase2');
+        expect(log.dispatches[8].name).to.equal('MeshletCullPhase2');
+        expect(log.dispatches[8].computes[0], 'counters reset first').to.equal('MeshletresetPhase2');
         expect(culler.meshletCullPhase2.getParameter('hzbTexture')).to.equal(hzb.texture);
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             expect(culler.finalizeArgsPhase2.getParameter(`drawSlot${b}`)).to.equal(MESHLET_BUCKET_COUNT + b);

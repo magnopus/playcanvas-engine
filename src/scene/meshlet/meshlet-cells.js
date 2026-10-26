@@ -61,6 +61,18 @@ class MeshletCells {
     /** @type {Float32Array} - per cell, the world-space bounding sphere (x, y, z, radius). */
     spheres;
 
+    /**
+     * Per cell, the radius of its largest member. A view whose root admission drops instances
+     * below a projected size culls a whole cell when even this member, at the cell's nearest
+     * point, is below it - a far cell of small props then costs no per-instance work at all.
+     *
+     * @type {Float32Array}
+     */
+    maxRadii;
+
+    /** @type {StorageBuffer|null} - {@link maxRadii} on the GPU. */
+    radiiBuffer = null;
+
     /** @type {StorageBuffer|null} - {@link instanceOrder} on the GPU. */
     instancesBuffer = null;
 
@@ -88,6 +100,7 @@ class MeshletCells {
         }
 
         this.spheres = new Float32Array(Math.max(this.cellCount, 1) * 4);
+        this.maxRadii = new Float32Array(Math.max(this.cellCount, 1));
         for (let c = 0; c < this.cellCount; c++) {
             this._fitCell(c, centers);
         }
@@ -96,6 +109,8 @@ class MeshletCells {
         if (instanceCount) this.instancesBuffer.write(0, this.instanceOrder);
         this.boundsBuffer = new StorageBuffer(device, this.spheres.byteLength, BUFFERUSAGE_COPY_DST);
         this.boundsBuffer.write(0, this.spheres);
+        this.radiiBuffer = new StorageBuffer(device, Math.max(this.maxRadii.byteLength, 16), BUFFERUSAGE_COPY_DST);
+        this.radiiBuffer.write(0, this.maxRadii);
     }
 
     destroy() {
@@ -103,6 +118,8 @@ class MeshletCells {
         this.instancesBuffer = null;
         this.boundsBuffer?.destroy();
         this.boundsBuffer = null;
+        this.radiiBuffer?.destroy();
+        this.radiiBuffer = null;
     }
 
     /**
@@ -135,6 +152,7 @@ class MeshletCells {
         });
         if (hi >= lo) {
             this.boundsBuffer?.write(lo * 16, this.spheres, lo * 4, (hi - lo + 1) * 4);
+            this.radiiBuffer?.write(lo * 4, this.maxRadii, lo, hi - lo + 1);
         }
     }
 
@@ -175,10 +193,13 @@ class MeshletCells {
         }
         const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5;
         let radius = 0;
+        let maxRadius = 0;
         for (let m = 0; m < count; m++) {
             const dx = members[m * 4] - cx, dy = members[m * 4 + 1] - cy, dz = members[m * 4 + 2] - cz;
             radius = Math.max(radius, Math.sqrt(dx * dx + dy * dy + dz * dz) + members[m * 4 + 3]);
+            maxRadius = Math.max(maxRadius, members[m * 4 + 3]);
         }
+        this.maxRadii[cell] = maxRadius * 1.001 + 1e-3;
         const o = cell * 4;
         this.spheres[o] = cx;
         this.spheres[o + 1] = cy;

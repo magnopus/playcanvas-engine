@@ -629,6 +629,13 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
             super.loseContext(); // 'super' works correctly here
             this.fire('devicelost');
 
+            // Commands recorded on the lost device can never be submitted, and mixed into the new
+            // device's first frame they invalidate it: a cached encoder would record the next
+            // frame's passes against the new device's swap chain texture.
+            this.commandEncoder = null;
+            this.commandBuffers.length = 0;
+            this.passEncoder = null;
+
             await this.createDevice(); // Recreate the WebGPU device and associated resources after device loss.
 
             super.restoreContext(); // 'super' works correctly here

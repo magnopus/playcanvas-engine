@@ -460,7 +460,7 @@ class MeshletShadowRenderer {
         culler.cullFlags = CULL_FLAG_NO_TEXEL_RATE | CULL_FLAG_SHADOW_VIEW;
         culler.viewDir = _viewDir.copy(node.forward);
         culler.dagPixelThreshold = director.dagPixelThreshold * director.shadowThresholdScale;
-        culler.pressureScale = director.budget.pressureScale * director.shadowPressureScale;
+        culler.pressureScale = director.budget.pressureScale * view.pressureScale;
         // casters tiny on screen cast nothing, or the far cascades' root floor swamps the budget
         culler.rootMinPixels = director.shadowRootMinPixels;
         culler.forceSubmitBoundaries = director.forceSubmitBoundaries;
@@ -470,10 +470,10 @@ class MeshletShadowRenderer {
             culler.priorityOrigin = director.priorityOrigin;
             culler.priorityProjScale = director.priorityProjScale;
         }
-        // casters refine at least as far as the camera's own cut, so they match the receivers
-        // the camera draws (backed off by the shadow pressure when the shadow budget is tight)
+        // optionally, casters refine at least as far as the camera's own cut (backed off by the
+        // face's pressure when its budget is tight)
         culler.cameraLodThreshold = director.shadowMatchCameraLod ?
-            director.dagPixelThreshold * director.budget.pressureScale * director.shadowPressureScale : 0;
+            director.dagPixelThreshold * director.budget.pressureScale * view.pressureScale : 0;
         // the faces share one claim buffer, so its persistent admission bits would mix
         culler.hysteresis = !this._claimBits;
 

@@ -194,6 +194,9 @@ class MeshletCutData {
         // them from 128-byte geometry records for every instance of a primitive.
         const topology = new Uint32Array(records.count * 2);
         const instanceCount = objects.length / OBJECT_DATA_U32S;
+        const objectFloats = new Float32Array(objects.buffer, objects.byteOffset, objects.length);
+        // per instance, its primitive (for the chunk error bounds below)
+        const instancePrimitives = new Array(instanceCount);
         for (let instance = 0; instance < instanceCount; instance++) {
             const first = objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET];
             const count = objects[instance * OBJECT_DATA_U32S + O.MESHLET_COUNT];
@@ -212,6 +215,21 @@ class MeshletCutData {
                     }
                 }
                 const { groups, roots } = buildMeshletGroups(source);
+                // Error bounds for skipping whole chunks of the cut (see chunkBounds): the
+                // largest replacement error per LOD level, and how far any group's sphere reaches
+                // past the instance's own bounding sphere (local units)
+                const sourceFloats = new Float32Array(source.buffer, source.byteOffset, source.length);
+                const sphereBase = instance * OBJECT_DATA_U32S + O.SPHERE;
+                const levelMaxError = [];
+                let slack = 0;
+                for (const group of groups) {
+                    const row = group.start * MESHLET_DATA_U32S;
+                    levelMaxError[group.level] = Math.max(levelMaxError[group.level] ?? 0, sourceFloats[row + M.CLUSTER_ERROR]);
+                    const dx = sourceFloats[row + M.GROUP_SPHERE] - objectFloats[sphereBase];
+                    const dy = sourceFloats[row + M.GROUP_SPHERE + 1] - objectFloats[sphereBase + 1];
+                    const dz = sourceFloats[row + M.GROUP_SPHERE + 2] - objectFloats[sphereBase + 2];
+                    slack = Math.max(slack, Math.sqrt(dx * dx + dy * dy + dz * dz) + sourceFloats[row + M.GROUP_SPHERE + 3] - objectFloats[sphereBase + 3]);
+                }
                 let minRootLevel = Infinity;
                 for (const root of roots) minRootLevel = Math.min(minRootLevel, source[root * MESHLET_DATA_U32S + M.LOD_LEVEL]);
                 for (let m = count - 1; m > 0; m--) {
@@ -276,9 +294,10 @@ class MeshletCutData {
                     topology[(first + m) * 2 + 1] = source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP];
                 }
                 records.done(first, source);
-                primitive = { tasks, rootOffset, rootCost, bucket };
+                primitive = { tasks, rootOffset, rootCost, bucket, levelMaxError, slack };
                 primitives.set(first, primitive);
             }
+            instancePrimitives[instance] = primitive;
             this.rootIndices[primitive.bucket] += primitive.rootCost[0];
             this.rootRecords += primitive.rootCost[1];
             for (const task of primitive.tasks) {
@@ -363,6 +382,35 @@ class MeshletCutData {
             stageRows.push(cellChunkBase, chunkTaskBase, listOffset, chunks);
             listOffset += chunks;
         }
+
+        // Per chunk (indexed like the visible-chunk lists: stage list offset + chunk), an upper
+        // bound on the world-space error of any group in it and on how far its group spheres
+        // reach past their instances' spheres. A view skips a chunk whose bound cannot refine at
+        // the nearest point of the chunk's cell: the cut then costs what it refines rather than
+        // every group in view, so a coarser threshold is also a cheaper cut. Scales are taken at
+        // build time.
+        const chunkBounds = new Float32Array(Math.max(listOffset, 1) * 2);
+        for (let s = 0; s < stageLevels.length; s++) {
+            const level = stageLevels[s];
+            const row = s * (cellCount + 1);
+            let chunk = stageRows[s * 4 + 2];
+            for (let c = 0; c < cellCount; c++) {
+                const end = cellTaskStarts[row + c + 1];
+                for (let start = cellTaskStarts[row + c]; start < end; start += MESHLET_CUT_CHUNK, chunk++) {
+                    let error = 0;
+                    let slack = 0;
+                    for (let task = start, last = Math.min(start + MESHLET_CUT_CHUNK, end); task < last; task++) {
+                        const instance = tasks[task * 2];
+                        const primitive = instancePrimitives[instance];
+                        const scale = objectFloats[instance * OBJECT_DATA_U32S + O.MAX_SCALE];
+                        error = Math.max(error, (primitive.levelMaxError[level] ?? 0) * scale);
+                        slack = Math.max(slack, primitive.slack * scale);
+                    }
+                    chunkBounds[chunk * 2] = error;
+                    chunkBounds[chunk * 2 + 1] = slack;
+                }
+            }
+        }
         this.stageTableBase = words.length;
         for (const value of stageRows) words.push(value);
         /**
@@ -380,6 +428,8 @@ class MeshletCutData {
             return buffer;
         };
         this.groups = create(words.view());
+        /** @type {StorageBuffer} - per chunk: max world error, sphere slack (vec2f). */
+        this.chunkBounds = create(chunkBounds);
         this.tasks = create(tasks);
         this.selectionTopology = new StorageBuffer(device, Math.max(topology.byteLength, 16), BUFFERUSAGE_COPY_DST);
         if (topology.length) this.selectionTopology.write(0, topology);
@@ -398,6 +448,7 @@ class MeshletCutData {
 
     destroy() {
         this.groups.destroy();
+        this.chunkBounds.destroy();
         this.tasks.destroy();
         this.selectionTopology.destroy();
         this.levelStarts.destroy();

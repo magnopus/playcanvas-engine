@@ -64,6 +64,8 @@ export const cellCullWGSL = /* wgsl */ `
     uniform cellCount : u32;
 
     var<storage, read> cellBounds : array<vec4f>;
+    // per cell, the radius of its largest member
+    var<storage, read> cellMaxRadius : array<f32>;
     var<storage, read> cullParams : array<vec4f>;
     var<storage, read_write> counters : array<atomic<u32>>;
 
@@ -76,6 +78,18 @@ export const cellCullWGSL = /* wgsl */ `
         let sphere = cellBounds[cell];
         if (!meshletInCullVolume(sphere.xyz, sphere.w)) {
             return;
+        }
+        // Root classification drops an instance smaller on screen than the size cut (half of it
+        // for one admitted last frame). Every member lies inside the cell sphere and is no larger
+        // than its largest, so if that one at the cell's nearest point is under the half cut,
+        // classification would drop them all.
+        let bands = cullParams[${CULL_PARAMS.ROOT_BANDS}u];
+        if (bands.w > 0.0) {
+            let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
+            let gap = max(distance(sphere.xyz, priority.xyz) - sphere.w, 1e-4);
+            if (cellMaxRadius[cell] * priority.w / gap < bands.w * 0.5) {
+                return;
+            }
         }
         let slot = atomicAdd(&counters[${MESHLET_COUNTER.VISIBLE_CELLS}u], 1u);
         atomicStore(&counters[${MESHLET_VISIBLE_CELLS_BASE}u + slot], cell);
@@ -96,6 +110,29 @@ export const cellExpandWGSL = /* wgsl */ `
 
     var<storage, read> cutGroups : array<u32>;
     var<storage, read_write> counters : array<atomic<u32>>;
+    var<storage, read> cullParams : array<vec4f>;
+    var<storage, read> cellBounds : array<vec4f>;
+    // per chunk: max world error of its groups, how far their spheres reach past the instances'
+    var<storage, read> chunkBounds : array<vec2f>;
+
+    // Whether any group of a chunk could refine: its largest error at the nearest distance the
+    // cell allows passes the view's LOD test (see the cut stage). The same tests as the cut, so
+    // a skipped chunk is one whose every task would return without refining.
+    fn chunkMayRefine(bounds: vec2f, cell: vec4f) -> bool {
+        let lod = cullParams[${CULL_PARAMS.LOD}u].x;
+        let ortho = cullParams[${CULL_PARAMS.STREAMING}u].y;
+        let camera = cullParams[${CULL_PARAMS.CAMERA}u];
+        let near = max(distance(cell.xyz, camera.xyz) - cell.w - bounds.y, 1e-5);
+        let scale = select(camera.w / near, ortho, ortho > 0.0);
+        if (bounds.x * scale > lod) { return true; }
+        let cameraLod = cullParams[${CULL_PARAMS.VIEW_DIR}u].w;
+        if (cameraLod > 0.0) {
+            let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
+            let priorityNear = max(distance(cell.xyz, priority.xyz) - cell.w - bounds.y, 1e-5);
+            return bounds.x * priority.w / priorityNear > cameraLod;
+        }
+        return false;
+    }
 
     @compute @workgroup_size(64)
     fn main(@builtin(workgroup_id) group : vec3u, @builtin(local_invocation_id) lane : vec3u) {
@@ -104,6 +141,7 @@ export const cellExpandWGSL = /* wgsl */ `
             return;
         }
         let cell = atomicLoad(&counters[${MESHLET_VISIBLE_CELLS_BASE}u + slot]);
+        let sphere = cellBounds[cell];
         for (var stage = 0u; stage < uniform.stageCount; stage++) {
             let row = uniform.stageTableBase + stage * 4u;
             let cellChunks = cutGroups[row];
@@ -112,10 +150,23 @@ export const cellExpandWGSL = /* wgsl */ `
             if (count == 0u) {
                 continue;
             }
-            let base = atomicAdd(&counters[${MESHLET_STAGE_CHUNKS_BASE}u + stage], count);
-            let list = uniform.listsBase + cutGroups[row + 2u] + base;
+            // chunk bounds are indexed like the lists: the stage's list offset + chunk
+            let boundsBase = cutGroups[row + 2u];
+            var kept = 0u;
             for (var k = 0u; k < count; k++) {
-                atomicStore(&counters[list + k], first + k);
+                if (chunkMayRefine(chunkBounds[boundsBase + first + k], sphere)) { kept++; }
+            }
+            if (kept == 0u) {
+                continue;
+            }
+            let base = atomicAdd(&counters[${MESHLET_STAGE_CHUNKS_BASE}u + stage], kept);
+            let list = uniform.listsBase + cutGroups[row + 2u] + base;
+            var written = 0u;
+            for (var k = 0u; k < count; k++) {
+                if (chunkMayRefine(chunkBounds[boundsBase + first + k], sphere)) {
+                    atomicStore(&counters[list + written], first + k);
+                    written++;
+                }
             }
         }
     }

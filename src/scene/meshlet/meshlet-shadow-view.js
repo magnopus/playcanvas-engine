@@ -71,6 +71,14 @@ class MeshletShadowView extends MeshletView {
 
         this.light = light;
         this.face = face;
+
+        /**
+         * This face's LOD pressure: a multiplier on the shadow threshold, raised while its
+         * demand overruns its index share (see MeshletDirector#_updateShadowPressure).
+         *
+         * @type {number}
+         */
+        this.pressureScale = 1;
         this.sceneCamera = sceneCamera;
         this.culler.passSuffix = `Shadow${face}`;
 

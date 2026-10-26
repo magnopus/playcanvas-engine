@@ -168,6 +168,24 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         #endif
         vertex_normal = meshletDecodeOct16(pagePool[meshletLayout.normalBase + meshletVert]);
         dMeshletModelMatrix = objectData[meshletInstance].worldMatrix;
+        #ifdef SHADOW_PASS
+        #if LIGHT_TYPE == DIRECTIONAL
+        // A simplified cluster lies within its error of the true surface - above it as often
+        // as below - and the camera draws the receiver at its own, usually finer, cut: unbiased,
+        // a coarse caster shadows the surface it stands for in broad blotches. Pushed away from
+        // the light by its error it can only sit behind that surface. Clip depth is linear in
+        // world position for the orthographic shadow camera, so its gradient is the light axis;
+        // reverse-z stores nearer as larger, so away is down that axis instead of up it.
+        let meshletDepthAxis = vec3f(uniform.matrix_viewProjection[0][2], uniform.matrix_viewProjection[1][2], uniform.matrix_viewProjection[2][2]);
+        #ifdef REVERSE_Z
+            let meshletAwayFromLight = -normalize(meshletDepthAxis);
+        #else
+            let meshletAwayFromLight = normalize(meshletDepthAxis);
+        #endif
+        let meshletLodError = meshletData[meshletIndex].clusterError * objectData[meshletInstance].maxScale;
+        dMeshletModelMatrix[3] = dMeshletModelMatrix[3] + vec4f(meshletAwayFromLight * meshletLodError, 0.0);
+        #endif
+        #endif
         dMeshletMatRow = objectData[meshletInstance].material;
         dMeshletPickId = objectData[meshletInstance].pickId;
 

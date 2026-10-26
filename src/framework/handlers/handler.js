@@ -219,7 +219,9 @@ class ResourceHandler {
         http.get(url.load, {
             responseType,
             retry: this.maxRetries > 0,
-            maxRetries: this.maxRetries
+            maxRetries: this.maxRetries,
+            // Magnopus patched - add withCredentials option
+            withCredentials: asset?.options?.crossOrigin === 'use-credentials'
         }, callback);
     }
 

@@ -90,6 +90,9 @@ RENDER_SKIP = re.compile(r'^(caulk|skip|nodraw|clip|trigger|volume|portal|shadow
                          r'reflection|client_|lightgrid|occlusion|hint|origin|mantle|ladder|'
                          r'broadphase|vista|terrain_cutout|terrain_collision|outofbounds)'
                          r'|decal|_shadow_caster|shadowcaster')
+# temporary test override: CALDERA_EXTRA_SKIP='name1|name2' also skips those materials (render and world collision)
+if os.environ.get('CALDERA_EXTRA_SKIP'):
+    RENDER_SKIP = re.compile(RENDER_SKIP.pattern + '|' + os.environ['CALDERA_EXTRA_SKIP'])
 # collision class for a material; None = not collision
 COLL_PLAYER = re.compile(r'^(clip($|_player|_ai|_lm_|_full|_stairs|_vehicle|_metal|_wood|_grating|'
                          r'_concrete|_rock|_dirt|_glass|_nosight_player|_water_player)|caulk)')
@@ -810,7 +813,7 @@ TEXTURE_SETS = {
     'concrete': 'Concrete034',
     'asphalt': 'Asphalt033',
     'dirt': 'Ground111',
-    'rock': 'Rock064',
+    'rock': 'Rock030',
     'thatch': 'ThatchedRoof001A',
     'wood': 'Wood096',
 }

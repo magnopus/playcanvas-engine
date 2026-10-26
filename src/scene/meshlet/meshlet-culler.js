@@ -190,6 +190,7 @@ class MeshletCuller {
         this.cellCull = makeCompute('cellCull');
         this.cellCull.setParameter('cellCount', cells.cellCount);
         this.cellCull.setParameter('cellBounds', cells.boundsBuffer);
+        this.cellCull.setParameter('cellMaxRadius', cells.radiiBuffer);
         this.cellCull.setParameter('cullParams', view.cullParamsBuffer);
         this.cellCull.setParameter('counters', view.countersBuffer);
         const cellGroups = Math.ceil(cells.cellCount / 64);
@@ -222,6 +223,9 @@ class MeshletCuller {
         this.cellExpand.setParameter('listsBase', listsBase);
         this.cellExpand.setParameter('cutGroups', cut.groups);
         this.cellExpand.setParameter('counters', view.countersBuffer);
+        this.cellExpand.setParameter('cullParams', view.cullParamsBuffer);
+        this.cellExpand.setParameter('cellBounds', cells.boundsBuffer);
+        this.cellExpand.setParameter('chunkBounds', cut.chunkBounds);
         this.stageArgs = makeCompute('stageArgs');
         this.stageArgs.setParameter('stageCount', stageCount);
         this.stageArgs.setParameter('counters', view.countersBuffer);
@@ -586,9 +590,10 @@ class MeshletCuller {
             device.computeDispatch([this.rootScatter, ...this.rootAdmit], `MeshletRootAdmit${this.passSuffix}`);
         } else {
             device.computeDispatch([this.cellCull, this.cellArgs, this.cellThreadArgs, this.cellExpand, this.stageArgs], `MeshletCellCull${this.passSuffix}`);
-            device.computeDispatch([
-                this.rootClassify, this.rootArgs, this.rootBandArgs, this.rootScatter, ...this.rootAdmit
-            ], `MeshletRootAdmit${this.passSuffix}`);
+            // classification and the band admissions profile apart: the first scales with the
+            // instances in view, the second with the dispatch count and the root pages it checks
+            device.computeDispatch([this.rootClassify, this.rootArgs, this.rootBandArgs, this.rootScatter], `MeshletRootClassify${this.passSuffix}`);
+            device.computeDispatch(this.rootAdmit, `MeshletRootAdmit${this.passSuffix}`);
         }
         if (this.cutStages.length) device.computeDispatch(this.cutStages, `MeshletResidentCut${this.passSuffix}`);
 
@@ -601,7 +606,8 @@ class MeshletCuller {
             device.submit();
             device.computeDispatch([this.indexWrite], `MeshletCullPhase1c${this.passSuffix}`);
         } else {
-            device.computeDispatch([this.instanceCull, this.dispatchArgs, this.compactMeshlets, this.selectedArgs], `MeshletCompact${this.passSuffix}`);
+            device.computeDispatch([this.instanceCull, this.dispatchArgs], `MeshletInstanceCull${this.passSuffix}`);
+            device.computeDispatch([this.compactMeshlets, this.selectedArgs], `MeshletCompact${this.passSuffix}`);
             device.computeDispatch([this.meshletCull, this.finalizeArgs], `MeshletCullPhase1${this.passSuffix}`);
             // its own pass so the profiler separates triangle emission from the cluster cull
             device.computeDispatch([this.indexWrite], `MeshletIndexWrite${this.passSuffix}`);

@@ -117,6 +117,17 @@ class RenderPassForward extends RenderPass {
      */
     noDepthClear = false;
 
+    /**
+     * If true, the cameras render to the whole render target, ignoring their viewport and scissor
+     * rectangles, and the render target is cleared by the pass itself. Used when rendering to an
+     * intermediate render target sized to the camera's viewport, such as the scene render target
+     * of the CameraFrame, where the viewport is applied when the result is composed to the final
+     * render target.
+     *
+     * @type {boolean}
+     */
+    fullViewport = false;
+
     constructor(device, layerComposition, scene, renderer) {
         super(device);
 
@@ -221,7 +232,7 @@ class RenderPassForward extends RenderPass {
             // set up clear params if the camera covers the full viewport
             const cameraComponent = step.cameraComponent;
             const camera = cameraComponent.camera;
-            const fullSizeClearRect = camera.fullSizeClearRect;
+            const fullSizeClearRect = this.fullViewport || camera.fullSizeClearRect;
 
             // when this pass renders the scene textures, the camera's clear color describes the scene
             // color attachment alone - the clear values of the scene texture attachments belong to
@@ -373,7 +384,8 @@ class RenderPassForward extends RenderPass {
             scene.fire(EVENT_PRERENDER_LAYER, cameraComponent, layer, transparent);
 
             const options = {
-                lightClusters: step.lightClusters
+                lightClusters: step.lightClusters,
+                fullViewport: this.fullViewport
             };
 
             // shader pass - use setting from camera if available, otherwise forward
@@ -381,7 +393,7 @@ class RenderPassForward extends RenderPass {
 
             // if this is not a first render action to the render target, or if the render target was not
             // fully cleared on pass start, we need to execute clears here
-            if (!firstStep || !cameraComponent.camera.fullSizeClearRect) {
+            if (!firstStep || !(this.fullViewport || cameraComponent.camera.fullSizeClearRect)) {
                 options.clearColor = step.clearColor;
                 options.clearDepth = step.clearDepth;
                 options.clearStencil = step.clearStencil;

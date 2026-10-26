@@ -175,16 +175,16 @@ class MeshletDirector {
     rootMinPixels = 3;
 
     /**
-     * Shadow casters refine at least as far as the camera's own cut does. The shadow cut is
-     * otherwise measured in shadow-map texels, and a far cascade's texel spans metres: terrain
-     * simplified to a few of them stands that far proud of the surface the camera draws and
-     * shadows it in broad blotches that no depth bias covers. Matching the camera's cut keeps
-     * each caster's error under a pixel or so of what is on screen. Set false to use the texel
-     * test alone (cheaper, coarser).
+     * Shadow casters also refine at least as far as the camera's own cut does. The shadow cut is
+     * otherwise measured in shadow-map texels, so a far cascade's casters can be far coarser
+     * than the surfaces the camera draws. The shadow pass already pushes each simplified
+     * cluster away from the light by its error, so a coarse caster cannot shadow the surface it
+     * stands for; matching the camera's cut is only a further refinement, at a large cost in
+     * wide views (every caster of a far cascade refined to camera detail).
      *
      * @type {boolean}
      */
-    shadowMatchCameraLod = true;
+    shadowMatchCameraLod = false;
 
     /**
      * Projected size on screen, in pixels, below which an instance casts no meshlet shadow. A
@@ -198,6 +198,17 @@ class MeshletDirector {
     shadowRootMinPixels = 2;
 
     /**
+     * Index budget of a shadow face, per texel of its part of the shadow map (three indices to a
+     * triangle), or 0 for no cap. Shadow faces otherwise share whatever index budget the cameras
+     * leave, which on a large memory budget lets them refine far below the shadow map's
+     * resolution - detail it cannot show, at full raster and cull cost. Over the cap the shadow
+     * LOD controller coarsens them as for any other budget.
+     *
+     * @type {number}
+     */
+    shadowIndicesPerTexel = 8;
+
+    /**
      * Shadow views' own LOD pressure, on top of the camera's. Shadow views are budgeted after
      * the camera (see _distributeIndexBudget), so a starved cascade coarsens its own casters
      * instead of the scene the camera sees.
@@ -205,7 +216,7 @@ class MeshletDirector {
      * @type {number}
      * @ignore
      */
-    shadowPressureScale = 1;
+    shadowPressureScale = 1;  // the largest shadow face's (see _updateShadowPressure)
 
     /** @type {number} - worst shadow-view demand/share ratio from the last distribution. @private */
     _shadowIndexRatio = 0;
@@ -861,7 +872,7 @@ class MeshletDirector {
         // too fine for the memory it has, and the answer to both is to coarsen it
         const indexRatio = this._distributeIndexBudget();
         this.budget.update(this.residency, indexRatio);
-        this._updateShadowPressure(this._shadowIndexRatio);
+        this._updateShadowPressure();
         this._checkBudgetFeasible(indexRatio);
 
         // resolve this frame's camera set
@@ -1087,20 +1098,58 @@ class MeshletDirector {
             v.indexShare = floor + (shadowWant > 0 ?
                 Math.floor(shadowGive * want(v) / shadowWant) :
                 Math.floor(shadowGive / shadows.length));
+            // a face never gets more than its shadow map can resolve: what is left of a large
+            // memory budget is not a reason to draw triangles far below a texel
+            const cap = this._shadowIndexCap(v);
+            if (cap > 0) v.indexShare = Math.min(v.indexShare, cap);
             this._shadowIndexRatio = Math.max(this._shadowIndexRatio, v.indexPressure());
         }
         return worst;
     }
 
     /**
-     * Shadow views' LOD controller: the budget manager's index response (raise past
-     * indexStarvedAt, decay under indexEasedAt, hold between), driven by the shadow views' own
-     * demand against what the cameras left them.
+     * The most indices a shadow face may draw: {@link shadowIndicesPerTexel} per texel of its
+     * part of the shadow map, or 0 when that is not known yet.
      *
-     * @param {number} ratio - Worst shadow-view demand/share ratio.
+     * @param {import('./meshlet-shadow-view.js').MeshletShadowView} view - The shadow face.
+     * @returns {number} The cap, in indices.
      * @private
      */
-    _updateShadowPressure(ratio) {
+    _shadowIndexCap(view) {
+        if (!(this.shadowIndicesPerTexel > 0)) return 0;
+        const resolution = view.light?._shadowResolution ?? 0;
+        const viewport = view.renderData?.shadowViewport;
+        const texels = resolution * resolution * (viewport ? viewport.z * viewport.w : 1);
+        return texels > 0 ? Math.floor(texels * this.shadowIndicesPerTexel) : 0;
+    }
+
+    /**
+     * Steps every shadow face's own LOD pressure from its demand against its share, and
+     * reports the largest as {@link shadowPressureScale}. Per face, so a far cascade over its
+     * budget coarsens alone instead of taking the near cascades - where coarse casters show as
+     * blotches - with it.
+     *
+     * @private
+     */
+    _updateShadowPressure() {
+        let worst = 1;
+        for (const view of this.shadowRenderer?.views ?? []) {
+            view.pressureScale = this._stepShadowPressure(view.pressureScale, view.indexPressure());
+            worst = Math.max(worst, view.pressureScale);
+        }
+        this.shadowPressureScale = worst;
+    }
+
+    /**
+     * One step of a shadow face's LOD controller: the budget manager's index response (raise
+     * past indexStarvedAt, decay under indexEasedAt, hold between).
+     *
+     * @param {number} scale - The face's pressure scale.
+     * @param {number} ratio - Its demand/share ratio.
+     * @returns {number} The new scale.
+     * @private
+     */
+    _stepShadowPressure(scale, ratio) {
         const budget = this.budget;
         // Proportional and rate-limited, unlike the camera's: the scale moves every shadow
         // caster's cut at once, and a fast ramp (x1.05 a frame) overshot by tens of times on
@@ -1112,7 +1161,7 @@ class MeshletDirector {
         } else if (ratio < budget.indexEasedAt) {
             step = Math.max((ratio / budget.indexEasedAt) ** SHADOW_PRESSURE_GAIN, SHADOW_PRESSURE_MAX_DECAY);
         }
-        this.shadowPressureScale = Math.min(Math.max(this.shadowPressureScale * step, 1), budget.maxScale);
+        return Math.min(Math.max(scale * step, 1), budget.maxScale);
     }
 
     /**
