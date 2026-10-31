@@ -490,6 +490,23 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
+     * Sets whether the screen-space thresholds - {@link dagPixelThreshold}, {@link rootMinPixels}
+     * and {@link shadowRootMinPixels} - are measured in CSS pixels rather than render target
+     * pixels, for cameras rendering to the canvas. In render target pixels, a display with a
+     * pixel ratio of 2 refines the cut about four times further, mostly into detail too small to
+     * see. The thresholds never go finer than one render target pixel. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    set cssPixels(value) {
+        if (this.group) this.group.cssPixels = value;
+    }
+
+    get cssPixels() {
+        return this.group?.cssPixels ?? true;
+    }
+
+    /**
      * Projected size on screen, in pixels, below which an instance casts no meshlet shadow.
      * Far-reaching shadow cascades cover most of the world, and every caster they admit costs at
      * least its coarsest level; skipping casters this small keeps them from taking the index

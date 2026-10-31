@@ -1,7 +1,8 @@
 #!/bin/zsh
 # convert (if needed) -> bake -> drop the raw render GLB. Collision GLBs are copied next to the bake.
 # Optional terrain clutter (grass, plants, rocks, trees; not part of the default scene):
-#   CLUTTER=trees|all           also bake caldera_<r>_clutter.glb, which manifest.py lists in scene.clutter.json
+#   CLUTTER=trees|all           also bake caldera_<r>_clutter.glb (trees) or caldera_<r>_clutter_all.glb (all);
+#                               manifest.py lists the trees in scene.clutter.json
 #   CLUTTER=trees CLUTTER_ONLY=1  bake only that, leaving the district's existing bake alone
 set -u
 setopt pipefail
@@ -35,15 +36,16 @@ for r in "$@"; do
     fi
     fi
     if [[ -n "${CLUTTER:-}" ]]; then
-        rm -rf $OUT/caldera_${r}_clutter.glb $OUT/caldera_${r}_clutter_meshlets $OUT/caldera_${r}_clutter_textures
+        c=caldera_${r}_clutter; [[ $CLUTTER == all ]] && c=${c}_all
+        rm -rf $OUT/$c.glb $OUT/${c}_meshlets $OUT/${c}_textures
         $PY -u $HERE/usd2glb.py --clutter $CLUTTER --clutter-only --out $RAW $r 2>&1 | grep -v "^ *[0-9]* meshes" || echo "CLUTTER CONVERT FAILED $r"
-        if [[ -f $RAW/caldera_${r}_clutter.glb ]]; then
-            (cd $TOOLS && /usr/bin/time -l gltf-transform streamed-meshlets $RAW/caldera_${r}_clutter.glb $OUT/caldera_${r}_clutter.glb \
+        if [[ -f $RAW/$c.glb ]]; then
+            (cd $TOOLS && /usr/bin/time -l gltf-transform streamed-meshlets $RAW/$c.glb $OUT/$c.glb \
                 --strip-source-geometry --no-tangents --config ./gltf-tools-plugin.js 2>&1 \
                 | grep -E "streamed .* page|Processed|real|peak memory|rror|failed") || echo "CLUTTER BAKE FAILED $r"
-            [[ -f $OUT/caldera_${r}_clutter.glb ]] && $PY $HERE/instance_nodes.py $OUT/caldera_${r}_clutter.glb
-            [[ -f $OUT/caldera_${r}_clutter.glb ]] && $PY $HERE/manifest.py 2>/dev/null
-            [[ -f $OUT/caldera_${r}_clutter.glb && -z "${KEEPRAW:-}" ]] && rm -f $RAW/caldera_${r}_clutter.glb
+            [[ -f $OUT/$c.glb ]] && $PY $HERE/instance_nodes.py $OUT/$c.glb
+            [[ -f $OUT/$c.glb ]] && $PY $HERE/manifest.py 2>/dev/null
+            [[ -f $OUT/$c.glb && -z "${KEEPRAW:-}" ]] && rm -f $RAW/$c.glb
         fi
     fi
     df -h ~ | tail -1 | awk '{print "  disk free", $4}'

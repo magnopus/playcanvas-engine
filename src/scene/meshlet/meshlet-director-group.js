@@ -174,6 +174,7 @@ class MeshletDirectorGroup {
         rootMinPixels: 3,
         shadowRootMinPixels: 2,
         shadowMatchCameraLod: false,
+        cssPixels: true,
         fastLoad: true,
         forceSubmitBoundaries: false,
         transcode: /** @type {MeshletTranscodeFn|null} */ (null)
@@ -243,6 +244,7 @@ class MeshletDirectorGroup {
         director.rootMinPixels = s.rootMinPixels;
         director.shadowRootMinPixels = s.shadowRootMinPixels;
         director.shadowMatchCameraLod = s.shadowMatchCameraLod;
+        director.cssPixels = s.cssPixels;
         director.fastLoad = s.fastLoad;
         director.forceSubmitBoundaries = s.forceSubmitBoundaries;
         director.transcode = s.transcode;
@@ -319,6 +321,15 @@ class MeshletDirectorGroup {
 
     get rootMinPixels() {
         return this._settings.rootMinPixels;
+    }
+
+    /** @type {boolean} */
+    set cssPixels(value) {
+        this._set('cssPixels', !!value);
+    }
+
+    get cssPixels() {
+        return this._settings.cssPixels;
     }
 
     /** @type {number} */

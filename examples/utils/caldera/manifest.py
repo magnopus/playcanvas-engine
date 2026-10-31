@@ -82,6 +82,8 @@ for name in ORDER:
              'baked': os.path.exists(baked), 'min': lo.round(2).tolist(), 'max': hi.round(2).tolist()}
     if os.path.exists(f'{OUT}/caldera_{name}_clutter.glb'):
         entry['clutter'] = f'caldera_{name}_clutter.glb'
+    if os.path.exists(f'{OUT}/caldera_{name}_clutter_all.glb'):
+        entry['clutterAll'] = f'caldera_{name}_clutter_all.glb'
     if os.path.exists(f'{OUT}/caldera_{name}_collision.glb'):
         entry['collision'] = f'caldera_{name}_collision.glb'
         entry['playerCollision'] = player_collision(OUT, name)

@@ -56,7 +56,7 @@ const BASE = new URLSearchParams(location.search).get('base') ?? './assets/meshl
 
 /**
  * @typedef {{ name: string, label: string, url: string, baked: boolean, collision?: string,
- * min: number[], max: number[] }} Region
+ * clutter?: string, clutterAll?: string, min: number[], max: number[] }} Region
  */
 /** @type {{ regions: Region[] }} */
 const manifest = await fetch(`${BASE}caldera_scene.json`).then(r => r.json());
@@ -128,6 +128,8 @@ app.systems.meshlet.poolBytes = (Number(params.get('pool')) || 2048) * 1024 * 10
 // ?worldMeshlets=<millions>: split the content across worlds of at most this many meshlets
 if (params.get('worldMeshlets')) app.systems.meshlet.maxWorldMeshlets = Number(params.get('worldMeshlets')) * 1e6;
 app.systems.meshlet.occlusion = true;
+// ?cssPixels=0: measure the LOD threshold in render target pixels (finer on high-density displays)
+app.systems.meshlet.cssPixels = params.get('cssPixels') !== '0';
 
 const scene = new Entity('Caldera');
 app.root.addChild(scene);
@@ -136,13 +138,20 @@ app.root.addChild(scene);
 // see which are still loading: the first region builds at once, the rest wait for the burst to
 // finish and join in a single rebuild (?progressive=1 instead rebuilds as regions arrive)
 app.systems.meshlet.deferRebuildWhileLoading = params.get('progressive') !== '1';
+// ?clutter=1 also loads the terrain tiles' baked trees (pipeline.sh CLUTTER=trees), ?clutter=all
+// their grass, plants and rocks too (CLUTTER=all), where present
+const clutter = params.get('clutter');
 for (const region of regions) {
-    const asset = new Asset(region.label, 'container', { url: BASE + region.url });
-    asset.once('error', err => console.error(`Caldera: failed to load ${region.url}`, err));
-    app.assets.add(asset);
-    const entity = new Entity(region.label);
-    entity.addComponent('meshlet', { asset });
-    scene.addChild(entity);
+    const extra = clutter === 'all' ? region.clutterAll ?? region.clutter : clutter === '1' ? region.clutter : undefined;
+    const urls = extra ? [region.url, extra] : [region.url];
+    for (const url of urls) {
+        const asset = new Asset(region.label, 'container', { url: BASE + url });
+        asset.once('error', err => console.error(`Caldera: failed to load ${url}`, err));
+        app.assets.add(asset);
+        const entity = new Entity(region.label);
+        entity.addComponent('meshlet', { asset });
+        scene.addChild(entity);
+    }
 }
 
 const light = new Entity('Sun');

@@ -177,6 +177,30 @@ describe('MeshletDirector', function () {
         expect(director.views.get(cameraComponent), 'same camera keeps its view').to.equal(view);
     });
 
+    it('measures the screen-space thresholds in CSS pixels on a high-density canvas', function () {
+        finalizeStreamed();
+        director.dagPixelThreshold = 1.5;
+        Object.defineProperty(device.canvas, 'clientHeight', { value: device.height / 2, configurable: true });
+        director.update(comp);
+        const view = director.views.get(cameraComponent);
+        expect(director.pixelScale).to.equal(2);
+        expect(view.culler.dagPixelThreshold).to.equal(3);
+        expect(view.culler.rootMinPixels).to.equal(6);
+
+        director.cssPixels = false;
+        director.update(comp);
+        expect(director.pixelScale).to.equal(1);
+        expect(view.culler.dagPixelThreshold).to.equal(1.5);
+        expect(view.culler.rootMinPixels).to.equal(3);
+
+        // never finer than one render target pixel: a canvas rendered below its CSS size
+        director.cssPixels = true;
+        Object.defineProperty(device.canvas, 'clientHeight', { value: device.height * 2, configurable: true });
+        director.update(comp);
+        expect(director.pixelScale).to.equal(1);
+        delete device.canvas.clientHeight;
+    });
+
     it('caps the camera set and drops views whose camera left', function () {
         finalizeStreamed();
         const second = makeCameraComponent();

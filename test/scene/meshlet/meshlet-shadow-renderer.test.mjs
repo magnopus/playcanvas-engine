@@ -126,6 +126,7 @@ describe('MeshletShadowRenderer', function () {
             takeShadowCapCarry: () => null,
             shadowInitialIndexScale: 0.5,
             dagPixelThreshold: 2,
+            pixelScale: 1,
             shadowThresholdScale: 1.5,
             budget: { pressureScale: 1.25 },
             forceSubmitBoundaries: false

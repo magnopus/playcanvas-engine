@@ -8,7 +8,7 @@ Per region it writes:
   <name>_collision.glb  world-space collision soup (POSITION + indices), one node per class/cell.
 
 With --clutter the terrain tiles' PointInstancers (grass, plants, rocks, trees) are also written,
-as <name>_clutter.glb: one prototype mesh per USD prototype, one node per point. They are not
+as <name>_clutter.glb (trees) or <name>_clutter_all.glb (all): one prototype mesh per USD prototype, one node per point. They are not
 collidable. --clutter-only skips everything else, so a tile's clutter can be tried without
 reconverting its geometry.
 
@@ -73,6 +73,9 @@ CREASE_COS = math.cos(math.radians(35.0))
 # coplanar layer faces closer than this to another prim's surface are dropped (inches). Measured
 # on the hotel, the duplicates are exactly coplanar; real trim starts ~0.5" proud of its wall.
 OVERLAY_OFFSET = 0.1
+# faces named as a blend layer (OVERLAY_NAME) also drop up to this far in front of a surface: some
+# sit 0.5-2" proud of their base, where they would draw as opaque patches
+LAYER_OFFSET = 2.0
 # a content-deduped mesh placed once and smaller than this merges into its cell instead
 DEDUPE_MERGE_TRIS = 5000
 # names that read as a blend / grime layer lose the tie when two coplanar copies overlap
@@ -85,11 +88,13 @@ CLUTTER_TREES = re.compile(r'tree|palm|bush|shrub|banana|mangrove|cordyline|albi
 # ---------------------------------------------------------------------------------------------
 # material classification
 
-# render faces with these materials are not drawn (tool / no-draw / overlay surfaces)
+# render faces with these materials are not drawn (tool / no-draw / overlay surfaces). audio_* are
+# footstep-sound surfaces floating just above the ground (audio_user_terrain_water read as water);
+# *_dec* are decal patches (stains, cracks) laid on a surface that is drawn anyway
 RENDER_SKIP = re.compile(r'^(caulk|skip|nodraw|clip|trigger|volume|portal|shadow|sky|mount_|'
-                         r'reflection|client_|lightgrid|occlusion|hint|origin|mantle|ladder|'
+                         r'reflection|client_|audio_|lightgrid|occlusion|hint|origin|mantle|ladder|'
                          r'broadphase|vista|terrain_cutout|terrain_collision|outofbounds)'
-                         r'|decal|_shadow_caster|shadowcaster')
+                         r'|decal|_dec\b|_dec_|_shadow_caster|shadowcaster')
 # temporary test override: CALDERA_EXTRA_SKIP='name1|name2' also skips those materials (render and world collision)
 if os.environ.get('CALDERA_EXTRA_SKIP'):
     RENDER_SKIP = re.compile(RENDER_SKIP.pattern + '|' + os.environ['CALDERA_EXTRA_SKIP'])
@@ -189,8 +194,10 @@ def read_mesh(prim):
     fvc = np.asarray(fvc, dtype=np.int64)
     fvi = np.asarray(fvi, dtype=np.int64)
 
+    # uvs only matter with textures (CALDERA_TEXTURES); without them they cost ~55% more meshlet
+    # page bytes, partly from vertices split at uv seams
     uv = None
-    stv = UsdGeom.PrimvarsAPI(prim).GetPrimvar('st')
+    stv = UsdGeom.PrimvarsAPI(prim).GetPrimvar('st') if os.environ.get('CALDERA_TEXTURES') else None
     if stv and stv.HasAuthoredValue():
         val = attr_value(stv.GetAttr())
         if val is not None and len(val):
@@ -594,7 +601,7 @@ class Exporter:
             if not tris:
                 continue
             tris = np.concatenate(tris)
-            drop = overlay_mask(tris, np.concatenate(owner), OVERLAY_OFFSET, np.concatenate(rank))
+            drop = overlay_mask(tris, np.concatenate(owner), OVERLAY_OFFSET, np.concatenate(rank), LAYER_OFFSET)
             self.overlay_dropped += int(drop.sum())
             self.overlay_total += len(drop)
             start = 0
@@ -960,7 +967,8 @@ def main():
             write_render(ex, f'{args.out}/caldera_{r}.glb', r)
             write_collision(ex, f'{args.out}/caldera_{r}_collision.glb', r)
         if clutter and ex.clutter_set.protos:
-            write_render(ex.clutter_set, f'{args.out}/caldera_{r}_clutter.glb', r + '_clutter')
+            suffix = '_clutter_all' if clutter == 'all' else '_clutter'
+            write_render(ex.clutter_set, f'{args.out}/caldera_{r}{suffix}.glb', r + suffix)
         if ex.unknown_guide:
             top = sorted(ex.unknown_guide.items(), key=lambda kv: -kv[1])[:25]
             print('  guide materials not treated as collision:', top, flush=True)

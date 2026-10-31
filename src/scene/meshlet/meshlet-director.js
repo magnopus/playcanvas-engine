@@ -111,6 +111,15 @@ class MeshletDirector {
     _dagPixelThreshold = 1;
 
     /**
+     * Render target pixels per CSS pixel of the last camera view updated (at least 1): the factor
+     * the screen-space thresholds are scaled by when {@link cssPixels} is on, else 1.
+     *
+     * @type {number}
+     * @ignore
+     */
+    pixelScale = 1;
+
+    /**
      * Rebuild retention: previous views' visibility-bit buffers keyed by camera, GPU-copied
      * into the recreated views' fresh buffers (see MeshletView), then retired.
      *
@@ -173,6 +182,19 @@ class MeshletDirector {
      * @type {number}
      */
     rootMinPixels = 3;
+
+    /**
+     * Measure the screen-space thresholds - {@link dagPixelThreshold}, {@link rootMinPixels} and
+     * {@link shadowRootMinPixels} - in CSS pixels instead of render target pixels, for cameras
+     * rendering to the canvas. On a high-density display a render target pixel is a fraction of
+     * a CSS pixel, and a cut measured in render target pixels refines with the density squared:
+     * at a pixel ratio of 2 it draws about four times the geometry, mostly detail too small to
+     * see. The thresholds never go finer than one render target pixel, so a render scale below
+     * the pixel ratio still coarsens the cut.
+     *
+     * @type {boolean}
+     */
+    cssPixels = true;
 
     /**
      * Shadow casters also refine at least as far as the camera's own cut does. The shadow cut is
@@ -837,9 +859,6 @@ class MeshletDirector {
     /** @type {number} - screen-space error threshold in pixels for the DAG LOD cut. */
     set dagPixelThreshold(value) {
         this._dagPixelThreshold = value;
-        this.views.forEach((v) => {
-            v.culler.dagPixelThreshold = value;
-        });
     }
 
     get dagPixelThreshold() {
@@ -900,7 +919,6 @@ class MeshletDirector {
                     capCarry: this._capCarry?.get(cameraComponent) ?? null,
                     cullShaders: this.cullShaders
                 });
-                view.culler.dagPixelThreshold = this._dagPixelThreshold;
                 this.views.set(cameraComponent, view);
                 // a CameraFrame builds its pass chain once and caches it, so it has to be told
                 // to rebuild now that there are meshlet passes to splice in
@@ -928,7 +946,6 @@ class MeshletDirector {
         view._passesAdded = false;
         view.syncMaterials();
         view.culler.pressureScale = this.budget.pressureScale;
-        view.culler.rootMinPixels = this.rootMinPixels;
         view.culler.forceSubmitBoundaries = this.forceSubmitBoundaries;
         // grow first, then read demand: buffers must not change once the frame is encoding
         view.applyPendingGrowth();
@@ -957,6 +974,11 @@ class MeshletDirector {
             halfFov = Math.atan(Math.tan(halfFov) * viewportHeight / Math.max(viewportWidth, 1));
         }
         const projScale = viewportHeight / (2 * Math.tan(halfFov));
+        // see cssPixels: render target pixels per CSS pixel, for a camera drawing to the canvas
+        const cssHeight = this.cssPixels && !cameraComponent.renderTarget ? this.device.canvas?.clientHeight : 0;
+        this.pixelScale = cssHeight > 0 ? Math.max(viewportHeight / cssHeight, 1) : 1;
+        view.culler.dagPixelThreshold = this._dagPixelThreshold * this.pixelScale;
+        view.culler.rootMinPixels = this.rootMinPixels * this.pixelScale;
         // shadow views rank their casters' root admission by this camera's view of them
         this.priorityOrigin.copy(cameraComponent.entity.getPosition());
         this.priorityProjScale = projScale;
