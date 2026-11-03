@@ -104,7 +104,8 @@ COLL_PLAYER = re.compile(r'^(clip($|_player|_ai|_lm_|_full|_stairs|_vehicle|_met
 COLL_WEAPON = re.compile(r'^clip_(weap|missile|bullet|shot|nosight(?!_player))')
 
 PALETTE = [
-    # (regex, name, rgb, roughness, metallic, doubleSided)
+    # (regex, name, rgb, roughness, metallic, doubleSided); rgb is sRGB, as picked by eye - glTF
+    # factors are linear, so write_render decodes it (linearize_palette.py patches older bakes)
     (r'water|ocean|puddle', 'water', (0.10, 0.24, 0.30), 0.05, 0.0, False),
     (r'glass|window_pane|windshield', 'glass', (0.45, 0.55, 0.60), 0.05, 0.3, True),
     # before foliage: 'palm_roof' and 'reed_roof' must not fall through to the palm/reed foliage match
@@ -456,6 +457,9 @@ class Exporter:
         mats = np.array([classify_render(m, self.is_terrain) for m in face_mat])
         # full-terrain heightfields are plain meshes, not brushes, but they are the ground
         is_height = prim.GetName() == 'height' and prim.GetParent().GetName().startswith('super_terrain')
+        if is_height:
+            # most of a heightfield has no material bound, which would read as the neutral default
+            mats[np.array([not m for m in face_mat])] = MATERIAL_INDEX['terrain']
         if self.is_terrain or is_brush or is_height:
             solid = (mats >= 0) & (mats != MATERIAL_INDEX['water']) & (mats != MATERIAL_INDEX['glass'])
             caulk = np.array([bool(m) and m.lower().startswith('caulk') for m in face_mat])
@@ -837,6 +841,10 @@ def texture_files(set_id):
     return color, normal
 
 
+def srgb_to_linear(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
 def write_render(ex, path, name):
     w = GlbWriter(path)
     for n in MATERIAL_NAMES:
@@ -844,11 +852,12 @@ def write_render(ex, path, name):
         if entry:
             _, _, rgb, rough, metal, ds = entry
         elif n == 'terrain':
-            rgb, rough, metal, ds = (0.42, 0.38, 0.30), 0.95, 0.0, False
+            rgb, rough, metal, ds = (0.58, 0.52, 0.40), 0.95, 0.0, False
         else:
             rgb, rough, metal, ds = (0.60, 0.58, 0.55), 0.8, 0.0, False
-        pbr = {'baseColorFactor': [*rgb, 1.0], 'metallicFactor': metal, 'roughnessFactor': rough}
-        mat = {'name': n, 'pbrMetallicRoughness': pbr}
+        pbr = {'baseColorFactor': [*map(srgb_to_linear, rgb), 1.0], 'metallicFactor': metal, 'roughnessFactor': rough}
+        # marks the factor as already decoded, so linearize_palette.py leaves it alone
+        mat = {'name': n, 'pbrMetallicRoughness': pbr, 'extras': {'linearPalette': True}}
         files = texture_files(TEXTURE_SETS[n]) if n in TEXTURE_SETS else None
         if files:
             color, normal = files

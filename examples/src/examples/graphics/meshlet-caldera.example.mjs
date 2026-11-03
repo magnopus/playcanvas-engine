@@ -18,12 +18,17 @@ import {
     ByteCache,
     CameraComponentSystem,
     CameraFrame,
+    CircleGeometry,
     Color,
     ContainerHandler,
     Entity,
     FILLMODE_FILL_WINDOW,
     Keyboard,
+    Layer,
     LightComponentSystem,
+    Mesh,
+    MeshInstance,
+    math,
     MeshletComponentSystem,
     OpfsByteStore,
     Mouse,
@@ -32,12 +37,15 @@ import {
     SHADERPASS_WORLDNORMAL,
     ScriptComponentSystem,
     StandardMaterial,
+    TONEMAP_ACES2,
     TextureHandler,
     TouchDevice,
     Vec3,
     createGraphicsDevice
 } from 'playcanvas';
 import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
+import { ProceduralSky } from 'playcanvas/scripts/esm/sky/procedural-sky.mjs';
+import { Water } from 'playcanvas/scripts/esm/water.mjs';
 
 import { data, deviceType } from 'examples/context';
 
@@ -158,7 +166,7 @@ const light = new Entity('Sun');
 light.addComponent('light', {
     type: 'directional',
     color: new Color(1, 0.96, 0.9),
-    intensity: 1.6
+    intensity: 2
 });
 light.setEulerAngles(50, 35, 0);
 app.root.addChild(light);
@@ -182,8 +190,6 @@ if (params.get('shadows') === '1') {
     if (group && params.get('shadowRootMin')) group.shadowRootMinPixels = Number(params.get('shadowRootMin'));
 }
 
-app.scene.ambientLight = new Color(0.32, 0.36, 0.42);
-
 const camera = new Entity('Camera');
 camera.addComponent('camera', {
     clearColor: new Color(0.55, 0.68, 0.82),
@@ -206,6 +212,80 @@ cameraFrame.bloom.enabled = false;
 cameraFrame.update();
 app.on('destroy', () => cameraFrame.destroy());
 
+// A sunny day: a procedural sky, whose env-atlas lights the scene (in place of a flat ambient)
+// under the HDR sun, tone mapped. The sun disk goes where the light shines from (its +Y). The
+// sky is not handed the light, as it would recolour and re-aim it.
+const sky = new Entity('ProceduralSky');
+sky.addComponent('script');
+const skyScript = /** @type {ProceduralSky} */ (sky.script.create(ProceduralSky));
+const toSun = light.up;
+skyScript.elevation = Math.asin(toSun.y) * math.RAD_TO_DEG;
+skyScript.azimuth = Math.atan2(toSun.x, toSun.z) * math.RAD_TO_DEG;
+// the sky's share of the light, against the sun's intensity: brighter flattens the shading
+skyScript.luminance = 0.3;
+app.root.addChild(sky);
+app.scene.ambientLight = new Color(0, 0, 0);
+cameraFrame.rendering.toneMapping = TONEMAP_ACES2;
+cameraFrame.update();
+
+// The sea, as in the water example (?water=0 turns it off): a water surface at ?seaLevel=<m>
+// (3.5, the top of the map's shallow-water trigger volumes), reflecting the sky's env-atlas.
+// Planar reflection / refraction are off: their cameras would render the whole meshlet scene
+// again. So are the depth effects (shore fade, foam): the scene depth map they read comes from a
+// depth prepass, which has no meshlets in it and replaces the scene depth the meshlet occlusion
+// culling builds its HZB from
+if (params.get('water') !== '0') {
+    const normalMap = await new Promise((resolve, reject) => {
+        const asset = new Asset('water normal', 'texture', { url: './assets/textures/normal-map.png' });
+        asset.once('load', () => resolve(asset.resource));
+        asset.once('error', reject);
+        app.assets.add(asset);
+        app.assets.load(asset);
+    });
+
+    // the water blends over the opaque scene, so it renders after the world's transparent pass
+    const worldLayer = app.scene.layers.getLayerByName('World');
+    const waterLayer = new Layer({ name: 'Water' });
+    app.scene.layers.insert(waterLayer, app.scene.layers.getTransparentIndex(worldLayer) + 1);
+    camera.camera.layers = [...camera.camera.layers, waterLayer.id];
+
+    // Where the far clip cuts the water off, the sky below the horizon shows through as a grey
+    // band, a few degrees tall when seen from high up. The far clip is pushed out so the band
+    // shrinks to a sliver, and the water reaches past it from anywhere on the island. Flat:
+    // geometry waves need vertices finer than their wavelength, and at island scale they would be
+    // too small to see anyway
+    camera.camera.farClip = 60000;
+    const waterMesh = Mesh.fromGeometry(device, new CircleGeometry({ radius: 62000, sectors: 64, rings: 4 }));
+    const water = new Entity('Water');
+    water.addComponent('render', {
+        meshInstances: [new MeshInstance(waterMesh, new StandardMaterial())],
+        layers: [waterLayer.id],
+        castShadows: false
+    });
+    const seaLevel = Number(params.get('seaLevel') ?? 3.5);
+    water.setLocalPosition(0, seaLevel, 0);
+    app.root.addChild(water);
+
+    water.addComponent('script');
+    water.script.create(Water, {
+        properties: {
+            cameraEntity: camera,
+            lightEntity: light,
+            normalMap,
+            reflectionSource: 'sky',
+            refraction: false,
+            depthEffects: false,
+            shallowColor: new Color(0.6, 0.9, 0.85),
+            deepColor: new Color(0.03, 0.16, 0.24),
+            depthFade: 3,
+            // larger, softer ripples than the water example's, which shimmer at these distances
+            rippleTiling: 0.02,
+            bumpiness: 0.25,
+            waves: false
+        }
+    });
+}
+
 // orbit pivot: the world point under the screen centre, from the meshlet depth. It is picked once
 // when an orbit drag starts (left or middle button), not every frame: a pick costs a meshlet pick pass
 // and a GPU readback. The pick is queued from pointerdown and run from postrender, because meshlet draw
@@ -224,7 +304,8 @@ app.on('postrender', () => {
     if (!pickRequested || pickInFlight) return;
     pickRequested = false;
     pickInFlight = true;
-    picker.prepare(camera.camera, app.scene);
+    // the world layer only: the water's shader has no pick output
+    picker.prepare(camera.camera, app.scene, [app.scene.layers.getLayerByName('World')]);
     picker.getWorldPointAsync(picker.width * 0.5, picker.height * 0.5).then((point) => {
         // setting focusPoint re-aims the camera, so it is set once per orbit start and only when hit
         if (point) {
