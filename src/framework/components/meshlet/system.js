@@ -490,6 +490,36 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
+     * Projected size on screen, in pixels, of a whole impostor prototype (a tree) under which its
+     * instances draw as one billboard of the baked {@link impostors} instead of meshlets. The
+     * meshlet LOD cannot keep distant foliage - it erases the leaf cards - so this takes over
+     * beyond the switch size. 0 (the default) draws meshlets at every distance.
+     *
+     * @type {number}
+     */
+    set impostorPixels(value) {
+        if (this.group) this.group.impostorPixels = value;
+    }
+
+    get impostorPixels() {
+        return this.group?.impostorPixels ?? 0;
+    }
+
+    /**
+     * Pre-baked octahedral impostors of whole prototypes, matched to the glTF mesh names of the
+     * loaded assets. Set it before the assets load. See `MeshletImpostors`.
+     *
+     * @type {import('../../../scene/meshlet/meshlet-impostors.js').MeshletImpostors|null}
+     */
+    set impostors(value) {
+        if (this.group) this.group.impostors = value;
+    }
+
+    get impostors() {
+        return this.group?.impostors ?? null;
+    }
+
+    /**
      * Sets whether the screen-space thresholds - {@link dagPixelThreshold}, {@link rootMinPixels}
      * and {@link shadowRootMinPixels} - are measured in CSS pixels rather than render target
      * pixels, for cameras rendering to the canvas. In render target pixels, a display with a

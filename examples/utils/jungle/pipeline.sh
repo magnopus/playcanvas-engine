@@ -1,6 +1,6 @@
 #!/bin/zsh
 # convert (if needed) -> bake -> manifest for the JungleRuins groups.
-#   pipeline.sh terrain static trees plants sky canopy
+#   pipeline.sh terrain static trees plants sky canopy treetest
 # JUNGLE_RAW: export folder (raw GLBs + resized textures), GLTF_TOOLS: gltf-tools checkout,
 # PY: python with usd-core + numpy + Pillow, JUNGLE_USD: the scene (defaults to ~/Downloads)
 # RECONVERT=1 re-exports, EXPORT_ARGS passes extra usd2glb.py options (e.g. --forest-radius 1500),
@@ -22,6 +22,15 @@ for g in "$@"; do
     echo "== $g $(date +%T)"
     if [[ $g == sky ]]; then
         $PY -u $HERE/sky.py --out $OUT ${=SKY_ARGS:---to-sun 0.35355,0.70711,0.61237} || echo "SKY FAILED"
+        continue
+    fi
+    if [[ $g == treetest ]]; then
+        # the isolated tree test scene (meshlet-impostor-test example), baked beside the scene, not in it
+        $PY -u $HERE/protos.py --out $RAW --test-scene 2>&1 | grep -E "test scene|prototypes" || { echo "TREETEST EXPORT FAILED"; continue; }
+        rm -rf $OUT/treetest && mkdir -p $OUT/treetest
+        (cd $TOOLS && /usr/bin/time -l gltf-transform streamed-meshlets $RAW/jungle_treetest.glb $OUT/treetest/jungle_treetest.glb \
+            --strip-source-geometry --no-tangents ${=BAKE_ARGS:---srgb-encoding uastc} --config ./gltf-tools-plugin.js 2>&1 \
+            | grep -E "streamed .* page|Processed|real|peak memory|rror|failed") || echo "BAKE FAILED treetest"
         continue
     fi
     if [[ $g == canopy ]]; then

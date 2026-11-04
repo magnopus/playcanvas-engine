@@ -184,6 +184,15 @@ class MeshletDirector {
     rootMinPixels = 3;
 
     /**
+     * Projected size in pixels of a whole impostor prototype (a tree) under which its instances
+     * draw as one billboard instead of meshlets. 0 turns impostors off. Needs {@link impostors}.
+     * Billboards still vanish under {@link rootMinPixels}.
+     *
+     * @type {number}
+     */
+    impostorPixels = 0;
+
+    /**
      * Measure the screen-space thresholds - {@link dagPixelThreshold}, {@link rootMinPixels} and
      * {@link shadowRootMinPixels} - in CSS pixels instead of render target pixels, for cameras
      * rendering to the canvas. On a high-density display a render target pixel is a fraction of
@@ -246,6 +255,9 @@ class MeshletDirector {
     /** @private */
     _transcode = null;
 
+    /** @type {import("./meshlet-impostors.js").MeshletImpostors|null} */
+    _impostors = null;
+
     /** @type {number} - the budget value the shortfall warning was last printed for. @private */
     _budgetWarnedAt = -1;
 
@@ -273,6 +285,21 @@ class MeshletDirector {
 
     get transcode() {
         return this._transcode;
+    }
+
+    /**
+     * The impostor set: baked views of whole prototypes, matched to the glTF meshes of the
+     * loaded assets by name. Set it before the assets load - it tags their instances.
+     *
+     * @type {import('./meshlet-impostors.js').MeshletImpostors|null}
+     */
+    set impostors(value) {
+        this._impostors = value;
+        this.world.impostors = value;
+    }
+
+    get impostors() {
+        return this._impostors;
     }
 
     /**
@@ -682,6 +709,7 @@ class MeshletDirector {
         this.world.indexBudgetFraction = indexBudgetFraction;
         this.world.initialRecords = initialRecords;
         this.world.transcode = this._transcode;
+        this.world.impostors = this._impostors;
         this.world.fetchScheduler = this.fetchScheduler;
         this.budget._lastDropped = 0;
         this.budget._lastEvicted = 0;
@@ -979,6 +1007,7 @@ class MeshletDirector {
         this.pixelScale = cssHeight > 0 ? Math.max(viewportHeight / cssHeight, 1) : 1;
         view.culler.dagPixelThreshold = this._dagPixelThreshold * this.pixelScale;
         view.culler.rootMinPixels = this.rootMinPixels * this.pixelScale;
+        view.culler.impostorPixels = this.impostorPixels * this.pixelScale;
         // shadow views rank their casters' root admission by this camera's view of them
         this.priorityOrigin.copy(cameraComponent.entity.getPosition());
         this.priorityProjScale = projScale;
@@ -1286,7 +1315,10 @@ class MeshletDirector {
     /** @type {MeshInstance[]} - all views' mesh instances (shader-update sweep). */
     get allMeshInstances() {
         const mis = [];
-        this.views.forEach(v => mis.push(...v.meshInstances));
+        this.views.forEach((v) => {
+            mis.push(...v.meshInstances);
+            if (v.impostorInstance) mis.push(v.impostorInstance);
+        });
         this.shadowRenderer?.entries.forEach((entry) => {
             entry.views.forEach(v => mis.push(...v.meshInstances));
         });
@@ -1540,7 +1572,7 @@ class MeshletDirector {
             clearDepth: clears && camera.clearDepthBuffer,
             clearStencil: clears && camera.clearStencilBuffer
         });
-        view.drawPass1.meshInstances = mis.slice(0, MESHLET_BUCKET_COUNT);
+        view.drawPass1.meshInstances = view.impostorInstance ? [...mis.slice(0, MESHLET_BUCKET_COUNT), view.impostorInstance] : mis.slice(0, MESHLET_BUCKET_COUNT);
 
         const middle = [];
         if (view.useOcclusion) {
@@ -1597,7 +1629,7 @@ class MeshletDirector {
             clearDepth: firstAction.clearDepth,
             clearStencil: firstAction.clearStencil
         });
-        view.drawPass1.meshInstances = mis.slice(0, MESHLET_BUCKET_COUNT);
+        view.drawPass1.meshInstances = view.impostorInstance ? [...mis.slice(0, MESHLET_BUCKET_COUNT), view.impostorInstance] : mis.slice(0, MESHLET_BUCKET_COUNT);
         frameGraph.addRenderPass(view.drawPass1);
 
         // split the block at its first transparent render action

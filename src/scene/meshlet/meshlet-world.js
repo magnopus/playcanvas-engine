@@ -15,9 +15,11 @@ import { OBJECT_FLAG_NO_SHADOW,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COMPACT_SLICE, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
     MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, MESHLET_NO_PARENT, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
-    OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
+    OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_IMPOSTOR, OBJECT_FLAG_IMPOSTOR_PRIMARY, OBJECT_FLAG_OUTLINED,
+    OBJECT_IMPOSTOR_LAYER_SHIFT, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
     RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S,
     MESHLET_COLOR_MODE, claimWordCount } from './constants.js';
+import { createMeshletImpostorMaterial } from './meshlet-impostors.js';
 import { createMeshletLitMaterial } from './meshlet-lit-material.js';
 import { createMeshletMaterial } from './meshlet-material.js';
 import { buildMeshletLitChunks } from './shaders/meshlet-lit-chunks-wgsl.js';
@@ -118,6 +120,26 @@ class MeshletWorld {
 
 
     objectDataBuffer = null;
+
+    /**
+     * The impostor set (see meshlet-impostors.js), or null. Set before the resources are
+     * finalized - it tags the instances of the prototypes it names.
+     *
+     * @type {import('./meshlet-impostors.js').MeshletImpostors|null}
+     */
+    impostors = null;
+
+    /** @type {number} - instances that emit a billboard (one per impostor tree). */
+    impostorCount = 0;
+
+    /** @type {StorageBuffer|null} - per atlas layer: prototype sphere (centre xyz, radius), then framed half width and height. */
+    impostorProtosBuffer = null;
+
+    /** @type {StorageBuffer|null} - stand-in impostor list bound to views that draw no billboards. */
+    impostorDummyBuffer = null;
+
+    /** @type {import('../materials/standard-material.js').StandardMaterial|null} */
+    impostorMaterial = null;
 
     materialTableBuffer = null;
 
@@ -221,6 +243,10 @@ class MeshletWorld {
         this.cut?.destroy();
         this.cells?.destroy();
         this.objectDataBuffer?.destroy();
+        this.impostorProtosBuffer?.destroy();
+        this.impostorDummyBuffer?.destroy();
+        this.impostorMaterial?.destroy();
+        this.impostorMaterial = null;
         this.materialTableBuffer?.destroy();
         this.lightmapBuffer?.destroy();
         // bucket materials are shared across the views' mesh instances - destroy each set once
@@ -1046,7 +1072,18 @@ class MeshletWorld {
                         Debug.warnOnce('MeshletWorld: invalid streamed EPIC lightmap reference, coefficients or UV channel; lightmap ignored.');
                     }
                 }
-                objectData[row + OBJECT_DATA.FLAGS] = (hasTangents ? OBJECT_FLAG_HAS_TANGENTS : 0) | (hasColors ? OBJECT_FLAG_HAS_COLORS : 0);
+                // an instance of an impostor prototype carries its atlas layer; the first primitive
+                // of the mesh speaks for the tree
+                const impostorProto = this.impostors?.prototypes?.[prim.meshName];
+                let impostorFlags = 0;
+                if (impostorProto) {
+                    impostorFlags = OBJECT_FLAG_IMPOSTOR | (impostorProto.layer << OBJECT_IMPOSTOR_LAYER_SHIFT);
+                    if (prim.firstOfMesh) {
+                        impostorFlags |= OBJECT_FLAG_IMPOSTOR_PRIMARY;
+                        this.impostorCount++;
+                    }
+                }
+                objectData[row + OBJECT_DATA.FLAGS] = (hasTangents ? OBJECT_FLAG_HAS_TANGENTS : 0) | (hasColors ? OBJECT_FLAG_HAS_COLORS : 0) | impostorFlags;
                 objectDataF[row + OBJECT_DATA.MAX_SCALE] = maxAxisScale(matrix);
                 objectData[row + OBJECT_DATA.FIRST_PAIR_BIT] = this.totalPairs;
                 for (let c = 0; c < 3; c++) objectDataF[row + OBJECT_DATA.GRID_ORIGIN + c] = grid.origin[c];
@@ -1233,6 +1270,24 @@ class MeshletWorld {
         this._litMaterials.forEach(bindWorldParams);
         this._litMaterials.forEach(bindTextureParams);
         this._debugMaterials = null;
+
+        // impostors: the prototype table the classify and the billboard shader read, and the
+        // draw material. The table is always bound (the shaders declare it), so it exists even
+        // when no instance is tagged.
+        const protoLayers = Object.values(this.impostors?.prototypes ?? {});
+        const protoTable = new Float32Array(Math.max(protoLayers.reduce((n, p) => Math.max(n, p.layer + 1), 0), 1) * 8);
+        for (const proto of protoLayers) {
+            const half = proto.half ?? [proto.radius, proto.radius];
+            protoTable.set([proto.center[0], proto.center[1], proto.center[2], proto.radius, half[0], half[1], 0, 0], proto.layer * 8);
+        }
+        this.impostorProtosBuffer = new StorageBuffer(device, protoTable.byteLength, BUFFERUSAGE_COPY_DST);
+        this.impostorProtosBuffer.write(0, protoTable);
+        this.impostorDummyBuffer = new StorageBuffer(device, 16, BUFFERUSAGE_COPY_DST);
+        if (this.impostors && this.impostorCount > 0) {
+            this.impostorMaterial = createMeshletImpostorMaterial(this.impostors);
+            this.impostorMaterial.setParameter('objectData', this.objectDataBuffer);
+            this.impostorMaterial.setParameter('impostorProtos', this.impostorProtosBuffer);
+        }
         this._bindWorldParams = bindWorldParams;
 
         // family arrays are created asynchronously (format known after the first transcode) -

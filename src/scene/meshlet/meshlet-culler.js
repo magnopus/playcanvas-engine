@@ -3,7 +3,7 @@ import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import {
     CULL_FLAG_HZB_LINEAR, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_VISIBLE_CELLS_BASE, MESHLET_CULL_SLICE,
-    MESHLET_COMPACT_SLICE, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS,
+    MESHLET_COMPACT_SLICE, MESHLET_IMPOSTOR_FADE_BAND, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS,
     MESHLET_ROOT_BAND_OCTAVES, WORK_ITEM_U32S, claimLevelBase, claimPersistBase
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
@@ -75,6 +75,15 @@ class MeshletCuller {
      * @type {number}
      */
     rootMinPixels = 0;
+
+    /**
+     * Projected size in pixels of a whole impostor prototype under which its instances draw as
+     * one billboard instead of meshlets (0 turns impostors off, as every shadow view has them).
+     * Billboards still vanish below {@link rootMinPixels}.
+     *
+     * @type {number}
+     */
+    impostorPixels = 0;
 
     /**
      * Keep last frame's admissions for hysteresis. Views sharing one claim buffer (shadow
@@ -273,7 +282,15 @@ class MeshletCuller {
         this.rootClassify.setParameter('rootList', view.workItemsBuffer);
         this.rootClassify.setParameter('rootBands', this.rootBandsBuffer);
         this.rootClassify.setParameter('cellInstances', cells.instancesBuffer);
+        this.rootClassify.setParameter('impostorProtos', world.impostorProtosBuffer);
+        // a view that draws no billboards still binds a list: the shader always declares it
+        this.rootClassify.setParameter('impostorList', view.impostorListBuffer ?? world.impostorDummyBuffer);
         bindCells(this.rootClassify);
+        if (view.impostorInstance) {
+            this.impostorArgs = makeCompute('impostorArgs');
+            this.impostorArgs.setParameter('capacity', world.impostorCount);
+            this.impostorArgs.setParameter('counters', view.countersBuffer);
+        }
         this.rootArgs = makeCompute('dispatchArgs');
         this.rootArgs.setParameter('counterIndex', MESHLET_COUNTER.ROOT_CANDIDATES);
         this.rootArgs.setParameter('groupSize', 64);
@@ -495,6 +512,8 @@ class MeshletCuller {
         params[row(CULL_PARAMS.ROOT_BANDS) + 1] = MESHLET_ROOT_BANDS / MESHLET_ROOT_BAND_OCTAVES;
         params[row(CULL_PARAMS.ROOT_BANDS) + 2] = MESHLET_ROOT_BANDS;
         params[row(CULL_PARAMS.ROOT_BANDS) + 3] = this.rootMinPixels;
+        params[row(CULL_PARAMS.IMPOSTOR) + 0] = this.impostorPixels;
+        params[row(CULL_PARAMS.IMPOSTOR) + 1] = MESHLET_IMPOSTOR_FADE_BAND;
 
         // queue.writeBuffer executes before this frame's command buffer, so these clears land
         // ahead of every dispatch below. The requests buffer is NOT cleared here - the residency
@@ -536,6 +555,12 @@ class MeshletCuller {
         this._dispatchSlotBands = device.getIndirectDispatchSlot(MESHLET_ROOT_BANDS);
         this._dispatchSlotSelected = device.getIndirectDispatchSlot();
         this._dispatchSlotWrite = device.getIndirectDispatchSlot();
+        if (this.impostorArgs) {
+            this._impostorSlot = device.getIndirectDrawSlot();
+            this.impostorArgs.setParameter('drawSlot', this._impostorSlot);
+            this.impostorArgs.setParameter('indirectDraw', device.indirectDrawBuffer);
+            this.impostorArgs.setupDispatch(1);
+        }
 
         this._hzbTexture = twoPhase ? hzb.texture : null;
         this.meshletCull.setParameter('hzbTexture', this._hzbTexture ?? this.dummyHzb);
@@ -585,14 +610,14 @@ class MeshletCuller {
         if (this.forceSubmitBoundaries) {
             device.computeDispatch([this.cellCull, this.cellArgs, this.cellThreadArgs], `MeshletCellCull${this.passSuffix}`);
             device.submit();
-            device.computeDispatch([this.cellExpand, this.stageArgs, this.rootClassify, this.rootArgs, this.rootBandArgs], `MeshletRootClassify${this.passSuffix}`);
+            device.computeDispatch([this.cellExpand, this.stageArgs, this.rootClassify, ...(this.impostorArgs ? [this.impostorArgs] : []), this.rootArgs, this.rootBandArgs], `MeshletRootClassify${this.passSuffix}`);
             device.submit();
             device.computeDispatch([this.rootScatter, ...this.rootAdmit], `MeshletRootAdmit${this.passSuffix}`);
         } else {
             device.computeDispatch([this.cellCull, this.cellArgs, this.cellThreadArgs, this.cellExpand, this.stageArgs], `MeshletCellCull${this.passSuffix}`);
             // classification and the band admissions profile apart: the first scales with the
             // instances in view, the second with the dispatch count and the root pages it checks
-            device.computeDispatch([this.rootClassify, this.rootArgs, this.rootBandArgs, this.rootScatter], `MeshletRootClassify${this.passSuffix}`);
+            device.computeDispatch([this.rootClassify, ...(this.impostorArgs ? [this.impostorArgs] : []), this.rootArgs, this.rootBandArgs, this.rootScatter], `MeshletRootClassify${this.passSuffix}`);
             device.computeDispatch(this.rootAdmit, `MeshletRootAdmit${this.passSuffix}`);
         }
         if (this.cutStages.length) device.computeDispatch(this.cutStages, `MeshletResidentCut${this.passSuffix}`);
@@ -616,6 +641,7 @@ class MeshletCuller {
         for (let i = 0; i < view.meshInstances.length; i++) {
             view.meshInstances[i].setIndirect(null, this._drawSlots[i]);
         }
+        view.impostorInstance?.setIndirect(null, this._impostorSlot);
     }
 
     /**

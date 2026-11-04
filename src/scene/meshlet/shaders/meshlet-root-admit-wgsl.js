@@ -1,7 +1,7 @@
 import {
-    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH,
-    MESHLET_ROOT_BANDS, OBJECT_FLAG_HIDDEN,
-    OBJECT_FLAG_NO_SHADOW, PAGE_NOT_RESIDENT, PAGE_REQUEST
+    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH,
+    MESHLET_ROOT_BANDS, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_IMPOSTOR, OBJECT_FLAG_IMPOSTOR_PRIMARY,
+    OBJECT_FLAG_NO_SHADOW, OBJECT_IMPOSTOR_LAYER_SHIFT, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
 import { meshletCullVolumeWGSL, meshletVisibleCellWGSL } from './meshlet-cull-wgsl.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
@@ -16,6 +16,12 @@ const INSTANCE_MASK = (1 << BAND_SHIFT) - 1;
  * rest by projected size - the LOD metric - into priority bands, and appends them to the root
  * list for admission. An instance admitted last frame is promoted one band (hysteresis), so
  * admission does not flicker at the budget's edge.
+ *
+ * Instances of an impostor prototype are decided first, from the whole prototype's sphere: while
+ * it projects under the impostor switch size none of them reach the root list, and the primary
+ * one appends itself to the impostor list instead (one billboard per tree, drawn by the impostor
+ * material). The verdict is stateless and uses the prototype sphere through the shared instance
+ * matrix, so every primitive of a tree switches on the same frame.
  *
  * @ignore
  */
@@ -35,6 +41,10 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
     var<storage, read_write> rootBands: array<atomic<u32>>;
     // instance ids in cell order
     var<storage, read> cellInstances: array<u32>;
+    // two per atlas layer: prototype sphere (centre xyz, radius), then the framed box (half width, half height)
+    var<storage, read> impostorProtos: array<vec4f>;
+    // the billboards to draw: [instance id, fade-in as f32 bits] each
+    var<storage, read_write> impostorList: array<u32>;
 
     ${meshletVisibleCellWGSL}
     ${meshletCullVolumeWGSL}
@@ -50,13 +60,41 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
         let shadow = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_SHADOW_VIEW}u) != 0u;
         if ((object.flags & ${OBJECT_FLAG_HIDDEN}u) != 0u ||
             (shadow && (object.flags & ${OBJECT_FLAG_NO_SHADOW}u) != 0u)) { return; }
+        let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
+        let bands = cullParams[${CULL_PARAMS.ROOT_BANDS}u];
+
+        let impostorParams = cullParams[${CULL_PARAMS.IMPOSTOR}u];
+        let impostorSwitch = impostorParams.x;
+        if (impostorSwitch > 0.0 && (object.flags & ${OBJECT_FLAG_IMPOSTOR}u) != 0u) {
+            let proto = impostorProtos[(object.flags >> ${OBJECT_IMPOSTOR_LAYER_SHIFT}u) * 2u];
+            let protoCenter = (object.worldMatrix * vec4f(proto.xyz, 1.0)).xyz;
+            let protoRadius = proto.w * object.maxScale;
+            let protoGap = max(distance(protoCenter, priority.xyz) - protoRadius, 1e-4);
+            let protoPixels = protoRadius * priority.w / protoGap;
+            // the billboard fades in over a band above the switch size (dithered, over the meshlets,
+            // which are still drawn); from the switch size down it is opaque and the meshlets drop
+            let fadeTop = impostorSwitch * (1.0 + impostorParams.y);
+            if (protoPixels < fadeTop) {
+                // billboards vanish at the same size as any other instance
+                if ((object.flags & ${OBJECT_FLAG_IMPOSTOR_PRIMARY}u) != 0u && protoPixels >= bands.w &&
+                    meshletInCullVolume(protoCenter, protoRadius)) {
+                    let billboard = atomicAdd(&counters[${MESHLET_COUNTER.IMPOSTORS}u], 1u);
+                    if (billboard * 2u + 1u < arrayLength(&impostorList)) {
+                        impostorList[billboard * 2u] = instance;
+                        impostorList[billboard * 2u + 1u] = bitcast<u32>(clamp((fadeTop - protoPixels) / max(fadeTop - impostorSwitch, 1e-3), 0.0, 1.0));
+                    }
+                }
+                if (protoPixels < impostorSwitch) {
+                    return;
+                }
+            }
+        }
+
         let center = (object.worldMatrix * vec4f(object.sphere.xyz, 1.0)).xyz;
         let radius = object.sphere.w * object.maxScale;
         if (!meshletInCullVolume(center, radius)) { return; }
 
         // projected size from the priority origin (the viewing camera, also for shadow views)
-        let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
-        let bands = cullParams[${CULL_PARAMS.ROOT_BANDS}u];
         let gap = max(distance(center, priority.xyz) - radius, 1e-4);
         let pixels = radius * priority.w / gap;
         let incumbent = uniform.hasPrevious != 0u &&
@@ -207,5 +245,29 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         let admission = uniform.totalPairs + instance;
         atomicOr(&claimBits[admission >> 5u], 1u << (admission & 31u));
         atomicOr(&claimBits[uniform.nextBase + (instance >> 5u)], 1u << (instance & 31u));
+    }
+`;
+
+/**
+ * One thread: writes the impostor draw's indirect arguments - six indices, one instance per
+ * billboard the classify appended (clamped to the list's capacity).
+ *
+ * @ignore
+ */
+export const meshletImpostorArgsWGSL = /* wgsl */ `
+    uniform drawSlot: u32;
+    uniform capacity: u32;
+
+    var<storage, read_write> counters: array<u32>;
+    var<storage, read_write> indirectDraw: array<u32>;
+
+    @compute @workgroup_size(1)
+    fn main() {
+        let base = uniform.drawSlot * ${INDIRECT_DRAW_U32S}u;
+        indirectDraw[base + 0u] = 6u;
+        indirectDraw[base + 1u] = min(counters[${MESHLET_COUNTER.IMPOSTORS}u], uniform.capacity);
+        indirectDraw[base + 2u] = 0u;
+        indirectDraw[base + 3u] = 0u;
+        indirectDraw[base + 4u] = 0u;
     }
 `;

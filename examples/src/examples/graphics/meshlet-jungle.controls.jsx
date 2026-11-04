@@ -30,6 +30,40 @@ export function Controls({ observer }) {
                     precision={2}
                 />
             </LabelGroup>
+            <LabelGroup text='Impostor px'>
+                <SliderInput
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.impostorPx' }}
+                    min={0}
+                    max={400}
+                    precision={0}
+                />
+            </LabelGroup>
+            <LabelGroup text='Impostor bright'>
+                <SliderInput
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.impostorBrightness' }}
+                    min={0.2}
+                    max={1.5}
+                    precision={2}
+                />
+            </LabelGroup>
+            <LabelGroup text='Impostor AO'>
+                <SliderInput
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.impostorOcclusion' }}
+                    min={0}
+                    max={0.6}
+                    precision={2}
+                />
+            </LabelGroup>
+            <LabelGroup text='Impostor tint'>
+                <BooleanInput
+                    type='toggle'
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.impostorTint' }}
+                />
+            </LabelGroup>
             <LabelGroup text='Drawn'>
                 <Label
                     binding={new BindingTwoWay()}

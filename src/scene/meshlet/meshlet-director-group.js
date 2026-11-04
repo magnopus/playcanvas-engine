@@ -102,6 +102,8 @@ class MeshletGroupCamera {
         for (const view of views) {
             const mis = view.meshInstances;
             for (let i = 0; i < MESHLET_BUCKET_COUNT; i++) mis1.push(mis[i]);
+            // billboards draw with their world's phase 1, after its buckets
+            if (view.impostorInstance) mis1.push(view.impostorInstance);
             if (view.useOcclusion) {
                 for (let i = MESHLET_BUCKET_COUNT; i < MESHLET_BUCKET_COUNT * 2; i++) mis2.push(mis[i]);
             }
@@ -172,6 +174,8 @@ class MeshletDirectorGroup {
         shadowsEnabled: false,
         shadowThresholdScale: 4,
         rootMinPixels: 3,
+        impostorPixels: 0,
+        impostors: /** @type {import('./meshlet-impostors.js').MeshletImpostors|null} */ (null),
         shadowRootMinPixels: 2,
         shadowMatchCameraLod: false,
         cssPixels: true,
@@ -242,6 +246,8 @@ class MeshletDirectorGroup {
         director.shadowsEnabled = s.shadowsEnabled;
         director.shadowThresholdScale = s.shadowThresholdScale;
         director.rootMinPixels = s.rootMinPixels;
+        director.impostorPixels = s.impostorPixels;
+        director.impostors = s.impostors;
         director.shadowRootMinPixels = s.shadowRootMinPixels;
         director.shadowMatchCameraLod = s.shadowMatchCameraLod;
         director.cssPixels = s.cssPixels;
@@ -321,6 +327,24 @@ class MeshletDirectorGroup {
 
     get rootMinPixels() {
         return this._settings.rootMinPixels;
+    }
+
+    /** @type {number} */
+    set impostorPixels(value) {
+        this._set('impostorPixels', value);
+    }
+
+    get impostorPixels() {
+        return this._settings.impostorPixels;
+    }
+
+    /** @type {import('./meshlet-impostors.js').MeshletImpostors|null} */
+    set impostors(value) {
+        this._set('impostors', value);
+    }
+
+    get impostors() {
+        return this._settings.impostors;
     }
 
     /** @type {boolean} */

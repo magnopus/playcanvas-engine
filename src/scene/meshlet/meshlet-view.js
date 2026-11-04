@@ -13,6 +13,7 @@ import { Mesh } from '../mesh.js';
 import { MeshInstance } from '../mesh-instance.js';
 import { FramePassMeshletCompute } from './frame-pass-meshlet-compute.js';
 import { MeshletCuller } from './meshlet-culler.js';
+import { createMeshletImpostorMesh } from './meshlet-impostors.js';
 import { RenderPassMeshletDraw } from './render-pass-meshlet-draw.js';
 
 /**
@@ -85,6 +86,12 @@ class MeshletView {
 
     /** @type {boolean} - one cull pass, no occlusion test, no phase 2 (shadow views). */
     singlePhase = false;
+
+    /** @type {StorageBuffer|null} - the billboards to draw ([instance id, fade-in]), written by the root classify. */
+    impostorListBuffer = null;
+
+    /** @type {MeshInstance|null} - the billboard draw, when the world has impostors. */
+    impostorInstance = null;
 
     /** @type {boolean} - false when visBitsBuffer is the world's shared placeholder. */
     _ownsVisBits = true;
@@ -300,6 +307,18 @@ class MeshletView {
         this.recordsBuffer = new StorageBuffer(device, Math.max(this.recordCapacity * RECORD_U32S * BYTES_PER_WORD, 16), BUFFERUSAGE_COPY_DST);
         this.meshInstances.forEach(mi => mi.setParameter('records', this.recordsBuffer));
 
+        // impostor billboards: a draw of their own after the phase-1 buckets, fed by the list
+        // the root classify fills. Shadow views draw none.
+        if (world.impostorMaterial && !singlePhase) {
+            this.impostorListBuffer = new StorageBuffer(device, Math.max(world.impostorCount, 1) * 2 * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
+            const mi = new MeshInstance(createMeshletImpostorMesh(device), world.impostorMaterial);
+            mi.node = this._node;
+            mi.cull = false;
+            mi.castShadow = false;
+            mi.setParameter('impostorList', this.impostorListBuffer);
+            this.impostorInstance = mi;
+        }
+
         this.culler = new MeshletCuller(device, world, this, cullShaders);
 
         // a single-phase view is drawn by whoever owns its instances (the shadow renderer's
@@ -346,6 +365,10 @@ class MeshletView {
         }
         this.workItemsBuffer = null;
         this.recordsBuffer?.destroy();
+        this.impostorInstance?.destroy();
+        this.impostorInstance = null;
+        this.impostorListBuffer?.destroy();
+        this.impostorListBuffer = null;
         this.selectedMeshletsBuffer?.destroy();
         if (this._ownsClaimBits) {
             this.claimBitsBuffer?.destroy();
