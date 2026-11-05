@@ -224,6 +224,40 @@ const sceneDepthWGSL = /* wgsl */ `
     }
 `;
 
+// The scene normal preview, following the orientation of the scene depth one. The normal map holds
+// the signed world space normal, premultiplied by the coverage in its alpha, and is shown as stored
+// in the shader - remapped to 0..1 without gamma correction, as it is a vector rather than a
+// color. A texel nothing was rendered to is black.
+const sceneNormalGLSL = /* glsl */ `
+    uniform highp sampler2D uSceneNormalMap;
+    varying vec2 uv0;
+    uniform float projectionFlipY;
+    void main(void) {
+        vec2 uv = vec2(uv0.x, 0.5 - (uv0.y - 0.5) * projectionFlipY);
+        ivec2 size = textureSize(uSceneNormalMap, 0);
+        ivec2 texel = clamp(ivec2(getImageEffectUV(uv) * vec2(size)), ivec2(0), size - 1);
+        vec4 value = texelFetch(uSceneNormalMap, texel, 0);
+        vec3 color = value.a > 0.0 ? normalize(value.rgb) * 0.5 + 0.5 : vec3(0.0);
+        gl_FragColor = vec4(color, 1.0);
+    }
+`;
+
+const sceneNormalWGSL = /* wgsl */ `
+    var uSceneNormalMap: texture_2d<uff>;
+    varying uv0: vec2f;
+    uniform projectionFlipY: f32;
+    @fragment fn fragmentMain(input: FragmentInput) -> FragmentOutput {
+        var output: FragmentOutput;
+        let uv = vec2f(input.uv0.x, 0.5 - (input.uv0.y - 0.5) * uniform.projectionFlipY);
+        let size = vec2i(textureDimensions(uSceneNormalMap, 0));
+        let texel = clamp(vec2i(getImageEffectUV(uv) * vec2f(size)), vec2i(0), size - vec2i(1));
+        let value = textureLoad(uSceneNormalMap, texel, 0);
+        let color = select(vec3f(0.0), normalize(value.rgb) * 0.5 + vec3f(0.5), value.a > 0.0);
+        output.color = vec4f(color, 1.0);
+        return output;
+    }
+`;
+
 const attributes = { vertex_position: SEMANTIC_POSITION };
 
 /**
@@ -256,4 +290,19 @@ const sceneDepthShaderDesc = {
     fragmentWGSL: sceneDepthWGSL
 };
 
-export { textureShaderDesc, sceneDepthShaderDesc };
+/**
+ * Shader for the scene normal preview.
+ *
+ * @type {ShaderDesc}
+ * @ignore
+ */
+const sceneNormalShaderDesc = {
+    uniqueName: 'TextureRenderer-SceneNormal',
+    attributes,
+    vertexGLSL,
+    vertexWGSL,
+    fragmentGLSL: sceneNormalGLSL,
+    fragmentWGSL: sceneNormalWGSL
+};
+
+export { textureShaderDesc, sceneDepthShaderDesc, sceneNormalShaderDesc };

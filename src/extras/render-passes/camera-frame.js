@@ -54,6 +54,12 @@ const builtinDebugViews = ['scene', 'depth', 'depthmissing'];
  * used together at a higher cost. Defaults to 1.
  * @property {boolean} sceneColorMap - Whether rendering generates a scene color map. Defaults to false.
  * @property {boolean} sceneDepthMap - Whether rendering generates a scene depth map. Defaults to false.
+ * @property {boolean} sceneNormalMap - Whether rendering generates a scene normal map, published as
+ * {@link CameraComponent#sceneNormalMapHandle} (RGBA16F, signed world space normal in RGB, alpha 0
+ * where nothing was rendered). It is rendered by the scene pass alongside the scene depth, which it
+ * therefore also generates, and needs the scene textures: it is not generated when the depth prepass
+ * is needed (SSAO in lighting mode, or `sceneDepthMap`), or when `samples` is above 1, and a debug
+ * build warns in those cases. Transparent materials do not write it. Defaults to false.
  * @property {number} toneMapping - The tone mapping. Can be:
  *
  * - {@link TONEMAP_LINEAR}
@@ -112,6 +118,7 @@ class CameraFrame {
         samples: 1,
         sceneColorMap: false,
         sceneDepthMap: false,
+        sceneNormalMap: false,
         toneMapping: 0,
         sharpness: 0.0
     };
@@ -584,6 +591,7 @@ class CameraFrame {
         options.stencil = rendering.stencil;
         options.samples = rendering.samples;
         options.prepassEnabled = rendering.sceneDepthMap;
+        options.sceneNormalMap = rendering.sceneNormalMap;
         options.formats = rendering.renderFormats.slice();
 
         // the scene format, chosen before the effects are asked whether they are active, as an

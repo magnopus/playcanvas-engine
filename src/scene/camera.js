@@ -9,6 +9,7 @@ import { Frustum } from '../core/shape/frustum.js';
 import { MIPMAPFILTER_BOX } from '../platform/graphics/constants.js';
 import { SceneColorMapHandle } from '../platform/graphics/scene-color-map-handle.js';
 import { SceneDepthMapHandle } from '../platform/graphics/scene-depth-map-handle.js';
+import { SceneNormalMapHandle } from '../platform/graphics/scene-normal-map-handle.js';
 import {
     VIEW_CENTER, ASPECT_AUTO, PROJECTION_PERSPECTIVE, PROJECTION_ORTHOGRAPHIC,
     LAYERID_WORLD, LAYERID_DEPTH, LAYERID_SKYBOX, LAYERID_UI, LAYERID_IMMEDIATE
@@ -188,6 +189,15 @@ class Camera {
      */
     sceneColorMapMipmapFilter = MIPMAPFILTER_BOX;
 
+    /**
+     * The handle to the scene normal map most recently published for this camera. The uniform the
+     * normal map is published to is global, the same as for the depth map.
+     *
+     * @type {SceneNormalMapHandle}
+     * @ignore
+     */
+    sceneNormalMapHandle = new SceneNormalMapHandle();
+
     /** @type {number} */
     jitter = 0;
 
@@ -332,6 +342,10 @@ class Camera {
         const colorHandle = this.sceneColorMapHandle;
         colorHandle.texture = null;
         colorHandle.destroyed = true;
+
+        const normalHandle = this.sceneNormalMapHandle;
+        normalHandle.texture = null;
+        normalHandle.destroyed = true;
     }
 
     /**
@@ -366,19 +380,30 @@ class Camera {
         // in it - see Camera#_storeShaderMatrices
         handle.viewProjectionInverse.copy(this._viewProjInverse);
 
-        // the viewport the camera rendered to, the way Renderer#setupViewport sets it. WebGPU places
-        // it from the top of the target, unless the target stores its rows from the bottom
-        // (RENDERTARGET_ORIGIN_BOTTOM), as its flipY reflects
+        this._fillViewport(handle.viewport, texture, flipY);
+
+        SceneDepthMapHandle.setUniform(this.device, texture);
+    }
+
+    /**
+     * Writes the viewport the camera rendered to into a texture, in texels as a compute shader
+     * addresses them, the way Renderer#setupViewport sets it. WebGPU places it from the top of the
+     * target, unless the target stores its rows from the bottom (RENDERTARGET_ORIGIN_BOTTOM), as
+     * its flipY reflects.
+     *
+     * @param {Uint32Array} viewport - The array to write to: x, y, width and height.
+     * @param {Texture} texture - The texture the camera rendered to.
+     * @param {boolean} flipY - The flipY of the render target the texture is attached to.
+     * @private
+     */
+    _fillViewport(viewport, texture, flipY) {
         const { width, height } = texture;
         const rect = this._rect;
-        const viewport = handle.viewport;
         const y = Math.floor(rect.y * height);
         viewport[0] = Math.floor(rect.x * width);
         viewport[2] = Math.floor(rect.z * width);
         viewport[3] = Math.floor(rect.w * height);
         viewport[1] = flipY ? y : height - y - viewport[3];
-
-        SceneDepthMapHandle.setUniform(this.device, texture);
     }
 
     /**
@@ -396,6 +421,28 @@ class Camera {
         handle.gamma = gamma;
 
         SceneColorMapHandle.setUniform(this.device, texture);
+    }
+
+    /**
+     * Publishes the scene normal texture the scene pass has rendered for this camera. The viewport
+     * the normal was rendered with is captured as well. The texture is recorded on the handle of
+     * this camera, and also set to the global uniform, which holds the normal map of whichever
+     * camera published last.
+     *
+     * @param {Texture} texture - The texture the normals were rendered to.
+     * @param {number} renderVersion - The render version it was rendered in.
+     * @param {boolean} [flipY] - The flipY of the render target the camera rendered the normals
+     * with, which the texture matches the layout of. Defaults to false.
+     * @ignore
+     */
+    publishSceneNormalMap(texture, renderVersion, flipY = false) {
+        const handle = this.sceneNormalMapHandle;
+        handle.texture = texture;
+        handle.renderVersion = renderVersion;
+        handle.flipY = flipY;
+        this._fillViewport(handle.viewport, texture, flipY);
+
+        SceneNormalMapHandle.setUniform(this.device, texture);
     }
 
     /**

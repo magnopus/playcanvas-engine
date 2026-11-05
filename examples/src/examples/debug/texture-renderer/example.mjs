@@ -1,15 +1,17 @@
 // @config
 //
-// Single-frame color and depth texture previews with normalized coordinates.
+// Single-frame color, scene depth and scene normal texture previews with normalized coordinates.
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
     AppBase,
     AppOptions,
     CameraComponentSystem,
+    CameraFrame,
     Color,
     Entity,
     FILLMODE_FILL_WINDOW,
+    LAYERID_UI,
     LAYERID_WORLD,
     LightComponentSystem,
     PIXELFORMAT_RGBA8,
@@ -104,8 +106,22 @@ camera.addComponent('camera', {
 camera.setLocalPosition(8, 6.5, 11);
 camera.lookAt(0, 0.1, 0);
 app.root.addChild(camera);
-// sceneDepth uses the depth map belonging to the camera rendering the preview layer.
-camera.camera.requestSceneDepthMap(true);
+
+// sceneDepth and sceneNormal use the scene maps belonging to the camera rendering the preview layer.
+// The camera frame renders the scene normal alongside the scene depth, in the scene pass, where the
+// forward renderer only renders the depth on request.
+const cameraFrame = new CameraFrame(app, camera.camera);
+cameraFrame.rendering.toneMapping = TONEMAP_ACES;
+cameraFrame.rendering.sceneNormalMap = true;
+let depthRequested = false;
+const applyCameraFrame = (/** @type {boolean} */ enabled) => {
+    cameraFrame.enabled = enabled;
+    cameraFrame.update();
+    if (depthRequested === enabled) {
+        camera.camera.requestSceneDepthMap(!enabled);
+        depthRequested = !enabled;
+    }
+};
 
 const liveTexture = new Texture(device, {
     name: 'Live camera color',
@@ -175,17 +191,24 @@ imageTexture.setSource(source);
 
 // Draw each texture on every frame its preview should be visible.
 const textures = new TextureRenderer(app);
-data.set('settings', { previews: true, animate: true, swap: false, channels: 'rgb' });
+// The scene depth and normal previews sample maps the camera frame's scene pass renders into, and
+// the default Immediate layer is drawn by that pass. The UI layer is drawn after it, once the maps
+// are published.
+textures.layer = app.scene.layers.getLayerById(LAYERID_UI);
+data.set('settings', { previews: true, animate: true, swap: false, cameraFrame: true, channels: 'rgb' });
+applyCameraFrame(true);
+data.on('settings.cameraFrame:set', applyCameraFrame);
 
 // Captions sit outside the sampled images, keeping texture contents unmodified.
 const captions = document.createElement('div');
 captions.style.cssText =
     'position:absolute;inset:0;pointer-events:none;color:#c6d4df;font:11px monospace;letter-spacing:1px;';
-const titles = ['01 / SOURCE IMAGE', '02 / LIVE CAMERA', '03 / SCENE DEPTH'];
+const titles = ['01 / SOURCE IMAGE', '02 / LIVE CAMERA', '03 / SCENE DEPTH', '04 / SCENE NORMAL'];
+const previewX = [0.03, 0.27, 0.51, 0.75];
 for (let i = 0; i < titles.length; i++) {
     const caption = document.createElement('div');
     caption.textContent = titles[i];
-    caption.style.cssText = `position:absolute;left:${4 + i * 32}%;top:69%;`;
+    caption.style.cssText = `position:absolute;left:${previewX[i] * 100}%;top:69%;`;
     captions.appendChild(caption);
 }
 document.body.appendChild(captions);
@@ -205,10 +228,14 @@ app.on('update', (dt) => {
         // Coordinates are fractions of the viewport, measured from its top-left corner.
         // Switching textures needs no matching ID, or add/remove calls.
         textures.channels = data.get('settings.channels');
-        textures.draw(swap ? liveTexture : imageTexture, 0.04, 0.73, 0.28, 0.23);
-        textures.draw(swap ? imageTexture : liveTexture, 0.36, 0.73, 0.28, 0.23);
+        textures.draw(swap ? liveTexture : imageTexture, previewX[0], 0.73, 0.21, 0.23);
+        textures.draw(swap ? imageTexture : liveTexture, previewX[1], 0.73, 0.21, 0.23);
         // Depth previews stay grayscale regardless of the channel selection.
-        textures.sceneDepth(0.68, 0.73, 0.28, 0.23);
+        textures.sceneDepth(previewX[2], 0.73, 0.21, 0.23);
+        // The scene normal is shown as stored, remapped to 0..1, and needs the camera frame.
+        const normals = data.get('settings.cameraFrame');
+        if (normals) textures.sceneNormal(previewX[3], 0.73, 0.21, 0.23);
+        captions.children[3].style.display = normals ? '' : 'none';
         captions.children[0].textContent = swap ? titles[1] : titles[0];
         captions.children[1].textContent = swap ? titles[0] : titles[1];
     }
@@ -218,6 +245,7 @@ app.on('update', (dt) => {
 app.on('destroy', () => {
     window.removeEventListener('resize', resize);
     captions.remove();
+    cameraFrame.destroy();
     target.destroy();
     liveTexture.destroy();
     imageTexture.destroy();

@@ -4,6 +4,7 @@ import { UNIFORM_BUFFER_DEFAULT_SLOT_NAME } from './constants.js';
 import { DebugGraphics } from './debug-graphics.js';
 import { SceneColorMapHandle } from './scene-color-map-handle.js';
 import { SceneDepthMapHandle } from './scene-depth-map-handle.js';
+import { SceneNormalMapHandle } from './scene-normal-map-handle.js';
 import { TextureView } from './texture-view.js';
 
 /**
@@ -332,6 +333,8 @@ class BindGroup {
                 Debug.errorOnce(`A uSceneDepthMap texture is used by the shader but a scene depth texture is not available. Use CameraComponent.requestSceneDepthMap / enable Depth Grabpass on the Camera Component / CameraFrame.rendering.sceneDepthMap to enable it. Rendering [${DebugGraphics.toString()}]`);
             } else if (name === SceneColorMapHandle.uniformName) {
                 Debug.errorOnce(`A uSceneColorMap texture is used by the shader but a scene color texture is not available. Use CameraComponent.requestSceneColorMap / enable Color Grabpass on the Camera Component / CameraFrame.rendering.sceneColorMap to enable it. Rendering [${DebugGraphics.toString()}]`);
+            } else if (name === SceneNormalMapHandle.uniformName) {
+                Debug.errorOnce(`A uSceneNormalMap texture is used by the shader but a scene normal texture is not available. Enable it with CameraFrame.rendering.sceneNormalMap. Rendering [${DebugGraphics.toString()}]`);
             } else {
                 Debug.errorOnce(`Texture ${name} is required for rendering but was not set. Rendering [${DebugGraphics.toString()}]`);
             }

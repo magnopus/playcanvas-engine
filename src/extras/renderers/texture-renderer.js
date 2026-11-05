@@ -10,7 +10,7 @@ import { ShaderMaterial } from '../../scene/materials/shader-material.js';
 import { Mesh } from '../../scene/mesh.js';
 import { MeshInstance } from '../../scene/mesh-instance.js';
 import { ChunkUtils } from '../../scene/shader-lib/chunk-utils.js';
-import { sceneDepthShaderDesc, textureShaderDesc } from './texture-renderer-shaders.js';
+import { sceneDepthShaderDesc, sceneNormalShaderDesc, textureShaderDesc } from './texture-renderer-shaders.js';
 
 // the red channel replicated, for single-channel formats shown with the default selection
 const SINGLE_CHANNEL_INDICES = new Int32Array([0, 0, 0]);
@@ -58,8 +58,8 @@ function rendersInto(rt, texture) {
 }
 
 /**
- * Displays textures for a single frame, for debugging. Call {@link draw} or {@link sceneDepth}
- * during update or prerender on every frame the preview should be visible. Positions specify
+ * Displays textures for a single frame, for debugging. Call {@link draw}, {@link sceneDepth} or
+ * {@link sceneNormal} during update or prerender on every frame the preview should be visible. Positions specify
  * the top-left corner in normalized camera-viewport coordinates: (0, 0) is top-left and (1, 1)
  * is bottom-right. Width and height are fractions of the viewport; a rectangle of (0, 0, 1, 1)
  * fills it. Signed sizes can flip a preview, and rectangles can extend outside the viewport.
@@ -73,7 +73,8 @@ function rendersInto(rt, texture) {
  * Depth textures using {@link PIXELFORMAT_DEPTH}, {@link PIXELFORMAT_DEPTH16} or
  * {@link PIXELFORMAT_DEPTHSTENCIL} are displayed as raw grayscale values. Use {@link sceneDepth}
  * to display the rendering camera's scene depth, linearized and normalized by its far clip
- * distance. The camera must have scene depth capture enabled.
+ * distance. The camera must have scene depth capture enabled. Use {@link sceneNormal} to display
+ * its scene normal map, which a {@link CameraFrame} renders when configured to.
  *
  * Cubemaps are displayed as a 4x3 horizontal cross, with each face as stored and its first row at
  * the top. The middle row shows the -X, +Z, +X and -Z faces, with +Y above and -Y below +Z, so a
@@ -120,6 +121,13 @@ function rendersInto(rt, texture) {
  * const textures = new TextureRenderer(app);
  * app.on('update', () => {
  *     textures.sceneDepth(0.7, 0.7, 0.25, 0.25);
+ * });
+ * @example
+ * // the camera frame renders the scene normal alongside the scene depth, with multi-sampling off
+ * cameraFrame.rendering.sceneNormalMap = true;
+ * const textures = new TextureRenderer(app);
+ * app.on('update', () => {
+ *     textures.sceneNormal(0.7, 0.7, 0.25, 0.25);
  * });
  * @category Graphics
  */
@@ -278,7 +286,22 @@ class TextureRenderer {
     }
 
     /**
-     * @param {Texture|null} texture - Source texture, or null for scene depth.
+     * Displays the rendering camera's scene normal map for this frame, as the world space normal
+     * remapped to the 0 to 1 range, without gamma correction. Texels nothing was rendered to are
+     * black. The camera must already render a scene normal map, see
+     * `CameraFrame.rendering.sceneNormalMap`, and this layer must render after it is captured.
+     *
+     * @param {number} x - Left edge as a fraction of the camera viewport width.
+     * @param {number} y - Top edge as a fraction of the camera viewport height.
+     * @param {number} width - Width as a fraction of the camera viewport width.
+     * @param {number} height - Height as a fraction of the camera viewport height.
+     */
+    sceneNormal(x, y, width, height) {
+        this._draw(null, 'scene-normal', 'linear', false, x, y, width, height, SINGLE_CHANNEL_INDICES);
+    }
+
+    /**
+     * @param {Texture|null} texture - Source texture, or null for a scene map.
      * @param {string} mode - Sampling mode.
      * @param {string} encoding - Source encoding.
      * @param {boolean} cube - Whether the source is a cubemap.
@@ -330,7 +353,8 @@ class TextureRenderer {
             const material = slot.material;
             const raw = encoding === 'raw' || encoding === 'raw-srgb';
             const decoded = !raw && (mode === 'filtered' || mode === 'unfilterable');
-            material.shaderDesc = mode === 'scene-depth' ? sceneDepthShaderDesc : textureShaderDesc;
+            material.shaderDesc = mode === 'scene-depth' ? sceneDepthShaderDesc :
+                mode === 'scene-normal' ? sceneNormalShaderDesc : textureShaderDesc;
             material.setDefine('CUBEMAP_SOURCE', cube);
             material.setDefine('UNFILTERABLE_SOURCE', mode === 'unfilterable');
             material.setDefine('DEPTH_SOURCE', mode === 'depth');

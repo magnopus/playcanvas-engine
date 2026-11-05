@@ -1,7 +1,8 @@
 // @config
 //
 // GPU regression test for TextureRenderer. Compares rendered pixels against CPU reference values
-// for every reachable shader variant, output gamma, channel selection, raw depth and scene-depth encoding.
+// for every reachable shader variant, output gamma, channel selection, raw depth, scene-depth encoding
+// and the scene normal.
 // Cubemaps are checked for their cross layout, face orientation, mip selection along cell edges, raw
 // channels, unfilterable float and depth sampling.
 // Also creates and removes textures every three frames, checking slot reuse and resource counts.
@@ -445,6 +446,41 @@ async function runTests() {
             });
         });
         device.scope.resolve('uSceneDepthMap').setValue(null);
+
+        // The scene normal is a signed vector, premultiplied by its coverage in alpha. It shows
+        // remapped to 0..1 without gamma correction, and black where nothing was rendered.
+        await serial([GAMMA_NONE, GAMMA_SRGB], async (gamma) => {
+            setGamma(gamma);
+            await serial(
+                [
+                    { name: 'up', texel: [0, 2, 0, 1], expected: [128, 255, 128] },
+                    { name: 'diagonal', texel: [1, 1, 0, 1], expected: [218, 218, 128] },
+                    { name: 'empty', texel: [0, 0, 0, 0], expected: [0, 0, 0] }
+                ],
+                async ({ name, texel, expected }) => {
+                    const normal = track(
+                        new Texture(device, {
+                            width: 1,
+                            height: 1,
+                            format: PIXELFORMAT_RGBA32F,
+                            mipmaps: false,
+                            minFilter: FILTER_NEAREST,
+                            magFilter: FILTER_NEAREST,
+                            levels: [new Float32Array(texel)]
+                        })
+                    );
+                    device.scope.resolve('uSceneNormalMap').setValue(normal);
+                    renderer.sceneNormal(0, 0, 1, 1);
+                    variants.add(variantName());
+                    const label = `scene-normal/${name}/gamma-${gamma}`;
+                    pixel(await read(), 32, 32, [...expected, 255], label);
+                    passed.push(label);
+                    showReport('running');
+                    release(normal);
+                }
+            );
+        });
+        device.scope.resolve('uSceneNormalMap').setValue(null);
 
         // Cubemaps display as a 4x3 cross of 16x16 pixel cells. The preview is offset by one pixel,
         // so cell edges fall inside 2x2 pixel quads and implicit derivatives would span two faces.

@@ -3,6 +3,7 @@ import { Vec2 } from '../../core/math/vec2.js';
 import { BUFFERUSAGE_INDIRECT, PIXELFORMAT_R32F, PIXELFORMAT_RG32F, PIXELFORMAT_RGB32F, PIXELFORMAT_RGBA32F } from './constants.js';
 import { SceneColorMapHandle } from './scene-color-map-handle.js';
 import { SceneDepthMapHandle } from './scene-depth-map-handle.js';
+import { SceneNormalMapHandle } from './scene-normal-map-handle.js';
 import { Shader } from './shader.js';
 
 /**
@@ -14,16 +15,19 @@ import { Shader } from './shader.js';
  * @import { VertexBuffer } from './vertex-buffer.js'
  */
 
-// The resources the sceneDepthCS and sceneColorCS chunks declare. The compute instance assigns
+// The resources the sceneDepthCS, sceneColorCS and sceneNormalCS chunks declare. The compute instance assigns
 // them from the attached scene maps itself, so they cannot be set as parameters.
 const DEPTH_MAP = 'computeSceneDepthMap';
 const DEPTH_CAMERA_PARAMS = 'computeSceneDepthCameraParams';
 const DEPTH_VIEW_PROJECTION_INVERSE = 'computeSceneDepthViewProjectionInverse';
 const DEPTH_VIEWPORT = 'computeSceneDepthViewport';
 const COLOR_MAP = 'computeSceneColorMap';
+const NORMAL_MAP = 'computeSceneNormalMap';
+const NORMAL_VIEWPORT = 'computeSceneNormalViewport';
 
 const isSceneMapName = name => name === DEPTH_MAP || name === DEPTH_CAMERA_PARAMS ||
-    name === DEPTH_VIEW_PROJECTION_INVERSE || name === DEPTH_VIEWPORT || name === COLOR_MAP;
+    name === DEPTH_VIEW_PROJECTION_INVERSE || name === DEPTH_VIEWPORT || name === COLOR_MAP ||
+    name === NORMAL_MAP || name === NORMAL_VIEWPORT;
 
 // The uniforms the dispatchThreadsCS chunk declares, which the compute instance assigns itself in
 // setupDispatchThreads, so they cannot be set as parameters.
@@ -80,8 +84,9 @@ class ComputeParameter {
  *
  * Every uniform and resource the compute shader declares has to be given a value on the compute
  * instance, using {@link Compute#setParameter}. Values set globally on the scope of the graphics
- * device are not used. The scene depth and color maps of a camera are made available to the shader
- * using {@link Compute#setSceneDepthMap} and {@link Compute#setSceneColorMap}.
+ * device are not used. The scene depth, color and normal maps of a camera are made available to the
+ * shader using {@link Compute#setSceneDepthMap}, {@link Compute#setSceneColorMap} and
+ * {@link Compute#setSceneNormalMap}.
  *
  * A compute instance is dispatched at most once in a frame. To dispatch a compute shader more than
  * once in a frame, use a separate compute instance for each dispatch. The instances can share the
@@ -143,6 +148,12 @@ class Compute {
      * @private
      */
     _sceneColorMap = null;
+
+    /**
+     * @type {SceneNormalMapHandle|null}
+     * @private
+     */
+    _sceneNormalMap = null;
 
     /**
      * The key of the shader variant the compute is dispatched with, 0 for the shader itself.
@@ -237,7 +248,7 @@ class Compute {
      * The value for the specified parameter.
      */
     setParameter(name, value) {
-        Debug.assert(!isSceneMapName(name), `Compute ${this.name}: the parameter ${name} is assigned from the scene map attached with setSceneDepthMap / setSceneColorMap, and cannot be set.`, this);
+        Debug.assert(!isSceneMapName(name), `Compute ${this.name}: the parameter ${name} is assigned from the scene map attached with setSceneDepthMap / setSceneColorMap / setSceneNormalMap, and cannot be set.`, this);
         Debug.assert(!isDispatchName(name), `Compute ${this.name}: the parameter ${name} is assigned by setupDispatchThreads, and cannot be set.`, this);
         this._setParameter(name, value);
     }
@@ -370,6 +381,47 @@ class Compute {
     }
 
     /**
+     * Attaches the scene normal map of a camera to this compute instance, making it available to
+     * the compute shader, which accesses it using the functions of the `sceneNormalCS` chunk it
+     * includes:
+     *
+     * - `sceneNormalSize() -> vec2u`: the dimensions of the normal map.
+     * - `sceneNormalViewport() -> vec4u`: the viewport the camera rendered the normal map with, in
+     * texels: the x and y of its first texel, and its width and height.
+     * - `sceneNormalCoverage(texel: vec2i) -> f32`: 1 where a surface was rendered at the texel,
+     * 0 where nothing was.
+     * - `sceneNormalWorld(texel: vec2i) -> vec3f`: the world space unit normal of the surface at
+     * the texel, or a zero vector where nothing was rendered.
+     *
+     * The handle is kept, and the normal map it identifies is read each time the compute is
+     * dispatched, so this only needs to be called once. A dispatch uses the normal map the camera
+     * rendered most recently - when dispatched before the camera renders, for example from an
+     * update event, that is the normal map of the previous frame.
+     *
+     * The camera only renders the normal map when its {@link CameraFrame} is configured to, see
+     * `CameraFrame.rendering.sceneNormalMap`.
+     *
+     * @param {SceneNormalMapHandle|null} handle - The handle to the scene normal map of a camera,
+     * see {@link CameraComponent#sceneNormalMapHandle}, or null to detach the normal map.
+     * @example
+     * // the compute shader includes the chunk, for example:
+     * //     #include "sceneNormalCS"
+     * //     let normal = sceneNormalWorld(vec2i(id.xy));
+     * cameraFrame.rendering.sceneNormalMap = true;
+     * compute.setSceneNormalMap(cameraEntity.camera.sceneNormalMapHandle);
+     */
+    setSceneNormalMap(handle) {
+        Debug.assert(handle === null || handle instanceof SceneNormalMapHandle, `Compute ${this.name}: setSceneNormalMap expects a SceneNormalMapHandle or null.`, this);
+        Debug.assert(!handle || this._declares(NORMAL_MAP), `Compute ${this.name}: a scene normal map is attached, but the shader does not include the sceneNormalCS chunk to access it.`, this);
+
+        this._sceneNormalMap = handle;
+        if (!handle) {
+            this.deleteParameter(NORMAL_MAP);
+            this.deleteParameter(NORMAL_VIEWPORT);
+        }
+    }
+
+    /**
      * Returns true when the shader declares a texture of the given name.
      *
      * @param {string} name - The name of the texture.
@@ -416,6 +468,7 @@ class Compute {
     prepareDispatch() {
         const depthHandle = this._sceneDepthMap;
         const colorHandle = this._sceneColorMap;
+        const normalHandle = this._sceneNormalMap;
 
         let key = 0;
 
@@ -442,6 +495,13 @@ class Compute {
             this._setParameter(COLOR_MAP, texture);
         }
 
+        if (normalHandle) {
+            Debug.assert(!normalHandle.destroyed, `Compute ${this.name}: the camera of the attached scene normal map has been destroyed. Detach it with setSceneNormalMap(null).`, this);
+
+            this._setParameter(NORMAL_MAP, this._sceneMapTexture(normalHandle, 'normal', 'pink'));
+            this._setParameter(NORMAL_VIEWPORT, normalHandle.viewport);
+        }
+
         if (key !== this._variantKey) {
             this._setVariant(key);
         }
@@ -454,7 +514,7 @@ class Compute {
      * changes, until the camera publishes the next one - which is expected, and not reported.
      * Neither is a destroyed camera, which the caller reports.
      *
-     * @param {SceneDepthMapHandle|SceneColorMapHandle} handle - The handle to the map.
+     * @param {SceneDepthMapHandle|SceneColorMapHandle|SceneNormalMapHandle} handle - The handle to the map.
      * @param {string} kind - The kind of the map, for the report.
      * @param {string} substitute - The name of the built-in texture to bind.
      * @returns {Texture} The texture to bind.
@@ -468,7 +528,10 @@ class Compute {
 
         Debug.call(() => {
             if (!texture && !handle.destroyed) {
-                Debug.warnOnce(`Compute ${this.name}: the camera of the attached scene ${kind} map has not rendered it. A camera only renders it when requested, using CameraComponent#requestScene${kind === 'depth' ? 'Depth' : 'Color'}Map, or when its CameraFrame is configured to.`);
+                const how = kind === 'normal' ?
+                    'A camera only renders it when its CameraFrame is configured to, using CameraFrame.rendering.sceneNormalMap.' :
+                    `A camera only renders it when requested, using CameraComponent#requestScene${kind === 'depth' ? 'Depth' : 'Color'}Map, or when its CameraFrame is configured to.`;
+                Debug.warnOnce(`Compute ${this.name}: the camera of the attached scene ${kind} map has not rendered it. ${how}`);
             }
         });
         return this.device.builtInTextures[substitute];

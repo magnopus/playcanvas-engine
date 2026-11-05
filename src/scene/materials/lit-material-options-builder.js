@@ -7,7 +7,7 @@ import {
     FOG_NONE,
     REFLECTIONSRC_NONE, REFLECTIONSRC_ENVATLAS, REFLECTIONSRC_ENVATLASHQ, REFLECTIONSRC_CUBEMAP,
     AMBIENTSRC_AMBIENTSH, AMBIENTSRC_ENVALATLAS, AMBIENTSRC_CONSTANT,
-    SHADER_PREPASS, SCENETEXTURE_DEPTH
+    SHADER_PREPASS, SCENETEXTURE_DEPTH, SCENETEXTURE_NORMAL
 } from '../constants.js';
 import { shaderDefsToLightMask } from '../light-mask.js';
 
@@ -32,6 +32,9 @@ class LitMaterialOptionsBuilder {
         // the scene depth into a scene texture
         litOptions.linearDepth = pass === SHADER_PREPASS ||
             !!renderParams?.sceneTextures.includes(SCENETEXTURE_DEPTH);
+
+        // the scene normal texture is written by the forward pass only
+        litOptions.sceneTextureNormal = !!renderParams?.sceneTextures.includes(SCENETEXTURE_NORMAL);
 
         litOptions.alphaTest = material.alphaTest > 0;
         litOptions.blendType = material.blendType;

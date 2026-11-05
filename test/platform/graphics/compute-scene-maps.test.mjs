@@ -432,6 +432,83 @@ describe('Compute', function () {
         });
     });
 
+    describe('#setSceneNormalMap', function () {
+
+        const source = /* wgsl */`
+            #include "sceneNormalCS"
+            var<storage, read_write> result: array<vec4f>;
+
+            @compute @workgroup_size(1)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let texel = vec2i(i32(id.x), 0);
+                result[id.x] = vec4f(sceneNormalWorld(texel), sceneNormalCoverage(texel));
+            }
+        `;
+
+        // a 2 x 1 normal map: a surface facing +y, and a texel nothing was rendered to
+        const values = [0, 2, 0, 1, 0, 0, 0, 0];
+
+        const run = async (rect, flipY) => {
+            const camera = new Camera(device);
+            camera.rect = rect;
+            const texture = new Texture(device, {
+                width: 2, height: 1, format: PIXELFORMAT_RGBA32F, mipmaps: false, levels: [new Float32Array(values)]
+            });
+            camera.publishSceneNormalMap(texture, device.renderVersion, flipY);
+            const handle = camera.sceneNormalMapHandle;
+            const viewport = Array.from(handle.viewport);
+
+            const compute = createCompute(source);
+            const results = new StorageBuffer(device, 2 * 16, BUFFERUSAGE_COPY_SRC);
+            compute.setParameter('result', results);
+            compute.setSceneNormalMap(handle);
+            const data = await dispatch(compute, 2, results, 8);
+
+            compute.destroy();
+            results.destroy();
+            texture.destroy();
+            camera.destroy();
+            return { data, handle, viewport };
+        };
+
+        it('reads the world normal, and zero where nothing was rendered', async function () {
+            const { data } = await run(new Vec4(0, 0, 1, 1), false);
+            if (executesGpuWork) {
+                expect(Array.from(data)).to.deep.equal([0, 1, 0, 1, 0, 0, 0, 0]);
+            }
+        });
+
+        it('records the texture, the render version and flipY on the handle', async function () {
+            const { handle } = await run(new Vec4(0, 0, 1, 1), true);
+            expect(handle.flipY).to.equal(true);
+            expect(handle.renderVersion).to.equal(device.renderVersion);
+        });
+
+        it('places the viewport from the top of the target, unless flipY', async function () {
+            // an 8 x 4 target, the camera rendering to its lower right quarter
+            const place = (flipY) => {
+                const camera = new Camera(device);
+                camera.rect = new Vec4(0.5, 0, 0.5, 0.5);
+                const texture = new Texture(device, { width: 8, height: 4, format: PIXELFORMAT_RGBA32F, mipmaps: false });
+                camera.publishSceneNormalMap(texture, device.renderVersion, flipY);
+                const viewport = Array.from(camera.sceneNormalMapHandle.viewport);
+                texture.destroy();
+                camera.destroy();
+                return viewport;
+            };
+            expect(place(false)).to.deep.equal([4, 2, 4, 2]);
+            expect(place(true)).to.deep.equal([4, 0, 4, 2]);
+        });
+
+        it('marks the handle destroyed with its camera', function () {
+            const camera = new Camera(device);
+            const handle = camera.sceneNormalMapHandle;
+            camera.destroy();
+            expect(handle.destroyed).to.equal(true);
+            expect(handle.texture).to.equal(null);
+        });
+    });
+
     describe('#setSceneColorMap', function () {
 
         const source = /* wgsl */`

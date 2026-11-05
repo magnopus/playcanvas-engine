@@ -234,6 +234,20 @@ describe('TextureRenderer', function () {
         expect(layer.meshInstances).to.have.length(0);
     });
 
+    it('draws the scene normal with its own shader, and reuses a slot for it', function () {
+        renderer.sceneNormal(0, 0, 1, 1);
+        const [instance] = layer.meshInstances;
+        expect(instance.material.shaderDesc.uniqueName).to.equal('TextureRenderer-SceneNormal');
+        expect(definesOf(instance.material)).to.deep.equal({});
+        app.fire('postrender');
+        renderer.sceneDepth(0, 0, 1, 1);
+        expect(instance.material.shaderDesc.uniqueName).to.equal('TextureRenderer-SceneDepth');
+        app.fire('postrender');
+        renderer.sceneNormal(0, 0, 1, 1);
+        expect(instance.material.shaderDesc.uniqueName).to.equal('TextureRenderer-SceneNormal');
+        expect(layer.meshInstances).to.have.length(1);
+    });
+
     it('can reuse a color slot for scene depth and back again', function () {
         renderer.draw(texture, 0, 0, 1, 1);
         const [instance] = layer.meshInstances;

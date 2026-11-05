@@ -17,7 +17,7 @@ import {
     REFLECTIONSRC_NONE, REFLECTIONSRC_ENVATLAS, REFLECTIONSRC_ENVATLASHQ, REFLECTIONSRC_CUBEMAP, REFLECTIONSRC_SPHEREMAP,
     REFLECTIONSRC_PLANAR,
     AMBIENTSRC_AMBIENTSH, AMBIENTSRC_ENVALATLAS, AMBIENTSRC_CONSTANT,
-    SCENETEXTURE_DEPTH
+    SCENETEXTURE_DEPTH, SCENETEXTURE_NORMAL
 } from '../constants.js';
 import { _matTex2D } from '../shader-lib/programs/standard.js';
 import { LitMaterialOptionsBuilder } from './lit-material-options-builder.js';
@@ -75,6 +75,9 @@ class StandardMaterialOptionsBuilder {
         // by the prepass among others, is built without the camera shader params
         options.litOptions.linearDepth = pass === SHADER_PREPASS ||
             !!cameraShaderParams?.sceneTextures.includes(SCENETEXTURE_DEPTH);
+
+        // the scene normal texture is written by the forward pass only
+        options.litOptions.sceneTextureNormal = !!cameraShaderParams?.sceneTextures.includes(SCENETEXTURE_NORMAL);
 
         // USER ATTRIBUTES
         if (stdMat.userAttributes) {

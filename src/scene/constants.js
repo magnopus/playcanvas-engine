@@ -1,5 +1,6 @@
 import { PIXELFORMAT_DEPTH, PIXELFORMAT_DEPTH16, PIXELFORMAT_R32F, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F } from '../platform/graphics/constants.js';
 import { SceneDepthMapHandle } from '../platform/graphics/scene-depth-map-handle.js';
+import { SceneNormalMapHandle } from '../platform/graphics/scene-normal-map-handle.js';
 
 /**
  * Subtract the color of the source fragment from the destination fragment and write the result to
@@ -1468,6 +1469,18 @@ export const RADIX_SORT_ONESWEEP = 2;
 export const SCENETEXTURE_DEPTH = 'depth';
 
 /**
+ * The name of the scene normal texture - a scene texture storing the world space surface normal of
+ * the scene (including normal mapping), rendered by the scene pass alongside the scene color. The
+ * normal is stored as the signed vector in RGB (RGBA16F), with alpha 1 where a surface was rendered and
+ * 0 where nothing was. It is only rendered together with the scene depth. See
+ * {@link CameraShaderParams#sceneTextures}.
+ *
+ * @type {string}
+ * @ignore
+ */
+export const SCENETEXTURE_NORMAL = 'normal';
+
+/**
  * The uniform each scene texture is published under by the render pass which rendered it. Note that
  * the depth uses the same uniform as the depth prepass, as those are two producers of the same thing,
  * and the consumers sample whichever of them ran later in the frame.
@@ -1476,7 +1489,8 @@ export const SCENETEXTURE_DEPTH = 'depth';
  * @ignore
  */
 export const sceneTextureUniformNames = {
-    [SCENETEXTURE_DEPTH]: SceneDepthMapHandle.uniformName
+    [SCENETEXTURE_DEPTH]: SceneDepthMapHandle.uniformName,
+    [SCENETEXTURE_NORMAL]: SceneNormalMapHandle.uniformName
 };
 
 /**

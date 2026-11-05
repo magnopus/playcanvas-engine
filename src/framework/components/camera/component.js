@@ -20,6 +20,7 @@ import { PostEffectQueue } from './post-effect-queue.js';
  * @import { RenderTarget } from '../../../platform/graphics/render-target.js'
  * @import { SceneColorMapHandle } from '../../../platform/graphics/scene-color-map-handle.js'
  * @import { SceneDepthMapHandle } from '../../../platform/graphics/scene-depth-map-handle.js'
+ * @import { SceneNormalMapHandle } from '../../../platform/graphics/scene-normal-map-handle.js'
  * @import { FogParams } from '../../../scene/fog-params.js'
  * @import { Vec2 } from '../../../core/math/vec2.js'
  * @import { Vec3 } from '../../../core/math/vec3.js'
@@ -1128,6 +1129,18 @@ class CameraComponent extends Component {
      */
     get sceneColorMapHandle() {
         return this._camera.sceneColorMapHandle;
+    }
+
+    /**
+     * Gets the handle to the scene normal map of this camera. The handle is the same object for the
+     * lifetime of the camera, and identifies the normal map the camera rendered most recently. The
+     * camera only renders the normal map when its {@link CameraFrame} is configured to, see
+     * `CameraFrame.rendering.sceneNormalMap`.
+     *
+     * @type {SceneNormalMapHandle}
+     */
+    get sceneNormalMapHandle() {
+        return this._camera.sceneNormalMapHandle;
     }
 
     /**

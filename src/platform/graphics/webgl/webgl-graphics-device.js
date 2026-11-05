@@ -43,6 +43,7 @@ import { WebglBindGroup } from './webgl-bind-group.js';
 import { WebglBindGroupFormat } from './webgl-bind-group-format.js';
 import { SceneColorMapHandle } from '../scene-color-map-handle.js';
 import { SceneDepthMapHandle } from '../scene-depth-map-handle.js';
+import { SceneNormalMapHandle } from '../scene-normal-map-handle.js';
 import { WebglDynamicBuffers } from './webgl-dynamic-buffers.js';
 import { WebglDrawCommands } from './webgl-draw-commands.js';
 import { WebglTexture } from './webgl-texture.js';
@@ -2205,6 +2206,10 @@ class WebglGraphicsDevice extends GraphicsDevice {
                         }
                         if (samplerName === SceneColorMapHandle.uniformName) {
                             Debug.errorOnce(`A uSceneColorMap texture is used by the shader but a scene color texture is not available. Use CameraComponent.requestSceneColorMap / enable Color Grabpass on the Camera Component / CameraFrame.rendering.sceneColorMap to enable it. Rendering [${DebugGraphics.toString()}]`);
+                            samplerValue = this.builtInTextures.pink;
+                        }
+                        if (samplerName === SceneNormalMapHandle.uniformName) {
+                            Debug.errorOnce(`A uSceneNormalMap texture is used by the shader but a scene normal texture is not available. Enable it with CameraFrame.rendering.sceneNormalMap. Rendering [${DebugGraphics.toString()}]`);
                             samplerValue = this.builtInTextures.pink;
                         }
 

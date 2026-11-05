@@ -284,6 +284,12 @@ class LitShaderOptions {
     linearDepth = false;
 
     /**
+     * The forward pass writes the world space surface normal to the scene normal texture. This
+     * forces the normal to be computed, even when the material would not otherwise need it.
+     */
+    sceneTextureNormal = false;
+
+    /**
      * Shader outputs the accumulated shadow value, used for shadow catcher materials.
      */
     shadowCatcher = false;

@@ -63,6 +63,12 @@ void main(void) {
         writeSceneTextureDepth(vLinearDepth, 1.0);
     #endif
 
+    // the world space normal, including normal mapping. The scene normal texture forces the normal to
+    // be computed (LIT_NEEDS_NORMAL), so litArgs_worldNormal is always set when this is defined
+    #ifdef SCENE_TEXTURE_NORMAL
+        writeSceneTextureNormal(litArgs_worldNormal, 1.0);
+    #endif
+
     #include "litUserMainEndPS"
 }
 `;

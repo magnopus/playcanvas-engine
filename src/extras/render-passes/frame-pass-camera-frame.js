@@ -1,5 +1,5 @@
-import { LAYERID_SKYBOX, LAYERID_IMMEDIATE, TONEMAP_NONE, GAMMA_NONE, SCENETEXTURE_DEPTH } from '../../scene/constants.js';
-import { ADDRESS_CLAMP_TO_EDGE, FILTER_LINEAR, PIXELFORMAT_R16F, PIXELFORMAT_R32F } from '../../platform/graphics/constants.js';
+import { LAYERID_SKYBOX, LAYERID_IMMEDIATE, TONEMAP_NONE, GAMMA_NONE, SCENETEXTURE_DEPTH, SCENETEXTURE_NORMAL } from '../../scene/constants.js';
+import { ADDRESS_CLAMP_TO_EDGE, FILTER_LINEAR, PIXELFORMAT_R16F, PIXELFORMAT_R32F, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F } from '../../platform/graphics/constants.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { FramePass } from '../../platform/graphics/frame-pass.js';
 import { FramePassColorGrab } from '../../scene/graphics/frame-pass-color-grab.js';
@@ -61,10 +61,24 @@ class CameraFrameOptions {
     // scene render target, instead of, or in addition to, by the depth prepass. This is not a user
     // setting - sanitizeOptions derives it from what needs the depth and what the device supports.
     sceneTextureDepth = false;
+
+    // Whether the scene normal is requested - see CameraFrame.rendering.sceneNormalMap. The normal is
+    // only ever rendered as a scene texture, so it needs the scene textures to be available.
+    sceneNormalMap = false;
+
+    // Whether the scene normal is rendered by the scene pass into an additional attachment of the
+    // scene render target, after the depth. Derived by sanitizeOptions from sceneNormalMap and
+    // whether this camera can render the scene textures. Implies sceneTextureDepth.
+    sceneTextureNormal = false;
 }
 
 // the formats the scene depth can be rendered to, in the order of preference
 const _sceneDepthFormats = [PIXELFORMAT_R32F, PIXELFORMAT_R16F];
+
+// the formats the scene normal can be rendered to, in the order of preference. The normal is stored as
+// the signed world space vector, so half float (11 bits of mantissa, a step of about 0.0005 near 1) is
+// already finer than any 8 bit encoding, and full float is only the fallback.
+const _sceneNormalFormats = [PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F];
 
 /**
  * Render pass implementation of a common camera frame rendering with integrated post-processing
@@ -169,6 +183,24 @@ class FramePassCameraFrame extends FramePass {
     sceneDepthSlot = 0;
 
     /**
+     * The scene normal rendered by the scene pass as a scene texture, or null when it is not
+     * rendered. Signed world space normals in RGB (RGBA16F), alpha 0 where nothing was rendered.
+     * Owned by the scene render target it is attached to.
+     *
+     * @type {Texture|null}
+     * @private
+     */
+    sceneNormalTexture = null;
+
+    /**
+     * The color attachment index the scene normal is rendered to, or 0 when it is not rendered.
+     *
+     * @type {number}
+     * @private
+     */
+    sceneNormalSlot = 0;
+
+    /**
      * A render target holding the scene color alone, aliasing the color attachment of the scene
      * render target. The passes blending into the scene after it has been rendered use this instead of
      * the scene render target, as they sample the scene textures, and a texture attached to the render
@@ -187,6 +219,15 @@ class FramePassCameraFrame extends FramePass {
      * @private
      */
     _sceneDepthClearValue = new Color(0, 0, 0, 1);
+
+    /**
+     * The clear value of the scene normal texture. All zeros, so that an alpha of 0 marks a pixel
+     * nothing was rendered to, and so that what the blended geometry adds to it stays untouched.
+     *
+     * @type {Color}
+     * @private
+     */
+    _sceneNormalClearValue = new Color(0, 0, 0, 0);
 
     constructor(app, cameraFrame, cameraComponent, options = {}) {
         Debug.assert(app);
@@ -208,6 +249,13 @@ class FramePassCameraFrame extends FramePass {
 
         this.sceneTexture = null;
         this.sceneTextureHalf = null;
+
+        if (this.sceneNormalTexture) {
+
+            // the texture itself is owned by the scene render target, destroyed below
+            this.sceneNormalTexture = null;
+            this.sceneNormalSlot = 0;
+        }
 
         if (this.sceneDepthTexture) {
 
@@ -300,7 +348,26 @@ class FramePassCameraFrame extends FramePass {
         options.sceneTextureDepth = postProcessDepth && deviceSupported && !unsupportedReason &&
             (!requiresSplatDepth || splatDepth);
 
+        // The scene normal only exists as a scene texture, so it is available only where those are -
+        // when the depth prepass is needed, or on a multi-sampled frame, it is not. It is rendered
+        // together with the depth, which is then rendered as a scene texture even if nothing else
+        // consuming the depth asked for it.
+        options.sceneTextureNormal = !!options.sceneNormalMap && deviceSupported && !unsupportedReason &&
+            this.sceneNormalFormat !== undefined;
+        if (options.sceneTextureNormal) {
+            options.sceneTextureDepth = true;
+        }
+
         options.prepassEnabled = inSceneDepth || (postProcessDepth && !options.sceneTextureDepth);
+
+        Debug.call(() => {
+            if (options.sceneNormalMap && !options.sceneTextureNormal) {
+                const reason = deviceSupported ?
+                    unsupportedReason :
+                    'this device cannot render the scene textures';
+                Debug.warnOnce(`CameraFrame: the scene normal map was requested (rendering.sceneNormalMap), but this camera cannot render it: ${reason}.`);
+            }
+        });
 
         Debug.call(() => {
 
@@ -409,6 +476,18 @@ class FramePassCameraFrame extends FramePass {
     }
 
     /**
+     * The format of the scene normal texture, or undefined when the device supports no floating point
+     * format which can be both rendered and blended into (the gaussian splats write to the attachment
+     * as well, with zeros, under the blending of the scene pass).
+     *
+     * @type {number|undefined}
+     * @private
+     */
+    get sceneNormalFormat() {
+        return this.device.getRenderableHdrFormat(_sceneNormalFormats, false, 1, true);
+    }
+
+    /**
      * The format of the scene depth texture, or undefined when the device supports no floating point
      * format which can be both rendered and blended into.
      *
@@ -488,6 +567,7 @@ class FramePassCameraFrame extends FramePass {
             options.effectPasses !== currentOptions.effectPasses ||
             options.prepassEnabled !== currentOptions.prepassEnabled ||
             options.sceneTextureDepth !== currentOptions.sceneTextureDepth ||
+            options.sceneTextureNormal !== currentOptions.sceneTextureNormal ||
             options.sceneColorMap !== currentOptions.sceneColorMap ||
             arraysNotEqual(options.formats, currentOptions.formats);
     }
@@ -573,6 +653,14 @@ class FramePassCameraFrame extends FramePass {
             sceneTextures.push(this.sceneDepthTexture);
             names.push(SCENETEXTURE_DEPTH);
             this.sceneDepthSlot = sceneTextures.length;
+        }
+
+        // the normal follows the depth, as the signed world space vector in a floating point format
+        if (options.sceneTextureNormal) {
+            this.sceneNormalTexture = Texture.createDataTexture2D(device, 'SceneTextureNormal', 4, 4, this.sceneNormalFormat);
+            sceneTextures.push(this.sceneNormalTexture);
+            names.push(SCENETEXTURE_NORMAL);
+            this.sceneNormalSlot = sceneTextures.length;
         }
 
         // create a render target to render the scene into. This uses the API-native orientation
@@ -1005,6 +1093,12 @@ class FramePassCameraFrame extends FramePass {
             const clearValue = this._sceneDepthClearValue;
             clearValue.r = 1 / this.cameraComponent.camera.farClip;
             this.scenePass.setClearColor(clearValue, this.sceneDepthSlot);
+
+            // the normal is cleared to all zeros (alpha 0 = nothing rendered), by the same pass for the
+            // same reason as the depth
+            if (this.sceneNormalTexture) {
+                this.scenePass.setClearColor(this._sceneNormalClearValue, this.sceneNormalSlot);
+            }
         }
 
         // The effects owning passes resolve the scene in turn, in the order they are registered, each

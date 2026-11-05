@@ -31,6 +31,7 @@ export function Controls({ observer }) {
             {toggle('previews', 'Show Previews')}
             {toggle('animate', 'Animate Scene')}
             {toggle('swap', 'Swap Color Textures')}
+            {toggle('cameraFrame', 'Camera Frame (Normals)')}
             <LabelGroup text='Channels'>
                 <SelectInput
                     type='string'

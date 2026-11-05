@@ -9,6 +9,7 @@ import halfTypes from './shader-chunks/frag/half-types.js';
 import dispatchThreadsCS from './shader-chunks/compute/dispatch-threads.js';
 import sceneColorCS from './shader-chunks/compute/scene-color.js';
 import sceneDepthCS from './shader-chunks/compute/scene-depth.js';
+import sceneNormalCS from './shader-chunks/compute/scene-normal.js';
 
 /**
  * @import { BindGroupFormat } from './bind-group-format.js'
@@ -234,6 +235,9 @@ class Shader {
             }
             if (!cincludes.has('sceneColorCS')) {
                 cincludes.set('sceneColorCS', sceneColorCS);
+            }
+            if (!cincludes.has('sceneNormalCS')) {
+                cincludes.set('sceneNormalCS', sceneNormalCS);
             }
             if (!cincludes.has('dispatchThreadsCS')) {
                 cincludes.set('dispatchThreadsCS', dispatchThreadsCS);

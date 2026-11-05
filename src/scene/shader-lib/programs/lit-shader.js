@@ -176,6 +176,9 @@ class LitShader {
             (options.clusteredLightingEnabled && !this.shadowPass) ||
             options.useClearCoatNormals;
         this.needsNormal = this.needsNormal && !this.shadowPass;
+        // the forward pass writes the world space normal to the scene normal texture. Shadow passes are
+        // excluded above and are never given the option, as it is derived from the camera's scene textures.
+        this.needsNormal = this.needsNormal || (options.sceneTextureNormal && !this.shadowPass);
         this.needsSceneColor = options.useDynamicRefraction;
         this.needsScreenSize = options.useDynamicRefraction;
         this.needsTransforms = options.useDynamicRefraction;

@@ -30,5 +30,26 @@ void writeSceneTextureDepth(float linearDepth, float alpha) {
     #endif
 }
 
+// Writes the fragment's world space surface normal to the scene normal texture. The normal is
+// stored as is - signed, in the floating point attachment, so no precision is spent on an encoding -
+// premultiplied by the coverage alpha like the depth, so that under the same premultiplied blending a
+// fragment with no coverage leaves the attachment as it was. Opaque
+// geometry passes 1.0 and simply overwrites. A pixel nothing was rendered to keeps the clear value
+// of all zeros, so an alpha of 0 marks it as empty.
+void writeSceneTextureNormal(vec3 worldNormal, float alpha) {
+    #ifdef SCENE_TEXTURE_NORMAL
+        pcFragColor{SCENE_TEXTURE_NORMAL_SLOT} = vec4(normalize(worldNormal) * alpha, alpha);
+    #endif
+}
+
+// Writes a fragment which has no surface normal to the scene normal texture - for example a gaussian
+// splat. Writes all zeros, which leaves the attachment as it was under premultiplied blending, and
+// marks the pixel as empty where the fragment overwrites it.
+void writeSceneTextureNoNormal() {
+    #ifdef SCENE_TEXTURE_NORMAL
+        pcFragColor{SCENE_TEXTURE_NORMAL_SLOT} = vec4(0.0);
+    #endif
+}
+
 #endif // SCENE_TEXTURES
 `;

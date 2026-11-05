@@ -151,6 +151,12 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
                 writeSceneTextureDepth(&output, vLinearDepth, 1.0);
             #endif
         #endif
+
+        // splats have no surface normal. All zeros leave the normal attachment alone when blended, and
+        // mark the pixel empty where a dithered splat overwrites it, matching the depth it replaced
+        #ifdef SCENE_TEXTURE_NORMAL
+            writeSceneTextureNoNormal(&output);
+        #endif
     #endif
 
     return output;

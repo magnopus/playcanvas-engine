@@ -13,6 +13,8 @@ docs-scripts
 examples/.cert
 examples/dist
 examples/node_modules
+examples/assets/meshlets
+examples/utils/caldera
 node_modules
 npm-debug.log
 types
