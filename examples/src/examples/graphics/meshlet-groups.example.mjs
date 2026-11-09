@@ -8,6 +8,7 @@
 // @flag WEBGPU_BARE_DISABLED
 // @flag NO_MINISTATS
 // @flag HIDDEN
+// @flag HIDDEN_IN_DEV
 
 import {
     AppBase,

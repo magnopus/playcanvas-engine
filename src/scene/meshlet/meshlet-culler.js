@@ -318,7 +318,6 @@ class MeshletCuller {
             compute.setParameter('recordCapacity', view.recordCapacity);
             bindCapacities(compute, view);
             compute.setParameter('cutGroups', world.cut.groups);
-            compute.setParameter('cutTasks', world.cut.tasks);
             compute.setParameter('residency', world.residencyBuffer);
             compute.setParameter('requests', world.requestsBuffer);
             compute.setParameter('claimBits', view.claimBitsBuffer);

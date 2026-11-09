@@ -243,7 +243,7 @@ describe('buildMeshletLitChunks', function () {
         expect(chunks.normalMapPS).to.include(`meshletSampleSlot(${MATERIAL_SLOT.NORMAL}u`);
         expect(chunks.litEngineMainStartPS).to.include('dpdx(vMeshletUv0)');
         expect(chunks.litEngineMainStartPS).to.include('dpdx(vMeshletUv1)');
-        expect(chunks.litEngineDeclarationPS).to.include('materialTable[vMeshletMatRow].slotWords[slot]');
+        expect(chunks.litEngineDeclarationPS).to.include(`meshletSlotDesc[vMeshletMatRow * ${MATERIAL_SLOT.EMISSIVE + 1}u + slot]`);
         expect(chunks.litEngineDeclarationPS).to.include('materialTable[vMeshletMatRow].slotTransforms[slot]');
         expect(chunks.litEngineDeclarationPS).to.include('meshletTexMinLod(resident)');
         expect(chunks.litEngineDeclarationPS).to.include('dMeshletTexDebugBase = dMeshletTexDebug;');

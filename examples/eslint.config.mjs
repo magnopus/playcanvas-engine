@@ -13,6 +13,7 @@ const emptyLine = /^[ \t]*$/;
 const STRAY_DELIM_PATTERN = /\*\*|`/;
 const booleanFlags = new Set([
     'HIDDEN',
+    'HIDDEN_IN_DEV',
     'NO_DEVICE_SELECTOR',
     'NO_MINISTATS',
     'WEBGPU_DISABLED',

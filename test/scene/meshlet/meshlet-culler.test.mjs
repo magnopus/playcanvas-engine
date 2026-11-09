@@ -50,9 +50,7 @@ const storage = (byteSize = 16) => ({
 
 const makeWorld = () => ({
     cut: {
-        levels: [{ start: 0, count: 130, root: true }, { start: 130, count: 50, root: false }],
         groups: storage(),
-        tasks: storage(),
         selectionTopology: storage(),
         stageLevels: [1]
     },

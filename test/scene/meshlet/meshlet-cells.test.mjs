@@ -125,17 +125,17 @@ describe('MeshletCutData queue ownership', function () {
         const cut = new MeshletCutData(device, meshlets, objects);
         try {
             const words = cut.groups.impl.words;
-            const tasks = cut.tasks.impl.words;
+            const rootOffset = words[0];
             const ownedList = offset => words.subarray(words[offset + 2] + words[offset + 3] + 1,
                 words[offset + 2] + words[offset + 3] + 1 + words[words[offset + 2] + words[offset + 3]]);
-            // primitive-local representative -> task row, from the non-root tasks of instance 0
+            // primitive-local representative -> task row, walking the rows before rootOffset
             const rowOf = new Map();
             const groupTasks = [];
-            for (let t = cut.levels[0].count; t < tasks.length / 2; t++) {
-                if (tasks[t * 2] !== 0) continue;
-                const offset = tasks[t * 2 + 1];
+            for (let offset = 1; offset < rootOffset;) {
                 rowOf.set(words[offset] - objects[O.FIRST_MESHLET], offset);
                 groupTasks.push(offset);
+                const ownedStart = words[offset + 2] + words[offset + 3];
+                offset = ownedStart + 1 + words[ownedStart];
             }
             expect(groupTasks.length).to.be.above(1);
             const owners = new Map();
@@ -143,7 +143,7 @@ describe('MeshletCutData queue ownership', function () {
                 expect(owners.has(task), `task ${task} owned twice`).to.equal(false);
                 owners.set(task, owner);
             });
-            record('root', Array.from(ownedList(tasks[1])));
+            record('root', Array.from(ownedList(rootOffset)));
             groupTasks.forEach(offset => record(offset, Array.from(ownedList(offset))));
             groupTasks.forEach((offset) => {
                 expect(owners.has(offset), `task ${offset} has an owner`).to.equal(true);

@@ -15,6 +15,7 @@ const LOG_HIDDEN_EXAMPLES = process.env.NODE_ENV === 'production';
  * @property {string} categoryKebab - The category name.
  * @property {string} exampleNameKebab - The example name.
  * @property {boolean} hidden - True if hidden from the production sidebar.
+ * @property {boolean} hiddenInDev - True if hidden from the development sidebar.
  */
 
 /**
@@ -74,7 +75,8 @@ export const buildMetadata = () => {
                 path: categoryPath,
                 categoryKebab,
                 exampleNameKebab,
-                hidden
+                hidden,
+                hiddenInDev: !!config.HIDDEN_IN_DEV
             });
         });
     });

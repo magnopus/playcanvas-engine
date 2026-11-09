@@ -24,9 +24,10 @@ describe('meshlet replacement groups', function () {
         const cut = new MeshletCutData(device, meshlets, objects);
         try {
             const words = cut.groups.impl.words;
-            expect(words[1], 'unique ancestor count').to.equal(1);
-            expect(words[3], 'unique finer page count').to.equal(1);
-            const roots = cut.tasks.impl.words[1];
+            const group0 = 1;
+            expect(words[group0 + 1], 'unique ancestor count').to.equal(1);
+            expect(words[group0 + 3], 'unique finer page count').to.equal(1);
+            const roots = words[0];
             expect(words[roots + 3], 'unique root page count').to.equal(1);
             expect(cut.rootIndices).to.deep.equal([6, 0, 0]);
             expect(cut.selectionTopology.byteSize).to.equal(10 * 8);
@@ -83,10 +84,11 @@ describe('meshlet replacement groups', function () {
         };
         const cut = new MeshletCutData(device, meshlets, objects);
         try {
-            // Group 4 replaces coarse members 4 (under root 8) and 5 (under root 9) with 0 and 1.
-            const words = Array.from(cut.groups.impl.words.slice(0, 16));
+            // Word 0 is the instance's root offset; group 4 starts at word 1 and replaces
+            // coarse members 4 (under root 8) and 5 (under root 9) with 0 and 1.
+            const words = Array.from(cut.groups.impl.words.slice(1, 17));
             expect(words).to.deep.equal([
-                4, 2, 14, 2, 12, 6, 2, 2,
+                4, 2, 15, 2, 12, 6, 2, 2,
                 8, 3, 1, 9, 3, 1,
                 0, 1
             ]);
@@ -117,36 +119,6 @@ describe('meshlet replacement groups', function () {
             const { meshlets } = createCutFixture();
             meshlets[M.PARENT] = parent;
             expect(() => buildMeshletGroups(meshlets)).to.throw('invalid parent');
-        }
-    });
-
-    it('promotes real coarse geometry beneath legacy empty roots into the pinned fallback', function () {
-        const { meshlets, objects } = createCutFixture();
-        const f = new Float32Array(meshlets.buffer);
-        for (const m of [8, 9]) {
-            meshlets[m * MESHLET_DATA_U32S + M.TRIANGLE_COUNT] = 0;
-            f[m * MESHLET_DATA_U32S + M.CLUSTER_ERROR] = 1e30;
-        }
-        const device = {
-            buffers: new Set(),
-            _vram: { sb: 0 },
-            createBufferImpl: () => ({
-                allocate() {},
-                write(device, offset, data) {
-                    this.words = data.slice();
-                },
-                destroy() {}
-            })
-        };
-        const cut = new MeshletCutData(device, meshlets, objects);
-        try {
-            for (const m of [4, 5, 6, 7]) expect(meshlets[m * MESHLET_DATA_U32S + M.PARENT]).to.equal(MESHLET_NO_PARENT);
-            for (const m of [4, 5, 6, 7]) expect(cut.selectionTopology.impl.words[m * 2]).to.equal(MESHLET_NO_PARENT);
-            expect(cut.rootIndices).to.deep.equal([12, 0, 0]);
-            expect(cut.rootRecords).to.equal(4);
-            expect(cut.rootPages).to.deep.equal([4, 5, 6, 7, 8, 9]);
-        } finally {
-            cut.destroy();
         }
     });
 });

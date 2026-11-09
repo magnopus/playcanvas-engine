@@ -563,7 +563,6 @@ class MeshletWorld {
      */
     _resolveBudget(counts) {
         const { totalPages, totalMeshlets, totalInstances, totalMaterialRows, pairs, workItems, lightmapBytes = 0, rootPages = 0 } = counts;
-        const cutTasks = counts.cutTasks ?? pairs;
         if (!(this.poolBytes > 0)) {
             this.budgetBreakdown = null;
             this.maxIndices = 0;
@@ -572,11 +571,9 @@ class MeshletWorld {
 
         const pairWords = Math.max(Math.ceil((pairs + totalInstances) / 32), 4);
         const claimWords = claimWordCount(pairs, totalInstances);
-        // Group headers and membership lists (upper bound), packed selection links, and one
-        // task per (instance, group). Instances share every per-meshlet table; charging the
-        // tasks per (instance, meshlet) reserved ~8x their size - 535 MB of a 768 MB budget
-        // for 40k copies of one small asset, starving the index buffer below even its roots.
-        const cutBytes = totalMeshlets * (56 + 8) + cutTasks * 8 + totalInstances * 40;
+        // Group headers and membership lists, packed selection links, per-instance root offsets
+        // and cell tables.
+        const cutBytes = totalMeshlets * (56 + 8) + totalInstances * 44;
         const fixed = cutBytes + lightmapBytes + totalMeshlets * MESHLET_DATA_U32S * 4 +      // meshletData
             totalInstances * OBJECT_DATA_U32S * 4 +                // objectData
             totalPages * 4 +                                       // residency
@@ -717,22 +714,6 @@ class MeshletWorld {
         // loop below recomputes them as it writes the tables.
         let budgetPairs = 0;
         let budgetWorkItems = 0;
-        let budgetCutTasks = 0;
-        // replacement groups per primitive (distinct parent representatives): the cut dispatches
-        // one task per (instance, group), far fewer than one per (instance, meshlet)
-        // Both are cached on the primitive, which is immutable once parsed, so a rebuild that
-        // re-adds the same resources does not rescan their meshlets.
-        const groupCount = (prim) => {
-            if (prim._groupCount === undefined) {
-                const parents = new Set();
-                for (let m = 0; m < prim.meshletCount; m++) {
-                    const parent = prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.PARENT];
-                    if (parent !== MESHLET_NO_PARENT) parents.add(parent);
-                }
-                prim._groupCount = parents.size;
-            }
-            return prim._groupCount;
-        };
         // unique root pages per resource (the pages of meshlets without a parent): pinned for
         // the resource's lifetime, so the pool is sized to hold them before anything else
         const rootPagesOf = new Map();
@@ -745,7 +726,6 @@ class MeshletWorld {
                 const n = prim.meshletCount;
                 budgetPairs += n;
                 budgetWorkItems += Math.ceil(n / MESHLET_COMPACT_SLICE);
-                budgetCutTasks += groupCount(prim) + 1;
                 if (!rootScanned.has(prim)) {
                     rootScanned.add(prim);
                     if (!prim._rootPages) {
@@ -772,7 +752,6 @@ class MeshletWorld {
             totalMaterialRows,
             lightmapBytes: anyLightmaps ? totalInstances * 64 : 0,
             pairs: budgetPairs,
-            cutTasks: budgetCutTasks,
             workItems: budgetWorkItems,
             rootPages: rootPageCount
         });

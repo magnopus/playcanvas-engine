@@ -10,6 +10,7 @@
 // @flag WEBGL_DISABLED
 // @flag WEBGPU_BARE_DISABLED
 // @flag HIDDEN
+// @flag HIDDEN_IN_DEV
 
 // the bake is sequential by nature: one render target, read back view by view
 /* eslint-disable no-await-in-loop */

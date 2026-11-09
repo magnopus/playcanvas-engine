@@ -25,6 +25,22 @@ package grew from 473 to 508 pages (about 2.2 MiB more geometry storage).
 
 ## Local Zorah reproduction
 
+`graphics/meshlet-zorah` loads the **entire dataset** from `zorah/scene.all.json`, including
+all 19 chunks and their entity/model transforms. Open
+`/iframe/graphics_meshlet-zorah.html?deviceType=webgpu` after creating the local link below.
+The camera starts at the manifest's position and orientation; WASD and mouse look fly through
+the scene, with Shift/Ctrl changing speed. Single-sample CameraFrame depth enables two-phase
+HZB occlusion. Reverse-Z preserves depth precision across the manifest's view distance.
+The Jungle bake's `jungle_sky.hdr` supplies the visible sky; its clamped
+`jungle_sky_env.hdr` generates the environment lighting atlas. Both files must be available
+under `assets/meshlets/jungle/`, as in the Jungle example.
+ACES tone mapping compresses HDR highlights without clipping them to white.
+The default directional light is disabled. The geometry pool budget is 16 GiB
+(`17179869184` bytes); this is a large scene and requires sufficient GPU memory.
+
+The tiles, streaming, groups and both impostor debug examples are hidden from development and
+production navigation, but remain available at their direct URLs.
+
 `graphics/meshlet-basic` loads a local Zorah chunk through an asset link; the dropdown's Zorah
 choice selects `chunk_003.streamed.glb`. The example opens on the Bunny; pick Zorah from the
 dropdown or open `/iframe/graphics_meshlet-basic.html?deviceType=webgpu&asset=zorah`.

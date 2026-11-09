@@ -199,7 +199,6 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     uniform queueCapacity: u32;
     var<storage, read_write> cutQueue: array<vec2u>;
     var<storage, read> cutGroups: array<u32>;
-    var<storage, read> cutTasks: array<vec2u>;
     var<storage, read> residency: array<u32>;
     var<storage, read_write> requests: array<atomic<u32>>;
     var<storage, read_write> claimBits: array<atomic<u32>>;
@@ -217,8 +216,7 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         if (index >= rootBands[uniform.rootBand]) { return; }
         let entry = rootList[uniform.sortedBase + rootBands[${2 * MESHLET_ROOT_BANDS}u + uniform.rootBand] + index];
         let instance = entry & ${INSTANCE_MASK}u;
-        // root tasks come first in the task list, one per instance in instance order
-        let offset = cutTasks[instance].y;
+        let offset = cutGroups[instance];
         let pageStart = cutGroups[offset + 2u];
         let pageCount = cutGroups[offset + 3u];
         var ready = true;

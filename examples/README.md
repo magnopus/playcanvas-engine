@@ -180,6 +180,9 @@ The examples loader finds and destroys applications registered to canvases it ow
 
 Examples can also contain comments which allow you to define the default configuration for your examples as well as overrides to particular settings such as `deviceType`. Check the possible values to set in `ExampleConfig` in `utils/example-source.mjs` file for the full list.
 
+`HIDDEN` removes an example from production navigation. Add `HIDDEN_IN_DEV` to hide it
+in development too; both flags leave the example built and reachable by its direct URL.
+
 ```js
 // @config
 //
@@ -195,6 +198,7 @@ Examples can also contain comments which allow you to define the default configu
 // license: CC BY 4.0
 //
 // @flag HIDDEN
+// @flag HIDDEN_IN_DEV
 // @flag ENGINE=performance
 // @flag NO_DEVICE_SELECTOR
 // @flag NO_MINISTATS

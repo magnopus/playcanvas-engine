@@ -254,11 +254,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
                 // debug view: magenta tint where the surface wants a finer mip than is resident
                 let starved = select(0.0, 0.6, wanted < minLod - 0.5);
                 let tailFloor = max(tailStart + sizeBias - ${slotLevels}, 0.0);
-                #ifdef MESHLET_DEBUG_TAIL_ONLY
-                if (false) {
-                #else
                 if (slotLayer != 0xFFFFu && lod < tailStart) {
-                #endif
                     let fineTop = tailStart + sizeBias - 1.0;
                     let fineLod = clamp(comb, minLod + sizeBias, fineTop);
                     dMeshletTexDebug = mix(mix(vec3f(0.2, 1.0, 0.2), vec3f(0.0, 0.3, 0.0), comb / max(fineTop + 1.0, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
@@ -337,7 +333,6 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         ${col ? 'varying vMeshletColor: vec4f;' : ''}
 
         ${textures ? /* wgsl */ `
-        ${meshletTexResidencyWGSL}
         var<storage, read> meshletSlotDesc: array<vec4u>;
         ${texDecls}
 
@@ -376,20 +371,8 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             return 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-12));
         }
 
-        // samples the given material slot (MATERIAL_SLOT.*) from its texture's resident mips
-        // (fine slot pool above the tail, resident tail below), or returns the fallback when
-        // the slot is absent or nothing is resident yet. Derivatives are the cached
-        // uniform-flow ones.
-        fn meshletSampleTexture(texIndex: u32, uv: vec2f, ddx: vec2f, ddy: vec2f, fallback: vec4f) -> vec4f {
-            if (texIndex == ${MATERIAL_SLOT_ABSENT}u) { dMeshletTexDebug = vec3f(0.15); return fallback; }
-            return meshletSampleResident(texResidency[texIndex], uv, ddx, ddy, fallback);
-        }
-
         // samples a texture whose residency entry the caller already has
         fn meshletSampleResident(resident: MeshletTexResidency, uv: vec2f, ddx: vec2f, ddy: vec2f, fallback: vec4f) -> vec4f {
-            #ifdef MESHLET_DEBUG_NO_TEX
-            if (true) { return fallback; }
-            #endif
             if (meshletTexMinLod(resident) == ${MESHLET_TEX_NO_MINLOD}u) { dMeshletTexDebug = vec3f(1.0, 0.1, 0.1); return fallback; }  // nothing resident yet
             let minLod = f32(meshletTexMinLod(resident));
             let family = meshletTexFamily(resident);
@@ -429,38 +412,14 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         }
 
         fn meshletSampleSlot(slot: u32, fallback: vec4f) -> vec4f {
-            #ifdef MESHLET_NO_SLOT_DESC
-            let slotWord = materialTable[vMeshletMatRow].slotWords[slot];
-            let uv = meshletSlotUv(slot, slotWord);
-            return meshletSampleTexture(slotWord & 0xFFFFu, uv[0], uv[1], uv[2], fallback);
-            #else
-            // one load, no dependency: the slot word and its texture's residency, combined on
-            // the CPU (MeshletTextures#slotDescBuffer)
             let desc = meshletSlotDesc[vMeshletMatRow * ${MATERIAL_TEXTURE_SLOTS}u + slot];
             if ((desc.x & 0xFFFFu) == ${MATERIAL_SLOT_ABSENT}u) { dMeshletTexDebug = vec3f(0.15); return fallback; }
             let uv = meshletSlotUv(slot, desc.x);
             return meshletSampleResident(MeshletTexResidency(desc.y, desc.z), uv[0], uv[1], uv[2], fallback);
-            #endif
         }
 
         // The frontend reads base colour twice (albedo, opacity) and ORM twice (metalness,
-        // gloss). Each read is a full chain - material table, residency, LOD, up to two
-        // samples - so sample each slot once per fragment and reuse it. Private vars start
-        // zeroed, so the ready flags start false.
-        #ifdef MESHLET_NO_SAMPLE_CACHE
-        fn meshletBaseTex() -> vec4f {
-            let c = meshletSampleSlot(${MATERIAL_SLOT.BASE_COLOR}u, vec4f(1.0));
-            dMeshletTexDebugBase = dMeshletTexDebug;
-            return c;
-        }
-        fn meshletOrmTex() -> vec4f {
-            #ifdef MESHLET_MATERIAL_LITE
-            return vec4f(1.0);
-            #else
-            return meshletSampleSlot(${MATERIAL_SLOT.ORM}u, vec4f(1.0));
-            #endif
-        }
-        #else
+        // gloss); sample each slot once per fragment and reuse it.
         var<private> dMeshletBaseTex: vec4f;
         var<private> dMeshletBaseTexReady: bool;
         var<private> dMeshletOrmTex: vec4f;
@@ -474,8 +433,6 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             return dMeshletBaseTex;
         }
         fn meshletOrmTex() -> vec4f {
-            // MESHLET_MATERIAL_LITE (mobile tier): roughness and metalness from the record's
-            // factors alone
             #ifdef MESHLET_MATERIAL_LITE
             return vec4f(1.0);
             #else
@@ -485,9 +442,14 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             }
             return dMeshletOrmTex;
             #endif
-        }
-        #endif` : ''}
+        }` : ''}
         ${lightmapped ? /* wgsl */ `
+        ${meshletTexResidencyWGSL}
+        fn meshletSampleTexture(texIndex: u32, uv: vec2f, ddx: vec2f, ddy: vec2f, fallback: vec4f) -> vec4f {
+            if (texIndex == ${MATERIAL_SLOT_ABSENT}u) { dMeshletTexDebug = vec3f(0.15); return fallback; }
+            return meshletSampleResident(texResidency[texIndex], uv, ddx, ddy, fallback);
+        }
+
         fn meshletHasLightmap() -> bool {
             return meshletLightmaps[vMeshletInstance * 4u + 3u].z != 0.0;
         }

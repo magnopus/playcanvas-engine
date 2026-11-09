@@ -6,6 +6,7 @@
 // See assets/meshlets/README.md for extraction and placement metadata.
 //
 // @flag HIDDEN
+// @flag HIDDEN_IN_DEV
 // @flag NO_MINISTATS
 
 import {

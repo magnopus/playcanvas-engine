@@ -153,26 +153,6 @@ const cutShader = entry => /* wgsl */ `
 `;
 
 /**
- * Select complete replacements from coarse to fine, reserving capacity before refinement. The
- * roots are admitted beforehand (meshletRootAdmitWGSL); a stage runs one DAG level's groups,
- * one thread per task of the level.
- *
- * @ignore
- */
-export const meshletCutWGSL = cutShader(/* wgsl */ `
-    uniform taskStart: u32;
-    var<storage, read> cutTasks: array<vec2u>;
-    uniform taskCount: u32;
-
-    @compute @workgroup_size(64)
-    fn main(@builtin(global_invocation_id) gid: vec3u) {
-        let index = gid.x + gid.y * (65535u * 64u);
-        if (index >= uniform.taskCount) { return; }
-        _ = cutTask(cutTasks[uniform.taskStart + index]);
-    }
-`);
-
-/**
  * Appends tasks to the cut queue: the `count` task rows listed in cutGroups from `listStart`, all
  * of `instance`. Past the queue's capacity they are dropped (their groups stay coarse this frame)
  * but still counted, so the CPU grows the queue to the demand. Needs `cutGroups`, `counters`,

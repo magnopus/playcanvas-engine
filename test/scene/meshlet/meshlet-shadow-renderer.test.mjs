@@ -37,7 +37,7 @@ const makeWorld = () => {
         finalized: true,
         totalPairs: PAIRS,
         workItemCapacity: 50,
-        cut: { rootIndices: [0, 0, 0], rootRecords: 0, levels: [], stageLevels: [] },
+        cut: { rootIndices: [0, 0, 0], rootRecords: 0, stageLevels: [] },
         cells: { cellCount: 1, boundsBuffer: {}, instancesBuffer: {} },
         recordCapacity: 4000,
         initialRecords: 100,

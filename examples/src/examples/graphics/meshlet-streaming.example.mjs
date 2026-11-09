@@ -9,6 +9,7 @@
 //
 // @flag WEBGL_DISABLED
 // @flag HIDDEN
+// @flag HIDDEN_IN_DEV
 
 import {
     ADDRESS_CLAMP_TO_EDGE,

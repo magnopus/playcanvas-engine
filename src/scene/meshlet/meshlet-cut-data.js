@@ -172,9 +172,7 @@ class MeshletCutData {
     constructor(device, meshlets, objects) {
         const records = recordSource(meshlets);
         const words = new U32Builder();
-        // task pairs (instance, group offset) per LOD level, counted first so the task table is
-        // allocated once and filled in place
-        const levelCounts = [];
+        const levelSet = new Set();
         const primitives = new Map();
         const rootPages = new Set();
         const floorPages = new Map();
@@ -189,23 +187,14 @@ class MeshletCutData {
         // them from 128-byte geometry records for every instance of a primitive.
         const topology = new Uint32Array(records.count * 2);
         const instanceCount = objects.length / OBJECT_DATA_U32S;
+        // Leading words [0, instanceCount): each instance's root header offset in cutGroups.
+        for (let i = 0; i < instanceCount; i++) words.push(0);
         for (let instance = 0; instance < instanceCount; instance++) {
             const first = objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET];
             const count = objects[instance * OBJECT_DATA_U32S + O.MESHLET_COUNT];
             let primitive = primitives.get(first);
             if (!primitive) {
                 const source = records.get(first, count);
-                // Older foliage bakes cap real geometry with synthetic empty roots. Empty
-                // geometry cannot cover a missing page up close: retain and pin the real
-                // coarse level instead. Such bakes consequently need a larger resident set.
-                for (let m = 0; m < count; m++) {
-                    const row = m * MESHLET_DATA_U32S;
-                    const parent = source[row + M.PARENT];
-                    if (parent < count && source[parent * MESHLET_DATA_U32S + M.PARENT] === MESHLET_NO_PARENT &&
-                        source[parent * MESHLET_DATA_U32S + M.TRIANGLE_COUNT] === 0) {
-                        source[row + M.PARENT] = MESHLET_NO_PARENT;
-                    }
-                }
                 const { groups, roots } = buildMeshletGroups(source);
                 let minRootLevel = Infinity;
                 for (const root of roots) minRootLevel = Math.min(minRootLevel, source[root * MESHLET_DATA_U32S + M.LOD_LEVEL]);
@@ -217,7 +206,6 @@ class MeshletCutData {
                 for (const root of roots) rootPages.add(source[root * MESHLET_DATA_U32S + M.PAGE]);
                 collectFloorPages(source, groups, floorPages);
                 for (let m = 0; m < count; m++) source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP] = MESHLET_NO_PARENT;
-                const tasks = [];
                 const costs = (members) => {
                     let indices = 0, records = 0;
                     for (const m of members) {
@@ -230,6 +218,7 @@ class MeshletCutData {
                 // Gather each group's dependencies and pages first, then lay the rows out: a
                 // row ends with the tasks it owns (see below), which need their own offsets.
                 const rows = groups.map((group) => {
+                    levelSet.add(group.level);
                     const coarse = [];
                     const parents = new Map();
                     for (let m = group.start; m < group.start + group.count; m++) {
@@ -287,7 +276,6 @@ class MeshletCutData {
                     if (words.length !== offset + 8 + parents.size * 3 + pages.size + 1 + owned.length) {
                         throw new Error('MeshletCutData: task row layout mismatch.');
                     }
-                    tasks.push({ level: group.level, offset });
                 }
                 const rootCost = costs(roots);
                 const pages = new Set();
@@ -307,54 +295,25 @@ class MeshletCutData {
                     topology[(first + m) * 2 + 1] = source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP];
                 }
                 records.done(first, source);
-                primitive = { tasks, rootOffset, rootCost, bucket };
+                primitive = { rootOffset, rootCost, bucket };
                 primitives.set(first, primitive);
             }
+            words.data[instance] = primitive.rootOffset;
             this.rootIndices[primitive.bucket] += primitive.rootCost[0];
             this.rootRecords += primitive.rootCost[1];
-            for (const task of primitive.tasks) {
-                levelCounts[task.level] = (levelCounts[task.level] ?? 0) + 1;
-            }
-        }
-        // Layout: one root task per instance, then the levels coarsest first.
-        this.levels = [{ start: 0, count: instanceCount, root: true }];
-        const levelCursor = [];
-        let taskCount = instanceCount;
-        const stageLevels = [];
-        for (let level = levelCounts.length - 1; level > 0; level--) {
-            const count = levelCounts[level];
-            if (!count) continue;
-            this.levels.push({ start: taskCount, count, root: false });
-            stageLevels.push(level);
-            levelCursor[level] = taskCount;
-            taskCount += count;
-        }
-        const tasks = new Uint32Array(taskCount * 2);
-        for (let instance = 0; instance < instanceCount; instance++) {
-            const primitive = primitives.get(objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET]);
-            tasks[instance * 2] = instance;
-            tasks[instance * 2 + 1] = primitive.rootOffset;
-            for (const task of primitive.tasks) {
-                const slot = levelCursor[task.level];
-                if (slot === undefined) continue;
-                tasks[slot * 2] = instance;
-                tasks[slot * 2 + 1] = task.offset;
-                levelCursor[task.level] = slot + 1;
-            }
         }
         /**
          * Per cut stage, its group LOD level (coarsest first).
          *
          * @type {number[]}
          */
-        this.stageLevels = stageLevels;
+        this.stageLevels = Array.from(levelSet).sort((a, b) => b - a);
         const create = (values) => {
             const buffer = new StorageBuffer(device, Math.max(values.byteLength, 16), BUFFERUSAGE_COPY_DST);
             if (values.length) buffer.write(0, values);
             return buffer;
         };
         this.groups = create(words.view());
-        this.tasks = create(tasks);
         this.selectionTopology = new StorageBuffer(device, Math.max(topology.byteLength, 16), BUFFERUSAGE_COPY_DST);
         if (topology.length) this.selectionTopology.write(0, topology);
         this.levelStarts = new StorageBuffer(device, Math.max(levelStarts.byteLength, 16), BUFFERUSAGE_COPY_DST);
@@ -372,7 +331,6 @@ class MeshletCutData {
 
     destroy() {
         this.groups.destroy();
-        this.tasks.destroy();
         this.selectionTopology.destroy();
         this.levelStarts.destroy();
     }
