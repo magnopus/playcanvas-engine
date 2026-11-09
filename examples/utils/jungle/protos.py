@@ -37,7 +37,8 @@ def silhouette_extent(points, grid):
             x, z = gx - gy, -1 + gx + gy
             f = np.array([x, 1 - abs(x) - abs(z), z])
             f /= np.linalg.norm(f)
-            right = np.cross([0.0, 1.0, 0.0], f)
+            ref_up = [0.0, 0.0, 1.0] if abs(f[1]) > 0.999 else [0.0, 1.0, 0.0]
+            right = np.cross(ref_up, f)
             right /= np.linalg.norm(right)
             up = np.cross(f, right)
             ex = max(ex, float(np.abs(points @ right).max()))

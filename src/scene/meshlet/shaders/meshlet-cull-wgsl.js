@@ -25,8 +25,8 @@
 import { OBJECT_FLAG_NO_SHADOW, CULL_FLAG_SHADOW_VIEW,
     CULL_FLAG_HZB_LINEAR, CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
     MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_COMPACT_SLICE,
-    MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP,
-    MESHLET_NO_PARENT, MESHLET_STAGE_CHUNKS_BASE, MESHLET_VISIBLE_CELLS_BASE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HIDDEN,
+    MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP, MESHLET_INDEX_WRITE_RECORDS,
+    MESHLET_NO_PARENT, MESHLET_VISIBLE_CELLS_BASE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HIDDEN,
     PAGE_REQUEST, TEXEL_RATE_PER_MIP, MESHLET_LEVEL_BIAS } from '../constants.js';
 import {
     meshletDataWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL,
@@ -79,119 +79,20 @@ export const cellCullWGSL = /* wgsl */ `
         if (!meshletInCullVolume(sphere.xyz, sphere.w)) {
             return;
         }
-        // Root classification drops an instance smaller on screen than the size cut (half of it
-        // for one admitted last frame). Every member lies inside the cell sphere and is no larger
-        // than its largest, so if that one at the cell's nearest point is under the half cut,
-        // classification would drop them all.
+        // Root classification drops an instance smaller on screen than its bucket's size cut (a
+        // fraction of it for one admitted last frame). Every member lies inside the cell sphere and
+        // is no larger than its largest, so if that one at the cell's nearest point is under the
+        // smallest such cut, classification would drop them all.
         let bands = cullParams[${CULL_PARAMS.ROOT_BANDS}u];
         if (bands.w > 0.0) {
             let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
             let gap = max(distance(sphere.xyz, priority.xyz) - sphere.w, 1e-4);
-            if (cellMaxRadius[cell] * priority.w / gap < bands.w * 0.5) {
+            if (cellMaxRadius[cell] * priority.w / gap < bands.w * cullParams[${CULL_PARAMS.BUCKET_ROOT}u].w) {
                 return;
             }
         }
         let slot = atomicAdd(&counters[${MESHLET_COUNTER.VISIBLE_CELLS}u], 1u);
         atomicStore(&counters[${MESHLET_VISIBLE_CELLS_BASE}u + slot], cell);
-    }
-`;
-
-/**
- * Chunk expansion: one thread per visible cell, appending the cell's cut chunks of every stage
- * to that stage's visible-chunk list (see MeshletCutData), so each cut stage then dispatches
- * one balanced workgroup per chunk. Lists and their counters sit in the counter buffer.
- */
-export const cellExpandWGSL = /* wgsl */ `
-    uniform stageCount : u32;
-    // word base in cutGroups of the stage table: [cell chunk row, chunk task row, list offset, chunks]
-    uniform stageTableBase : u32;
-    // word base in counters of the first stage's visible-chunk list
-    uniform listsBase : u32;
-
-    var<storage, read> cutGroups : array<u32>;
-    var<storage, read_write> counters : array<atomic<u32>>;
-    var<storage, read> cullParams : array<vec4f>;
-    var<storage, read> cellBounds : array<vec4f>;
-    // per chunk: max world error of its groups, how far their spheres reach past the instances'
-    var<storage, read> chunkBounds : array<vec2f>;
-
-    // Whether any group of a chunk could refine: its largest error at the nearest distance the
-    // cell allows passes the view's LOD test (see the cut stage). The same tests as the cut, so
-    // a skipped chunk is one whose every task would return without refining.
-    fn chunkMayRefine(bounds: vec2f, cell: vec4f) -> bool {
-        let lod = cullParams[${CULL_PARAMS.LOD}u].x;
-        let ortho = cullParams[${CULL_PARAMS.STREAMING}u].y;
-        let camera = cullParams[${CULL_PARAMS.CAMERA}u];
-        let near = max(distance(cell.xyz, camera.xyz) - cell.w - bounds.y, 1e-5);
-        let scale = select(camera.w / near, ortho, ortho > 0.0);
-        if (bounds.x * scale > lod) { return true; }
-        let cameraLod = cullParams[${CULL_PARAMS.VIEW_DIR}u].w;
-        if (cameraLod > 0.0) {
-            let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
-            let priorityNear = max(distance(cell.xyz, priority.xyz) - cell.w - bounds.y, 1e-5);
-            return bounds.x * priority.w / priorityNear > cameraLod;
-        }
-        return false;
-    }
-
-    @compute @workgroup_size(64)
-    fn main(@builtin(workgroup_id) group : vec3u, @builtin(local_invocation_id) lane : vec3u) {
-        let slot = (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * 64u + lane.x;
-        if (slot >= atomicLoad(&counters[${MESHLET_COUNTER.VISIBLE_CELLS}u])) {
-            return;
-        }
-        let cell = atomicLoad(&counters[${MESHLET_VISIBLE_CELLS_BASE}u + slot]);
-        let sphere = cellBounds[cell];
-        for (var stage = 0u; stage < uniform.stageCount; stage++) {
-            let row = uniform.stageTableBase + stage * 4u;
-            let cellChunks = cutGroups[row];
-            let first = cutGroups[cellChunks + cell];
-            let count = cutGroups[cellChunks + cell + 1u] - first;
-            if (count == 0u) {
-                continue;
-            }
-            // chunk bounds are indexed like the lists: the stage's list offset + chunk
-            let boundsBase = cutGroups[row + 2u];
-            var kept = 0u;
-            for (var k = 0u; k < count; k++) {
-                if (chunkMayRefine(chunkBounds[boundsBase + first + k], sphere)) { kept++; }
-            }
-            if (kept == 0u) {
-                continue;
-            }
-            let base = atomicAdd(&counters[${MESHLET_STAGE_CHUNKS_BASE}u + stage], kept);
-            let list = uniform.listsBase + cutGroups[row + 2u] + base;
-            var written = 0u;
-            for (var k = 0u; k < count; k++) {
-                if (chunkMayRefine(chunkBounds[boundsBase + first + k], sphere)) {
-                    atomicStore(&counters[list + written], first + k);
-                    written++;
-                }
-            }
-        }
-    }
-`;
-
-/**
- * One thread: writes each cut stage's indirect dispatch - one workgroup per visible chunk - to
- * consecutive slots from `firstSlot`.
- */
-export const stageArgsWGSL = /* wgsl */ `
-    uniform firstSlot : u32;
-    uniform stageCount : u32;
-
-    var<storage, read_write> counters : array<atomic<u32>>;
-    var<storage, read_write> indirectDispatch : array<u32>;
-
-    @compute @workgroup_size(1)
-    fn main() {
-        for (var stage = 0u; stage < uniform.stageCount; stage++) {
-            let count = atomicLoad(&counters[${MESHLET_STAGE_CHUNKS_BASE}u + stage]);
-            let base = (uniform.firstSlot + stage) * ${INDIRECT_DISPATCH_U32S}u;
-            indirectDispatch[base + 0u] = min(count, ${MESHLET_DISPATCH_WIDTH}u);
-            indirectDispatch[base + 1u] = (count + ${MESHLET_DISPATCH_WIDTH - 1}u) / ${MESHLET_DISPATCH_WIDTH}u;
-            indirectDispatch[base + 2u] = 1u;
-        }
     }
 `;
 
@@ -670,15 +571,18 @@ export const finalizeArgsWGSL = /* wgsl */ `
         let recordCount = min(recordDemand, uniform.recordCapacity);
         let base = uniform.dispatchSlot * ${INDIRECT_DISPATCH_U32S}u;
         atomicAdd(&counters[${MESHLET_COUNTER.RENDERED}u], recordCount);
-        indirectDispatch[base + 0u] = min(recordCount, ${MESHLET_DISPATCH_WIDTH}u);
-        indirectDispatch[base + 1u] = (recordCount + ${MESHLET_DISPATCH_WIDTH - 1}u) / ${MESHLET_DISPATCH_WIDTH}u;
+        // index write: MESHLET_INDEX_WRITE_RECORDS records per workgroup
+        let groups = (recordCount + ${MESHLET_INDEX_WRITE_RECORDS - 1}u) / ${MESHLET_INDEX_WRITE_RECORDS}u;
+        indirectDispatch[base + 0u] = min(groups, ${MESHLET_DISPATCH_WIDTH}u);
+        indirectDispatch[base + 1u] = (groups + ${MESHLET_DISPATCH_WIDTH - 1}u) / ${MESHLET_DISPATCH_WIDTH}u;
         indirectDispatch[base + 2u] = 1u;
     }
 `;
 
 /**
- * Index generation: one workgroup per surviving record, threads expand the meshlet's u8 corner
- * stream from the page pool into the global index buffer as (recordIndex << 8) | localVertex.
+ * Index generation: each workgroup expands MESHLET_INDEX_WRITE_RECORDS surviving records, a
+ * slice of threads per record, from the meshlet's u8 corner stream in the page pool into the
+ * global index buffer as (recordIndex << 8) | localVertex.
  */
 export const indexWriteWGSL = /* wgsl */ `
     ${meshletStructsWGSL}
@@ -699,7 +603,10 @@ export const indexWriteWGSL = /* wgsl */ `
 
     @compute @workgroup_size(${MESHLET_INDEX_WRITE_WORKGROUP})
     fn main(@builtin(workgroup_id) workgroupId : vec3u, @builtin(local_invocation_id) localId : vec3u) {
-        let recordIndex = workgroupId.y * ${MESHLET_DISPATCH_WIDTH}u + workgroupId.x;
+        let lanes = ${MESHLET_INDEX_WRITE_WORKGROUP / MESHLET_INDEX_WRITE_RECORDS}u;
+        let lane = localId.x % lanes;
+        let group = workgroupId.y * ${MESHLET_DISPATCH_WIDTH}u + workgroupId.x;
+        let recordIndex = group * ${MESHLET_INDEX_WRITE_RECORDS}u + localId.x / lanes;
         let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity);
         if (recordIndex >= recordCount) {
             return;
@@ -709,7 +616,7 @@ export const indexWriteWGSL = /* wgsl */ `
         let meshlet = records[recordIndex].meshlet;
         let baseIndexOffset = records[recordIndex].baseIndexOffset;
         if (baseIndexOffset == 0xffffffffu) {
-            if (localId.x == 0u) {
+            if (lane == 0u) {
                 atomicSub(&counters[${MESHLET_COUNTER.RENDERED}u], 1u);
             }
             return;
@@ -731,7 +638,7 @@ export const indexWriteWGSL = /* wgsl */ `
         let worldMatrix = objectData[instance].worldMatrix;
         let mirrored = dot(cross(worldMatrix[0].xyz, worldMatrix[1].xyz), worldMatrix[2].xyz) < 0.0;
 
-        for (var corner = localId.x; corner < cornerCount; corner += ${MESHLET_INDEX_WRITE_WORKGROUP}u) {
+        for (var corner = lane; corner < cornerCount; corner += lanes) {
             let triangleCorner = corner % 3u;
             let sourceCorner = select(corner, corner - triangleCorner + (3u - triangleCorner) % 3u, mirrored);
             let byteIndex = triangleStreamByte + sourceCorner;

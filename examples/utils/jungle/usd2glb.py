@@ -5,7 +5,8 @@ One GLB per group, so each bakes on its own and the example can load any subset:
   jungle_terrain.glb   the extended (8 km, E_ tiles) and cinematic (1 km, M_ tiles) terrain
   jungle_static.glb    the pyramid, the banyan forest, river and creek
   jungle_trees.glb     RiverForest, QueenForest, RiverSapling and RiverSeedling scatters
-  jungle_plants.glb    grass, moss, shrubs, sorrel, nettle, anthurium scatters
+  jungle_plants.glb    grass, shrubs, sorrel, nettle, anthurium scatters
+  jungle_moss.glb      the moss on the pyramid (its own group so it can be left out)
 
 Every PointInstancer prototype becomes one glTF mesh (a primitive per bound material) and one node
 carrying an EXT_mesh_gpu_instancing scatter of all its placements, so the whole scatter shares one
@@ -57,7 +58,14 @@ FOREST = ('RiverForest', 'QueenForest')
 CORE_CENTRE = (512.0, 512.0)
 
 
+# the moss carpeting the pyramid: ~2M instances, 60% of all the scatter, so its own group - the
+# example drops it with ?moss=0
+MOSS = ('Moss',)
+
+
 def group_of_proto(name):
+    if name.startswith(MOSS):
+        return 'moss'
     return 'trees' if name.startswith(TREES) else 'plants'
 
 
@@ -557,7 +565,7 @@ def in_bounds_xy(lo, hi, bounds):
     return lo[0] <= x1 and hi[0] >= x0 and lo[1] <= y1 and hi[1] >= y0
 
 
-def export_group(stage, group, out_path, cache, bounds, only, forest_radius=None):
+def export_group(stage, group, out_path, cache, bounds, only, forest_radius=None, moss_keep=1.0):
     t0 = time.time()
     mats = Materials(cache)
     meshes = []  # (name, prims, [column-vector glTF matrices] or None, single matrix)
@@ -612,6 +620,9 @@ def export_group(stage, group, out_path, cache, bounds, only, forest_radius=None
                 sel = keep & (idx == pidx)
                 if forest_radius is not None and name.startswith(FOREST):
                     sel &= np.hypot(pos[:, 0] - CORE_CENTRE[0], pos[:, 1] - CORE_CENTRE[1]) <= forest_radius
+                if moss_keep < 1.0 and name.startswith(MOSS):
+                    # fixed seed: a re-export keeps the same instances
+                    sel &= np.random.default_rng(1234 + pidx).random(len(idx)) < moss_keep
                 if not sel.any():
                     continue
                 if name not in protos:
@@ -680,11 +691,13 @@ def export_group(stage, group, out_path, cache, bounds, only, forest_radius=None
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', required=True)
-    ap.add_argument('--groups', default='terrain,static,trees,plants')
+    ap.add_argument('--groups', default='terrain,static,trees,plants,moss')
     ap.add_argument('--bounds', help='x0,y0,x1,y1 in USD metres (x east, y north)')
     ap.add_argument('--forest-radius', type=float,
                     help='keep RiverForest / QueenForest trees within this many metres of the cinematic core '
                          'centre (they cover the whole 8 km terrain, ~3M trees)')
+    ap.add_argument('--moss-keep', type=float, default=1.0,
+                    help='fraction of the moss instances to keep (0..1), for a sparser moss group')
     ap.add_argument('--only', help='comma list of name substrings to keep (debugging)')
     ap.add_argument('--tex-size', type=int, default=2048)
     ap.add_argument('--suffix', default='')
@@ -697,7 +710,8 @@ def main():
     print(f'opened {SCENE} in {time.time() - t0:.0f} s', flush=True)
     cache = TextureCache(os.path.join(args.out, 'textures'), args.tex_size)
     for group in args.groups.split(','):
-        export_group(stage, group, os.path.join(args.out, f'jungle_{group}{args.suffix}.glb'), cache, bounds, only, args.forest_radius)
+        export_group(stage, group, os.path.join(args.out, f'jungle_{group}{args.suffix}.glb'), cache, bounds, only, args.forest_radius,
+                     args.moss_keep)
 
 
 if __name__ == '__main__':

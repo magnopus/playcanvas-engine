@@ -1,7 +1,7 @@
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import {
-    MESHLET_CELL_SIZE, MESHLET_CUT_CHUNK, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_MAX_CUT_STAGES, MESHLET_NO_PARENT,
+    MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT,
     MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_SLOPPY, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA as O, OBJECT_DATA_U32S
 } from './constants.js';
 
@@ -168,13 +168,8 @@ class MeshletCutData {
      * @param {Uint32Array|MeshletRecordSource} meshlets - World records, whole or one primitive at
      * a time; reserved words receive primitive-local birth representatives.
      * @param {Uint32Array} objects - World instance records.
-     * @param {Uint32Array|null} [instanceOrder] - Instance ids in spatial cell order (see
-     * MeshletCells), chunked into cells of `cellSize`. Each level's tasks are laid out in this
-     * order so a cell's tasks at a level are contiguous; omitted, instances run in id order as
-     * one cell per `cellSize` ids.
-     * @param {number} [cellSize] - Instances per cell.
      */
-    constructor(device, meshlets, objects, instanceOrder = null, cellSize = MESHLET_CELL_SIZE) {
+    constructor(device, meshlets, objects) {
         const records = recordSource(meshlets);
         const words = new U32Builder();
         // task pairs (instance, group offset) per LOD level, counted first so the task table is
@@ -194,9 +189,6 @@ class MeshletCutData {
         // them from 128-byte geometry records for every instance of a primitive.
         const topology = new Uint32Array(records.count * 2);
         const instanceCount = objects.length / OBJECT_DATA_U32S;
-        const objectFloats = new Float32Array(objects.buffer, objects.byteOffset, objects.length);
-        // per instance, its primitive (for the chunk error bounds below)
-        const instancePrimitives = new Array(instanceCount);
         for (let instance = 0; instance < instanceCount; instance++) {
             const first = objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET];
             const count = objects[instance * OBJECT_DATA_U32S + O.MESHLET_COUNT];
@@ -215,21 +207,6 @@ class MeshletCutData {
                     }
                 }
                 const { groups, roots } = buildMeshletGroups(source);
-                // Error bounds for skipping whole chunks of the cut (see chunkBounds): the
-                // largest replacement error per LOD level, and how far any group's sphere reaches
-                // past the instance's own bounding sphere (local units)
-                const sourceFloats = new Float32Array(source.buffer, source.byteOffset, source.length);
-                const sphereBase = instance * OBJECT_DATA_U32S + O.SPHERE;
-                const levelMaxError = [];
-                let slack = 0;
-                for (const group of groups) {
-                    const row = group.start * MESHLET_DATA_U32S;
-                    levelMaxError[group.level] = Math.max(levelMaxError[group.level] ?? 0, sourceFloats[row + M.CLUSTER_ERROR]);
-                    const dx = sourceFloats[row + M.GROUP_SPHERE] - objectFloats[sphereBase];
-                    const dy = sourceFloats[row + M.GROUP_SPHERE + 1] - objectFloats[sphereBase + 1];
-                    const dz = sourceFloats[row + M.GROUP_SPHERE + 2] - objectFloats[sphereBase + 2];
-                    slack = Math.max(slack, Math.sqrt(dx * dx + dy * dy + dz * dz) + sourceFloats[row + M.GROUP_SPHERE + 3] - objectFloats[sphereBase + 3]);
-                }
                 let minRootLevel = Infinity;
                 for (const root of roots) minRootLevel = Math.min(minRootLevel, source[root * MESHLET_DATA_U32S + M.LOD_LEVEL]);
                 for (let m = count - 1; m > 0; m--) {
@@ -250,7 +227,9 @@ class MeshletCutData {
                     }
                     return [indices, records];
                 };
-                for (const group of groups) {
+                // Gather each group's dependencies and pages first, then lay the rows out: a
+                // row ends with the tasks it owns (see below), which need their own offsets.
+                const rows = groups.map((group) => {
                     const coarse = [];
                     const parents = new Map();
                     for (let m = group.start; m < group.start + group.count; m++) {
@@ -265,18 +244,49 @@ class MeshletCutData {
                     }
                     const pages = new Set();
                     for (const child of group.children) pages.add(source[child * MESHLET_DATA_U32S + M.PAGE]);
+                    /** @type {{ offset: number }[]} */
+                    const owned = [];
+                    return { group, coarse, parents, pages, offset: 0, owned };
+                });
+                // Ownership for the queued cut traversal: a task is enqueued by exactly one of the
+                // groups it depends on - its first parent - when that one refines, and checks the
+                // rest itself. Every parent sits one LOD level coarser, so all of them have been
+                // decided by the time the task's own level runs. A task with no parent depends only
+                // on the root admission, which enqueues it.
+                const byStart = new Map(rows.map(row => [row.group.start, row]));
+                /** @type {typeof rows} */
+                const rootOwnedRows = [];
+                for (const row of rows) {
+                    const owner = row.parents.size ? byStart.get(row.parents.keys().next().value) : null;
+                    if (row.parents.size && !owner) throw new Error('Meshlet DAG parent is not a replacement group.');
+                    (owner ? owner.owned : rootOwnedRows).push(row);
+                }
+                let cursor = words.length;
+                for (const row of rows) {
+                    row.offset = cursor;
+                    cursor += 8 + row.parents.size * 3 + row.pages.size + 1 + row.owned.length;
+                }
+                const rootOwned = rootOwnedRows.map(row => row.offset);
+                for (const row of rows) {
+                    const { group, coarse, parents, pages, offset } = row;
+                    const owned = row.owned.map(child => child.offset);
                     const fineCost = costs(group.children), coarseCost = costs(coarse);
-                    const offset = words.length;
                     // Header: representative, dependency count, page-list offset/count,
                     // fine/coarse index and record costs. Lists contain unique parent
                     // representatives and pages, avoiding serial scans over every meshlet.
                     // Each parent also carries the coarse cost it contributed: an off-frustum
                     // parent refines without charging its children, so a replacement must not
-                    // subtract those uncharged members from its own charge.
+                    // subtract those uncharged members from its own charge. After the pages:
+                    // the count, then the task offsets, of the tasks this group owns.
                     words.push(first + group.start, parents.size, offset + 8 + parents.size * 3, pages.size,
                         fineCost[0], coarseCost[0], fineCost[1], coarseCost[1]);
                     for (const [parent, members] of parents) words.push(parent, ...costs(members));
                     for (const page of pages) words.push(page);
+                    words.push(owned.length);
+                    for (const task of owned) words.push(task);
+                    if (words.length !== offset + 8 + parents.size * 3 + pages.size + 1 + owned.length) {
+                        throw new Error('MeshletCutData: task row layout mismatch.');
+                    }
                     tasks.push({ level: group.level, offset });
                 }
                 const rootCost = costs(roots);
@@ -286,18 +296,20 @@ class MeshletCutData {
                 const bucket = flags & MESHLET_FLAG_ALPHA_MASKED ? 2 : (flags & MESHLET_FLAG_TWO_SIDED ? 1 : 0);
                 const rootOffset = words.length;
                 // root header: word 5 carries the draw bucket (there is no coarser cost to hold),
-                // so the root admission needs no meshlet record
+                // so the root admission needs no meshlet record. After the pages: the tasks that
+                // depend on the roots alone, which the admission enqueues.
                 words.push(first, 0, rootOffset + 8, pages.size, rootCost[0], bucket, rootCost[1], 0);
                 for (const page of pages) words.push(page);
+                words.push(rootOwned.length);
+                for (const task of rootOwned) words.push(task);
                 for (let m = 0; m < count; m++) {
                     topology[(first + m) * 2] = source[m * MESHLET_DATA_U32S + M.PARENT];
                     topology[(first + m) * 2 + 1] = source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP];
                 }
                 records.done(first, source);
-                primitive = { tasks, rootOffset, rootCost, bucket, levelMaxError, slack };
+                primitive = { tasks, rootOffset, rootCost, bucket };
                 primitives.set(first, primitive);
             }
-            instancePrimitives[instance] = primitive;
             this.rootIndices[primitive.bucket] += primitive.rootCost[0];
             this.rootRecords += primitive.rootCost[1];
             for (const task of primitive.tasks) {
@@ -308,31 +320,17 @@ class MeshletCutData {
         this.levels = [{ start: 0, count: instanceCount, root: true }];
         const levelCursor = [];
         let taskCount = instanceCount;
+        const stageLevels = [];
         for (let level = levelCounts.length - 1; level > 0; level--) {
             const count = levelCounts[level];
             if (!count) continue;
             this.levels.push({ start: taskCount, count, root: false });
+            stageLevels.push(level);
             levelCursor[level] = taskCount;
             taskCount += count;
         }
-        // Per cut stage (non-root level, in this.levels order), where each cell's tasks start:
-        // cellCount + 1 entries, the last closing the final cell. Root tasks stay in instance
-        // order - the root admission indexes them by instance id.
-        const stageLevels = [];
-        for (let level = levelCounts.length - 1; level > 0; level--) {
-            if (levelCounts[level]) stageLevels.push(level);
-        }
-        const cellCount = Math.ceil(instanceCount / cellSize);
-        const cellTaskStarts = new Uint32Array(stageLevels.length * (cellCount + 1));
         const tasks = new Uint32Array(taskCount * 2);
-        for (let position = 0; position < instanceCount; position++) {
-            if (position % cellSize === 0) {
-                const cell = position / cellSize;
-                for (let s = 0; s < stageLevels.length; s++) {
-                    cellTaskStarts[s * (cellCount + 1) + cell] = levelCursor[stageLevels[s]];
-                }
-            }
-            const instance = instanceOrder ? instanceOrder[position] : position;
+        for (let instance = 0; instance < instanceCount; instance++) {
             const primitive = primitives.get(objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET]);
             tasks[instance * 2] = instance;
             tasks[instance * 2 + 1] = primitive.rootOffset;
@@ -344,92 +342,18 @@ class MeshletCutData {
                 levelCursor[task.level] = slot + 1;
             }
         }
-        for (let s = 0; s < stageLevels.length; s++) {
-            cellTaskStarts[s * (cellCount + 1) + cellCount] = levelCursor[stageLevels[s]];
-        }
-        this.cellCount = cellCount;
-        this.cellTaskStartsCpu = cellTaskStarts;
-
-        // Each stage's tasks are split into chunks of MESHLET_CUT_CHUNK within a cell, so a cell
-        // holding thousands of fine groups (a cell of terrain tiles) spreads over many
-        // workgroups instead of looping in one. Per stage the groups table gets two rows:
-        // - cell -> first chunk (cellCount + 1 entries)
-        // - chunk -> first task (chunkCount + 1 entries; a chunk ends where the next begins,
-        //   because cells' task ranges are themselves contiguous)
-        // and a stage table row: [cell chunk row, chunk task row, list offset, chunk count],
-        // the list offset placing the stage's per-frame visible-chunk list (see MeshletCuller).
-        if (stageLevels.length > MESHLET_MAX_CUT_STAGES) {
-            throw new Error(`MeshletCutData: ${stageLevels.length} LOD levels exceed the ${MESHLET_MAX_CUT_STAGES} supported.`);
-        }
-        const stageRows = [];
-        let listOffset = 0;
-        for (let s = 0; s < stageLevels.length; s++) {
-            const row = s * (cellCount + 1);
-            const cellChunkBase = words.length;
-            let chunks = 0;
-            for (let c = 0; c < cellCount; c++) {
-                words.push(chunks);
-                chunks += Math.ceil((cellTaskStarts[row + c + 1] - cellTaskStarts[row + c]) / MESHLET_CUT_CHUNK);
-            }
-            words.push(chunks);
-            const chunkTaskBase = words.length;
-            for (let c = 0; c < cellCount; c++) {
-                for (let task = cellTaskStarts[row + c]; task < cellTaskStarts[row + c + 1]; task += MESHLET_CUT_CHUNK) {
-                    words.push(task);
-                }
-            }
-            words.push(cellTaskStarts[row + cellCount]);
-            stageRows.push(cellChunkBase, chunkTaskBase, listOffset, chunks);
-            listOffset += chunks;
-        }
-
-        // Per chunk (indexed like the visible-chunk lists: stage list offset + chunk), an upper
-        // bound on the world-space error of any group in it and on how far its group spheres
-        // reach past their instances' spheres. A view skips a chunk whose bound cannot refine at
-        // the nearest point of the chunk's cell: the cut then costs what it refines rather than
-        // every group in view, so a coarser threshold is also a cheaper cut. Scales are taken at
-        // build time.
-        const chunkBounds = new Float32Array(Math.max(listOffset, 1) * 2);
-        for (let s = 0; s < stageLevels.length; s++) {
-            const level = stageLevels[s];
-            const row = s * (cellCount + 1);
-            let chunk = stageRows[s * 4 + 2];
-            for (let c = 0; c < cellCount; c++) {
-                const end = cellTaskStarts[row + c + 1];
-                for (let start = cellTaskStarts[row + c]; start < end; start += MESHLET_CUT_CHUNK, chunk++) {
-                    let error = 0;
-                    let slack = 0;
-                    for (let task = start, last = Math.min(start + MESHLET_CUT_CHUNK, end); task < last; task++) {
-                        const instance = tasks[task * 2];
-                        const primitive = instancePrimitives[instance];
-                        const scale = objectFloats[instance * OBJECT_DATA_U32S + O.MAX_SCALE];
-                        error = Math.max(error, (primitive.levelMaxError[level] ?? 0) * scale);
-                        slack = Math.max(slack, primitive.slack * scale);
-                    }
-                    chunkBounds[chunk * 2] = error;
-                    chunkBounds[chunk * 2 + 1] = slack;
-                }
-            }
-        }
-        this.stageTableBase = words.length;
-        for (const value of stageRows) words.push(value);
         /**
-         * Per cut stage: [cell chunk row, chunk task row, list offset, chunk count] - the same
-         * rows the GPU reads from the groups table at {@link stageTableBase}.
+         * Per cut stage, its group LOD level (coarsest first).
          *
          * @type {number[]}
          */
-        this.stageTable = stageRows;
-        /** @type {number} - chunks over every stage: the capacity of a view's chunk lists. */
-        this.totalChunks = listOffset;
+        this.stageLevels = stageLevels;
         const create = (values) => {
             const buffer = new StorageBuffer(device, Math.max(values.byteLength, 16), BUFFERUSAGE_COPY_DST);
             if (values.length) buffer.write(0, values);
             return buffer;
         };
         this.groups = create(words.view());
-        /** @type {StorageBuffer} - per chunk: max world error, sphere slack (vec2f). */
-        this.chunkBounds = create(chunkBounds);
         this.tasks = create(tasks);
         this.selectionTopology = new StorageBuffer(device, Math.max(topology.byteLength, 16), BUFFERUSAGE_COPY_DST);
         if (topology.length) this.selectionTopology.write(0, topology);
@@ -448,7 +372,6 @@ class MeshletCutData {
 
     destroy() {
         this.groups.destroy();
-        this.chunkBounds.destroy();
         this.tasks.destroy();
         this.selectionTopology.destroy();
         this.levelStarts.destroy();

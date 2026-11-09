@@ -44,6 +44,10 @@ const ROOT_REJECTED_PRESSURE = 0.7;
 const BYTES_PER_VEC4 = 16;
 const BYTES_PER_WORD = 4;
 
+// Initial cut queue entries (8 bytes each). It grows to the queued-task demand by readback; an
+// overflowing frame only leaves the dropped tasks' groups coarse.
+const CUT_QUEUE_INITIAL = 1 << 16;
+
 /**
  * The per-camera half of the meshlet pipeline: everything that depends on one camera's cull
  * result. Owns the frame working buffers (cull params, counters, work items, records, claim
@@ -93,6 +97,12 @@ class MeshletView {
     /** @type {MeshInstance|null} - the billboard draw, when the world has impostors. */
     impostorInstance = null;
 
+    /** @type {StorageBuffer|null} - the queued cut's tasks, (instance, group row) pairs. */
+    cutQueueBuffer = null;
+
+    /** @type {number} - entries {@link cutQueueBuffer} holds. */
+    cutQueueCapacity = 0;
+
     /** @type {boolean} - false when visBitsBuffer is the world's shared placeholder. */
     _ownsVisBits = true;
 
@@ -106,7 +116,7 @@ class MeshletView {
 
     _countersReadBusy = false;
 
-    /** @type {{ indices: number[], records: number }|null} */
+    /** @type {{ indices: number[], records: number, cutQueue: number }|null} */
     _pendingDemand = null;
 
     /**
@@ -115,7 +125,7 @@ class MeshletView {
      * Actual draw counts are reported separately by {@link renderedMeshlets}; occlusion can
      * suppress drawing without reducing the capacity needed to select the same LOD next frame.
      *
-     * @type {{ indices: number[], records: number }|null}
+     * @type {{ indices: number[], records: number, cutQueue: number }|null}
      */
     lastDemand = null;
 
@@ -229,9 +239,8 @@ class MeshletView {
         // admission bits (see meshletCutWGSL)
         const claimWords = claimWordCount(world.totalPairs, world.instanceCount);
         this.cullParamsBuffer = new StorageBuffer(device, CULL_PARAMS_VEC4S * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
-        // the counters, then this frame's visible-cell and visible-chunk lists (see
-        // MESHLET_VISIBLE_CELLS_BASE)
-        const counterWords = MESHLET_VISIBLE_CELLS_BASE + (world.cells?.cellCount ?? 0) + (world.cut?.totalChunks ?? 0);
+        // the counters, then this frame's visible-cell list (see MESHLET_VISIBLE_CELLS_BASE)
+        const counterWords = MESHLET_VISIBLE_CELLS_BASE + (world.cells?.cellCount ?? 0);
         this.countersBuffer = new StorageBuffer(device, counterWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
         // demand readbacks go through a pooled staging buffer, the same way the residency's
         // request-marks readback does, rather than allocating a staging buffer per read
@@ -251,6 +260,9 @@ class MeshletView {
         this.selectedMeshletsBuffer = new StorageBuffer(device, Math.max(this.recordCapacity * 8, 16), BUFFERUSAGE_COPY_DST);
         this.cutBudgetBuffer = new StorageBuffer(device, 20, BUFFERUSAGE_COPY_DST);
         this.cutBudgetInitial = new Uint32Array(5);
+        // the queued cut's task queue (see MeshletCuller#queueCut), demand-grown like the records
+        this.cutQueueCapacity = CUT_QUEUE_INITIAL;
+        this.cutQueueBuffer = new StorageBuffer(device, this.cutQueueCapacity * 8, BUFFERUSAGE_COPY_DST);
         // persistent visibility bits for two-phase occlusion (never cleared - phase 2 maintains
         // them); carried across a rebuild for the unchanged-placement prefix, or the first
         // phase-2 pass re-discovers the whole frustum and its page-demand burst evicts the hot
@@ -332,6 +344,22 @@ class MeshletView {
     }
 
     /**
+     * Reallocates this view's cut queue to the observed demand. Written and consumed within
+     * each frame, so nothing copies.
+     *
+     * @param {number} wanted - Tasks queued (unclamped, counters[MESHLET_COUNTER.CUT_QUEUE_END]).
+     * @returns {boolean} True when the buffer was replaced.
+     */
+    growCutQueue(wanted) {
+        const target = Math.ceil(wanted * this.growTo);
+        if (target <= this.cutQueueCapacity) return false;
+        this.cutQueueCapacity = target;
+        this.cutQueueBuffer.destroy();
+        this.cutQueueBuffer = new StorageBuffer(this.device, target * 8, BUFFERUSAGE_COPY_DST);
+        return true;
+    }
+
+    /**
      * Reallocates this view's record buffer to the observed demand. The contents are
      * GPU-written every frame, so nothing copies.
      *
@@ -360,6 +388,8 @@ class MeshletView {
         this.cullParamsBuffer?.destroy();
         this.countersBuffer?.destroy();
         this.cutBudgetBuffer?.destroy();
+        this.cutQueueBuffer?.destroy();
+        this.cutQueueBuffer = null;
         if (this._ownsWorkItems) {
             this.workItemsBuffer?.destroy();
         }
@@ -638,7 +668,7 @@ class MeshletView {
             // the full visible root set within its budget
             const indices = [];
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) indices.push(data[MESHLET_COUNTER.DEMAND_BASE + b]);
-            this._pendingDemand = { indices, records: data[MESHLET_COUNTER.RECORD_DEMAND] };
+            this._pendingDemand = { indices, records: data[MESHLET_COUNTER.RECORD_DEMAND], cutQueue: data[MESHLET_COUNTER.CUT_QUEUE_END] };
             this.lastDemand = this._pendingDemand;
             const roots = this.lastRoots;
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
@@ -691,6 +721,10 @@ class MeshletView {
         // HZB then reads as disocclusion
         if (d.records > this.recordCapacity * this.growAt && this.growRecordsBuffer(d.records)) {
             this.culler.bindRecordState(this);
+        }
+        // an overflowing cut queue drops tasks, leaving their groups coarse
+        if (d.cutQueue > this.cutQueueCapacity * this.growAt && this.growCutQueue(d.cutQueue)) {
+            this.culler.bindQueueState(this);
         }
     }
 }

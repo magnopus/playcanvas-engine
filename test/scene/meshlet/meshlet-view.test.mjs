@@ -41,7 +41,7 @@ const makeWorld = (device, overrides = {}) => {
     return {
         totalPairs: PAIRS,
         workItemCapacity: 50,
-        cut: { rootIndices: [0, 0, 0], rootRecords: 0, levels: [], stageTableBase: 0, stageTable: [], totalChunks: 0 },
+        cut: { rootIndices: [0, 0, 0], rootRecords: 0, levels: [], stageLevels: [] },
         cells: { cellCount: 1, boundsBuffer: {}, instancesBuffer: {} },
         recordCapacity: 4000,
         initialRecords: 100,
@@ -226,7 +226,7 @@ describe('MeshletView', function () {
         const before = view.indexBuffer;
         resolveRead();
         await Promise.resolve();
-        expect(view.lastDemand).to.deep.equal({ indices: [250, 10, 10], records: 90 });
+        expect(view.lastDemand).to.deep.equal({ indices: [250, 10, 10], records: 90, cutQueue: 0 });
         expect(view.indexBuffer, 'no swap from the callback').to.equal(before);
         expect(view.indexDemand()).to.equal(270);
         expect(view.indexPressure()).to.be.closeTo(270 / 100000, 1e-9);

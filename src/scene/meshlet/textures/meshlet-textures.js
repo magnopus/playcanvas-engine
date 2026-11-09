@@ -100,6 +100,24 @@ class MeshletTextures {
     /** @type {StorageBuffer|null} */
     residencyBuffer = null;
 
+    /**
+     * Per (material row, slot) sampling descriptor, `vec4u(slotWord, residency word 0,
+     * residency word 1, 0)`, rebuilt from {@link residencyCpu} whenever residency changes. The
+     * fragment shader reads its slot's descriptor in one load whose address it knows up front,
+     * instead of the dependent chain material table -> texture index -> residency (each hop a
+     * full memory round-trip before the texture fetch can even start). See
+     * {@link setMaterialSlots}.
+     *
+     * @type {StorageBuffer|null}
+     */
+    slotDescBuffer = null;
+
+    /** @type {Uint32Array|null} - slot words per (row, slot), the descriptors' source. */
+    _slotWords = null;
+
+    /** @type {Uint32Array|null} - CPU mirror of {@link slotDescBuffer}. */
+    _slotDesc = null;
+
     /** @type {((family: number, tail: Texture, fine: Texture|null) => void)|null} */
     onFamilyTexturesReady = null;
 
@@ -427,6 +445,7 @@ class MeshletTextures {
         this.residencyBuffer = new StorageBuffer(this.device, residency.byteLength, BUFFERUSAGE_COPY_DST);
         this.residencyBuffer.write(0, residency);
         this._dirty = false;
+        this._writeSlotDescs();
         this._desiredTexelRate = null;
     }
 
@@ -569,7 +588,55 @@ class MeshletTextures {
         if (this._dirty && !this._destroyed) {
             this._dirty = false;
             this.residencyBuffer.write(0, this.residencyCpu);
+            this._writeSlotDescs();
         }
+    }
+
+    /**
+     * Captures the world's material slot words and builds {@link slotDescBuffer} from them.
+     * Call once the material table is final and the residency buffer covers every texture.
+     *
+     * @param {Uint32Array} materialTable - The world's material table.
+     * @param {number} rowCount - Material rows in the table.
+     * @param {number} recordU32s - u32s per material record.
+     * @param {number} slotWordsOffset - Offset of the slot words in a record, in u32s.
+     */
+    setMaterialSlots(materialTable, rowCount, recordU32s, slotWordsOffset) {
+        const count = Math.max(rowCount, 1) * MATERIAL_TEXTURE_SLOTS;
+        const words = new Uint32Array(count).fill(MATERIAL_SLOT_ABSENT);
+        for (let row = 0; row < rowCount; row++) {
+            for (let s = 0; s < MATERIAL_TEXTURE_SLOTS; s++) {
+                words[row * MATERIAL_TEXTURE_SLOTS + s] = materialTable[row * recordU32s + slotWordsOffset + s];
+            }
+        }
+        this._slotWords = words;
+        this._slotDesc = new Uint32Array(count * 4);
+        this.slotDescBuffer?.destroy();
+        this.slotDescBuffer = new StorageBuffer(this.device, this._slotDesc.byteLength, BUFFERUSAGE_COPY_DST);
+        this._writeSlotDescs();
+    }
+
+    /**
+     * Refreshes the slot descriptors from the current residency and uploads them.
+     *
+     * @private
+     */
+    _writeSlotDescs() {
+        const words = this._slotWords;
+        if (!words || !this.slotDescBuffer) return;
+        const desc = this._slotDesc;
+        const residency = this.residencyCpu;
+        const textureCount = residency.length / TEX_RESIDENCY_U32S;
+        for (let i = 0; i < words.length; i++) {
+            const word = words[i];
+            const tex = word & 0xFFFF;
+            const resident = tex !== MATERIAL_SLOT_ABSENT && tex < textureCount;
+            desc[i * 4] = word;
+            desc[i * 4 + 1] = resident ? residency[tex * TEX_RESIDENCY_U32S] : 0;
+            desc[i * 4 + 2] = resident ? residency[tex * TEX_RESIDENCY_U32S + 1] : MESHLET_TEX_NO_MINLOD;
+            desc[i * 4 + 3] = 0;
+        }
+        this.slotDescBuffer.write(0, desc);
     }
 
     /** @type {number} - fine slots in use across families. */
@@ -980,6 +1047,8 @@ class MeshletTextures {
         this.families = [];
         this.residencyBuffer?.destroy();
         this.residencyBuffer = null;
+        this.slotDescBuffer?.destroy();
+        this.slotDescBuffer = null;
     }
 }
 

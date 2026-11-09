@@ -121,7 +121,8 @@ describe('MeshletTextures', function () {
 
             const r = textures.residencyCpu;
             expect(r[0] & 0xFFFF, 'no fine slot').to.equal(0xFFFF);
-            expect((r[0] >> 16) & 0xFF, 'family').to.equal(0);
+            expect((r[0] >> 16) & 0x3, 'family').to.equal(0);
+            expect((r[0] >> 18) & 0x3F, 'tailStart').to.equal(2);
             expect((r[1] >> 16) & 0xFFFF, 'tail layer').to.equal(0);
             expect(r[1] & 0xFFFF, 'nothing resident yet').to.equal(MESHLET_TEX_NO_MINLOD);
             expect(r[2 * 2] >>> 24, 'size bias of the small texture').to.equal(2);

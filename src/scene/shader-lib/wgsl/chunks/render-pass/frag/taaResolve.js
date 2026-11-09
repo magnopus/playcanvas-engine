@@ -91,7 +91,10 @@ export default /* wgsl */`
         let historyPremulClamped = colorClampPremul(uv0, historyPremul);
 
         let mixFactor_condition = historyUv.x < 0.0 || historyUv.x > 1.0 || historyUv.y < 0.0 || historyUv.y > 1.0;
-        let mixFactor = select(0.05, 1.0, mixFactor_condition);
+        // trust the history less the further the pixel moved: a fast pixel is more likely a
+        // disocclusion or a thin feature the 3x3 clamp cannot tell from the surface it landed on
+        let motionPixels = length((historyUv - uv0) * uniform.textureSize);
+        let mixFactor = select(clamp(0.05 + motionPixels * 0.02, 0.05, 0.5), 1.0, mixFactor_condition);
 
         let mixedPremul = mix(historyPremulClamped, srcPremul, mixFactor);
         let a = srcColor.a;

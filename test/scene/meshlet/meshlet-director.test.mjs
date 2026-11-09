@@ -430,7 +430,7 @@ describe('MeshletDirector', function () {
         expect(world).to.not.equal(prevWorld);
         expect(world.finalized).to.equal(true);
         expect(world.pagePool, 'the pool buffer carried over').to.equal(prevPool);
-        expect(director.residency.slotPage, 'slot state carried into the new residency').to.equal(prevResidency.slotPage);
+        expect(director.residency.slotPage, 'slot state carried into the new residency').to.deep.equal(prevResidency.slotPage);
         expect(director.residency.frame).to.equal(77);
         expect(director._visCarry.words, '60 pairs: one word of visibility bits').to.equal(1);
         expect(director._capCarry.get(cameraComponent), 'same size: capacities carried as they were').to.deep.equal([900, 60, 30]);

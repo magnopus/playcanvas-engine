@@ -51,7 +51,8 @@ describe('MeshletComponent', function () {
 
     it('exposes the pipeline defaults on the system without a director', function () {
         const system = app.systems.meshlet;
-        expect(system.dagPixelThreshold).to.equal(1);
+        expect(system.dagPixelThreshold).to.equal(2);
+        expect(system.bucketThresholdScales).to.deep.equal([4, 1, 1]);
         expect(system.occlusion).to.equal(false);
         expect(system.shadows).to.equal(false);
         expect(system.shadowThresholdScale).to.equal(4);

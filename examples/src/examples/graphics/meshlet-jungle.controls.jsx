@@ -57,6 +57,13 @@ export function Controls({ observer }) {
                     precision={2}
                 />
             </LabelGroup>
+            <LabelGroup text='TAA'>
+                <BooleanInput
+                    type='toggle'
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.taa' }}
+                />
+            </LabelGroup>
             <LabelGroup text='Impostor tint'>
                 <BooleanInput
                     type='toggle'

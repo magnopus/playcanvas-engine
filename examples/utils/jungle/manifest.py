@@ -12,8 +12,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, '../../assets/meshlets/jungle')
-LABELS = {'terrain': 'Terrain', 'static': 'Pyramid and banyan', 'trees': 'Trees', 'plants': 'Plants'}
-ORDER = ['terrain', 'static', 'trees', 'plants']
+LABELS = {'terrain': 'Terrain', 'static': 'Pyramid and banyan', 'trees': 'Trees', 'plants': 'Plants', 'moss': 'Moss'}
+ORDER = ['terrain', 'static', 'trees', 'plants', 'moss']
 
 groups = []
 for sidecar in sorted(glob.glob(os.path.join(OUT, 'jungle_*.json'))):

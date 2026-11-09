@@ -108,7 +108,7 @@ class MeshletDirector {
     _frustumPlanes = new Float32Array(24);
 
     /** @type {number} */
-    _dagPixelThreshold = 1;
+    _dagPixelThreshold = 2;
 
     /**
      * Render target pixels per CSS pixel of the last camera view updated (at least 1): the factor
@@ -176,12 +176,40 @@ class MeshletDirector {
      * drawn instance costs at least its coarsest level, so a wide view of a world with very many
      * small placements is bound by that floor however coarse the cut gets - on a 1.5M-instance
      * island seen from above, 1.15M instances are under a pixel. An instance already drawn stays
-     * until it is half this size, so the cut does not pop while the camera moves. 0 draws every
-     * visible instance.
+     * until it shrinks to {@link rootHysteresis} of this size, so the cut does not pop while the
+     * camera moves. 0 draws every visible instance.
      *
      * @type {number}
      */
     rootMinPixels = 3;
+
+    /**
+     * The fraction of {@link rootMinPixels} (scaled for its bucket) an instance already drawn may
+     * shrink to before it is dropped. Lower holds instances longer - at 0.5 a 3 pixel cut keeps
+     * drawing them down to 1.5 pixels.
+     *
+     * @type {number}
+     */
+    rootHysteresis = 0.75;
+
+    /**
+     * Per draw bucket - opaque, opaque two-sided, alpha-masked - a multiplier on
+     * {@link dagPixelThreshold}, for the camera and shadow cuts alike. Solid geometry usually
+     * takes a much coarser cut than foliage before it shows, while foliage's simplified levels
+     * thin out rather than coarsen. The default puts opaque geometry at four times the base
+     * threshold - with the default threshold of 2, 8 pixels for solid geometry and 2 for foliage,
+     * which keeps a wide view of a large world near one triangle per pixel.
+     *
+     * @type {number[]}
+     */
+    bucketThresholdScales = [4, 1, 1];
+
+    /**
+     * Per draw bucket, a multiplier on {@link rootMinPixels} (and {@link shadowRootMinPixels}).
+     *
+     * @type {number[]}
+     */
+    bucketRootMinScales = [1, 1, 1];
 
     /**
      * Projected size in pixels of a whole impostor prototype (a tree) under which its instances
@@ -255,7 +283,7 @@ class MeshletDirector {
     /** @private */
     _transcode = null;
 
-    /** @type {import("./meshlet-impostors.js").MeshletImpostors|null} */
+    /** @type {import('./meshlet-impostors.js').MeshletImpostors|null} */
     _impostors = null;
 
     /** @type {number} - the budget value the shortfall warning was last printed for. @private */
@@ -704,6 +732,7 @@ class MeshletDirector {
         this.world.texturePoolBytes = texturePoolBytes;
         this.world.maxFineTextureSize = maxFineTextureSize;
         this.world.textureAnisotropy = prevWorld.textureAnisotropy;
+        this.world.liteMaterials = prevWorld.liteMaterials;
         this.world.maxInstallBytesPerFrame = prevWorld.maxInstallBytesPerFrame;
         this.world.initialIndices = initialIndices;
         this.world.indexBudgetFraction = indexBudgetFraction;
@@ -1007,6 +1036,9 @@ class MeshletDirector {
         this.pixelScale = cssHeight > 0 ? Math.max(viewportHeight / cssHeight, 1) : 1;
         view.culler.dagPixelThreshold = this._dagPixelThreshold * this.pixelScale;
         view.culler.rootMinPixels = this.rootMinPixels * this.pixelScale;
+        view.culler.rootHysteresis = this.rootHysteresis;
+        view.culler.bucketThresholdScales = this.bucketThresholdScales;
+        view.culler.bucketRootMinScales = this.bucketRootMinScales;
         view.culler.impostorPixels = this.impostorPixels * this.pixelScale;
         // shadow views rank their casters' root admission by this camera's view of them
         this.priorityOrigin.copy(cameraComponent.entity.getPosition());

@@ -174,6 +174,9 @@ class MeshletComponentSystem extends ComponentSystem {
     _textureAnisotropy = 1;
 
     /** @private */
+    _liteMaterials = false;
+
+    /** @private */
     _maxDrawIndices = 0;
 
     /** @private */
@@ -319,6 +322,27 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
+     * Uses cheaper lit materials, for mobile GPUs and standalone headsets: roughness and
+     * metalness come from the material factors alone (no ORM texture), and streamed textures
+     * take a single sample rather than blending across the fine/tail mip boundary. Base colour,
+     * normal and emissive textures are kept. Takes effect immediately (the lit materials
+     * recompile). Defaults to false.
+     *
+     * @type {boolean}
+     * @example
+     * // a mobile GPU, or a standalone headset
+     * app.systems.meshlet.liteMaterials = true;
+     */
+    set liteMaterials(value) {
+        this._liteMaterials = !!value;
+        for (const director of this.directors) director.world.liteMaterials = this._liteMaterials;
+    }
+
+    get liteMaterials() {
+        return this._liteMaterials;
+    }
+
+    /**
      * Largest texture size streamed at full resolution. A family's fine slots are sized to its
      * largest texture, so one very large texture would make every slot that large; textures
      * above this size stream down to it. Takes effect on the next world rebuild. Defaults to
@@ -386,7 +410,8 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
-     * Sets the screen-space error threshold in pixels for the DAG LOD cut. Defaults to 1.
+     * Sets the screen-space error threshold in pixels for the DAG LOD cut, scaled per draw bucket
+     * by {@link bucketThresholdScales}. Defaults to 2.
      *
      * @type {number}
      */
@@ -395,7 +420,54 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get dagPixelThreshold() {
-        return this.group?.dagPixelThreshold ?? 1;
+        return this.group?.dagPixelThreshold ?? 2;
+    }
+
+    /**
+     * The fraction of {@link rootMinPixels} an instance already drawn may shrink to before it is
+     * dropped, so instances do not pop at the cut while the camera moves. Defaults to 0.75.
+     *
+     * @type {number}
+     */
+    set rootHysteresis(value) {
+        if (this.group) this.group.rootHysteresis = value;
+    }
+
+    get rootHysteresis() {
+        return this.group?.rootHysteresis ?? 0.75;
+    }
+
+    /**
+     * Per draw bucket - opaque, opaque two-sided, alpha-masked - a multiplier on
+     * {@link dagPixelThreshold}. Solid geometry can take a much coarser cut than foliage, whose
+     * simplified levels thin out rather than coarsen. Defaults to [4, 1, 1]: solid geometry at
+     * four times {@link dagPixelThreshold}, foliage at it.
+     *
+     * @type {number[]}
+     * @example
+     * // every bucket at the base threshold
+     * app.systems.meshlet.bucketThresholdScales = [1, 1, 1];
+     */
+    set bucketThresholdScales(value) {
+        if (this.group) this.group.bucketThresholdScales = value;
+    }
+
+    get bucketThresholdScales() {
+        return this.group?.bucketThresholdScales ?? [4, 1, 1];
+    }
+
+    /**
+     * Per draw bucket - opaque, opaque two-sided, alpha-masked - a multiplier on
+     * {@link rootMinPixels}. Defaults to [1, 1, 1].
+     *
+     * @type {number[]}
+     */
+    set bucketRootMinScales(value) {
+        if (this.group) this.group.bucketRootMinScales = value;
+    }
+
+    get bucketRootMinScales() {
+        return this.group?.bucketRootMinScales ?? [1, 1, 1];
     }
 
     /**
@@ -1033,6 +1105,7 @@ class MeshletComponentSystem extends ComponentSystem {
         world.texturePoolBytes = texturePoolBytes;
         world.maxFineTextureSize = this._maxFineTextureSize;
         world.textureAnisotropy = this._textureAnisotropy;
+        world.liteMaterials = this._liteMaterials;
         world.initialIndices = INITIAL_DRAW_INDICES;
         world.maxIndices = this._maxDrawIndices;
     }

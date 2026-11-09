@@ -5,7 +5,7 @@ import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-gra
 import {
     INDIRECT_DRAW_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED,
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COMPACT_SLICE, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S,
-    MESHLET_DISPATCH_WIDTH, OBJECT_DATA, OBJECT_DATA_U32S, PAGE_HEADER, RECORD_U32S, TEX_RESIDENCY_U32S,
+    MESHLET_DISPATCH_WIDTH, MESHLET_INDEX_WRITE_RECORDS, OBJECT_BUCKET_SHIFT, OBJECT_DATA, OBJECT_DATA_U32S, PAGE_HEADER, RECORD_U32S, TEX_RESIDENCY_U32S,
     WORK_ITEM_U32S
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
@@ -51,9 +51,10 @@ describe('meshlet cull shaders', function () {
     });
 
     it('dispatch the cull and index-write passes over a 2D grid to dodge the per-dimension limit', function () {
-        for (const text of [dispatchArgsWGSL, finalizeArgsWGSL]) {
-            expect(text).to.include(`min(count, ${MESHLET_DISPATCH_WIDTH}u)`.replace('count', text === finalizeArgsWGSL ? 'recordCount' : 'count'));
-        }
+        expect(dispatchArgsWGSL).to.include(`min(count, ${MESHLET_DISPATCH_WIDTH}u)`);
+        // the index write packs MESHLET_INDEX_WRITE_RECORDS records to a workgroup
+        expect(finalizeArgsWGSL).to.include(`(recordCount + ${MESHLET_INDEX_WRITE_RECORDS - 1}u) / ${MESHLET_INDEX_WRITE_RECORDS}u`);
+        expect(finalizeArgsWGSL).to.include(`min(groups, ${MESHLET_DISPATCH_WIDTH}u)`);
         expect(meshletCullWGSL).to.include(`workgroupId.y * ${MESHLET_DISPATCH_WIDTH}u + workgroupId.x`);
         expect(indexWriteWGSL).to.include(`workgroupId.y * ${MESHLET_DISPATCH_WIDTH}u + workgroupId.x`);
     });
@@ -76,8 +77,10 @@ describe('meshlet cull shaders', function () {
         expect(meshletRootClassifyWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.ROOT_SUBPIXEL}u], 1u)`);
         // an incumbent is promoted one band, never past band 0
         expect(meshletRootClassifyWGSL).to.include('band = max(band, 1u) - 1u');
-        // and keeps its place until it is half the size cut, so the cut does not pop
-        expect(meshletRootClassifyWGSL).to.include('select(bands.w, bands.w * 0.5, incumbent)');
+        // and keeps its place until it shrinks to the hysteresis fraction of its bucket's size cut,
+        // so the cut does not pop
+        expect(meshletRootClassifyWGSL).to.include(`let rootMin = bucketRoot[min((object.flags >> ${OBJECT_BUCKET_SHIFT}u) & 3u, 2u)]`);
+        expect(meshletRootClassifyWGSL).to.include('select(rootMin, rootMin * bucketRoot.w, incumbent)');
         // classify counts each band; the scatter sorts the list by band, so a band pass reads only its range
         expect(meshletRootClassifyWGSL).to.include('atomicAdd(&rootBands[band], 1u)');
         expect(meshletRootScatterWGSL).to.include('rootList[uniform.sortedBase + slot] = entry');
@@ -153,7 +156,7 @@ describe('meshlet cull shaders', function () {
             if (typeof wgsl === 'string') expect(wgsl, name).to.not.match(/\$\{|undefined|NaN/);
         }
         expect(pageWGSL.meshletPageLayoutWGSL).to.include('struct MeshletPageLayout');
-        expect(indexWriteWGSL).to.include('let pageLayout = meshletPageLayout(pageBase, hasTangents, uvFloatsPerVertex);');
+        expect(indexWriteWGSL).to.include('let pageLayout = meshletPageLayout(pageBase, hasTangents, uvFloatsPerVertex, hasColors);');
         expect(indexWriteWGSL).to.include('records[recordIndex].baseIndexOffset');
         expect(pageWGSL.meshletDecodeDrawIndexWGSL).to.include('vec2u(index >> 8u, index & 0xFFu)');
     });

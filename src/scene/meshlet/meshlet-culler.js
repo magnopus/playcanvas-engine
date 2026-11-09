@@ -2,7 +2,7 @@ import { Compute } from '../../platform/graphics/compute.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import {
-    CULL_FLAG_HZB_LINEAR, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_VISIBLE_CELLS_BASE, MESHLET_CULL_SLICE,
+    CULL_FLAG_HZB_LINEAR, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_CULL_SLICE,
     MESHLET_COMPACT_SLICE, MESHLET_IMPOSTOR_FADE_BAND, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS,
     MESHLET_ROOT_BAND_OCTAVES, WORK_ITEM_U32S, claimLevelBase, claimPersistBase
 } from './constants.js';
@@ -75,6 +75,31 @@ class MeshletCuller {
      * @type {number}
      */
     rootMinPixels = 0;
+
+    /**
+     * Per draw bucket (MESHLET_BUCKET_*: opaque, opaque two-sided, alpha-masked), a multiplier on
+     * {@link dagPixelThreshold}. Lets solid geometry take a coarser cut than foliage, whose
+     * simplified levels thin out rather than coarsen.
+     *
+     * @type {number[]}
+     */
+    bucketThresholdScales = [1, 1, 1];
+
+    /**
+     * Per draw bucket, a multiplier on {@link rootMinPixels}.
+     *
+     * @type {number[]}
+     */
+    bucketRootMinScales = [1, 1, 1];
+
+    /**
+     * The fraction of its bucket's size cut an instance admitted last frame may shrink to before
+     * it is dropped, so admission does not pop at the cut while the camera moves. Lower keeps
+     * instances longer - at 0.5 one stays down to half the cut.
+     *
+     * @type {number}
+     */
+    rootHysteresis = 0.75;
 
     /**
      * Projected size in pixels of a whole impostor prototype under which its instances draw as
@@ -210,50 +235,27 @@ class MeshletCuller {
         this.cellArgs.setParameter('groupSize', 1);
         this.cellArgs.setParameter('workItemCapacity', cells.cellCount);
         this.cellArgs.setParameter('counters', view.countersBuffer);
-        // the visible-cell and visible-chunk lists ride at the tail of the counters buffer
+        // the visible-cell list rides at the tail of the counters buffer
         const bindCells = (/** @type {Compute} */ compute) => {
             compute.setParameter('counters', view.countersBuffer);
         };
 
-        // Each visible cell's cut tasks are expanded into per-stage chunk lists, so each cut
-        // stage below runs one workgroup per chunk (see MeshletCutData).
+        // The resident cut runs as a queue traversal: each stage visits only the tasks whose
+        // groups' parents refined (queued by the root admission and the previous stage), preceded
+        // by an args pass sizing the dispatch from what the previous step queued.
         const cut = world.cut;
-        const stageCount = cut.levels.filter(level => !level.root).length;
-        const listsBase = MESHLET_VISIBLE_CELLS_BASE + cells.cellCount;
-        this.stageCount = stageCount;
-        this.cellThreadArgs = makeCompute('dispatchArgs');
-        this.cellThreadArgs.setParameter('counterIndex', MESHLET_COUNTER.VISIBLE_CELLS);
-        this.cellThreadArgs.setParameter('groupSize', 64);
-        this.cellThreadArgs.setParameter('workItemCapacity', cells.cellCount);
-        this.cellThreadArgs.setParameter('counters', view.countersBuffer);
-        this.cellExpand = makeCompute('cellExpand');
-        this.cellExpand.setParameter('stageCount', stageCount);
-        this.cellExpand.setParameter('stageTableBase', cut.stageTableBase);
-        this.cellExpand.setParameter('listsBase', listsBase);
-        this.cellExpand.setParameter('cutGroups', cut.groups);
-        this.cellExpand.setParameter('counters', view.countersBuffer);
-        this.cellExpand.setParameter('cullParams', view.cullParamsBuffer);
-        this.cellExpand.setParameter('cellBounds', cells.boundsBuffer);
-        this.cellExpand.setParameter('chunkBounds', cut.chunkBounds);
-        this.stageArgs = makeCompute('stageArgs');
-        this.stageArgs.setParameter('stageCount', stageCount);
-        this.stageArgs.setParameter('counters', view.countersBuffer);
-
-        // Roots are admitted by the root passes below; the cut stages refine, one DAG level each,
-        // over the visible cells' chunks of that level.
-        this.cutStages = cut.levels.filter(level => !level.root).map((level, stage) => {
-            const compute = makeCompute('cut');
-            compute.setParameter('stage', stage);
-            compute.setParameter('chunkTaskBase', cut.stageTable[stage * 4 + 1]);
-            compute.setParameter('listBase', listsBase + cut.stageTable[stage * 4 + 2]);
-            bindCells(compute);
+        this.stageCount = cut.stageLevels.length;
+        this.queueStages = cut.stageLevels.map((level, stage) => {
+            const args = makeCompute('cutQueueArgs');
+            args.setParameter('counters', view.countersBuffer);
+            const compute = new Compute(device, this.shaders.cutQueue, `MeshletCutQueue${stage}`);
+            compute.setParameter('stageLevel', level);
             compute.setParameter('totalPairs', world.totalPairs);
             compute.setParameter('freeBase', world.totalPairs + world.instanceCount);
             compute.setParameter('levelBase', claimLevelBase(world.totalPairs, world.instanceCount));
             compute.setParameter('recordCapacity', view.recordCapacity);
             bindCapacities(compute, view);
             compute.setParameter('cutGroups', world.cut.groups);
-            compute.setParameter('cutTasks', world.cut.tasks);
             compute.setParameter('meshletData', world.meshletDataBuffer);
             compute.setParameter('objectData', world.objectDataBuffer);
             compute.setParameter('cullParams', view.cullParamsBuffer);
@@ -261,8 +263,10 @@ class MeshletCuller {
             compute.setParameter('requests', world.requestsBuffer);
             compute.setParameter('claimBits', view.claimBitsBuffer);
             compute.setParameter('cutBudget', view.cutBudgetBuffer);
-            return compute;
+            compute.setParameter('counters', view.countersBuffer);
+            return { args, compute };
         });
+
         // Root admission: classify every instance into priority bands (one pass), sort the
         // candidates by band, then admit band by band - largest on screen first - each pass over
         // its own band's range only. Both the classify-order list and the band-sorted copy after
@@ -325,6 +329,7 @@ class MeshletCuller {
             compute.setParameter('sortedBase', world.instanceCount);
             this.rootAdmit.push(compute);
         }
+        this.bindQueueState(view);
 
         this.instanceCull = makeCompute('instanceCull');
         this.dispatchArgs = makeCompute('dispatchArgs');
@@ -422,7 +427,7 @@ class MeshletCuller {
      * @param {MeshletView} view - The view.
      */
     bindIndexState(view) {
-        for (const compute of [...this.cutStages, ...this.rootAdmit, this.meshletCull, this.meshletCullPhase2, this.finalizeArgs, this.finalizeArgsPhase2]) {
+        for (const compute of [...this.queueStages.map(s => s.compute), ...this.rootAdmit, this.meshletCull, this.meshletCullPhase2, this.finalizeArgs, this.finalizeArgsPhase2]) {
             bindCapacities(compute, view);
         }
         for (const compute of [this.indexWrite, this.indexWritePhase2]) {
@@ -443,13 +448,28 @@ class MeshletCuller {
         for (const compute of [this.meshletCull, this.meshletCullPhase2]) {
             compute.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
         }
-        for (const compute of [...this.cutStages, ...this.rootAdmit]) compute.setParameter('recordCapacity', view.recordCapacity);
+        for (const compute of [...this.queueStages.map(s => s.compute), ...this.rootAdmit]) compute.setParameter('recordCapacity', view.recordCapacity);
         for (const compute of [this.meshletCull, this.meshletCullPhase2, this.indexWrite, this.indexWritePhase2]) {
             compute.setParameter('records', view.recordsBuffer);
             compute.setParameter('recordCapacity', view.recordCapacity);
         }
         for (const compute of [this.finalizeArgs, this.finalizeArgsPhase2]) {
             compute.setParameter('recordCapacity', view.recordCapacity);
+        }
+    }
+
+    /**
+     * Re-applies the cut queue binding and capacity after {@link MeshletView#growCutQueue}.
+     *
+     * @param {MeshletView} view - The view.
+     */
+    bindQueueState(view) {
+        for (const compute of [...this.rootAdmit, ...this.queueStages.map(s => s.compute)]) {
+            compute.setParameter('cutQueue', view.cutQueueBuffer);
+            compute.setParameter('queueCapacity', view.cutQueueCapacity);
+        }
+        for (const { args } of this.queueStages) {
+            args.setParameter('queueCapacity', view.cutQueueCapacity);
         }
     }
 
@@ -511,7 +531,21 @@ class MeshletCuller {
         params[row(CULL_PARAMS.ROOT_BANDS) + 0] = MESHLET_ROOT_BAND_MAX_PIXELS;
         params[row(CULL_PARAMS.ROOT_BANDS) + 1] = MESHLET_ROOT_BANDS / MESHLET_ROOT_BAND_OCTAVES;
         params[row(CULL_PARAMS.ROOT_BANDS) + 2] = MESHLET_ROOT_BANDS;
-        params[row(CULL_PARAMS.ROOT_BANDS) + 3] = this.rootMinPixels;
+        // per-bucket LOD thresholds and size cuts; the shared rows carry their smallest, for the
+        // tests that cover mixed buckets (chunk skipping, the cell size cull, impostor fades)
+        const lod = this.dagPixelThreshold * this.pressureScale;
+        let minLod = Infinity, minRoot = Infinity;
+        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
+            const bucketLod = lod * this.bucketThresholdScales[b];
+            const bucketRoot = this.rootMinPixels * this.bucketRootMinScales[b];
+            params[row(CULL_PARAMS.BUCKET_LOD) + b] = bucketLod;
+            params[row(CULL_PARAMS.BUCKET_ROOT) + b] = bucketRoot;
+            minLod = Math.min(minLod, bucketLod);
+            minRoot = Math.min(minRoot, bucketRoot);
+        }
+        params[row(CULL_PARAMS.BUCKET_LOD) + 3] = minLod;
+        params[row(CULL_PARAMS.BUCKET_ROOT) + 3] = this.rootHysteresis;
+        params[row(CULL_PARAMS.ROOT_BANDS) + 3] = minRoot;
         params[row(CULL_PARAMS.IMPOSTOR) + 0] = this.impostorPixels;
         params[row(CULL_PARAMS.IMPOSTOR) + 1] = MESHLET_IMPOSTOR_FADE_BAND;
 
@@ -536,7 +570,9 @@ class MeshletCuller {
         const hysteresis = this.hysteresis && this._hasPrevious;
         this.rootClassify.setParameter('prevBase', prevBase);
         this.rootClassify.setParameter('hasPrevious', hysteresis ? 1 : 0);
-        for (const compute of this.rootAdmit) compute.setParameter('nextBase', nextBase);
+        for (const compute of this.rootAdmit) {
+            compute.setParameter('nextBase', nextBase);
+        }
         this._parity = 1 - this._parity;
         this._hasPrevious = this.hysteresis;
 
@@ -548,7 +584,6 @@ class MeshletCuller {
             this._drawSlots.push(device.getIndirectDrawSlot());
         }
         this._dispatchSlotCells = device.getIndirectDispatchSlot();
-        this._dispatchSlotCellThreads = device.getIndirectDispatchSlot();
         this._dispatchSlotStages = device.getIndirectDispatchSlot(Math.max(this.stageCount, 1));
         this._dispatchSlotCull = device.getIndirectDispatchSlot();
         this._dispatchSlotRoots = device.getIndirectDispatchSlot();
@@ -568,13 +603,13 @@ class MeshletCuller {
         // the per-cell passes all run one workgroup per visible cell, from the one argument slot
         this.cellArgs.setParameter('dispatchSlot', this._dispatchSlotCells);
         this.cellArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
-        this.cellThreadArgs.setParameter('dispatchSlot', this._dispatchSlotCellThreads);
-        this.cellThreadArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
-        this.cellExpand.setupIndirectDispatch(this._dispatchSlotCellThreads);
-        this.stageArgs.setParameter('firstSlot', this._dispatchSlotStages);
-        this.stageArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
         this.rootClassify.setupIndirectDispatch(this._dispatchSlotCells);
-        this.cutStages.forEach((stage, index) => stage.setupIndirectDispatch(this._dispatchSlotStages + index));
+        this.queueStages.forEach(({ args, compute }, index) => {
+            args.setParameter('dispatchSlot', this._dispatchSlotStages + index);
+            args.setParameter('indirectDispatch', device.indirectDispatchBuffer);
+            args.setupDispatch(1);
+            compute.setupIndirectDispatch(this._dispatchSlotStages + index);
+        });
         this.instanceCull.setupIndirectDispatch(this._dispatchSlotCells);
 
         this.rootArgs.setParameter('dispatchSlot', this._dispatchSlotRoots);
@@ -608,19 +643,26 @@ class MeshletCuller {
         this.indexWrite.setupIndirectDispatch(this._dispatchSlotWrite);
 
         if (this.forceSubmitBoundaries) {
-            device.computeDispatch([this.cellCull, this.cellArgs, this.cellThreadArgs], `MeshletCellCull${this.passSuffix}`);
+            device.computeDispatch([this.cellCull, this.cellArgs], `MeshletCellCull${this.passSuffix}`);
             device.submit();
-            device.computeDispatch([this.cellExpand, this.stageArgs, this.rootClassify, ...(this.impostorArgs ? [this.impostorArgs] : []), this.rootArgs, this.rootBandArgs], `MeshletRootClassify${this.passSuffix}`);
+            device.computeDispatch([this.rootClassify, ...(this.impostorArgs ? [this.impostorArgs] : []), this.rootArgs, this.rootBandArgs], `MeshletRootClassify${this.passSuffix}`);
             device.submit();
             device.computeDispatch([this.rootScatter, ...this.rootAdmit], `MeshletRootAdmit${this.passSuffix}`);
+            for (const { args, compute } of this.queueStages) {
+                device.computeDispatch([args], `MeshletCutArgs${this.passSuffix}`);
+                device.submit();
+                device.computeDispatch([compute], `MeshletResidentCut${this.passSuffix}`);
+            }
         } else {
-            device.computeDispatch([this.cellCull, this.cellArgs, this.cellThreadArgs, this.cellExpand, this.stageArgs], `MeshletCellCull${this.passSuffix}`);
+            device.computeDispatch([this.cellCull, this.cellArgs], `MeshletCellCull${this.passSuffix}`);
             // classification and the band admissions profile apart: the first scales with the
             // instances in view, the second with the dispatch count and the root pages it checks
             device.computeDispatch([this.rootClassify, ...(this.impostorArgs ? [this.impostorArgs] : []), this.rootArgs, this.rootBandArgs, this.rootScatter], `MeshletRootClassify${this.passSuffix}`);
             device.computeDispatch(this.rootAdmit, `MeshletRootAdmit${this.passSuffix}`);
+            if (this.queueStages.length) {
+                device.computeDispatch(this.queueStages.flatMap(({ args, compute }) => [args, compute]), `MeshletResidentCut${this.passSuffix}`);
+            }
         }
-        if (this.cutStages.length) device.computeDispatch(this.cutStages, `MeshletResidentCut${this.passSuffix}`);
 
         if (this.forceSubmitBoundaries) {
             device.computeDispatch([this.instanceCull, this.dispatchArgs], `MeshletCompacta${this.passSuffix}`);

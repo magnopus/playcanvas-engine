@@ -20,6 +20,7 @@ import {
     CameraFrame,
     Color,
     ContainerHandler,
+    DISPLAYFORMAT_HDR,
     Entity,
     EnvLighting,
     FILLMODE_FILL_WINDOW,
@@ -40,6 +41,7 @@ import {
     SSAOTYPE_COMBINE,
     ScriptComponentSystem,
     TONEMAP_ACES2,
+    TONEMAP_NONE,
     Texture,
     TextureHandler,
     TouchDevice,
@@ -73,12 +75,15 @@ const BASE = params.get('base') ?? './assets/meshlets/jungle/';
 const manifest = await fetch(`${BASE}jungle_scene.json`).then(r => r.json());
 // ?groups=terrain,trees loads only those
 const only = params.get('groups')?.split(',');
-const groups = manifest.groups.filter(g => !only || only.includes(g.name));
+// ?moss=0 leaves the pyramid's moss out: about 2M instances, most of the scatter's cost
+const groups = manifest.groups.filter(g => (!only || only.includes(g.name)) && !(g.name === 'moss' && params.get('moss') === '0'));
 
 const device = await createGraphicsDevice(canvas, {
     deviceTypes: [deviceType],
     antialias: false,
-    reverseZ: params.get('reverseZ') !== '0'
+    reverseZ: params.get('reverseZ') !== '0',
+    // a 16 bit float canvas on displays that support HDR, silently LDR elsewhere; ?hdr=0 forces LDR
+    displayFormat: params.get('hdr') === '0' ? undefined : DISPLAYFORMAT_HDR
 });
 device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
@@ -357,7 +362,10 @@ Object.assign(cc, {
 const cameraFrame = new CameraFrame(app, camera.camera);
 cameraFrame.rendering.samples = 1;
 cameraFrame.bloom.enabled = false;
-cameraFrame.rendering.toneMapping = TONEMAP_ACES2;
+// an HDR canvas takes the scene values as they are, tone mapping would clip them
+cameraFrame.rendering.toneMapping = device.isHdr ? TONEMAP_NONE : TONEMAP_ACES2;
+// the foliage is all alpha-tested cutouts, so edges alias hard: ?taa=0 turns the temporal resolve off
+cameraFrame.taa.enabled = params.get('taa') !== '0';
 // ?ssao=1 darkens contact areas in the compose pass, from the scene depth the meshlets write
 if (params.get('ssao') === '1') {
     Object.assign(cameraFrame.ssao, {
@@ -434,9 +442,14 @@ data.set('data', {
     threshold: Number(params.get('threshold') ?? 6),
     impostorPx: impostorManifest ? Number(params.get('impostorPx') ?? 128) : 0,
     impostorTint: false,
+    taa: cameraFrame.taa.enabled,
     impostorBrightness: Number(params.get('impostorBrightness') ?? 0.85),
     impostorOcclusion: Number(params.get('impostorAo') ?? 0.1),
     stats: ''
+});
+data.on('data.taa:set', (/** @type {boolean} */ value) => {
+    cameraFrame.taa.enabled = value;
+    cameraFrame.update();
 });
 data.on('data.visualization:set', (value) => {
     camera.camera.setShaderPass(value === 'normals' ? SHADERPASS_WORLDNORMAL : null);

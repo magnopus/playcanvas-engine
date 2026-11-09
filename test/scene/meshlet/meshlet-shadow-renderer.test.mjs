@@ -7,7 +7,7 @@ import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-gra
 import { LAYERID_WORLD, LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI, LIGHTTYPE_SPOT, SHADOWUPDATE_NONE, SHADOWUPDATE_REALTIME, SHADOWUPDATE_THISFRAME } from '../../../src/scene/constants.js';
 import { GraphNode } from '../../../src/scene/graph-node.js';
 import { ShaderMaterial } from '../../../src/scene/materials/shader-material.js';
-import { CULL_FLAG_NO_TEXEL_RATE, MESHLET_BUCKET_COUNT, WORK_ITEM_U32S } from '../../../src/scene/meshlet/constants.js';
+import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, MESHLET_BUCKET_COUNT, WORK_ITEM_U32S } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
 import { MeshletShadowRenderer } from '../../../src/scene/meshlet/meshlet-shadow-renderer.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
@@ -37,7 +37,7 @@ const makeWorld = () => {
         finalized: true,
         totalPairs: PAIRS,
         workItemCapacity: 50,
-        cut: { rootIndices: [0, 0, 0], rootRecords: 0, levels: [], stageTableBase: 0, stageTable: [], totalChunks: 0 },
+        cut: { rootIndices: [0, 0, 0], rootRecords: 0, levels: [], stageLevels: [] },
         cells: { cellCount: 1, boundsBuffer: {}, instancesBuffer: {} },
         recordCapacity: 4000,
         initialRecords: 100,
@@ -258,6 +258,40 @@ describe('MeshletShadowRenderer', function () {
         expect(box.getMax().z).to.be.closeTo(-40 + radius + 100, 1e-6);
     });
 
+    it('keeps casters whose shadow can reach a receiver in the cascade slice', function () {
+        // cascade 0 of the scene camera covers x, y in [-10, 10], z in [-20, -0.5]
+        const sun = makeLight({ cascades: [20] });
+        sun.cascadeBlend = 0;
+        sun._normalOffsetBias = 0;
+        const shadowNode = { forward: new Vec3() };
+        const view = { face: 0, shadowCamera: { _node: shadowNode } };
+        const culler = { casterPlanes: new Float32Array(48), casterPlaneCount: 0 };
+        const casts = (center, radius) => {
+            renderer._setCasterVolume({ light: sun, camera: sceneCamera }, view, 32, culler);
+            const p = culler.casterPlanes;
+            for (let i = 0; i < culler.casterPlaneCount; i++) {
+                const o = i * 4;
+                if (p[o] * center.x + p[o + 1] * center.y + p[o + 2] * center.z + p[o + 3] < -radius) return false;
+            }
+            return true;
+        };
+
+        // the whole meshlet world inside the slice: every slice face clips away against it
+        world.worldBounds = new BoundingBox(new Vec3(0, 0, -10), new Vec3(1, 1, 1));
+        shadowNode.forward.set(0, -1, 0);
+        expect(casts(new Vec3(0, 0, -10), 1), 'world wholly inside the slice').to.equal(true);
+        expect(culler.casterPlaneCount, 'still culled by a volume').to.be.greaterThan(1);
+
+        // a caster outside the slice whose shadow falls into it, on ground outside the world
+        world.worldBounds = new BoundingBox(new Vec3(30, 5, -10), new Vec3(1, 1, 1));
+        shadowNode.forward.set(-1, -0.5, 0).normalize();
+        expect(casts(new Vec3(30, 5, -10), 1), 'shadow thrown into the slice').to.equal(true);
+
+        // the same caster lit from the other side throws its shadow away from the slice
+        shadowNode.forward.set(1, -0.5, 0).normalize();
+        expect(casts(new Vec3(30, 5, -10), 1), 'shadow thrown away from the slice').to.equal(false);
+    });
+
     it('derives the LOD projection from the face\'s shadow-map pixel height', function () {
         const sun = makeLight();
         const spot = makeLight({ type: LIGHTTYPE_SPOT, faces: 1 });
@@ -295,7 +329,7 @@ describe('MeshletShadowRenderer', function () {
         const culler = view.culler;
         expect(culler.twoPhase).to.equal(false);
         expect(culler.orthoScale).to.equal(2048 / 64);
-        expect(culler.cullFlags).to.equal(CULL_FLAG_NO_TEXEL_RATE);
+        expect(culler.cullFlags).to.equal(CULL_FLAG_NO_TEXEL_RATE | CULL_FLAG_SHADOW_VIEW);
         expect(culler.viewDir.equals(shadowNode.forward)).to.equal(true);
         expect(culler.dagPixelThreshold).to.equal(3);
         expect(culler.pressureScale).to.equal(1.25);

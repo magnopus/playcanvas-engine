@@ -168,12 +168,15 @@ class MeshletDirectorGroup {
      * @private
      */
     _settings = {
-        dagPixelThreshold: 1,
+        dagPixelThreshold: 2,
         occlusionEnabled: true,
         cameras: /** @type {CameraComponent[]} */ ([]),
         shadowsEnabled: false,
         shadowThresholdScale: 4,
         rootMinPixels: 3,
+        rootHysteresis: 0.75,
+        bucketThresholdScales: [4, 1, 1],
+        bucketRootMinScales: [1, 1, 1],
         impostorPixels: 0,
         impostors: /** @type {import('./meshlet-impostors.js').MeshletImpostors|null} */ (null),
         shadowRootMinPixels: 2,
@@ -246,6 +249,9 @@ class MeshletDirectorGroup {
         director.shadowsEnabled = s.shadowsEnabled;
         director.shadowThresholdScale = s.shadowThresholdScale;
         director.rootMinPixels = s.rootMinPixels;
+        director.rootHysteresis = s.rootHysteresis;
+        director.bucketThresholdScales = s.bucketThresholdScales;
+        director.bucketRootMinScales = s.bucketRootMinScales;
         director.impostorPixels = s.impostorPixels;
         director.impostors = s.impostors;
         director.shadowRootMinPixels = s.shadowRootMinPixels;
@@ -327,6 +333,45 @@ class MeshletDirectorGroup {
 
     get rootMinPixels() {
         return this._settings.rootMinPixels;
+    }
+
+    /**
+     * See {@link MeshletDirector#rootHysteresis}.
+     *
+     * @type {number}
+     */
+    set rootHysteresis(value) {
+        this._set('rootHysteresis', value);
+    }
+
+    get rootHysteresis() {
+        return this._settings.rootHysteresis;
+    }
+
+    /**
+     * See {@link MeshletDirector#bucketThresholdScales}. Assign a new array to change it.
+     *
+     * @type {number[]}
+     */
+    set bucketThresholdScales(value) {
+        this._set('bucketThresholdScales', [...value]);
+    }
+
+    get bucketThresholdScales() {
+        return this._settings.bucketThresholdScales;
+    }
+
+    /**
+     * See {@link MeshletDirector#bucketRootMinScales}. Assign a new array to change it.
+     *
+     * @type {number[]}
+     */
+    set bucketRootMinScales(value) {
+        this._set('bucketRootMinScales', [...value]);
+    }
+
+    get bucketRootMinScales() {
+        return this._settings.bucketRootMinScales;
     }
 
     /** @type {number} */

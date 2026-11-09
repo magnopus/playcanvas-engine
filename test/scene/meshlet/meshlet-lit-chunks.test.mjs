@@ -234,14 +234,19 @@ describe('buildMeshletLitChunks', function () {
 
     it('compiles texture sampling, UV derivatives and normal mapping in only when the world has them', function () {
         const chunks = buildMeshletLitChunks(textured);
-        expect(chunks.diffusePS).to.include(`meshletSampleSlot(${MATERIAL_SLOT.BASE_COLOR}u`);
-        expect(chunks.metalnessPS).to.include(`meshletSampleSlot(${MATERIAL_SLOT.ORM}u`);
+        // base colour and ORM are each sampled once per fragment, through cached helpers
+        const all = Object.values(chunks).join('\n');
+        expect(all).to.include(`meshletSampleSlot(${MATERIAL_SLOT.BASE_COLOR}u`);
+        expect(all).to.include(`meshletSampleSlot(${MATERIAL_SLOT.ORM}u`);
+        expect(chunks.diffusePS).to.include('meshletBaseTex()');
+        expect(chunks.metalnessPS).to.include('meshletOrmTex()');
         expect(chunks.normalMapPS).to.include(`meshletSampleSlot(${MATERIAL_SLOT.NORMAL}u`);
         expect(chunks.litEngineMainStartPS).to.include('dpdx(vMeshletUv0)');
         expect(chunks.litEngineMainStartPS).to.include('dpdx(vMeshletUv1)');
         expect(chunks.litEngineDeclarationPS).to.include('materialTable[vMeshletMatRow].slotWords[slot]');
         expect(chunks.litEngineDeclarationPS).to.include('materialTable[vMeshletMatRow].slotTransforms[slot]');
         expect(chunks.litEngineDeclarationPS).to.include('meshletTexMinLod(resident)');
+        expect(chunks.litEngineDeclarationPS).to.include('dMeshletTexDebugBase = dMeshletTexDebug;');
         // the WGSL processor reads one resource declaration per line
         const declarations = chunks.litEngineDeclarationPS.split('\n').filter(l => /var meshlet(?:Tail|Fine)\w+: (?:texture_2d_array<f32>|sampler);/.test(l));
         expect(declarations, 'four families x (tail, sampler, fine, sampler)').to.have.lengthOf(16);

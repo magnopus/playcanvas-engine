@@ -1,6 +1,6 @@
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
-import { MESHLET_CELL_SIZE, OBJECT_DATA, OBJECT_DATA_U32S } from './constants.js';
+import { MESHLET_CELL_SIZE, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_IMPOSTOR_PRIMARY, OBJECT_IMPOSTOR_LAYER_SHIFT } from './constants.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
@@ -14,10 +14,15 @@ const MORTON_BITS = 8;
 const INDEX_BITS = 27;
 const INDEX_SCALE = 2 ** INDEX_BITS;
 
-// Radius class edges. Sorting by class before position keeps a 1 km terrain tile out of a
-// cell of crates: a cell's sphere encloses its largest member, so one big instance would keep
-// 63 small neighbours visible to every view that sees it.
-const CLASS_EDGES = [8, 64, 512];
+// Radius classes, one per octave: class = floor(log2(radius)) - CLASS_MIN_LOG2, clamped.
+// Instances are grouped by class before position, so a cell's members are within 2x of each
+// other's size. A cell's sphere encloses its largest member and the cell cull's size test uses
+// that member's radius, so one large instance in a cell of small ones would keep all of them
+// visible to every view that sees it - a 1 km terrain tile among crates, or a boulder among
+// pebbles: with coarse classes, a far cell of clutter survives the size cut on its one big
+// member and every small one is still classified each frame.
+const CLASS_MIN_LOG2 = -8;
+const CLASS_COUNT = 24;
 
 // spreads the low 8 bits of v so there are two zero bits between each
 const spread = (/** @type {number} */ v) => {
@@ -79,18 +84,26 @@ class MeshletCells {
     /** @type {StorageBuffer|null} - {@link spheres} on the GPU. */
     boundsBuffer = null;
 
+    /** @type {Float32Array|null} - prototype spheres per impostor layer (8 floats/layer). @private */
+    _impostorProtos = null;
+
     /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {Float32Array} objectDataF - The world's objectData rows, as floats.
      * @param {number} instanceCount - The instance count.
+     * @param {Float32Array|null} [impostorProtos] - Per impostor layer, the whole-prototype sphere
+     * (8 floats per layer, sphere in the first 4) so a primary impostor instance's cell encloses
+     * its billboard as well as its own primitive.
      */
-    constructor(device, objectDataF, instanceCount) {
+    constructor(device, objectDataF, instanceCount, impostorProtos = null) {
         this.device = device;
         this.cellCount = Math.ceil(instanceCount / MESHLET_CELL_SIZE);
+        this._impostorProtos = impostorProtos;
 
+        const objectDataU = impostorProtos ? new Uint32Array(objectDataF.buffer, objectDataF.byteOffset, objectDataF.length) : null;
         const centers = new Float32Array(instanceCount * 4);
         for (let i = 0; i < instanceCount; i++) {
-            MeshletCells._instanceSphere(objectDataF, i, centers, i * 4);
+            MeshletCells._instanceSphere(objectDataF, i, centers, i * 4, objectDataU, impostorProtos);
         }
 
         this.instanceOrder = MeshletCells._order(centers, instanceCount);
@@ -139,12 +152,13 @@ class MeshletCells {
         for (let i = first; i < first + count; i++) {
             touched.add(this.instanceCell[i]);
         }
+        const objectDataU = this._impostorProtos ? new Uint32Array(objectDataF.buffer, objectDataF.byteOffset, objectDataF.length) : null;
         const centers = new Float32Array(MESHLET_CELL_SIZE * 4);
         touched.forEach((cell) => {
             const start = cell * MESHLET_CELL_SIZE;
             const end = Math.min(start + MESHLET_CELL_SIZE, this.instanceOrder.length);
             for (let p = start; p < end; p++) {
-                MeshletCells._instanceSphere(objectDataF, this.instanceOrder[p], centers, (p - start) * 4);
+                MeshletCells._instanceSphere(objectDataF, this.instanceOrder[p], centers, (p - start) * 4, objectDataU, this._impostorProtos);
             }
             this._fitSphere(cell, centers, end - start);
             lo = Math.min(lo, cell);
@@ -209,29 +223,51 @@ class MeshletCells {
     }
 
     /**
-     * World-space bounding sphere of one instance, as the cull shaders compute it.
+     * World-space bounding sphere of one instance, as the cull shaders compute it. For the
+     * primary primitive of an impostor prototype, encloses the whole prototype sphere as well so
+     * the cell cull keeps the cell alive whenever its billboard is in view and above rootMin.
      *
      * @param {Float32Array} objectDataF - The objectData rows, as floats.
      * @param {number} instance - The instance.
      * @param {Float32Array} out - Destination.
      * @param {number} offset - Destination offset.
+     * @param {Uint32Array|null} [objectDataU] - The objectData rows, as u32s.
+     * @param {Float32Array|null} [impostorProtos] - Prototype table (8 floats per layer).
      * @private
      */
-    static _instanceSphere(objectDataF, instance, out, offset) {
+    static _instanceSphere(objectDataF, instance, out, offset, objectDataU = null, impostorProtos = null) {
         const row = instance * OBJECT_DATA_U32S;
         const m = OBJECT_DATA.MATRIX + row;
         const s = OBJECT_DATA.SPHERE + row;
-        const x = objectDataF[s], y = objectDataF[s + 1], z = objectDataF[s + 2];
+        let x = objectDataF[s], y = objectDataF[s + 1], z = objectDataF[s + 2], r = objectDataF[s + 3];
+        if (objectDataU && impostorProtos) {
+            const flags = objectDataU[row + OBJECT_DATA.FLAGS];
+            if ((flags & OBJECT_FLAG_IMPOSTOR_PRIMARY) !== 0) {
+                const p = (flags >>> OBJECT_IMPOSTOR_LAYER_SHIFT) * 8;
+                const px = impostorProtos[p], py = impostorProtos[p + 1], pz = impostorProtos[p + 2], pr = impostorProtos[p + 3];
+                const d = Math.hypot(x - px, y - py, z - pz);
+                if (pr >= d + r) {
+                    x = px; y = py; z = pz; r = pr;
+                } else if (r < d + pr) {
+                    const nr = (r + d + pr) * 0.5;
+                    const t = (nr - r) / d;
+                    x += (px - x) * t;
+                    y += (py - y) * t;
+                    z += (pz - z) * t;
+                    r = nr;
+                }
+            }
+        }
         out[offset] = objectDataF[m] * x + objectDataF[m + 4] * y + objectDataF[m + 8] * z + objectDataF[m + 12];
         out[offset + 1] = objectDataF[m + 1] * x + objectDataF[m + 5] * y + objectDataF[m + 9] * z + objectDataF[m + 13];
         out[offset + 2] = objectDataF[m + 2] * x + objectDataF[m + 6] * y + objectDataF[m + 10] * z + objectDataF[m + 14];
-        out[offset + 3] = objectDataF[s + 3] * objectDataF[row + OBJECT_DATA.MAX_SCALE];
+        out[offset + 3] = r * objectDataF[row + OBJECT_DATA.MAX_SCALE];
     }
 
     /**
-     * Instance ids sorted by radius class, then Morton code of their centre. The key packs
-     * class (2 bits), Morton code (24 bits) and instance id (27 bits) into 53 bits, so a plain
-     * numeric sort of doubles does it.
+     * Instance ids sorted by radius class, then Morton code of their centre. Instances are
+     * bucketed by class, then each bucket is sorted by a key packing Morton code (24 bits) and
+     * instance id (27 bits) into an exact double, so a plain numeric sort does it.
      *
      * @param {Float32Array} centers - Per-instance world spheres.
      * @param {number} count - Instance count.
@@ -252,17 +288,27 @@ class MeshletCells {
         const cells = (1 << MORTON_BITS) - 1;
         const quantize = (/** @type {number} */ v, /** @type {number} */ lo, /** @type {number} */ hi) => (hi > lo ? Math.min(cells, Math.max(0, Math.floor((v - lo) / (hi - lo) * cells))) : 0);
 
-        const keys = new Float64Array(count);
+        const classes = new Uint8Array(count);
+        const classStarts = new Uint32Array(CLASS_COUNT + 1);
         for (let i = 0; i < count; i++) {
             const radius = centers[i * 4 + 3];
-            let cls = 0;
-            while (cls < CLASS_EDGES.length && radius >= CLASS_EDGES[cls]) cls++;
+            const cls = radius > 0 ? Math.min(CLASS_COUNT - 1, Math.max(0, Math.floor(Math.log2(radius)) - CLASS_MIN_LOG2)) : 0;
+            classes[i] = cls;
+            classStarts[cls + 1]++;
+        }
+        for (let c = 0; c < CLASS_COUNT; c++) classStarts[c + 1] += classStarts[c];
+
+        const keys = new Float64Array(count);
+        const cursor = classStarts.slice(0, CLASS_COUNT);
+        for (let i = 0; i < count; i++) {
             const morton = spread(quantize(centers[i * 4], minX, maxX)) |
                 (spread(quantize(centers[i * 4 + 1], minY, maxY)) << 1) |
                 (spread(quantize(centers[i * 4 + 2], minZ, maxZ)) << 2);
-            keys[i] = ((cls << (3 * MORTON_BITS)) | morton) * INDEX_SCALE + i;
+            keys[cursor[classes[i]]++] = morton * INDEX_SCALE + i;
         }
-        keys.sort();
+        for (let c = 0; c < CLASS_COUNT; c++) {
+            keys.subarray(classStarts[c], classStarts[c + 1]).sort();
+        }
 
         const order = new Uint32Array(count);
         for (let p = 0; p < count; p++) {

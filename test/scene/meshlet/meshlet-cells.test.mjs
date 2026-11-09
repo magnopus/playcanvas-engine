@@ -1,7 +1,10 @@
 import { expect } from 'chai';
 
 import { createCutFixture } from './meshlet-cut-fixture.mjs';
-import { MESHLET_CELL_SIZE, MESHLET_CUT_CHUNK, OBJECT_DATA as O, OBJECT_DATA_U32S } from '../../../src/scene/meshlet/constants.js';
+import {
+    MESHLET_CELL_SIZE, OBJECT_DATA as O, OBJECT_DATA_U32S,
+    OBJECT_FLAG_IMPOSTOR_PRIMARY, OBJECT_IMPOSTOR_LAYER_SHIFT
+} from '../../../src/scene/meshlet/constants.js';
 import { MeshletCells } from '../../../src/scene/meshlet/meshlet-cells.js';
 import { MeshletCutData } from '../../../src/scene/meshlet/meshlet-cut-data.js';
 
@@ -97,51 +100,63 @@ describe('MeshletCells', function () {
             cells.destroy();
         }
     });
+
+    it('encloses a primary impostor instance\'s whole prototype sphere in its cell and maxRadius', function () {
+        const { objects, f } = createObjects([[10, 20, 30]], [1.5]);
+        objects[O.FLAGS] = OBJECT_FLAG_IMPOSTOR_PRIMARY | (1 << OBJECT_IMPOSTOR_LAYER_SHIFT);
+        const protos = new Float32Array(16);
+        protos.set([0, 4, 0, 12, 6, 12, 0, 0], 8);
+        const cells = new MeshletCells(createDevice(), f, 1, protos);
+        try {
+            const sphere = Array.from(cells.spheres.subarray(0, 4));
+            expect(contains(sphere, [10, 24, 30, 12])).to.equal(true);
+            expect(cells.maxRadii[0]).to.be.at.least(12);
+        } finally {
+            cells.destroy();
+        }
+    });
 });
 
-describe('MeshletCutData cell chunks', function () {
+describe('MeshletCutData queue ownership', function () {
 
-    it('splits each stage into chunks that cover every cell\'s tasks, cell by cell', function () {
-        const positions = Array.from({ length: 150 }, (_, i) => [(i * 37) % 200, 0, (i * 11) % 90]);
-        const { objects, f } = createObjects(positions, positions.map(() => 1));
-        const { meshlets } = createCutFixture();
+    it('gives every task exactly one owner: its first parent, or the root when it has none', function () {
+        const { meshlets, objects } = createCutFixture();
         const device = createDevice();
-        const cells = new MeshletCells(device, f, positions.length);
-        const cut = new MeshletCutData(device, meshlets, objects, cells.instanceOrder);
+        const cut = new MeshletCutData(device, meshlets, objects);
         try {
             const words = cut.groups.impl.words;
             const tasks = cut.tasks.impl.words;
-            const stages = cut.levels.filter(level => !level.root);
-            expect(stages.length).to.be.above(0);
-            expect(cut.cellCount).to.equal(cells.cellCount);
-            let listEnd = 0;
-            stages.forEach((level, s) => {
-                const [cellChunks, chunkTasks, listOffset, chunkCount] = cut.stageTable.slice(s * 4, s * 4 + 4);
-                expect(Array.from(words.subarray(cut.stageTableBase + s * 4, cut.stageTableBase + s * 4 + 4)), 'stage table on the GPU')
-                .to.deep.equal([cellChunks, chunkTasks, listOffset, chunkCount]);
-                expect(listOffset, 'stage lists are packed').to.equal(listEnd);
-                listEnd += chunkCount;
-                expect(words[cellChunks + cut.cellCount]).to.equal(chunkCount);
-                // the chunks span the stage's tasks exactly, never wider than a chunk
-                expect(words[chunkTasks]).to.equal(level.start);
-                expect(words[chunkTasks + chunkCount]).to.equal(level.start + level.count);
-                for (let c = 0; c < cut.cellCount; c++) {
-                    for (let chunk = words[cellChunks + c]; chunk < words[cellChunks + c + 1]; chunk++) {
-                        const start = words[chunkTasks + chunk];
-                        const end = words[chunkTasks + chunk + 1];
-                        expect(end - start).to.be.within(1, MESHLET_CUT_CHUNK);
-                        for (let t = start; t < end; t++) {
-                            expect(cells.instanceCell[tasks[t * 2]], `task ${t} of stage ${s} belongs to cell ${c}`).to.equal(c);
-                        }
-                    }
+            const ownedList = offset => words.subarray(words[offset + 2] + words[offset + 3] + 1,
+                words[offset + 2] + words[offset + 3] + 1 + words[words[offset + 2] + words[offset + 3]]);
+            // primitive-local representative -> task row, from the non-root tasks of instance 0
+            const rowOf = new Map();
+            const groupTasks = [];
+            for (let t = cut.levels[0].count; t < tasks.length / 2; t++) {
+                if (tasks[t * 2] !== 0) continue;
+                const offset = tasks[t * 2 + 1];
+                rowOf.set(words[offset] - objects[O.FIRST_MESHLET], offset);
+                groupTasks.push(offset);
+            }
+            expect(groupTasks.length).to.be.above(1);
+            const owners = new Map();
+            const record = (owner, list) => list.forEach((task) => {
+                expect(owners.has(task), `task ${task} owned twice`).to.equal(false);
+                owners.set(task, owner);
+            });
+            record('root', Array.from(ownedList(tasks[1])));
+            groupTasks.forEach(offset => record(offset, Array.from(ownedList(offset))));
+            groupTasks.forEach((offset) => {
+                expect(owners.has(offset), `task ${offset} has an owner`).to.equal(true);
+                const parentCount = words[offset + 1];
+                const owner = owners.get(offset);
+                if (parentCount === 0) {
+                    expect(owner).to.equal('root');
+                } else {
+                    expect(owner, 'owned by its first parent').to.equal(rowOf.get(words[offset + 8]));
                 }
             });
-            expect(cut.totalChunks).to.equal(listEnd);
-            // root tasks stay in instance order for the root admission
-            for (let i = 0; i < positions.length; i++) expect(tasks[i * 2]).to.equal(i);
         } finally {
             cut.destroy();
-            cells.destroy();
         }
     });
 });

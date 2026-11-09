@@ -1,9 +1,10 @@
 import {
     CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH,
     MESHLET_ROOT_BANDS, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_IMPOSTOR, OBJECT_FLAG_IMPOSTOR_PRIMARY,
-    OBJECT_FLAG_NO_SHADOW, OBJECT_IMPOSTOR_LAYER_SHIFT, PAGE_NOT_RESIDENT, PAGE_REQUEST
+    OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW, OBJECT_IMPOSTOR_LAYER_SHIFT, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
 import { meshletCullVolumeWGSL, meshletVisibleCellWGSL } from './meshlet-cull-wgsl.js';
+import { meshletCutEnqueueWGSL } from './meshlet-cut-wgsl.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
 // band index in the top bits of a root list entry, instance id below
@@ -62,6 +63,9 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
             (shadow && (object.flags & ${OBJECT_FLAG_NO_SHADOW}u) != 0u)) { return; }
         let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
         let bands = cullParams[${CULL_PARAMS.ROOT_BANDS}u];
+        // the instance's draw bucket sets its size cut (see OBJECT_BUCKET_SHIFT)
+        let bucketRoot = cullParams[${CULL_PARAMS.BUCKET_ROOT}u];
+        let rootMin = bucketRoot[min((object.flags >> ${OBJECT_BUCKET_SHIFT}u) & 3u, 2u)];
 
         let impostorParams = cullParams[${CULL_PARAMS.IMPOSTOR}u];
         let impostorSwitch = impostorParams.x;
@@ -76,7 +80,7 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
             let fadeTop = impostorSwitch * (1.0 + impostorParams.y);
             if (protoPixels < fadeTop) {
                 // billboards vanish at the same size as any other instance
-                if ((object.flags & ${OBJECT_FLAG_IMPOSTOR_PRIMARY}u) != 0u && protoPixels >= bands.w &&
+                if ((object.flags & ${OBJECT_FLAG_IMPOSTOR_PRIMARY}u) != 0u && protoPixels >= rootMin &&
                     meshletInCullVolume(protoCenter, protoRadius)) {
                     let billboard = atomicAdd(&counters[${MESHLET_COUNTER.IMPOSTORS}u], 1u);
                     if (billboard * 2u + 1u < arrayLength(&impostorList)) {
@@ -99,9 +103,9 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
         let pixels = radius * priority.w / gap;
         let incumbent = uniform.hasPrevious != 0u &&
             (claimBits[uniform.prevBase + (instance >> 5u)] & (1u << (instance & 31u))) != 0u;
-        // an instance admitted last frame stays until it is half the size cut, so the size
-        // cut does not pop instances in and out while the camera moves
-        if (pixels < select(bands.w, bands.w * 0.5, incumbent)) {
+        // an instance admitted last frame stays until it shrinks to the hysteresis fraction of
+        // the size cut, so the cut does not pop instances in and out while the camera moves
+        if (pixels < select(rootMin, rootMin * bucketRoot.w, incumbent)) {
             atomicAdd(&counters[${MESHLET_COUNTER.ROOT_SUBPIXEL}u], 1u);
             return;
         }
@@ -192,6 +196,8 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     uniform indexCapacity2: u32;
     // word base of the band-sorted root list
     uniform sortedBase: u32;
+    uniform queueCapacity: u32;
+    var<storage, read_write> cutQueue: array<vec2u>;
     var<storage, read> cutGroups: array<u32>;
     var<storage, read> cutTasks: array<vec2u>;
     var<storage, read> residency: array<u32>;
@@ -202,6 +208,8 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     var<storage, read_write> counters: array<atomic<u32>>;
     var<storage, read> rootList: array<u32>;
     var<storage, read> rootBands: array<u32>;
+
+    ${meshletCutEnqueueWGSL}
 
     @compute @workgroup_size(64)
     fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
@@ -245,6 +253,8 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         let admission = uniform.totalPairs + instance;
         atomicOr(&claimBits[admission >> 5u], 1u << (admission & 31u));
         atomicOr(&claimBits[uniform.nextBase + (instance >> 5u)], 1u << (instance & 31u));
+        // the root-owned task list follows the root page list
+        cutEnqueue(instance, pageStart + pageCount);
     }
 `;
 

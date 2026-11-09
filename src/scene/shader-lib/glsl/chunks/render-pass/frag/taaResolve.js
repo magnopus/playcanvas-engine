@@ -80,8 +80,11 @@ export default /* glsl */`
 
         vec3 historyPremulClamped = colorClampPremul(uv0, historyPremul);
 
+        // trust the history less the further the pixel moved: a fast pixel is more likely a
+        // disocclusion or a thin feature the 3x3 clamp cannot tell from the surface it landed on
+        float motionPixels = length((historyUv - uv0) * textureSize);
         float mixFactor = (historyUv.x < 0.0 || historyUv.x > 1.0 || historyUv.y < 0.0 || historyUv.y > 1.0) ?
-            1.0 : 0.05;
+            1.0 : clamp(0.05 + motionPixels * 0.02, 0.05, 0.5);
 
         vec3 mixedPremul = mix(historyPremulClamped, srcPremul, mixFactor);
         float a = srcColor.a;

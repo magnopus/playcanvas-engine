@@ -105,6 +105,7 @@ function buildMeshletImpostorChunks({ grid, tilePixels }) {
         varying @interpolate(flat) vImpostorHalf: vec2f;
         varying @interpolate(flat) vImpostorLayer: u32;
         varying @interpolate(flat) vImpostorFade: f32;
+        varying @interpolate(flat) vImpostorPickId: u32;
         var<private> dImpostorRot0: vec3f;
         var<private> dImpostorRot1: vec3f;
         var<private> dImpostorRot2: vec3f;
@@ -112,12 +113,14 @@ function buildMeshletImpostorChunks({ grid, tilePixels }) {
         var<private> dImpostorHalf: vec2f;
         var<private> dImpostorLayer: u32;
         var<private> dImpostorFade: f32;
+        var<private> dImpostorPickId: u32;
     `;
 
     const litEngineMainStartVS = /* wgsl */ `
         let impostorInstance = impostorList[pcInstanceIndex * 2u];
         dImpostorFade = bitcast<f32>(impostorList[pcInstanceIndex * 2u + 1u]);
         let impostorObject = objectData[impostorInstance];
+        dImpostorPickId = impostorObject.pickId;
         let impostorMatrix = impostorObject.worldMatrix;
         dImpostorLayer = impostorObject.flags >> ${OBJECT_IMPOSTOR_LAYER_SHIFT}u;
         // per layer: [centre xyz, bounding radius] then [half width, half height, 0, 0] of the box
@@ -145,6 +148,7 @@ function buildMeshletImpostorChunks({ grid, tilePixels }) {
         output.vImpostorHalf = dImpostorHalf;
         output.vImpostorLayer = dImpostorLayer;
         output.vImpostorFade = dImpostorFade;
+        output.vImpostorPickId = dImpostorPickId;
     `;
 
     const litEngineDeclarationPS = /* wgsl */ `
@@ -156,6 +160,13 @@ function buildMeshletImpostorChunks({ grid, tilePixels }) {
         varying @interpolate(flat) vImpostorHalf: vec2f;
         varying @interpolate(flat) vImpostorLayer: u32;
         varying @interpolate(flat) vImpostorFade: f32;
+        varying @interpolate(flat) vImpostorPickId: u32;
+
+        #ifdef PICK_PASS
+        fn getPickOutput() -> vec4f {
+            return encodePickOutput(vImpostorPickId);
+        }
+        #endif
 
         var impostorAlbedo: texture_2d_array<f32>;
         var impostorAlbedoSampler: sampler;
@@ -209,7 +220,8 @@ function buildMeshletImpostorChunks({ grid, tilePixels }) {
             let f = impostorFrameDirection(frame);
             let denominator = dot(d, f);
             if (abs(denominator) < 1e-4) { return; }
-            let right = normalize(cross(vec3f(0.0, 1.0, 0.0), f));
+            let refUp = select(vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0), abs(f.y) > 0.999);
+            let right = normalize(cross(refUp, f));
             let up = cross(f, right);
             let hit = o - d * (dot(o, f) / denominator);
             let tile = vec2f(dot(hit, right) / vImpostorHalf.x, dot(hit, up) / vImpostorHalf.y) * 0.5 + 0.5;

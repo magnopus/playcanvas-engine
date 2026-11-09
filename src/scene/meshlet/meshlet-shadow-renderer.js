@@ -45,10 +45,29 @@ const _polyB = [];
 const _hullPoints = [];
 const _hullOrder = [];
 const _hull = [];
+// receiver region planes (see _setCasterVolume): up to 6 box faces + 12 silhouette edges, as
+// (nx, ny, nz, d) keeping dot(n, p) <= d
+const _regionPlanes = new Float32Array(18 * 4);
+// slice planes in the same form, for testing world corners against the slice
+const _slicePlanes = new Float32Array(6 * 4);
+const _faceNormal = new Vec3();
+const _facing = [0, 0, 0, 0, 0, 0];
+const _edgeA = new Vec3();
+const _edgeB = new Vec3();
 
 // the six faces of a frustum slice, as corner indices of Camera#getFrustumCorners (near 0-3,
 // far 4-7, each in the same winding)
 const SLICE_FACES = [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+
+// the world box: its corners as (x, y, z) picks of min (0) / max (1), its faces as (axis, side)
+// with the corner indices of each face, and its edges as corner index pairs with the two faces
+// they join
+const BOX_CORNERS = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]];
+const BOX_EDGES = [
+    [0, 1, 2, 4], [3, 2, 3, 4], [4, 5, 2, 5], [7, 6, 3, 5], // along x: faces -y/+y, -z/+z
+    [0, 3, 0, 4], [1, 2, 1, 4], [4, 7, 0, 5], [5, 6, 1, 5], // along y: faces -x/+x, -z/+z
+    [0, 4, 0, 2], [1, 5, 1, 2], [3, 7, 0, 3], [2, 6, 1, 3] //  along z: faces -x/+x, -y/+y
+];
 
 // PCF filter reach plus a little, in shadow-map texels: receivers this close outside the slice's
 // outline still sample casters inside it
@@ -59,28 +78,99 @@ const CASTER_VOLUME_TEXELS = 4;
 const CASCADE_REUSE_DRIFT = 0.1;
 
 /**
- * Clips a convex polygon (flat xyz triplets) to one side of an axis-aligned plane.
+ * Clips a convex polygon (flat xyz triplets) to the half-space `dot(n, p) <= d`.
  *
  * @param {number[]} src - Input polygon.
  * @param {number[]} dst - Output polygon, overwritten.
- * @param {number} axis - 0, 1 or 2.
- * @param {number} value - The plane's coordinate on that axis.
- * @param {number} sign - 1 keeps the side below the plane, -1 the side above it.
+ * @param {Float32Array} planes - Packed planes (nx, ny, nz, d).
+ * @param {number} o - Offset of the plane in `planes`.
  */
-const clipPolygon = (src, dst, axis, value, sign) => {
+const clipPolygon = (src, dst, planes, o) => {
     dst.length = 0;
+    const nx = planes[o], ny = planes[o + 1], nz = planes[o + 2], d = planes[o + 3];
     const n = src.length / 3;
     for (let i = 0; i < n; i++) {
         const a = i * 3;
         const b = ((i + 1) % n) * 3;
-        const da = sign * (src[a + axis] - value);
-        const db = sign * (src[b + axis] - value);
+        const da = nx * src[a] + ny * src[a + 1] + nz * src[a + 2] - d;
+        const db = nx * src[b] + ny * src[b + 1] + nz * src[b + 2] - d;
         if (da <= 0) dst.push(src[a], src[a + 1], src[a + 2]);
         if ((da <= 0) !== (db <= 0)) {
             const t = da / (da - db);
             dst.push(src[a] + (src[b] - src[a]) * t, src[a + 1] + (src[b + 1] - src[a + 1]) * t, src[a + 2] + (src[b + 2] - src[a + 2]) * t);
         }
     }
+};
+
+/**
+ * Projects a point onto the light-space plane (axes {@link _axisU}, {@link _axisV}), appends it
+ * to the hull points and returns its depth along {@link _lightDir}.
+ *
+ * @param {number} x - X.
+ * @param {number} y - Y.
+ * @param {number} z - Z.
+ * @returns {number} The point's depth along the light.
+ */
+const addHullPoint = (x, y, z) => {
+    _hullPoints.push(
+        _axisU.x * x + _axisU.y * y + _axisU.z * z,
+        _axisV.x * x + _axisV.y * y + _axisV.z * z
+    );
+    return _lightDir.x * x + _lightDir.y * y + _lightDir.z * z;
+};
+
+/**
+ * Writes the planes of the region a directional light can carry a caster's shadow into: the
+ * box swept to infinity along the light. Its faces are the box faces that do not face away
+ * from the light, plus a plane through each silhouette edge (between a lit and an unlit face),
+ * parallel to the light.
+ *
+ * @param {Vec3} min - Box minimum.
+ * @param {Vec3} max - Box maximum.
+ * @param {Vec3} dir - Normalized light travel direction.
+ * @param {Float32Array} out - Receives packed planes (nx, ny, nz, d), `dot(n, p) <= d` inside.
+ * @returns {number} The number of planes written.
+ */
+const sweptBoxPlanes = (min, max, dir, out) => {
+    // face f = axis * 2 + side, outward normal +-axis; its facing is the sign of dot(n, dir)
+    const facing = _facing;
+    facing[0] = -dir.x;
+    facing[1] = dir.x;
+    facing[2] = -dir.y;
+    facing[3] = dir.y;
+    facing[4] = -dir.z;
+    facing[5] = dir.z;
+    let count = 0;
+    for (let f = 0; f < 6; f++) {
+        if (facing[f] > 0) continue; // faces away from the light: the sweep passes through it
+        const axis = f >> 1;
+        const sign = (f & 1) ? 1 : -1;
+        const o = count++ * 4;
+        out[o] = axis === 0 ? sign : 0;
+        out[o + 1] = axis === 1 ? sign : 0;
+        out[o + 2] = axis === 2 ? sign : 0;
+        const bound = (f & 1) ? max : min;
+        out[o + 3] = sign * (axis === 0 ? bound.x : axis === 1 ? bound.y : bound.z);
+    }
+    for (const [ia, ib, fa, fb] of BOX_EDGES) {
+        if ((facing[fa] < 0) === (facing[fb] < 0) || facing[fa] === 0 || facing[fb] === 0) continue;
+        const ca = BOX_CORNERS[ia];
+        const cb = BOX_CORNERS[ib];
+        _edgeA.set(ca[0] ? max.x : min.x, ca[1] ? max.y : min.y, ca[2] ? max.z : min.z);
+        _edgeB.set(cb[0] ? max.x : min.x, cb[1] ? max.y : min.y, cb[2] ? max.z : min.z);
+        _faceNormal.sub2(_edgeB, _edgeA).cross(_faceNormal, dir).normalize();
+        // orient outwards: away from the box centre
+        const cx = (min.x + max.x) * 0.5 - _edgeA.x;
+        const cy = (min.y + max.y) * 0.5 - _edgeA.y;
+        const cz = (min.z + max.z) * 0.5 - _edgeA.z;
+        if (_faceNormal.x * cx + _faceNormal.y * cy + _faceNormal.z * cz > 0) _faceNormal.mulScalar(-1);
+        const o = count++ * 4;
+        out[o] = _faceNormal.x;
+        out[o + 1] = _faceNormal.y;
+        out[o + 2] = _faceNormal.z;
+        out[o + 3] = _faceNormal.dot(_edgeA);
+    }
+    return count;
 };
 
 /**
@@ -463,6 +553,9 @@ class MeshletShadowRenderer {
         culler.pressureScale = director.budget.pressureScale * view.pressureScale;
         // casters tiny on screen cast nothing, or the far cascades' root floor swamps the budget
         culler.rootMinPixels = director.shadowRootMinPixels * director.pixelScale;
+        culler.rootHysteresis = director.rootHysteresis;
+        culler.bucketThresholdScales = director.bucketThresholdScales;
+        culler.bucketRootMinScales = director.bucketRootMinScales;
         culler.forceSubmitBoundaries = director.forceSubmitBoundaries;
         // rank casters by what they cover on screen, not in the light's (orthographic) view;
         // before the scene camera has culled, the face ranks by its own projection
@@ -490,7 +583,8 @@ class MeshletShadowRenderer {
      * Fills the culler's caster planes with a directional cascade's caster volume, or clears them
      * (local lights, no camera, or a volume too complex to express - the light-space box alone
      * then culls). The volume is the convex hull of the cascade's view slice, clipped to the
-     * world bounds, projected along the light: one plane per hull edge, parallel to the light,
+     * world bounds swept along the light (the receivers any caster can reach), projected along
+     * the light: one plane per hull edge, parallel to the light,
      * plus one rejecting casters beyond the slice's farthest point along the light. It is grown
      * by the shadow filter's reach, the receivers' normal offset and, for a reused cascade, the
      * drift it tolerates before it refreshes.
@@ -529,13 +623,20 @@ class MeshletShadowRenderer {
         _axisU.cross(Math.abs(_lightDir.y) < 0.99 ? Vec3.UP : Vec3.RIGHT, _lightDir).normalize();
         _axisV.cross(_lightDir, _axisU);
 
-        // clip every face of the slice to the world, and project what is left
+        // The receivers a meshlet caster can shadow lie in the world box swept along the light -
+        // not in the box itself: the ground a meshlet's shadow falls on is often other geometry
+        // (a floor, terrain) outside the meshlet world's bounds. The volume is the slice's
+        // intersection with that region, whose vertices are the slice faces clipped to the
+        // region plus the box corners inside the slice (a box wholly inside the slice clips
+        // every slice face away).
         const world = this.director.world.worldBounds;
         const wmin = world.getMin();
         const wmax = world.getMax();
+        const regionCount = sweptBoxPlanes(wmin, wmax, _lightDir, _regionPlanes);
         _hullPoints.length = 0;
         let maxDepth = -Infinity;
-        for (const face of SLICE_FACES) {
+        for (let f = 0; f < 6; f++) {
+            const face = SLICE_FACES[f];
             let src = _polyA;
             let dst = _polyB;
             src.length = 0;
@@ -543,27 +644,38 @@ class MeshletShadowRenderer {
                 const p = _sliceCorners[index];
                 src.push(p.x, p.y, p.z);
             }
-            for (let axis = 0; axis < 3 && src.length; axis++) {
-                const lo = axis === 0 ? wmin.x : axis === 1 ? wmin.y : wmin.z;
-                const hi = axis === 0 ? wmax.x : axis === 1 ? wmax.y : wmax.z;
-                clipPolygon(src, dst, axis, hi, 1);
-                [src, dst] = [dst, src];
-                clipPolygon(src, dst, axis, lo, -1);
+
+            // the face's outward plane, for the corner test below
+            const p0 = _sliceCorners[face[0]];
+            _faceNormal.cross(_edgeA.sub2(_sliceCorners[face[1]], p0), _edgeB.sub2(_sliceCorners[face[2]], p0)).normalize();
+            if (_faceNormal.dot(_tmp.sub2(_center, p0)) > 0) _faceNormal.mulScalar(-1);
+            _slicePlanes[f * 4] = _faceNormal.x;
+            _slicePlanes[f * 4 + 1] = _faceNormal.y;
+            _slicePlanes[f * 4 + 2] = _faceNormal.z;
+            _slicePlanes[f * 4 + 3] = _faceNormal.dot(p0);
+
+            for (let r = 0; r < regionCount && src.length; r++) {
+                clipPolygon(src, dst, _regionPlanes, r * 4);
                 [src, dst] = [dst, src];
             }
-            for (let i = 0; i < src.length; i += 3) {
-                const x = src[i], y = src[i + 1], z = src[i + 2];
-                _hullPoints.push(
-                    _axisU.x * x + _axisU.y * y + _axisU.z * z,
-                    _axisV.x * x + _axisV.y * y + _axisV.z * z
-                );
-                maxDepth = Math.max(maxDepth, _lightDir.x * x + _lightDir.y * y + _lightDir.z * z);
+            for (let i = 0; i < src.length; i += 3) maxDepth = Math.max(maxDepth, addHullPoint(src[i], src[i + 1], src[i + 2]));
+        }
+        const eps = 1e-4 * (radius + 1);
+        for (const [cx, cy, cz] of BOX_CORNERS) {
+            const x = cx ? wmax.x : wmin.x;
+            const y = cy ? wmax.y : wmin.y;
+            const z = cz ? wmax.z : wmin.z;
+            let inside = true;
+            for (let f = 0; f < 6 && inside; f++) {
+                const o = f * 4;
+                inside = _slicePlanes[o] * x + _slicePlanes[o + 1] * y + _slicePlanes[o + 2] * z <= _slicePlanes[o + 3] + eps;
             }
+            if (inside) maxDepth = Math.max(maxDepth, addHullPoint(x, y, z));
         }
 
         const planes = culler.casterPlanes;
         if (_hullPoints.length < 6) {
-            // the slice lies outside the world: nothing it shades exists, so nothing casts
+            // the slice sees nothing any meshlet can shadow, so nothing casts
             planes.fill(0, 0, 4);
             planes[3] = -1e30;
             culler.casterPlaneCount = 1;

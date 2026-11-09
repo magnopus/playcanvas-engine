@@ -11,6 +11,7 @@ import { isModuleWithExternalDependencies, parseConfig, stripConfig } from './ex
  * @typedef {object} CopyTarget
  * @property {string} src - source path.
  * @property {string} dest - destination path.
+ * @property {boolean} [skipSymlinks] - true to leave symbolic links out of the copy.
  */
 
 /**
@@ -63,7 +64,8 @@ export const IFRAME_DIR = 'dist/iframe';
 export const STATIC_TARGETS = [
     { src: './src/static', dest: 'dist/' },
     { src: './iframe', dest: 'dist/iframe' },
-    { src: './assets', dest: 'dist/static/assets/' },
+    // assets/meshlets holds local bakes linked in from outside the repo, which fs.cp cannot follow
+    { src: './assets', dest: 'dist/static/assets/', skipSymlinks: true },
     { src: './thumbnails', dest: 'dist/thumbnails/' },
     { src: '../scripts', dest: 'dist/static/scripts/' },
     {
@@ -98,9 +100,12 @@ export const slash = file => file.split(path.sep).join('/');
  * @param {CopyTarget} target - copy target.
  * @returns {Promise<void>} completion promise.
  */
-export const copyFile = async ({ src, dest }) => {
+export const copyFile = async ({ src, dest, skipSymlinks }) => {
     await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-    await fs.promises.cp(src, dest, { recursive: true });
+    await fs.promises.cp(src, dest, {
+        recursive: true,
+        filter: skipSymlinks ? async file => !(await fs.promises.lstat(file)).isSymbolicLink() : undefined
+    });
 };
 
 /**

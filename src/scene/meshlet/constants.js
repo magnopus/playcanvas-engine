@@ -131,11 +131,17 @@ export const CULL_PARAMS = {
     MAX_CASTER_PLANES: 12,
     // impostor switch: projected size (px) of a whole prototype under which its instances draw
     // as one billboard instead of meshlets (0 = impostors off)
-    IMPOSTOR: 28
+    IMPOSTOR: 28,
+    // per draw bucket (MESHLET_BUCKET_*), the LOD threshold in xyz - LOD.x scaled by the bucket's
+    // scale - and their smallest in w (for tests over mixed buckets)
+    BUCKET_LOD: 29,
+    // per draw bucket, the root admission size cut (px) in xyz; w = the fraction of it an
+    // instance admitted last frame may shrink to before it is dropped (hysteresis)
+    BUCKET_ROOT: 30
 };
 
 /** vec4 rows in the cull parameter buffer. @type {number} */
-export const CULL_PARAMS_VEC4S = 29;
+export const CULL_PARAMS_VEC4S = 31;
 
 /**
  * Priority bands of GPU root admission. Instances are ranked by projected size - the quantity
@@ -189,8 +195,19 @@ export const MESHLET_INSTANCE_CULL_WORKGROUP = 64;
  */
 export const MESHLET_CELL_SIZE = 64;
 
-/** Threads per workgroup of the index-write pass (one workgroup per record). @type {number} */
+/** Threads per workgroup of the index-write pass. @type {number} */
 export const MESHLET_INDEX_WRITE_WORKGROUP = 64;
+
+/**
+ * Records (meshlets) expanded per index-write workgroup, each by WORKGROUP / RECORDS threads.
+ * One record per workgroup leaves the pass bound by each group's chain of dependent loads
+ * (record, meshlet, object, page) rather than by the writes; several records per group keep
+ * several chains in flight and cut the group count. Measured on a Quest 3 (Adreno 740), Bistro,
+ * 18k records: 1 per group 4.0ms, 4 1.8ms, 8 0.8ms, 16 0.9ms.
+ *
+ * @type {number}
+ */
+export const MESHLET_INDEX_WRITE_RECORDS = 8;
 
 /** u32 per draw record: [instance, meshlet, base index offset, bucket]. @type {number} */
 export const RECORD_U32S = 4;
@@ -255,11 +272,11 @@ export const MESHLET_BUCKET_MASKED = 2;
  * Counter buffer words: [0] workItemCount, [1] recordCount, then three MESHLET_BUCKET_COUNT
  * blocks - index cursors, committed ends, unclamped index demand - then the frame's rendered
  * meshlet count across both phases and peak per-phase record demand, the root admission
- * counters and the visible cell count.
+ * counters, the visible cell count and the cut queue's cursor and current stage range.
  *
  * @type {number}
  */
-export const MESHLET_COUNTER_U32S = 28;
+export const MESHLET_COUNTER_U32S = 32;
 
 /**
  * Word offsets into the counter buffer; the three per-bucket blocks are indexed as
@@ -283,44 +300,22 @@ export const MESHLET_COUNTER = {
     ROOT_UNREADY_INSTANCES: 22,   // instances whose root pages were not resident
     ROOT_SUBPIXEL: 23,            // instances below the admission size threshold
     VISIBLE_CELLS: 24,            // cells the cell cull appended to the visible list
-    IMPOSTORS: 25                 // billboards the root classify appended to the impostor list
+    IMPOSTORS: 25,                // billboards the root classify appended to the impostor list
+    CUT_QUEUE_END: 26,            // cut tasks appended to the queue (unclamped - the queue's demand)
+    CUT_STAGE_BEGIN: 27,          // the current cut stage's range of the queue
+    CUT_STAGE_END: 28
 };
 
 /**
- * Tasks per cut chunk: one cut-stage workgroup serves one chunk of one cell's tasks at a level,
- * a lane per task. See MeshletCutData.
+ * Leading counter-buffer words cleared every frame: the counters themselves. The visible-cell
+ * list after them is written up to its count and needs no clear.
  *
  * @type {number}
  */
-export const MESHLET_CUT_CHUNK = 64;
+export const MESHLET_COUNTER_CLEAR_U32S = MESHLET_COUNTER_U32S;
 
 /**
- * Most cut stages (non-root DAG levels) a world may have; the counter buffer reserves one
- * chunk counter per stage.
- *
- * @type {number}
- */
-export const MESHLET_MAX_CUT_STAGES = 32;
-
-/**
- * Word offset of the per-stage visible-chunk counters in the counter buffer.
- *
- * @type {number}
- */
-export const MESHLET_STAGE_CHUNKS_BASE = MESHLET_COUNTER_U32S;
-
-/**
- * Leading counter-buffer words cleared every frame: the counters, then the per-stage chunk
- * counters. The lists after them are written up to their counts and need no clear.
- *
- * @type {number}
- */
-export const MESHLET_COUNTER_CLEAR_U32S = MESHLET_STAGE_CHUNKS_BASE + MESHLET_MAX_CUT_STAGES;
-
-/**
- * Word offset of the visible-cell list in the counter buffer, followed by the per-stage
- * visible-chunk lists. They live there rather than in buffers of their own because the cut
- * stage already binds the per-stage limit of storage buffers, and it binds this one.
+ * Word offset of the visible-cell list in the counter buffer.
  *
  * @type {number}
  */
@@ -383,6 +378,14 @@ export const OBJECT_FLAG_HAS_COLORS = 1 << 2;
  * @type {number}
  */
 export const OBJECT_FLAG_NO_SHADOW = 1 << 3;
+
+/**
+ * objectData flags word (23), bits 4-5: the instance's draw bucket (MESHLET_BUCKET_*), so the
+ * root classification can apply the bucket's size cut without reading the cut tables.
+ *
+ * @type {number}
+ */
+export const OBJECT_BUCKET_SHIFT = 4;
 
 /**
  * objectData flags word (23), bit 8: draw this instance in the outline pass. Selection is a

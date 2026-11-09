@@ -378,7 +378,7 @@ data.set('data', {
     region: regions[0]?.name ?? '',
     visualization: 'material',
     occlusion: true,
-    threshold: 1,
+    threshold: app.systems.meshlet.dagPixelThreshold,
     collision: false,
     collisionClass: 'all',
     stats: ''

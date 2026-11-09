@@ -242,7 +242,7 @@ for (const [layer, proto] of protos.entries()) {
         for (let i = 0; i < GRID; i++) {
             const dir = frameDirection(i, j);
             camera.setPosition(dir.x * 3, dir.y * 3, dir.z * 3);
-            camera.lookAt(Vec3.ZERO, Vec3.UP);
+            camera.lookAt(Vec3.ZERO, Math.abs(dir.y) > 0.999 ? Vec3.BACK : Vec3.UP);
             for (const [normals, atlas] of [[false, albedo], [true, normal]]) {
                 const tile = await renderTile(normals);
                 for (let y = 0; y < TILE_H; y++) {

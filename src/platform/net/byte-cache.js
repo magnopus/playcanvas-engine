@@ -689,6 +689,7 @@ class ByteCache {
         this._dirty = true;
         if (this._flushTimer === null && !this._disabled) {
             this._flushTimer = setTimeout(() => this.flush(), this.flushDelay);
+            this._flushTimer.unref?.();
         }
     }
 

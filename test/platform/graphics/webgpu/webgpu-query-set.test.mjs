@@ -28,7 +28,10 @@ describe('WebgpuQuerySet#request', function () {
             getMappedRange: () => timestamps.buffer,
             unmap: () => unmapped++
         };
-        const fake = { activeStagingBuffer: stagingBuffer, stagingBuffers: [] };
+        const device = {
+            mapBufferAsync: buf => buf.mapAsync().then(() => true)
+        };
+        const fake = { device, activeStagingBuffer: stagingBuffer, stagingBuffers: [] };
         return WebgpuQuerySet.prototype.request.call(fake, pairs.length, 7).then((result) => {
             expect(unmapped).to.equal(1);
             expect(fake.stagingBuffers).to.deep.equal([stagingBuffer]);
