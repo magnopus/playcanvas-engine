@@ -31,7 +31,6 @@ import { getApplication } from './globals.js';
  * @import { ScrollViewComponent } from './components/scroll-view/component.js'
  * @import { SoundComponent } from './components/sound/component.js'
  * @import { SpriteComponent } from './components/sprite/component.js'
- * @import { ZoneComponent } from './components/zone/component.js'
  */
 
 /**
@@ -351,13 +350,6 @@ class Entity extends GraphNode {
     sprite;
 
     /**
-     * Gets the {@link ZoneComponent} attached to this entity.
-     *
-     * @type {import('./components/zone/component.js').ZoneComponent|undefined}
-     * @readonly
-     */
-
-    /**
      * Component storage.
      *
      * @type {Object<string, Component>}
@@ -430,39 +422,6 @@ class Entity extends GraphNode {
 
         Debug.assert(app, 'Could not find current application');
         this._app = app;
-    }
-
-    /**
-     * magnopus patched: Fired when the entity enters a zone.
-     *
-     * @event Entity#zoneEnter
-     * @param {import('./components/zone/component').ZoneComponent} zone - The zone that entity entered.
-     * @example
-     * entity.on('zoneEnter', function (zone) {
-     *     // entity entered a zone
-     * });
-     */
-
-    /**
-     * magnopus patched: Fired when the entity leaves a zone.
-     *
-     * @event Entity#zoneLeave
-     * @param {import('./components/zone/component').ZoneComponent} zone - The zone that entity left.
-     * @example
-     * entity.on('zoneLeave', function (entity) {
-     *     // entity left a zone
-     * });
-     */
-
-    /**
-     * magnopus patched: List of all zones this entity is currently within.
-     *
-     * @type {import('./components/zone/component').ZoneComponent[]}
-     */
-    get zones() {
-        return this._app.systems.zone.zones.filter(
-            z => z.entities.indexOf(this) !== -1
-        );
     }
 
     /**

@@ -1208,10 +1208,6 @@ class GraphNode extends EventHandler {
     _dirtifyWorldInternal() {
         if (!this._dirtyWorld) {
             this._frozen = false;
-            if (this._appRef) {
-                this._appRef._dirtyZoneEntities.push(this);
-            }
-            this._dirtyZone = true;
             this._dirtyWorld = true;
             for (let i = 0; i < this._children.length; i++) {
                 if (!this._children[i]._dirtyWorld) {

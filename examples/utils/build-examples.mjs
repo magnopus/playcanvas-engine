@@ -112,7 +112,13 @@ export const slash = file => file.split(path.sep).join('/');
  */
 export const copyFile = async ({ src, dest }) => {
     await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-    await fs.promises.cp(src, dest, { recursive: true });
+    await fs.promises.cp(src, dest, {
+        recursive: true,
+        // magnopus patched - skip symbolic links. Local, gitignored asset folders such as
+        // assets/meshlets/* are symlinks to large external bakes, which cp cannot recreate
+        // (ERR_FS_CP_EINVAL) and would otherwise have to copy in full.
+        filter: async file => !(await fs.promises.lstat(file)).isSymbolicLink()
+    });
 };
 
 /**
