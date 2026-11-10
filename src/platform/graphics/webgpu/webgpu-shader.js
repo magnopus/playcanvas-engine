@@ -7,6 +7,7 @@ import { WebgpuDebug } from './webgpu-debug.js';
 import { WebgpuShaderProcessorWGSL } from './webgpu-shader-processor-wgsl.js';
 
 /**
+ * @import { BindGroupFormat } from '../bind-group-format.js'
  * @import { GraphicsDevice } from '../graphics-device.js'
  * @import { Shader } from '../shader.js'
  */
@@ -20,6 +21,9 @@ const computeShaderIds = new StringIds();
  * @ignore
  */
 class WebgpuShader {
+    /** @type {BindGroupFormat|null} @private */
+    _ownedMeshBindGroupFormat = null;
+
     /**
      * Transpiled vertex shader code.
      *
@@ -48,6 +52,14 @@ class WebgpuShader {
      * @private
      */
     _computeKey;
+
+    /**
+     * Cached workgroup size of the compute entry point, null when it cannot be determined.
+     *
+     * @type {number[]|null|undefined}
+     * @private
+     */
+    _computeWorkgroupSize;
 
     /**
      * Caller-provided bind group format (compute, group 0), or null if none was supplied.
@@ -151,6 +163,10 @@ class WebgpuShader {
     destroy(shader) {
         this._vertexCode = null;
         this._fragmentCode = null;
+        this._ownedMeshBindGroupFormat?.destroy();
+        this._ownedMeshBindGroupFormat = null;
+        this.computeReflectedBindGroupFormat?.destroy();
+        this.computeReflectedBindGroupFormat = null;
     }
 
     createShaderModule(code, shaderType) {
@@ -186,6 +202,7 @@ class WebgpuShader {
     }
 
     processGLSL() {
+        Debug.assert(this._ownedMeshBindGroupFormat === null, 'Shader processing must not replace an owned mesh bind group format.');
         const shader = this.shader;
 
         // process the shader source to allow for uniforms
@@ -207,6 +224,8 @@ class WebgpuShader {
 
         shader.meshUniformBufferFormat = processed.meshUniformBufferFormat;
         shader.meshBindGroupFormat = processed.meshBindGroupFormat;
+        shader.viewBindGroupFormat = processed.viewBindGroupFormat;
+        this._ownedMeshBindGroupFormat = processed.meshBindGroupFormat;
         shader.attributes = processed.attributes;
     }
 
@@ -241,6 +260,7 @@ class WebgpuShader {
     }
 
     processWGSL() {
+        Debug.assert(this._ownedMeshBindGroupFormat === null, 'Shader processing must not replace an owned mesh bind group format.');
         const shader = this.shader;
 
         // process the shader source to allow for uniforms
@@ -256,6 +276,10 @@ class WebgpuShader {
 
         shader.meshUniformBufferFormat = processed.meshUniformBufferFormat;
         shader.meshBindGroupFormat = processed.meshBindGroupFormat;
+        shader.viewBindGroupFormat = processed.viewBindGroupFormat;
+        shader.usesMeshInstanceStorage = processed.usesMeshInstanceStorage;
+        shader.meshUniformBufferEmpty = processed.meshUniformBufferEmpty;
+        this._ownedMeshBindGroupFormat = processed.meshBindGroupFormat;
         shader.attributes = processed.attributes;
     }
 
@@ -312,6 +336,21 @@ class WebgpuShader {
     }
 
     /**
+     * The workgroup size the compute entry point declares, as its x, y and z, or null when it
+     * cannot be determined from the shader source. Determined when first requested.
+     *
+     * @type {number[]|null}
+     * @ignore
+     */
+    get computeWorkgroupSize() {
+        if (this._computeWorkgroupSize === undefined) {
+            this._computeWorkgroupSize = this._computeCode ?
+                WebgpuShaderProcessorWGSL.getWorkgroupSize(this._computeCode, this.computeEntryPoint) : null;
+        }
+        return this._computeWorkgroupSize;
+    }
+
+    /**
      * Dispose the shader when the context has been lost.
      */
     loseContext() {
@@ -325,6 +364,19 @@ class WebgpuShader {
      */
     restoreContext(device, shader) {
     }
+
+    // #if _DEBUG
+    /**
+     * See {@link Shader#debugReadsUniform}.
+     *
+     * @param {Shader} shader - The shader.
+     * @param {string} name - The name of the uniform.
+     * @returns {boolean} Whether the shader declares the uniform in its mesh uniform buffer.
+     */
+    debugReadsUniform(shader, name) {
+        return !!shader.meshUniformBufferFormat?.get(name);
+    }
+    // #endif
 }
 
 export { WebgpuShader };

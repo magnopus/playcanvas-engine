@@ -26,6 +26,10 @@ export default /* glsl */`
     #include "tonemappingAces2NoExposurePS"
 #elif TONEMAP == NEUTRAL
     #include "tonemappingNeutralPS"
+#elif TONEMAP == AGX
+    #include "tonemappingAgxPS"
+#elif TONEMAP == AGX_PUNCHY
+    #include "tonemappingAgxPS"
 #endif
 
 `;

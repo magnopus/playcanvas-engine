@@ -14,6 +14,8 @@ import { TextureParser } from './texture.js';
 
 /**
  * Parser for browser-supported image formats.
+ *
+ * @category Graphics
  */
 class ImgParser extends TextureParser {
     constructor(registry, device) {
@@ -146,9 +148,7 @@ class ImgParser extends TextureParser {
             responseType: 'blob',
             retry: this.handler.maxRetries > 0,
             maxRetries: this.handler.maxRetries,
-            progress: asset,
-            // Magnopus patched - add withCredentials option
-            withCredentials: crossOrigin === 'use-credentials'
+            progress: asset
         };
         http.get(url, options, (err, blob) => {
             if (err) {

@@ -43,13 +43,11 @@ function paramsIdentical(a, b) {
 }
 
 function equalParamSets(params1, params2) {
-    for (const param in params1) { // compare A -> B
-        if (params1.hasOwnProperty(param) && !paramsIdentical(params1[param], params2[param])) {
-            return false;
-        }
+    if (params1.size !== params2.size) {
+        return false;
     }
-    for (const param in params2) { // compare B -> A
-        if (params2.hasOwnProperty(param) && !paramsIdentical(params2[param], params1[param])) {
+    for (const [name, param] of params1) {
+        if (!paramsIdentical(param, params2.get(name))) {
             return false;
         }
     }
@@ -268,19 +266,21 @@ class BatchManager {
     }
 
     /**
-     * Filter out mesh instances that have skin or morph, as these are not supported by batching.
-     * If any mesh instance has skin/morph, the entire set is excluded.
+     * Filter out mesh instances that have skin, morph or clipping planes, as these are not
+     * supported by batching. If any mesh instance has them, the entire set is excluded.
      *
      * @param {MeshInstance[]} meshInstances - The mesh instances to filter.
      * @param {string} nodeName - The node name for warning messages.
-     * @returns {MeshInstance[]|null} The mesh instances if none have skin/morph, or null if any do.
+     * @returns {MeshInstance[]|null} The mesh instances if none have skin, morph or clipping
+     * planes, or null if any do.
      * @private
      */
     _filterBatchableInstances(meshInstances, nodeName) {
         let hasUnsupported = false;
         let hasSupported = false;
         for (let i = 0; i < meshInstances.length; i++) {
-            if (meshInstances[i].skinInstance || meshInstances[i].morphInstance) {
+            const meshInstance = meshInstances[i];
+            if (meshInstance.skinInstance || meshInstance.morphInstance || meshInstance.clipped) {
                 hasUnsupported = true;
             } else {
                 hasSupported = true;
@@ -289,7 +289,7 @@ class BatchManager {
 
         if (hasUnsupported) {
             if (hasSupported) {
-                Debug.warnOnce(`BatchManager: Some mesh instances on entity "${nodeName}" have skin/morph and the whole entity will be excluded from batching.`);
+                Debug.warnOnce(`BatchManager: Some mesh instances on entity "${nodeName}" have skin, morph or clipping planes and the whole entity will be excluded from batching.`);
             }
             return null;
         }
@@ -303,6 +303,9 @@ class BatchManager {
             if (valid) {
                 arr = groupMeshInstances[node.render.batchGroupId] = arr.concat(valid);
                 node.render.removeFromLayers();
+            } else {
+                // an excluded entity renders on its own, also when a previous batch included it
+                node.render.addToLayers();
             }
         }
 
@@ -315,6 +318,9 @@ class BatchManager {
             if (valid) {
                 arr = groupMeshInstances[node.model.batchGroupId] = arr.concat(valid);
                 node.model.removeModelFromLayers();
+            } else {
+                // an excluded entity renders on its own, also when a previous batch included it
+                node.model.addModelToLayers();
             }
         }
 
@@ -397,8 +403,9 @@ class BatchManager {
         const groupMeshInstances = {};
 
         if (!groupIds) {
-            // Full scene
-            groupIds = Object.keys(this._batchGroups);
+            // Full scene. Object keys are strings, convert them back to the numeric ids used by
+            // the batches and the dirty groups, as these are compared using indexOf.
+            groupIds = Object.keys(this._batchGroups).map(Number);
         }
 
         // delete old batches with matching batchGroupId
@@ -459,7 +466,7 @@ class BatchManager {
      * - Too many instances for a single batch (hardware-dependent, expect 128 on low-end and 1024
      * on high-end).
      * - Bounding box of a batch is larger than maxAabbSize in any dimension.
-     * - Mesh instances differ in shadow casting ({@link MeshInstance#castShadow}) or directional
+     * - Mesh instances differ in shadow casting ({@link MeshInstance#castShadows}) or directional
      * shadow cascade mask ({@link MeshInstance#shadowCascadeMask}).
      *
      * @param {MeshInstance[]} meshInstances - Input list of mesh instances
@@ -522,7 +529,7 @@ class BatchManager {
             const scaleSign = getScaleSign(meshInstancesLeftA[0]);
             const vertexFormatBatchingHash = meshInstancesLeftA[0].mesh.vertexBuffer.format.batchingHash;
             const indexed = meshInstancesLeftA[0].mesh.primitive[0].indexed;
-            const castShadow = meshInstancesLeftA[0].castShadow;
+            const castShadow = meshInstancesLeftA[0].castShadows;
             const shadowCascadeMask = meshInstancesLeftA[0].shadowCascadeMask;
             skipTranslucentAabb = null;
 
@@ -567,8 +574,9 @@ class BatchManager {
                     continue;
                 }
 
-                // Split by shadow casting — the batched MeshInstance exposes a single castShadow flag
-                if (castShadow !== mi.castShadow || shadowCascadeMask !== mi.shadowCascadeMask) {
+                // Split by shadow casting — the batched MeshInstance exposes a single castShadows
+                // flag
+                if (castShadow !== mi.castShadows || shadowCascadeMask !== mi.shadowCascadeMask) {
                     skipMesh(mi);
                     continue;
                 }
@@ -579,7 +587,7 @@ class BatchManager {
                     continue;
                 }
 
-                if (translucent && skipTranslucentAabb && skipTranslucentAabb.intersects(mi.aabb) && mi.drawOrder !== drawOrder) {
+                if (translucent && skipTranslucentAabb && skipTranslucentAabb.intersectsBoundingBox(mi.aabb) && mi.drawOrder !== drawOrder) {
                     skipMesh(mi);
                     continue;
                 }
@@ -860,19 +868,26 @@ class BatchManager {
             }
 
             // Create meshInstance
-            const meshInstance = new MeshInstance(mesh, material, this.rootNode);
-            meshInstance.castShadow = batch.origMeshInstances[0].castShadow;
-            meshInstance.parameters = batch.origMeshInstances[0].parameters;
-            meshInstance.layer = batch.origMeshInstances[0].layer;
-            meshInstance._shaderDefs = batch.origMeshInstances[0]._shaderDefs;
-            meshInstance.batching = true;
-            // Magnopus Patched - ensure renderStyle is copied
-            meshInstance.renderStyle = batch.origMeshInstances[0].renderStyle;
+            const batchedMeshInstance = new MeshInstance(mesh, material, this.rootNode);
+            const sourceMeshInstance = batch.origMeshInstances[0];
+
+            batchedMeshInstance.castShadows = sourceMeshInstance.castShadows;
+            batchedMeshInstance.shadowCascadeMask = sourceMeshInstance.shadowCascadeMask;
+
+            // copy the parameters through setParameter, which splits them between the scope and the
+            // material uniform buffer for the material of the batch
+            for (const [name, parameter] of sourceMeshInstance.parameters) {
+                batchedMeshInstance.setParameter(name, parameter.data);
+            }
+            batchedMeshInstance.layer = sourceMeshInstance.layer;
+            batchedMeshInstance._shaderDefs = sourceMeshInstance._shaderDefs;
+            batchedMeshInstance.batching = true;
+
             // meshInstance culling - don't cull UI elements, as they use custom culling Component.isVisibleForCamera
-            meshInstance.cull = batch.origMeshInstances[0].cull;
+            batchedMeshInstance.cull = sourceMeshInstance.cull;
             const batchGroup = this._batchGroups[batchGroupId];
             if (batchGroup && batchGroup._ui) {
-                meshInstance.cull = false;
+                batchedMeshInstance.cull = false;
             }
 
             if (dynamic) {
@@ -881,20 +896,22 @@ class BatchManager {
                 for (let i = 0; i < batch.origMeshInstances.length; i++) {
                     nodes.push(batch.origMeshInstances[i].node);
                 }
-                meshInstance.skinInstance = new SkinBatchInstance(this.device, nodes, this.rootNode);
+                batchedMeshInstance.skinInstance = new SkinBatchInstance(this.device, nodes, this.rootNode);
             }
 
             // disable aabb update, gets updated manually by batcher
-            meshInstance._updateAabb = false;
+            batchedMeshInstance._updateAabb = false;
 
-            meshInstance.drawOrder = batch.origMeshInstances[0].drawOrder;
-            meshInstance.stencilFront = batch.origMeshInstances[0].stencilFront;
-            meshInstance.stencilBack = batch.origMeshInstances[0].stencilBack;
-            meshInstance.flipFacesFactor = getScaleSign(batch.origMeshInstances[0]);
-            meshInstance.castShadow = batch.origMeshInstances[0].castShadow;
-            meshInstance.shadowCascadeMask = batch.origMeshInstances[0].shadowCascadeMask;
+            batchedMeshInstance.drawOrder = sourceMeshInstance.drawOrder;
+            batchedMeshInstance.stencilFront = sourceMeshInstance.stencilFront;
+            batchedMeshInstance.stencilBack = sourceMeshInstance.stencilBack;
+            batchedMeshInstance.flipFacesFactor = getScaleSign(sourceMeshInstance);
 
-            batch.meshInstance = meshInstance;
+            // assigning this prepares the batched mesh for the render style, generating its
+            // wireframe indices or points primitive as needed
+            batchedMeshInstance.renderStyle = sourceMeshInstance.renderStyle;
+
+            batch.meshInstance = batchedMeshInstance;
             batch.updateBoundingBox();
         }
 

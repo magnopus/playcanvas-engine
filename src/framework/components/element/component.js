@@ -80,10 +80,18 @@ const tmpCorners = [new Vec3(), new Vec3(), new Vec3(), new Vec3()];
  *
  * Relevant Engine API examples:
  *
+ * - [Anchors](https://playcanvas.github.io/#/user-interface/anchors)
+ * - [Image fitting](https://playcanvas.github.io/#/user-interface/image-fit)
+ * - [Sliced panels](https://playcanvas.github.io/#/user-interface/panel)
+ * - [Masking](https://playcanvas.github.io/#/user-interface/masking)
+ * - [Rendering 3D into an image](https://playcanvas.github.io/#/user-interface/render-to-image)
+ * - [Custom shader](https://playcanvas.github.io/#/user-interface/custom-shader)
  * - [Basic text rendering](https://playcanvas.github.io/#/user-interface/text)
  * - [Auto font sizing](https://playcanvas.github.io/#/user-interface/text-auto-font-size)
  * - [Emojis](https://playcanvas.github.io/#/user-interface/text-emojis)
+ * - [Justified text](https://playcanvas.github.io/#/user-interface/text-justify)
  * - [Text localization](https://playcanvas.github.io/#/user-interface/text-localization)
+ * - [Text markup](https://playcanvas.github.io/#/user-interface/text-markup)
  * - [Typewriter text](https://playcanvas.github.io/#/user-interface/text-typewriter)
  *
  * @hideconstructor
@@ -163,9 +171,10 @@ class ElementComponent extends Component {
     static EVENT_MOUSEWHEEL = 'mousewheel';
 
     /**
-     * Fired when the mouse is pressed and released on the component or when a touch starts and
-     * ends on the component. Only fired when useInput is true. The handler is passed an
-     * {@link ElementMouseEvent} or {@link ElementTouchEvent}.
+     * Fired when the mouse is pressed and released on the component, when a touch starts and ends
+     * on the component, or when an XR input source starts and ends a select action on the
+     * component. Only fired when useInput is true. The handler is passed an
+     * {@link ElementMouseEvent}, {@link ElementTouchEvent} or {@link ElementSelectEvent}.
      *
      * @event
      * @example
@@ -222,6 +231,72 @@ class ElementComponent extends Component {
      * });
      */
     static EVENT_TOUCHCANCEL = 'touchcancel';
+
+    /**
+     * Fired when an XR input source starts a select action, such as pulling a controller trigger
+     * or pinching, while its ray points at the component. Only fired when useInput is true and
+     * the input source's {@link XrInputSource#elementInput} is true. The handler is passed an
+     * {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectstart', (event) => {
+     *     console.log(`Select start event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTSTART = 'selectstart';
+
+    /**
+     * Fired when an XR input source ends a select action that started on the component, even if
+     * its ray no longer points at the component. Only fired when useInput is true. The handler is
+     * passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectend', (event) => {
+     *     console.log(`Select end event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTEND = 'selectend';
+
+    /**
+     * Fired when the ray of an XR input source starts pointing at the component. Only fired when
+     * useInput is true and the input source's {@link XrInputSource#elementInput} is true. The
+     * handler is passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectenter', (event) => {
+     *     console.log(`Select enter event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTENTER = 'selectenter';
+
+    /**
+     * Fired when the ray of an XR input source stops pointing at the component, or when the input
+     * source is removed while its ray points at the component. Only fired when useInput is true.
+     * The handler is passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectleave', (event) => {
+     *     console.log(`Select leave event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTLEAVE = 'selectleave';
+
+    /**
+     * Fired every XR frame while an XR input source holds a select action that started on the
+     * component, even if its ray no longer points at the component. Only fired when useInput is
+     * true. The handler is passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectmove', (event) => {
+     *     console.log(`Select move event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTMOVE = 'selectmove';
 
     /**
      * @type {EventHandle|null}
@@ -483,7 +558,8 @@ class ElementComponent extends Component {
 
     /**
      * Sets the distance from the bottom edge of the anchor. Can be used in combination with a
-     * split anchor to make the component's top edge always be 'top' units away from the top.
+     * split anchor to make the component's bottom edge always be 'bottom' units away from the
+     * bottom.
      *
      * @type {number}
      */
@@ -892,7 +968,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets the distance from the top edge of the anchor. Can be used in combination with a split
-     * anchor to make the component's bottom edge always be 'bottom' units away from the bottom.
+     * anchor to make the component's top edge always be 'top' units away from the top.
      *
      * @type {number}
      */
@@ -1338,7 +1414,9 @@ class ElementComponent extends Component {
     /**
      * Sets the spacing between the letters of the text, as a multiplier on the default character
      * advance, defaulting to 1 (normal spacing). Values below 1 tighten the text and values above 1
-     * spread it out. Only works for {@link ELEMENTTYPE_TEXT} elements.
+     * spread it out. As it scales the advance of each character, wide characters are spread further
+     * apart than narrow ones - use {@link letterSpacing} to space all characters evenly. Only works
+     * for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {number}
      */
@@ -1354,6 +1432,33 @@ class ElementComponent extends Component {
     get spacing() {
         if (this._text) {
             return this._text.spacing;
+        }
+
+        return null;
+    }
+
+    /**
+     * Sets the extra space between the letters of the text, as a fraction of the {@link fontSize},
+     * defaulting to 0. For example, 0.1 adds a tenth of the font size between each pair of
+     * characters, the same for every character, like the CSS `letter-spacing` property. Negative
+     * values tighten the text. The space only goes between characters, so it does not widen a line
+     * past its last character, and it is added on top of {@link spacing}. Only works for
+     * {@link ELEMENTTYPE_TEXT} elements.
+     *
+     * @type {number}
+     */
+    set letterSpacing(arg) {
+        this._setValue('letterSpacing', arg);
+    }
+
+    /**
+     * Gets the extra space between the letters of the text.
+     *
+     * @type {number}
+     */
+    get letterSpacing() {
+        if (this._text) {
+            return this._text.letterSpacing;
         }
 
         return null;
@@ -1452,7 +1557,7 @@ class ElementComponent extends Component {
      * `[0, 0]` is the bottom left and `[1, 1]` is the top right. Only works for
      * {@link ELEMENTTYPE_TEXT} elements.
      *
-     * @type {Vec2}
+     * @param {Vec2|number[]} arg - The alignment, as a Vec2 or an array of 2 numbers.
      */
     set alignment(arg) {
         this._setValue('alignment', arg);

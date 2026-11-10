@@ -5,23 +5,28 @@ import { math } from './math.js';
  * A 2-dimensional vector. Vec2 is commonly used to represent 2D positions, directions, texture
  * coordinates (UVs) or any pair of related numeric values.
  *
+ * Operations follow one convention throughout the math classes: a method that modifies the vector
+ * it is called on returns it, so calls can be chained and nothing is allocated, while queries such
+ * as {@link distance} and {@link dot} return a number. Two-operand forms such as {@link add2} and
+ * {@link sub2} write the result of `lhs op rhs` into `this`, and it is safe for `this` to also be
+ * one of the operands. Use {@link clone} for an independent copy and {@link copy} to overwrite one
+ * vector with another.
+ *
+ * The static constants such as {@link ZERO} and {@link UP} are frozen shared instances: read them
+ * freely, but writing to one throws. Copy a constant before modifying it.
+ *
+ * @example
+ * // Scroll a texture offset each frame without allocating
+ * const offset = new Vec2(0, 0);
+ * const speed = new Vec2(0.1, 0);
+ * offset.addScaled(speed, dt);
+ * @example
+ * // Chain mutating operations; each returns the vector it was called on
+ * const toTarget = new Vec2().sub2(target, position).normalize();
+ * const distance = target.distance(position);
  * @category Math
  */
 class Vec2 {
-    /**
-     * The first component of the vector.
-     *
-     * @type {number}
-     */
-    x;
-
-    /**
-     * The second component of the vector.
-     *
-     * @type {number}
-     */
-    y;
-
     /**
      * Creates a new Vec2 instance.
      *
@@ -47,12 +52,27 @@ class Vec2 {
      */
     constructor(x = 0, y = 0) {
         if (x.length === 2) {
-            this.x = x[0];
-            this.y = x[1];
-        } else {
-            this.x = x;
-            this.y = y;
+            y = x[1];
+            x = x[0];
         }
+
+        // Fields are assigned once here instead of declared as class fields. A declaration without
+        // an initializer stores undefined first, so V8 never unboxes the field as a double and
+        // every fractional write allocates a heap number.
+
+        /**
+         * The first component of the vector.
+         *
+         * @type {number}
+         */
+        this.x = x;
+
+        /**
+         * The second component of the vector.
+         *
+         * @type {number}
+         */
+        this.y = y;
     }
 
     /**
@@ -208,6 +228,23 @@ class Vec2 {
         const x = this.x - rhs.x;
         const y = this.y - rhs.y;
         return Math.sqrt(x * x + y * y);
+    }
+
+    /**
+     * Returns the squared distance between the two specified 2-dimensional vectors.
+     *
+     * @param {Vec2} rhs - The second 2-dimensional vector to test.
+     * @returns {number} The squared distance between the two vectors.
+     * @example
+     * const v1 = new Vec2(5, 10);
+     * const v2 = new Vec2(10, 20);
+     * const d = v1.distanceSq(v2);
+     * console.log("The squared distance between v1 and v2 is: " + d);
+     */
+    distanceSq(rhs) {
+        const x = this.x - rhs.x;
+        const y = this.y - rhs.y;
+        return x * x + y * y;
     }
 
     /**

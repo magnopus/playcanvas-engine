@@ -22,10 +22,10 @@ void getMetalness() {
         #ifdef MAG_STEREO_TEXTURE
         vec2 stereoUV = getStereoVideoUV({STD_METALNESS_TEXTURE_UV}, metalnessStereoVideoType, metalnessIsStereoFlipped);
 
-        metalness *= texture2DBias({STD_METALNESS_TEXTURE_NAME}, stereoUV, textureBias).{STD_METALNESS_TEXTURE_CHANNEL};
+        metalness *= texture2DBias({STD_METALNESS_TEXTURE_NAME}, stereoUV, {STD_TEXTURE_BIAS}).{STD_METALNESS_TEXTURE_CHANNEL};
         #else
         // end magnopus patched
-    metalness *= texture2DBias({STD_METALNESS_TEXTURE_NAME}, {STD_METALNESS_TEXTURE_UV}, textureBias).{STD_METALNESS_TEXTURE_CHANNEL};
+    metalness *= texture2DBias({STD_METALNESS_TEXTURE_NAME}, {STD_METALNESS_TEXTURE_UV}, {STD_TEXTURE_BIAS}).{STD_METALNESS_TEXTURE_CHANNEL};
         // magnopus patched
         #endif
         // end magnopus patched

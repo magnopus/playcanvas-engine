@@ -231,8 +231,7 @@ class Picker {
 
         Debug.assert(typeof x !== 'object', 'Picker.getSelection:param \'rect\' is deprecated, use \'x, y, width, height\' instead.');
 
-        y = this.renderTarget.height - (y + height);
-        const rect = this.sanitizeRect(x, y, width, height);
+        const rect = this._sanitizeFlippedRect(x, y, width, height, this.renderTarget.height);
 
         // read pixels from the render target
         device.setRenderTarget(this.renderTarget);
@@ -272,9 +271,9 @@ class Picker {
             return this.decodePixels(pixels, this.mapping);
         }).catch((error) => {
             // a read which could not complete because the device has gone reports an empty selection,
-            // which is what decodePixels reports for the same reason. Every other failure is a real one
+            // including cancellation before the device loss notification arrives. Every other failure is a real one
             // and is passed on, rather than being disguised as nothing having been selected.
-            if (this.deviceValid) {
+            if (this.deviceValid && !this.device.isContextLost() && error.name !== 'AbortError') {
                 throw error;
             }
             return [];
@@ -294,15 +293,10 @@ class Picker {
      * @private
      */
     _readTexture(texture, x, y, width, height, renderTarget) {
-        // Floor before the WebGL2 Y-flip so the flipped row matches prepare()'s scissor, which
-        // floors (via sanitizeRect) before flipping. With fractional pick coordinates, flipping
-        // first and flooring after lands the read one row off the rasterized pixel.
-        x = Math.floor(x);
-        y = Math.floor(y);
-        if (this.device?.isWebGL2) {
-            y = renderTarget.height - (y + height);
-        }
-        const rect = this.sanitizeRect(x, y, width, height);
+        // WebGL2 reads back with a bottom-left origin, WebGPU with a top-left one
+        const rect = this.device?.isWebGL2 ?
+            this._sanitizeFlippedRect(x, y, width, height, renderTarget.height) :
+            this.sanitizeRect(x, y, width, height);
 
         // @ts-ignore
         return texture.read(rect.x, rect.y, rect.z, rect.w, {
@@ -313,6 +307,8 @@ class Picker {
 
     /**
      * Return the world position of the mesh instance picked at the specified screen coordinates.
+     * The position is reconstructed at the center of the pixel containing the coordinates, which
+     * is where its depth was rasterized.
      *
      * @param {number} x - The x coordinate of the pixel to pick.
      * @param {number} y - The y coordinate of the pixel to pick.
@@ -389,7 +385,7 @@ class Picker {
      * Capture camera state needed to unproject pick-buffer depths into world space. Returns null
      * if no camera was supplied to the last prepare() call.
      *
-     * @returns {{invViewProj: Mat4, near: number, far: number, isOrtho: boolean, cameraPos: Vec3, rect: Vec4}|null}
+     * @returns {{invViewProj: Mat4, near: number, far: number, isOrtho: boolean, rect: Vec4}|null}
      * Captured camera state, or null if no camera is bound.
      * @private
      */
@@ -404,7 +400,6 @@ class Picker {
             near: camera.nearClip,
             far: camera.farClip,
             isOrtho: camera.projection === PROJECTION_ORTHOGRAPHIC,
-            cameraPos: camera.entity.getPosition().clone(),
             // the pick pass renders into the camera's viewport rect, so unprojection maps into it too
             rect: camera.rect.clone()
         };
@@ -425,10 +420,17 @@ class Picker {
         const { invViewProj, near, far, isOrtho, rect } = state;
         const ndcDepth = isOrtho ? linearDepth : (far * linearDepth / (linearDepth * (far - near) + near));
 
-        // map the pixel into the camera's viewport rect (normalized, bottom-left origin) - the
-        // projection only spans that rect, not the whole pick buffer
-        const vx = (x - rect.x * this.width) / (rect.z * this.width);
-        const vy = (y - (1 - rect.y - rect.w) * this.height) / (rect.w * this.height);
+        // The depth came from the pixel containing (x, y) and was rasterized at that pixel's center,
+        // so the point lies on the ray through the center - not through the requested coordinate,
+        // which for an integer input sits on the pixel's edge. Clamping matches the read, which is
+        // clamped to the buffer by sanitizeRect.
+        const pixelX = math.clamp(Math.floor(x), 0, this.width - 1) + 0.5;
+        const pixelY = math.clamp(Math.floor(y), 0, this.height - 1) + 0.5;
+
+        // magnopus patched - map the pixel into the camera's viewport rect (normalized, bottom-left
+        // origin) - the projection only spans that rect, not the whole pick buffer
+        const vx = (pixelX - rect.x * this.width) / (rect.z * this.width);
+        const vy = (pixelY - (1 - rect.y - rect.w) * this.height) / (rect.w * this.height);
         const dc = new Vec4(
             vx * 2 - 1,
             (1 - vy) * 2 - 1,
@@ -460,9 +462,9 @@ class Picker {
         try {
             pixels = await this._readTexture(this.depthBuffer, x, y, 1, 1, this.renderTargetDepth);
         } catch (error) {
-            // as in getSelectionAsync - only a device which has gone reports as nothing picked, and
-            // every other failure is passed on
-            if (this.deviceValid) {
+            // Mapping can be canceled before the device loss notification arrives. Other failures
+            // on a valid device must still be reported.
+            if (this.deviceValid && !this.device.isContextLost() && error.name !== 'AbortError') {
                 throw error;
             }
             return null;
@@ -498,7 +500,16 @@ class Picker {
             return null;
         }
 
-        const pixels = await this._readTexture(this.normalBuffer, x, y, 1, 1, /** @type {RenderTarget} */ (this.renderTargetNormal));
+        let pixels;
+        try {
+            pixels = await this._readTexture(this.normalBuffer, x, y, 1, 1, /** @type {RenderTarget} */ (this.renderTargetNormal));
+        } catch (error) {
+            // as in getPointDepthAsync, a canceled read or lost device reports as nothing picked
+            if (this.deviceValid && !this.device.isContextLost() && error.name !== 'AbortError') {
+                throw error;
+            }
+            return null;
+        }
 
         // decode RGBA8 (n*0.5+0.5) back to a world-space vector in [-1, 1]
         const normal = new Vec3(
@@ -512,6 +523,31 @@ class Picker {
             return null;
         }
         return normal.mulScalar(1 / len);
+    }
+
+    /**
+     * Sanitize a rectangle specified in the public top-left coordinate system and convert it to
+     * the bottom-left origin used when reading pixels back.
+     *
+     * The rectangle is floored and clipped while still in top-left space, and only then flipped,
+     * which matters twice. Flipping first would floor `bufferHeight - y - height`, landing one row
+     * off the requested pixel for any fractional y - common when the pick buffer is smaller than
+     * the canvas and coordinates are scaled into it. And clipping a rectangle that overhangs the
+     * bottom edge in flipped space absorbs the overflow at the wrong end, shifting the rectangle
+     * up instead of dropping the rows that fall outside the buffer.
+     *
+     * @param {number} x - The left edge of the rectangle.
+     * @param {number} y - The top edge of the rectangle.
+     * @param {number} width - The width of the rectangle.
+     * @param {number} height - The height of the rectangle.
+     * @param {number} bufferHeight - The height of the buffer being read.
+     * @returns {Vec4} The sanitized rectangle, with y in a bottom-left coordinate system.
+     * @private
+     */
+    _sanitizeFlippedRect(x, y, width, height, bufferHeight) {
+        const rect = this.sanitizeRect(x, y, width, height);
+        rect.y = bufferHeight - (rect.y + rect.w);   // rect.w is the height
+        return rect;
     }
 
     // sanitize the rectangle to make sure it's inside the texture and does not use fractions
@@ -652,7 +688,7 @@ class Picker {
 
         // set up clears - setClearColor handles MRT and clears all color buffers
         renderPass.setClearColor(Color.WHITE);
-        renderPass.depthStencilOps.clearDepth = true;
+        renderPass.setClearDepth(1);
 
         // optional scissor rect — sanitize and flip top-left → bottom-left for device.setScissor
         let scissorRect = null;
@@ -660,9 +696,7 @@ class Picker {
             const w = options.width ?? 0;
             const h = options.height ?? 0;
             if (w > 0 && h > 0) {
-                const r = this.sanitizeRect(options.x ?? 0, options.y ?? 0, w, h);
-                const flippedY = this.renderTarget.height - (r.y + r.w);
-                scissorRect = new Vec4(r.x, flippedY, r.z, r.w);
+                scissorRect = this._sanitizeFlippedRect(options.x ?? 0, options.y ?? 0, w, h, this.renderTarget.height);
             }
         }
 

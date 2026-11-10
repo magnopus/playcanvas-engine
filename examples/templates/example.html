@@ -12,13 +12,14 @@
                 <canvas id="application-canvas"></canvas>
             </div>
         </div>
-        <script src="../iframe/polyfill.js"></script>
         <script type="importmap">
             {
                 "imports": {
                     "playcanvas": '@ENGINE',
                     "playcanvas/scripts/": "./scripts/",
                     "fflate": "../modules/fflate/esm/browser.js",
+                    "@playcanvas/inspector": "../modules/inspector/index.js",
+                    "3d-tiles-renderer/playcanvas": "../modules/3d-tiles-renderer/index.playcanvas.js",
                     "examples/assets/": "./assets/",
                     "examples/context": "../iframe/context.mjs"
                 }
@@ -32,6 +33,7 @@
 
             window.addEventListener('requestFiles', () => loader.sendRequestedFiles());
             window.addEventListener('stats', (event) => loader.setMiniStats(!!event.detail?.state));
+            window.addEventListener('inspector', (event) => loader.setInspector(!!event.detail?.state));
             window.addEventListener('hotReload', () => loader.hotReload());
             window.addEventListener('reloadFiles', (event) => loader.reloadFiles(event.detail));
             window.addEventListener('destroy', () => loader.destroy());

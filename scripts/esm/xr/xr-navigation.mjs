@@ -12,7 +12,8 @@ import {
     SEMANTIC_TEXCOORD0,
     ShaderMaterial,
     Vec2,
-    Vec3
+    Vec3,
+    now
 } from 'playcanvas';
 
 /** @import { XrInputSource } from 'playcanvas' */
@@ -29,6 +30,13 @@ const tmpSide = new Vec3();
 const tmpAimOrigin = new Vec3();
 const tmpAimDir = new Vec3();
 const tmpAimPoint = new Vec3();
+const tmpPalm = new Vec3();
+const tmpToHead = new Vec3();
+
+// Milliseconds after the session regains focus during which a select that starts belongs to the
+// system UI being closed rather than the app. On Meta Quest these were seen up to 0.6 s after
+// focus returned, with the palm in any direction
+const FOCUS_SELECT_MS = 1000;
 
 const arcVertexGLSL = /* glsl */ `
     attribute vec3 vertex_position;
@@ -129,7 +137,10 @@ const ringFragmentWGSL = /* wgsl */ `
  * Teleportation: Point and teleport using trigger/pinch gestures. The aim is visualized as a
  * ballistic arc rendered as a glowing ribbon, landing on a flat navigation plane at
  * {@link XrNavigation#groundHeight}. Apps with physics or custom picking can override ground
- * detection by assigning {@link XrNavigation#castRay}.
+ * detection by assigning {@link XrNavigation#castRay}. Selects that belong to the system do not
+ * teleport: a hand pinch made with the palm facing the head, which is how the system menu is
+ * opened on Meta Quest, and a select that starts within a second of the session regaining focus
+ * from the system UI.
  * Smooth Locomotion: Use left thumbstick for XZ movement
  * Turning: Right thumbstick X-axis — snap turn (default) or continuous smooth turn, selected
  *   via {@link XrNavigation#turnMode}
@@ -164,9 +175,9 @@ class XrNavigation extends Script {
     movementSpeed = 1.5;
 
     /**
-     * Selects the right-thumbstick turn behaviour. One of:
+     * Selects the right-thumbstick turn behavior. One of:
      * - `'snap'`: discrete rotation of {@link XrNavigation#rotateSpeed} degrees per gesture
-     *   (default; existing behaviour).
+     *   (default; existing behavior).
      * - `'smooth'`: continuous rotation at {@link XrNavigation#smoothTurnSpeed} degrees/second
      *   while the thumbstick is past {@link XrNavigation#smoothTurnThreshold}.
      * - `'none'`: thumbstick X is ignored.
@@ -220,7 +231,7 @@ class XrNavigation extends Script {
 
     /**
      * Deadzone for the right-thumbstick X-axis when {@link XrNavigation#turnMode} is `'smooth'`.
-     * Below this magnitude the stick is treated as centred.
+     * Below this magnitude the stick is treated as centered.
      * @attribute
      * @range [0, 0.5]
      * @precision 0.01
@@ -391,6 +402,25 @@ class XrNavigation extends Script {
     // Y of the ground surface the rig currently stands on (groundHeight or last castRay hit)
     _currentGroundY = 0;
 
+    // Time the session was last seen without focus, such as behind the system menu
+    _unfocusedTime = -Infinity;
+
+    /**
+     * Height in meters of the floor the rig currently stands on: {@link XrNavigation#groundHeight}
+     * at first, then each teleport's landing point. A teleport keeps the rig's height above it, so
+     * a snap vertical offset carries over to the new floor. Set it when the application places the
+     * rig on another floor itself, such as on a collision mesh when a session starts.
+     *
+     * @type {number}
+     */
+    set currentGroundHeight(value) {
+        this._currentGroundY = value;
+    }
+
+    get currentGroundHeight() {
+        return this._currentGroundY;
+    }
+
     initialize() {
         if (!this.app.xr) {
             console.error('XrNavigation script requires XR to be enabled on the application');
@@ -460,6 +490,9 @@ class XrNavigation extends Script {
 
         const onInputAdd = (inputSource) => {
             const handleSelectStart = () => {
+                // a select that belongs to the system neither aims nor teleports
+                if (this._isSystemSelect(inputSource)) return;
+
                 this._activePointers.set(inputSource, true);
                 // Invalidate any hit cached from a previous aim session, so a select that
                 // starts and ends before the next update cannot teleport to a stale target.
@@ -469,6 +502,9 @@ class XrNavigation extends Script {
             };
 
             const handleSelectEnd = () => {
+                // only a select whose start was accepted teleports
+                if (!this._activePointers.get(inputSource)) return;
+
                 this._activePointers.set(inputSource, false);
                 // Only teleport when teleportation is enabled. Otherwise a select/pinch gesture
                 // (e.g. used to click a UI element) would still snap the rig to the floor point
@@ -613,25 +649,22 @@ class XrNavigation extends Script {
             }
         }
 
-        for (let i = 0; i <= segments; i++) {
-            const t = (tFlight * i) / segments;
-            this._arcPoints[i].set(
-                origin.x + vx * t,
-                origin.y + vy * t - 0.5 * g * t * t,
-                origin.z + vz * t
-            );
-        }
+        this._sampleArc(origin, vx, vy, vz, tFlight);
 
         if (this.castRay) {
-            // Custom ground detection: the first segment hit wins and truncates the arc there.
-            // Remaining samples collapse onto the hit so the ribbon's quads become degenerate.
+            // Custom ground detection: the first segment hit wins, and the arc is sampled again
+            // to end there, so the ribbon keeps all its segments and fades out at the hit
             for (let i = 0; i < segments; i++) {
-                const hit = this.castRay(this._arcPoints[i], this._arcPoints[i + 1]);
+                const start = this._arcPoints[i];
+                const end = this._arcPoints[i + 1];
+                const hit = this.castRay(start, end);
                 if (hit) {
                     rec.point.copy(hit);
-                    for (let j = i + 1; j <= segments; j++) {
-                        this._arcPoints[j].copy(rec.point);
-                    }
+                    // the hit's flight time, from where it lies along the segment
+                    const length = start.distance(end);
+                    const along = length > 1e-6 ? Math.min(start.distance(rec.point) / length, 1) : 0;
+                    this._sampleArc(origin, vx, vy, vz, (tFlight * (i + along)) / segments);
+                    this._arcPoints[segments].copy(rec.point);
                     rec.valid = this.isValidTeleportDistance(rec.point);
                     return;
                 }
@@ -640,6 +673,29 @@ class XrNavigation extends Script {
             rec.point.copy(this._arcPoints[segments]);
             rec.point.y = this.groundHeight;
             rec.valid = this.isValidTeleportDistance(rec.point);
+        }
+    }
+
+    /**
+     * Fills {@link _arcPoints} with the ballistic arc's positions at even steps over its first
+     * duration seconds.
+     *
+     * @param {Vec3} origin - World-space launch position.
+     * @param {number} vx - Launch velocity X.
+     * @param {number} vy - Launch velocity Y.
+     * @param {number} vz - Launch velocity Z.
+     * @param {number} duration - Flight time in seconds covered by the samples.
+     * @private
+     */
+    _sampleArc(origin, vx, vy, vz, duration) {
+        const segments = this._arcPoints.length - 1;
+        for (let i = 0; i <= segments; i++) {
+            const t = (duration * i) / segments;
+            this._arcPoints[i].set(
+                origin.x + vx * t,
+                origin.y + vy * t - 0.5 * ARC_GRAVITY * t * t,
+                origin.z + vz * t
+            );
         }
     }
 
@@ -689,6 +745,11 @@ class XrNavigation extends Script {
     }
 
     update(dt) {
+        // frames keep running while the system menu covers the session, so this stays current
+        if (this.app.xr?.active && this.app.xr.visibilityState !== 'visible') {
+            this._unfocusedTime = now();
+        }
+
         // Left thumbstick drives movement; right drives turning and vertical snaps
         for (const inputSource of this._inputSources) {
             if (!this._hasThumbsticks(inputSource)) continue;
@@ -716,6 +777,34 @@ class XrNavigation extends Script {
         if (this.enableTeleport) {
             this._handleTeleportation();
         }
+    }
+
+    /**
+     * Whether a select belongs to the system rather than the app. Browsers report selects made
+     * with the system UI, so such a select would otherwise aim and teleport: the pinch that opens
+     * the Meta Quest system menu, made with the palm facing the head, is reported before the
+     * session loses focus, and selects made while closing it are reported as, or shortly after,
+     * the session regains focus.
+     *
+     * @param {XrInputSource} inputSource - The input source starting the select.
+     * @returns {boolean} True if the select belongs to the system.
+     * @private
+     */
+    _isSystemSelect(inputSource) {
+        if (this.app.xr.visibilityState !== 'visible' || now() - this._unfocusedTime < FOCUS_SELECT_MS) {
+            return true;
+        }
+
+        // the -Y axis of the wrist joint points out of the palm
+        const hand = inputSource.hand;
+        const wrist = hand?.tracking ? hand.wrist : null;
+        if (wrist && this._cameraEntity) {
+            wrist.getRotation().transformVector(tmpPalm.set(0, -1, 0), tmpPalm);
+            tmpToHead.sub2(this._cameraEntity.getPosition(), wrist.getPosition()).normalize();
+            if (tmpPalm.dot(tmpToHead) > 0) return true;
+        }
+
+        return false;
     }
 
     /**
@@ -757,17 +846,17 @@ class XrNavigation extends Script {
     }
 
     /**
-     * Yaw-rotates the rig around the camera's local position, so the view pivots in place
-     * rather than orbiting the rig origin.
+     * Yaw-rotates the rig around the camera, so the view pivots in place rather than orbiting
+     * the rig origin. The camera's world position is held, which a scaled rig keeps too, where the
+     * camera's local position is scaled.
      *
      * @param {number} degrees - The rotation angle in degrees.
      * @private
      */
     _rotateRigAroundCamera(degrees) {
-        tmpVec3A.copy(this._cameraEntity.getLocalPosition());
-        this.entity.translateLocal(tmpVec3A);
+        tmpVec3A.copy(this._cameraEntity.getPosition());
         this.entity.rotateLocal(0, degrees, 0);
-        this.entity.translateLocal(tmpVec3A.mulScalar(-1));
+        this.entity.translate(tmpVec3A.sub(this._cameraEntity.getPosition()));
     }
 
     /**

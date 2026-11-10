@@ -84,13 +84,13 @@ Tween.attributes.add('tweens', {
         }, {
             name: 'yoyo',
             title: 'Yoyo',
-            description: 'This function only has effect if used along with repeat. When active, the behaviour of the tween will be like a yoyo, i.e. it will bounce to and from the start and end values, instead of just repeating the same sequence from the beginning. Defaults to false.',
+            description: 'This function only has effect if used along with repeat. When active, the behavior of the tween will be like a yoyo, i.e. it will bounce to and from the start and end values, instead of just repeating the same sequence from the beginning. Defaults to false.',
             type: 'boolean',
             default: false
         }, {
             name: 'startEvent',
             title: 'Start Event',
-            description: 'Executed right before the tween starts animating, after any delay time specified by the delay method. This will be executed only once per tween, i.e. it will not be run when the tween is repeated via repeat(). It is great for synchronising to other events or triggering actions you want to happen when a tween starts.',
+            description: 'Executed right before the tween starts animating, after any delay time specified by the delay method. This will be executed only once per tween, i.e. it will not be run when the tween is repeated via repeat(). It is great for synchronizing to other events or triggering actions you want to happen when a tween starts.',
             type: 'string'
         }, {
             name: 'stopEvent',
@@ -274,12 +274,12 @@ Tween.prototype.start = function (idx) {
     .to(endValue, tween.duration)
     .easing(easingFunc)
     .onStart((obj) => {
-        if (tween.startEvent !== '') {
+        if (tween.startEvent) {
             app.fire(tween.startEvent);
         }
     })
     .onStop((obj) => {
-        if (tween.stopEvent !== '') {
+        if (tween.stopEvent) {
             app.fire(tween.stopEvent);
         }
         tweenInstances[idx] = null;
@@ -287,18 +287,18 @@ Tween.prototype.start = function (idx) {
     .onUpdate((obj) => {
         updateProperty(obj);
 
-        if (tween.updateEvent !== '') {
+        if (tween.updateEvent) {
             app.fire(tween.updateEvent);
         }
     })
     .onComplete((obj) => {
-        if (tween.completeEvent !== '') {
+        if (tween.completeEvent) {
             app.fire(tween.completeEvent);
         }
         tweenInstances[idx] = null;
     })
     .onRepeat((obj) => {
-        if (tween.repeatEvent !== '') {
+        if (tween.repeatEvent) {
             app.fire(tween.repeatEvent);
         }
     })

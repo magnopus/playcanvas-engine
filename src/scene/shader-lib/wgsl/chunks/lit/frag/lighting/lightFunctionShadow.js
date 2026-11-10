@@ -39,7 +39,13 @@ export default /* wgsl */`
 
             var positionInShadowSpace: vec4f = shadowTransform * vec4f(surfacePosition, 1.0);
             #ifdef LIGHT{i}_SHADOW_SAMPLE_ORTHO
-                positionInShadowSpace.z = saturate(positionInShadowSpace.z) - 0.0001;
+                #if LIGHT{i}SHADOWTYPE == PCSS_32F
+                    // PCSS needs the depth of the receivers beyond the far plane, for their distance to
+                    // the blockers, and clamps the depth itself where it samples the shadow map
+                    positionInShadowSpace.z = positionInShadowSpace.z - 0.0001;
+                #else
+                    positionInShadowSpace.z = saturate(positionInShadowSpace.z) - 0.0001;
+                #endif
             #else
                 #ifdef LIGHT{i}_SHADOW_SAMPLE_SOURCE_ZBUFFER
                     positionInShadowSpace.xyz = positionInShadowSpace.xyz / positionInShadowSpace.w;
@@ -56,12 +62,27 @@ export default /* wgsl */`
     // shadow evaluation function
     fn getShadow{i}(lightDirW_in: vec3f) -> f32 {
 
+        #if LIGHT{i}TYPE == DIRECTIONAL
+            // Beyond the shadow distance, skip cascade selection and shadow-map sampling.
+            if (1.0 / pcPosition.w > uniform.light{i}_shadowCascadeDistances.w) {
+                return 1.0;
+            }
+        #endif
+
         var lightDirArg = lightDirW_in;
+
+        // The normal offset moves the sample off the surface, towards the light. A surface with
+        // diffuse transmission is also lit from behind, so the side facing the light is used
+        #ifdef LIT_DIFFUSE_TRANSMISSION
+            let shadowNormal: vec3f = faceForward(dVertexNormalW, dLightDirNormW, dVertexNormalW);
+        #else
+            let shadowNormal: vec3f = dVertexNormalW;
+        #endif
 
         #if LIGHT{i}TYPE == OMNI
 
             // omni shadows use cubemap and sample by direction
-            var shadowCoord: vec3f = getShadowSampleCoordOmni{i}(uniform.light{i}_shadowParams, vPositionW, uniform.light{i}_position, &lightDirArg, dLightDirNormW, dVertexNormalW);
+            var shadowCoord: vec3f = getShadowSampleCoordOmni{i}(uniform.light{i}_shadowParams, vPositionW, uniform.light{i}_position, &lightDirArg, dLightDirNormW, shadowNormal);
 
         #else
 
@@ -77,17 +98,11 @@ export default /* wgsl */`
             #endif
 
             #if LIGHT{i}TYPE == DIRECTIONAL
-                var shadowCoord: vec3f = getShadowSampleCoord{i}(shadowMatrix, uniform.light{i}_shadowParams, vPositionW, vec3f(0.0), &lightDirArg, dLightDirNormW, dVertexNormalW);
+                var shadowCoord: vec3f = getShadowSampleCoord{i}(shadowMatrix, uniform.light{i}_shadowParams, vPositionW, vec3f(0.0), &lightDirArg, dLightDirNormW, shadowNormal);
             #else
-                var shadowCoord: vec3f = getShadowSampleCoord{i}(shadowMatrix, uniform.light{i}_shadowParams, vPositionW, uniform.light{i}_position, &lightDirArg, dLightDirNormW, dVertexNormalW);
+                var shadowCoord: vec3f = getShadowSampleCoord{i}(shadowMatrix, uniform.light{i}_shadowParams, vPositionW, uniform.light{i}_position, &lightDirArg, dLightDirNormW, shadowNormal);
             #endif
 
-        #endif
-
-
-        // Fade directional shadow at the far distance
-        #if LIGHT{i}TYPE == DIRECTIONAL
-            shadowCoord = fadeShadow(shadowCoord, uniform.light{i}_shadowCascadeDistances);
         #endif
 
         // ----- sample the shadow -----
@@ -95,11 +110,11 @@ export default /* wgsl */`
         #if LIGHT{i}TYPE == DIRECTIONAL // ----- directional light -----
 
             #if LIGHT{i}SHADOWTYPE == VSM_16F
-                return getShadowVSM16(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, 5.54);
+                return getShadowVSM16(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, VSM_EXPONENT_16F);
             #endif
 
             #if LIGHT{i}SHADOWTYPE == VSM_32F
-                return getShadowVSM32(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, 15.0);
+                return getShadowVSM32(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, VSM_EXPONENT_32F);
             #endif
 
             #if LIGHT{i}SHADOWTYPE == PCSS_32F
@@ -108,11 +123,11 @@ export default /* wgsl */`
                     let shadowSearchArea = vec2f(length(uniform.light{i}_halfWidth), length(uniform.light{i}_halfHeight)) * uniform.light{i}_shadowSearchArea;
                     return getShadowPCSS(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, uniform.light{i}_cameraParams, shadowSearchArea, lightDirW_in);
                 #else
-                    // override the ortho radius with the radius of the cascade this fragment samples
+                    // Use the camera fitting stored with the cascade this fragment samples.
                     var pcssCameraParams: vec4f = uniform.light{i}_cameraParams;
                     #ifdef LIGHT{i}_SHADOW_CASCADES
-                        var cascadeRadii: vec4f = uniform.light{i}_shadowCascadeRadii;
-                        pcssCameraParams.x = cascadeRadii[cascadeIndex];
+                        var cascadeParams: mat4x4f = uniform.light{i}_shadowCascadeParams;
+                        pcssCameraParams = cascadeParams[cascadeIndex];
                     #endif
                     return getShadowPCSS(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, pcssCameraParams, uniform.light{i}_softShadowParams, lightDirW_in);
                 #endif
@@ -137,11 +152,11 @@ export default /* wgsl */`
         #if LIGHT{i}TYPE == SPOT // ----- spot light -----
 
             #if LIGHT{i}SHADOWTYPE == VSM_16F
-                return getShadowSpotVSM16(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, 5.54, lightDirW_in);
+                return getShadowSpotVSM16(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, VSM_EXPONENT_16F, lightDirW_in);
             #endif
 
             #if LIGHT{i}SHADOWTYPE == VSM_32F
-                return getShadowSpotVSM32(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, 15.0, lightDirW_in);
+                return getShadowSpotVSM32(light{i}_shadowMap, light{i}_shadowMapSampler, shadowCoord, uniform.light{i}_shadowParams, VSM_EXPONENT_32F, lightDirW_in);
             #endif
 
             #if LIGHT{i}SHADOWTYPE == PCSS_32F

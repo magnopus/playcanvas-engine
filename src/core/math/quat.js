@@ -10,37 +10,30 @@ import { Vec3 } from './vec3.js';
  * rotations in 3D applications, offering advantages over Euler angles including no gimbal lock and
  * more efficient interpolation.
  *
+ * A new Quat is the identity rotation. Build a rotation with {@link setFromEulerAngles},
+ * {@link setFromAxisAngle}, {@link setFromDirections} or {@link setFromMat4}, and read one back
+ * with {@link getEulerAngles} or {@link getAxisAngle}. Angles are in degrees throughout. Rotations
+ * combine by multiplication: `a.mul(b)` and `r.mul2(a, b)` both compute `a * b`, the same product
+ * {@link Mat4} uses, and {@link transformVector} applies a rotation to a {@link Vec3}. Interpolate
+ * with {@link slerp} for constant angular speed, or with the cheaper {@link lerp} when the two
+ * rotations are close together.
+ *
+ * Methods modify the quaternion they are called on and return it for chaining. Use {@link clone}
+ * for an independent copy and {@link copy} to overwrite. The static constants {@link IDENTITY} and
+ * {@link ZERO} are frozen shared instances, and the quaternion returned by
+ * {@link GraphNode#getRotation} is internal storage to be treated as read-only.
+ *
+ * @example
+ * // Rotate an entity 90 degrees about the world Y axis
+ * const rotation = new Quat().setFromAxisAngle(Vec3.UP, 90);
+ * entity.setRotation(rotation);
+ * @example
+ * // Turn smoothly towards a target orientation each frame
+ * const smoothed = new Quat().slerp(entity.getRotation(), targetRotation, 0.1);
+ * entity.setRotation(smoothed);
  * @category Math
  */
 class Quat {
-    /**
-     * The x component of the quaternion.
-     *
-     * @type {number}
-     */
-    x;
-
-    /**
-     * The y component of the quaternion.
-     *
-     * @type {number}
-     */
-    y;
-
-    /**
-     * The z component of the quaternion.
-     *
-     * @type {number}
-     */
-    z;
-
-    /**
-     * The w component of the quaternion.
-     *
-     * @type {number}
-     */
-    w;
-
     /**
      * Creates a new Quat instance.
      *
@@ -70,16 +63,43 @@ class Quat {
      */
     constructor(x = 0, y = 0, z = 0, w = 1) {
         if (x.length === 4) {
-            this.x = x[0];
-            this.y = x[1];
-            this.z = x[2];
-            this.w = x[3];
-        } else {
-            this.x = x;
-            this.y = y;
-            this.z = z;
-            this.w = w;
+            w = x[3];
+            z = x[2];
+            y = x[1];
+            x = x[0];
         }
+
+        // Fields are assigned once here instead of declared as class fields. A declaration without
+        // an initializer stores undefined first, so V8 never unboxes the field as a double and
+        // every fractional write allocates a heap number.
+
+        /**
+         * The x component of the quaternion.
+         *
+         * @type {number}
+         */
+        this.x = x;
+
+        /**
+         * The y component of the quaternion.
+         *
+         * @type {number}
+         */
+        this.y = y;
+
+        /**
+         * The z component of the quaternion.
+         *
+         * @type {number}
+         */
+        this.z = z;
+
+        /**
+         * The w component of the quaternion.
+         *
+         * @type {number}
+         */
+        this.w = w;
     }
 
     /**

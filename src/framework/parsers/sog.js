@@ -162,20 +162,26 @@ class SogParser {
         const gsplatCentersEnabledAtLoad = this.app.scene?.gsplatCentersEnabled !== false;
 
         // transform meta to latest shape
-        if (meta.version !== 2) {
+        if (meta.version === undefined) {
             Debug.deprecated('Loading SOG v1 data which is deprecated. Please recompress your scene with latest tools.');
             meta = upgradeMeta(meta);
+        } else if (meta.version !== 2 && meta.version !== 3) {
+            callback(`Error loading gsplat: unsupported SOG version ${meta.version} in ${url.original}`);
+            return;
         }
 
         const { assets } = this.app;
 
-        const subs = ['means', 'quats', 'scales', 'sh0', 'shN'];
+        // v3 has no quats texture (the rotation lives in the alpha channels of means_l, means_u
+        // and scales) and may carry per-gaussian blind data
+        const subs = ['means', 'quats', 'scales', 'sh0', 'shN', 'blind'];
 
         const textures = {};
         const promises = [];
 
         subs.forEach((sub) => {
-            const files = meta[sub]?.files ?? [];
+            // blind is a list of textures, each with its own file
+            const files = sub === 'blind' ? (meta.blind ?? []).map(t => t.files[0]) : (meta[sub]?.files ?? []);
             textures[sub] = files.map((filename) => {
                 // magnopus patched
                 const resolved = this._resolveTextureUrl(filename, url, asset);
@@ -186,7 +192,7 @@ class SogParser {
                 }, {
                     mipmaps: false
                 }, {
-                    crossOrigin: asset.options?.crossOrigin ?? 'anonymous' // Magnopus patched - add crossOrigin opts check
+                    crossOrigin: 'anonymous'
                 });
 
                 const promise = new Promise((resolve, reject) => {
@@ -239,7 +245,7 @@ class SogParser {
         textureAssets.forEach(t => assets.load(t));
 
         // wait for all textures to complete loading
-        await Promise.allSettled(promises);
+        const results = await Promise.allSettled(promises);
 
         if (this._shouldAbort(asset, unloaded)) {
             // Clean up texture assets that were created during the async load
@@ -251,6 +257,17 @@ class SogParser {
             return;
         }
 
+        // a texture that failed to load has no resource, so fail the whole load
+        const failed = results.findIndex(r => r.status === 'rejected');
+        if (failed !== -1) {
+            textureAssets.forEach((t) => {
+                assets.remove(t);
+                t.unload();
+            });
+            callback(`Error loading gsplat: failed to load ${textureAssets[failed].file.filename} in ${url.original}: ${results[failed].reason}`);
+            return;
+        }
+
         // construct the gsplat resource
         const data = new GSplatSogData();
         data.url = url.original;
@@ -258,11 +275,12 @@ class SogParser {
         data.numSplats = meta.count;
         data.means_l = textures.means[0].resource;
         data.means_u = textures.means[1].resource;
-        data.quats = textures.quats[0].resource;
+        data.quats = textures.quats[0]?.resource ?? null;
         data.scales = textures.scales[0].resource;
         data.sh0 = textures.sh0[0].resource;
         data.sh_centroids = textures.shN?.[0]?.resource;
         data.sh_labels = textures.shN?.[1]?.resource;
+        data.blind = textures.blind.map(t => t.resource);
         data.shBands = GSplatSogData.calcBands(data.sh_centroids?.width);
 
         const decompress = asset.data?.decompress;
@@ -277,7 +295,13 @@ class SogParser {
             // no need to prepare gpu data if decompressing
             data.prepareCodebook();
             if (gsplatCentersEnabledAtLoad) {
-                await data.prepareGpuData();
+                // An unload must cancel preparation even if the device never recovers.
+                const onUnload = asset.once('unload', () => data.destroy());
+                try {
+                    await data.prepareGpuData();
+                } finally {
+                    onUnload.off();
+                }
             }
         }
 
@@ -291,6 +315,7 @@ class SogParser {
         const resource = decompress ?
             new GSplatResource(this.app.graphicsDevice, await data.decompress(), { prepareCenters }) :
             new GSplatSogResource(this.app.graphicsDevice, data, { prepareCenters });
+        resource.antiAlias = data.meta.model === 'antialiased';
 
         // the sog resource now owns the textures in `data` (when decompressing, the decompressed
         // data was copied out instead and the textures stay with the texture assets)
@@ -314,9 +339,14 @@ class SogParser {
      * @param {Asset} asset - Container asset.
      */
     load(url, callback, asset) {
+        // report a throw as a load error instead of leaving the asset loading forever
+        const loadTextures = (meta) => {
+            this.loadTextures(url, callback, asset, meta).catch(err => callback(`Error loading gsplat: ${url.original} [${err}]`));
+        };
+
         if (asset.data?.means) {
             // user can specify meta.json in asset data
-            this.loadTextures(url, callback, asset, asset.data);
+            loadTextures(asset.data);
         } else {
             // otherwise download meta.json using asset url
             if (typeof url === 'string') {
@@ -330,9 +360,7 @@ class SogParser {
             const options = {
                 retry: this.handler.maxRetries > 0,
                 maxRetries: this.handler.maxRetries,
-                responseType: Http.ResponseType.JSON,
-                // Magnopus patched - add withCredentials option
-                withCredentials: asset?.options?.crossOrigin === 'use-credentials'
+                responseType: Http.ResponseType.JSON
             };
 
             http.get(url.load, options, (err, meta) => {
@@ -342,7 +370,7 @@ class SogParser {
                 }
 
                 if (!err) {
-                    this.loadTextures(url, callback, asset, meta);
+                    loadTextures(meta);
                 } else {
                     callback(`Error loading gsplat meta: ${url.original} [${err}]`);
                 }

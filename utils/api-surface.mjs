@@ -1,4 +1,4 @@
-// Serialises a TypeDoc JSON model (`typedoc --json`) into a stable, sorted, full-signature text
+// Serializes a TypeDoc JSON model (`typedoc --json`) into a stable, sorted, full-signature text
 // view of the public API. Because it consumes TypeDoc's model, it inherits the docs' public-API
 // rules (excludeNotDocumented, @ignore, @private, the custom typedoc plugin) — so internal/ignored
 // symbols are absent. `@protected` members are dropped here as well, see member().
@@ -6,7 +6,7 @@
 
 import { readFileSync } from 'node:fs';
 
-// TypeDoc ReflectionKind values we serialise at the top level
+// TypeDoc ReflectionKind values we serialize at the top level
 const NAMESPACE = 4, ENUM = 8, VARIABLE = 32, FUNCTION = 64, CLASS = 128, INTERFACE = 256;
 const CONSTRUCTOR = 512, PROPERTY = 1024, METHOD = 2048, ACCESSOR = 262144, TYPE_ALIAS = 2097152;
 const TOP = [NAMESPACE, ENUM, VARIABLE, FUNCTION, CLASS, INTERFACE, TYPE_ALIAS];
@@ -19,8 +19,14 @@ function typeStr(t) {
         case 'intrinsic': return t.name;
         case 'literal': return typeof t.value === 'string' ? JSON.stringify(t.value) : `${t.value}`;
         case 'reference': return t.name + (t.typeArguments?.length ? `<${t.typeArguments.map(typeStr).join(', ')}>` : '');
-        case 'array': return `${typeStr(t.elementType)}[]`;
-        case 'union': return t.types.map(typeStr).join(' | ');
+        case 'array': {
+            const el = typeStr(t.elementType);
+            return ['union', 'intersection'].includes(t.elementType?.type) ? `(${el})[]` : `${el}[]`;
+        }
+        // TypeScript orders union members by internal type id, which depends on the order it first
+        // meets each type in the whole program, so an unrelated change can reorder them. Sort them
+        // to keep the surface stable.
+        case 'union': return t.types.map(typeStr).sort().join(' | ');
         case 'intersection': return t.types.map(typeStr).join(' & ');
         case 'tuple': return `[${(t.elements || []).map(typeStr).join(', ')}]`;
         case 'query': return `typeof ${typeStr(t.queryType)}`;

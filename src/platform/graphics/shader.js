@@ -6,6 +6,9 @@ import { SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from './constants.js';
 import { DebugGraphics } from './debug-graphics.js';
 import { ShaderDefinitionUtils } from './shader-definition-utils.js';
 import halfTypes from './shader-chunks/frag/half-types.js';
+import dispatchThreadsCS from './shader-chunks/compute/dispatch-threads.js';
+import sceneColorCS from './shader-chunks/compute/scene-color.js';
+import sceneDepthCS from './shader-chunks/compute/scene-depth.js';
 
 /**
  * @import { BindGroupFormat } from './bind-group-format.js'
@@ -28,12 +31,31 @@ let id = 0;
  */
 class Shader {
     /**
+     * The definition of a compute shader as supplied, before its source is pre-processed, or null
+     * for a vertex and fragment shader. Variants of the compute shader, compiled with additional
+     * defines, are created from it.
+     *
+     * @type {object|null}
+     * @ignore
+     */
+    computeDefinition = null;
+
+    /**
      * Format of the uniform buffer for mesh bind group.
      *
      * @type {UniformBufferFormat}
      * @ignore
      */
     meshUniformBufferFormat;
+
+    /**
+     * True when the mesh uniform buffer holds no uniforms of the shader, only a placeholder, as
+     * WebGPU requires the buffer bound. Its draws can share one buffer, bound once per pass.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    meshUniformBufferEmpty = false;
 
     /**
      * Format of the bind group for the mesh bind group.
@@ -44,6 +66,28 @@ class Shader {
     meshBindGroupFormat;
 
     /**
+     * Format of the view bind group when the shader reads textures the renderer supplies per pass
+     * in it, following the view uniform buffer, or null when the group holds only the view uniform
+     * buffer. The format is shared by all shaders reading the same textures, and is not owned by
+     * the shader.
+     *
+     * @type {BindGroupFormat|null}
+     * @ignore
+     */
+    viewBindGroupFormat = null;
+
+    /**
+     * True when the vertex shader reads the model and normal matrices of the mesh instance from the
+     * mesh instance storage of the device, see {@link GraphicsDevice#meshInstanceStorage}, indexed
+     * by the instance index. The draws of such a shader pass the slot of the mesh instance as the
+     * first instance.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    usesMeshInstanceStorage = false;
+
+    /**
      * The attributes that this shader code uses. The location is the key, the value is the name.
      * These attributes are queried / extracted from the final shader.
      *
@@ -51,6 +95,17 @@ class Shader {
      * @ignore
      */
     attributes = new Map();
+
+    // #if _DEBUG
+    /**
+     * Set by the shadow renderer once it has checked whether the shader reads the normal matrix,
+     * which the shadow pass does not supply. Debug builds only.
+     *
+     * @type {boolean}
+     * @private
+     */
+    _debugNormalMatrixChecked = false;
+    // #endif
 
     /**
      * Creates a new Shader instance.
@@ -153,6 +208,10 @@ class Shader {
             Debug.assert(graphicsDevice.supportsCompute, 'Compute shaders are not supported on this device.');
             Debug.assert(!definition.vshader && !definition.fshader, 'Vertex and fragment shaders are not supported when creating a compute shader.');
 
+            // the definition as supplied, before its source is pre-processed, which variants
+            // compiled with additional defines are created from
+            this.computeDefinition = { ...definition };
+
             // keep reference to unmodified shader in debug mode
             Debug.call(() => {
                 this.cUnmodified = definition.cshader;
@@ -164,11 +223,20 @@ class Shader {
 
             const cshader = enablesCode + definesCode + definition.cshader;
 
-            // Add built-in halfTypesCS include for compute shaders (if not already provided by
-            // user). Note this copies the supplied map, which must not be modified.
+            // Add the built-in includes for compute shaders (if not already provided by user). Note
+            // this copies the supplied map, which must not be modified.
             const cincludes = new Map(definition.cincludes);
             if (!cincludes.has('halfTypesCS')) {
                 cincludes.set('halfTypesCS', halfTypes);
+            }
+            if (!cincludes.has('sceneDepthCS')) {
+                cincludes.set('sceneDepthCS', sceneDepthCS);
+            }
+            if (!cincludes.has('sceneColorCS')) {
+                cincludes.set('sceneColorCS', sceneColorCS);
+            }
+            if (!cincludes.has('dispatchThreadsCS')) {
+                cincludes.set('dispatchThreadsCS', dispatchThreadsCS);
             }
 
             // pre-process compute shader source
@@ -221,6 +289,9 @@ class Shader {
 
         this.impl = graphicsDevice.createShaderImpl(this);
 
+        // add it to the device list of all shaders
+        graphicsDevice.shaders.push(this);
+
         Debug.trace(TRACEID_SHADER_ALLOC, `Alloc: ${this.label}, stack: ${DebugGraphics.toString()}`, {
             instance: this
         });
@@ -241,13 +312,31 @@ class Shader {
         return `Shader Id ${this.id} (${this.definition.shaderLanguage === SHADERLANGUAGE_WGSL ? 'WGSL' : 'GLSL'}) ${this.name}`;
     }
 
+    // #if _DEBUG
+    /**
+     * Whether the shader reads a uniform, for debug validation. On WebGL the active uniforms of the
+     * linked program, from which the driver strips the unused ones. On WebGPU the uniforms the
+     * shader declares, as WGSL is not reflected. Debug builds only.
+     *
+     * @param {string} name - The name of the uniform.
+     * @returns {boolean|null} Whether the shader reads the uniform, or null when that is not known,
+     * before the shader is ready or on a device without shader reflection.
+     * @ignore
+     */
+    debugReadsUniform(name) {
+        return this.ready ? (this.impl.debugReadsUniform?.(this, name) ?? null) : null;
+    }
+    // #endif
+
     /**
      * Frees resources associated with this shader.
      */
     destroy() {
         Debug.trace(TRACEID_SHADER_ALLOC, `DeAlloc: Id ${this.id} ${this.name}`);
         this.device.onDestroyShader(this);
-        this.impl.destroy(this);
+
+        // a shader that failed to preprocess has no implementation
+        this.impl?.destroy(this);
     }
 
     /**

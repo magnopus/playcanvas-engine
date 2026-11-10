@@ -122,6 +122,13 @@ class GeometryVertexStream {
  * {@link IndexBuffer}. It also contains a primitive definition which controls the type of the
  * primitive and the portion of the vertex or index buffer to use.
  *
+ * A mesh holds geometry only. To draw it, pair it with a {@link Material} in a {@link MeshInstance}
+ * and give that instance to a {@link RenderComponent} or a {@link Layer}; one mesh can back any
+ * number of instances. {@link Mesh.fromGeometry} builds a mesh from a {@link Geometry} such as
+ * {@link BoxGeometry} in one call. Meshes are reference counted: every {@link MeshInstance} holds
+ * a reference to its mesh, so call {@link destroy} on a mesh you created only once no instance
+ * uses it.
+ *
  * ## Mesh APIs
  * There are two ways a mesh can be generated or updated.
  *
@@ -894,6 +901,11 @@ class Mesh extends RefCountedObject {
      * Applies any changes to vertex stream and indices to mesh. This allocates or reallocates
      * {@link vertexBuffer} or {@link indexBuffer} to fit all provided vertices and indices, and
      * fills them with data.
+     *
+     * A {@link MeshInstance} sets up its shaders for the vertex streams its mesh has when the mesh
+     * is assigned to it. If an update adds or removes a vertex stream of a mesh already assigned to
+     * mesh instances, such as texture coordinates, colors or tangents, assign the mesh to them
+     * again (`meshInstance.mesh = mesh`) so that their shaders use the new streams.
      *
      * @param {number} [primitiveType] - The type of primitive to render. Can be:
      *

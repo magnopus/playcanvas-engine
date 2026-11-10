@@ -1,3 +1,4 @@
+import { GSplatLcc2Parser } from '../parsers/gsplat-lcc2.js';
 import { GSplatOctreeParser } from '../parsers/gsplat-octree.js';
 import { PlyParser } from '../parsers/ply.js';
 import { SogBundleParser } from '../parsers/sog-bundle.js';
@@ -8,6 +9,15 @@ import { ResourceHandler } from './handler.js';
  * @import { AppBase } from '../app-base.js'
  */
 
+/**
+ * Resource handler for the `gsplat` asset type. Loads Gaussian splat scenes from PLY files, SOG
+ * files and SOG bundles, and level-of-detail scenes from their octree metadata or XGRIDS LCC2
+ * files, into a Gaussian splat resource. SPZ files are supported once the `SpzParser` shipped
+ * in `playcanvas/scripts/esm/parsers/spz-parser.mjs` is registered with
+ * {@link ResourceHandler#addParser}.
+ *
+ * @category Asset
+ */
 class GSplatHandler extends ResourceHandler {
     /**
      * Create a new GSplatHandler instance.
@@ -26,6 +36,7 @@ class GSplatHandler extends ResourceHandler {
         this.addParser(new SogBundleParser(app));       // .sog bundle
         this.addParser(new SogParser(app));             // .json (SOG meta)
         this.addParser(new GSplatOctreeParser(app));    // lod-meta.json
+        this.addParser(new GSplatLcc2Parser(app));      // .lcc2
     }
 }
 

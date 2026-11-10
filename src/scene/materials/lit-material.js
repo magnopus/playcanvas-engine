@@ -6,6 +6,7 @@ import { LitMaterialOptionsBuilder } from './lit-material-options-builder.js';
 import { getProgramLibrary } from '../shader-lib/get-program-library.js';
 import { lit } from '../shader-lib/programs/lit.js';
 import { ShaderUtils } from '../shader-lib/shader-utils.js';
+import { getViewTextures } from '../renderer/view-textures.js';
 
 const options = new LitMaterialOptions();
 
@@ -20,6 +21,9 @@ const options = new LitMaterialOptions();
  * @ignore
  */
 class LitMaterial extends Material {
+    /** @ignore */
+    _usesViewTextures = true;
+
     usedUvs = [true];
 
     shaderChunkGLSL = null;
@@ -71,6 +75,8 @@ class LitMaterial extends Material {
 
     hasLighting = false;
 
+    dirLightMap = false;
+
     hasHeights = false;
 
     hasNormals = false;
@@ -79,13 +85,31 @@ class LitMaterial extends Material {
 
     hasRefraction = false;
 
-    hasIrridescence = false;
+    hasDispersion = false;
+
+    hasIridescence = false;
+
+    hasDiffuseTransmission = false;
 
     hasMetalness = false;
 
     hasClearCoat = false;
 
     hasClearCoatNormals = false;
+
+    /** @ignore */
+    updateUniforms(device, scene) {
+        super.updateUniforms(device, scene);
+
+        // a uniform, the shader always contains both ways of applying the ambient occlusion
+        this.setParameter('material_occludeDirect', this.occludeDirect ? 1 : 0);
+
+        // a uniform, the shader always contains the flip of the normals of the back faces
+        this.setParameter('material_twoSidedLighting', this.twoSidedLighting ? 1 : 0);
+
+        // a uniform, the shader always applies the intensity of the specular occlusion
+        this.setParameter('material_occludeSpecularIntensity', this.occludeSpecularIntensity);
+    }
 
     /** @ignore */
     getShaderVariant(params) {
@@ -95,8 +119,8 @@ class LitMaterial extends Material {
         options.shaderChunkWGSL = this.shaderChunkWGSL;
         options.defines = ShaderUtils.getCoreDefines(this, params);
 
-        LitMaterialOptionsBuilder.update(options.litOptions, this, params.scene, params.cameraShaderParams, params.objDefs, params.pass, params.sortedLights);
-        const processingOptions = new ShaderProcessorOptions(params.viewUniformFormat, params.vertexFormat);
+        LitMaterialOptionsBuilder.update(options.litOptions, this, params.scene, params.cameraShaderParams, params.objDefs, params.pass, params.lightList);
+        const processingOptions = new ShaderProcessorOptions(params.viewUniformFormat, params.vertexFormat, getViewTextures(params.viewUniformFormat));
         const library = getProgramLibrary(params.device);
         library.register('lit', lit);
         const shader = library.getProgram('lit', options, processingOptions, this.userId);

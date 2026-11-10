@@ -8,11 +8,12 @@ import { DebugGraphics } from '../../platform/graphics/debug-graphics.js';
 import { PIXELFORMAT_RGBA32U } from '../../platform/graphics/constants.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { TextureUtils } from '../../platform/graphics/texture-utils.js';
+import { PROJECTION_ORTHOGRAPHIC } from '../constants.js';
+import { lodDebugColorIndex } from './gsplat-lod-colors.js';
 
 /**
  * @import { GSplatInfo } from './gsplat-info.js'
  * @import { GraphNode } from '../graph-node.js'
- * @import { RenderTarget } from '../../platform/graphics/render-target.js'
  * @import { GSplatWorkBuffer } from './gsplat-work-buffer.js'
  */
 
@@ -101,17 +102,6 @@ class GSplatWorkBufferRenderPass extends RenderPass {
         this.splats.length = 0;
         this._subDrawTexture.destroy();
         super.destroy();
-    }
-
-    /**
-     * Initialize the render pass with the specified render target.
-     *
-     * @param {RenderTarget} renderTarget - The target to render to.
-     */
-    init(renderTarget) {
-        super.init(renderTarget);
-        this.colorOps.clear = false;
-        this.depthStencilOps.clearDepth = false;
     }
 
     /**
@@ -221,6 +211,10 @@ class GSplatWorkBufferRenderPass extends RenderPass {
         const viewMat = _viewMat.copy(viewInvMat).invert();
         device.scope.resolve('matrix_view').setValue(viewMat.data);
 
+        // spherical harmonics are evaluated along the camera forward for orthographic cameras
+        const ortho = cameraNode.camera.projection === PROJECTION_ORTHOGRAPHIC;
+        device.scope.resolve('uCameraOrtho').setValue(ortho ? 1 : 0);
+
         // work-buffer-sourced geometry inputs for color-only (SH) updates. These are consumed
         // only by shaders compiled with GSPLAT_WORKBUFFER_GEOMETRY, so skip the setup unless a
         // splat in this pass opts in (see GSplatResourceBase#supportsWorkBufferGeometry).
@@ -274,19 +268,19 @@ class GSplatWorkBufferRenderPass extends RenderPass {
         const formatDeclarations = resource.format.getInputDeclarations();
 
         // quad renderer and material are cached in the resource
-        const workBufferRenderInfo = resource.getWorkBufferRenderInfo(
+        const workBufferRenderInfo = this.workBuffer.getRenderInfo(
+            resource,
             this.colorOnly,
             workBufferModifier,
             formatHash,
-            formatDeclarations,
-            this.workBuffer.format
+            formatDeclarations
         );
 
         // Assign material properties to scope
         workBufferRenderInfo.material.setParameters(device);
 
-        // Colorize by LOD using provided colors; use index 0 as fallback for non-LOD splats
-        const color = this.colorsByLod?.[splatInfo.lodIndex] ?? this.colorsByLod?.[0] ?? _whiteColor;
+        // Colorize by LOD using provided colors; levels past the palette share its last color
+        const color = this.colorsByLod?.[lodDebugColorIndex(splatInfo.lodIndex)] ?? _whiteColor;
         scope.resolve('uColorMultiply').setValue(color);
 
         // Decompose model matrix into scale and rotation
@@ -321,6 +315,9 @@ class GSplatWorkBufferRenderPass extends RenderPass {
 
         // Set placement ID for picking (unconditionally - cheap even if shader doesn't use it)
         scope.resolve('uId').setValue(splatInfo.placementId);
+
+        // anti-aliasing flag, stored per splat by writeSplat
+        scope.resolve('uAntiAlias').setValue(resource.antiAlias ? 1 : 0);
 
         // Apply per-instance shader parameters
         if (splatInfo.parameters) {

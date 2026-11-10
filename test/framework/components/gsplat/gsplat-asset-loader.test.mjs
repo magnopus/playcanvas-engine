@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { restore, spy } from 'sinon';
+import { restore, spy, stub } from 'sinon';
 
 import { GSplatAssetLoader } from '../../../../src/framework/components/gsplat/gsplat-asset-loader.js';
 
@@ -41,7 +41,7 @@ describe('GSplatAssetLoader', function () {
         return loader._urlToAsset.get(url);
     };
 
-    // Simulates a load that was cancelled mid-flight (e.g. LOD moved on) and resolved via the
+    // Simulates a load that was canceled mid-flight (e.g. LOD moved on) and resolved via the
     // success callback with no resource, as opposed to a genuine error.
     const resolveAsCancelledWithNoResource = () => {
         const asset = lastAsset();
@@ -101,7 +101,25 @@ describe('GSplatAssetLoader', function () {
             expect(loader._urlToAsset.size).to.equal(1);
         });
 
-        it('retries indefinitely when a previous load was cancelled with no resource', function () {
+        it('keeps the originalUrl of a { url, originalUrl } request that waits in the queue', function () {
+            loader.maxConcurrentLoads = 1;
+            const request = {
+                url: 'http://example.com/detail/abc',
+                originalUrl: 'http://example.com/package/chunk.json'
+            };
+
+            loader.load('http://example.com/busy.json');
+            loader.load(request);
+            expect(loader._loadQueue.has(request.url)).to.equal(true);
+
+            loader.maxConcurrentLoads = 2;
+            loader._processQueue();
+
+            expect(loader._urlToAsset.get(request.url)?.file.originalUrl).to.equal(request.originalUrl);
+            expect(loader._originalUrls.size).to.equal(0);
+        });
+
+        it('retries indefinitely when a previous load was canceled with no resource', function () {
             const url = 'http://example.com/chunk.json';
 
             loader.load(url);
@@ -175,9 +193,91 @@ describe('GSplatAssetLoader', function () {
 
     });
 
+    describe('load priority', function () {
+
+        // records the order loads start in, which the plain registry stub does not
+        const trackStarts = () => {
+            const started = [];
+            registry.load = (asset) => {
+                loadCalls++;
+                started.push(asset.file.url);
+            };
+            return started;
+        };
+
+        const resolve = (url) => {
+            const asset = loader._urlToAsset.get(url);
+            asset.loading = false;
+            asset.loaded = true;
+            asset.resource = { ok: true };
+            asset.fire('load', asset);
+        };
+
+        it('starts queued loads highest priority first, equal priorities in request order', function () {
+            const started = trackStarts();
+            loader.maxConcurrentLoads = 1;
+
+            loader.load('busy', 0);
+            loader.load('low', 1);
+            loader.load('high', 5);
+            loader.load('mid-a', 3);
+            loader.load('mid-b', 3);
+
+            for (const url of ['busy', 'high', 'mid-a', 'mid-b']) {
+                resolve(url);
+            }
+            expect(started).to.deep.equal(['busy', 'high', 'mid-a', 'mid-b', 'low']);
+        });
+
+        it('updates the priority of a queued load, and keeps it when re-requested without one', function () {
+            const started = trackStarts();
+            loader.maxConcurrentLoads = 1;
+
+            loader.load('busy', 0);
+            loader.load('a', 1);
+            loader.load('b', 2);
+
+            // a now outranks b, and a poll without a priority must not reset it
+            loader.load('a', 10);
+            loader.load('a');
+
+            resolve('busy');
+            expect(started).to.deep.equal(['busy', 'a']);
+        });
+
+        it('always starts a queued load, even from priorities that do not compare', function () {
+            const started = trackStarts();
+            stub(console, 'error');
+            loader.maxConcurrentLoads = 1;
+
+            loader.load('busy', 0);
+            loader.load('a', NaN);
+            loader.load('b', NaN);
+
+            resolve('busy');
+            resolve('a');
+            expect(started).to.deep.equal(['busy', 'a', 'b']);
+            expect(loader._loadQueue.size).to.equal(0);
+        });
+
+        it('dequeues only loads that have not started', function () {
+            loader.maxConcurrentLoads = 1;
+
+            loader.load('busy', 0);
+            loader.load('waiting', 1);
+
+            expect(loader.dequeue('busy')).to.equal(false);
+            expect(loader.dequeue('waiting')).to.equal(true);
+            expect(loader.dequeue('waiting')).to.equal(false);
+            expect(loader._currentlyLoading.has('busy')).to.equal(true);
+            expect(loader._loadQueue.size).to.equal(0);
+        });
+
+    });
+
     describe('#hasFailed', function () {
 
-        it('returns false while a load is in progress, cancelled, or never attempted', function () {
+        it('returns false while a load is in progress, canceled, or never attempted', function () {
             const url = 'http://example.com/chunk.json';
             expect(loader.hasFailed(url)).to.equal(false);
 
@@ -211,7 +311,7 @@ describe('GSplatAssetLoader', function () {
 
     describe('cancellation while in flight', function () {
 
-        it('does not warn or error when a load is cancelled before it resolves (routine LOD churn)', function () {
+        it('does not warn or error when a load is canceled before it resolves (routine LOD churn)', function () {
             const url = 'http://example.com/chunk.json';
             const warnSpy = spy(console, 'warn');
             const errorSpy = spy(console, 'error');
@@ -234,7 +334,7 @@ describe('GSplatAssetLoader', function () {
             expect(loader.hasFailed(url)).to.equal(false);
 
             // A later re-request (e.g. the camera swings back) starts a fresh attempt rather
-            // than being blocked by residual state from the cancelled one.
+            // than being blocked by residual state from the canceled one.
             loader.load(url);
             expect(loadCalls).to.equal(2);
         });

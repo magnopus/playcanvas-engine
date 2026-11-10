@@ -1,6 +1,13 @@
 import { expect } from 'chai';
+import { restore, stub } from 'sinon';
 
+import { Color } from '../../../src/core/math/color.js';
+import {
+    KHR_materials_diffuse_transmission
+} from '../../../src/framework/parsers/glb/extensions/khr-materials-diffuse-transmission.js';
 import { GlbParser } from '../../../src/framework/parsers/glb-parser.js';
+import { Texture } from '../../../src/platform/graphics/texture.js';
+import { StandardMaterial } from '../../../src/scene/materials/standard-material.js';
 import { createApp } from '../../app.mjs';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
@@ -14,22 +21,23 @@ describe('GlbParser', function () {
     });
 
     afterEach(function () {
+        restore();
         app?.destroy();
         app = null;
         jsdomTeardown();
     });
 
-    const parseMaterial = (occlusionTexture) => {
+    const parseMaterial = (occlusionTexture, extensions) => {
         const gltf = {
             asset: { version: '2.0' },
             scenes: [],
             nodes: [],
-            materials: [{ occlusionTexture }]
+            materials: [{ occlusionTexture, extensions }]
         };
         const data = new TextEncoder().encode(JSON.stringify(gltf));
 
         return new Promise((resolve, reject) => {
-            GlbParser.parse('material.gltf', '', data, app.graphicsDevice, app.assets, {}, (err, result) => {
+            GlbParser.parse('material.gltf', '', '', data, app.graphicsDevice, app.assets, {}, [], (err, result) => {
                 if (err) {
                     reject(err);
                 } else {
@@ -91,7 +99,7 @@ describe('GlbParser', function () {
 
         try {
             const result = await new Promise((resolve, reject) => {
-                GlbParser.parse('components.gltf', '', data, app.graphicsDevice, app.assets, {}, (err, result) => {
+                GlbParser.parse('components.gltf', '', '', data, app.graphicsDevice, app.assets, {}, [], (err, result) => {
                     if (err) reject(err);
                     else resolve(result);
                 });
@@ -107,6 +115,93 @@ describe('GlbParser', function () {
         } finally {
             app2.destroy();
         }
+    });
+
+    describe('KHR_materials_diffuse_transmission', function () {
+
+        const parseExtension = (extension) => {
+            return parseMaterial(undefined, { KHR_materials_diffuse_transmission: extension });
+        };
+
+        it('imports the transmission and its color, which is converted to sRGB', async function () {
+            const material = await parseExtension({
+                diffuseTransmissionFactor: 0.25,
+                diffuseTransmissionColorFactor: [1, 0.5, 0.25]
+            });
+
+            expect(material.diffuseTransmission).to.equal(0.25);
+            const expected = new Color(1, 0.5, 0.25).gamma();
+            expect(material.diffuseTransmissionColor.r).to.be.closeTo(expected.r, 1e-6);
+            expect(material.diffuseTransmissionColor.g).to.be.closeTo(expected.g, 1e-6);
+            expect(material.diffuseTransmissionColor.b).to.be.closeTo(expected.b, 1e-6);
+        });
+
+        it('uses the defaults of the extension for the values it omits', async function () {
+            const material = await parseExtension({});
+
+            expect(material.diffuseTransmission).to.equal(0);
+            expect(material.diffuseTransmissionColor.equals(Color.WHITE)).to.equal(true);
+        });
+
+        it('reads the transmission from the alpha channel of its texture', function () {
+            const material = new StandardMaterial();
+            const textures = [new Texture(app.graphicsDevice), new Texture(app.graphicsDevice)];
+            KHR_materials_diffuse_transmission.apply({
+                diffuseTransmissionFactor: 1,
+                diffuseTransmissionTexture: { index: 0, texCoord: 1 },
+                diffuseTransmissionColorTexture: {
+                    index: 1,
+                    extensions: { KHR_texture_transform: { scale: [2, 3] } }
+                }
+            }, material, textures);
+
+            expect(material.diffuseTransmissionMap).to.equal(textures[0]);
+            expect(material.diffuseTransmissionMapChannel).to.equal('a');
+            expect(material.diffuseTransmissionMapUv).to.equal(1);
+            expect(material.diffuseTransmissionColorMap).to.equal(textures[1]);
+            expect(material.diffuseTransmissionColorMapChannel).to.equal('rgb');
+            expect(material.diffuseTransmissionColorMapTiling.x).to.equal(2);
+            expect(material.diffuseTransmissionColorMapTiling.y).to.equal(3);
+        });
+
+        it('loads only the color texture as sRGB', function () {
+            const colorTexture = { index: 1 };
+            expect(KHR_materials_diffuse_transmission.getColorTextures({
+                diffuseTransmissionTexture: { index: 0 },
+                diffuseTransmissionColorTexture: colorTexture
+            })).to.deep.equal([colorTexture]);
+            expect(KHR_materials_diffuse_transmission.getColorTextures({
+                diffuseTransmissionTexture: { index: 0 }
+            })).to.deep.equal([]);
+        });
+    });
+
+    describe('KHR_materials_sheen', function () {
+
+        const parseExtension = (extension) => {
+            return parseMaterial(undefined, { KHR_materials_sheen: extension });
+        };
+
+        it('imports the sheen color factor in gamma space', async function () {
+            const material = await parseExtension({ sheenColorFactor: [0.5, 0.25, 1] });
+
+            expect(material.useSheen).to.equal(true);
+            expect(material.sheen).to.deep.equal(new Color(0.5, 0.25, 1).gamma());
+        });
+
+        it('defaults the sheen color to black when the sheen color factor is omitted', async function () {
+            const material = await parseExtension({ sheenRoughnessFactor: 0.5 });
+
+            expect(material.useSheen).to.equal(true);
+            expect(material.sheen).to.deep.equal(new Color(0, 0, 0));
+        });
+
+        it('defaults the sheen color to black when only a sheen color texture is given', async function () {
+            const material = await parseExtension({ sheenColorTexture: { index: 0 } });
+
+            // the factor multiplies the texture, so the texture alone gives no sheen
+            expect(material.sheen).to.deep.equal(new Color(0, 0, 0));
+        });
     });
 
     describe('flat shading of primitives without normals', function () {
@@ -134,9 +229,12 @@ describe('GlbParser', function () {
          * the glTF default.
          * @param {boolean} [options.material] - False to leave the primitive without a material of its
          * own. Defaults to true.
+         * @param {object} [options.extensions] - Extensions placed on the primitive.
+         * @param {object[]} [options.resourceExtensions] - Resource extensions registered with the
+         * parser.
          * @returns {Promise<object>} The parse result.
          */
-        const parsePrimitive = ({ normals = false, mode, material = true } = {}) => {
+        const parsePrimitive = ({ normals = false, mode, material = true, extensions, resourceExtensions = [] } = {}) => {
             const primitive = {
                 attributes: normals ? { POSITION: 0, NORMAL: 1 } : { POSITION: 0 },
                 indices: 2
@@ -146,6 +244,9 @@ describe('GlbParser', function () {
             }
             if (mode !== undefined) {
                 primitive.mode = mode;
+            }
+            if (extensions) {
+                primitive.extensions = extensions;
             }
 
             const gltf = {
@@ -169,7 +270,7 @@ describe('GlbParser', function () {
             const data = new TextEncoder().encode(JSON.stringify(gltf));
 
             return new Promise((resolve, reject) => {
-                GlbParser.parse('primitive.gltf', '', data, app.graphicsDevice, app.assets, {}, (err, result) => {
+                GlbParser.parse('primitive.gltf', '', '', data, app.graphicsDevice, app.assets, {}, resourceExtensions, (err, result) => {
                     if (err) reject(err);
                     else resolve(result);
                 });
@@ -212,6 +313,51 @@ describe('GlbParser', function () {
 
             expect(result.materials.length).to.equal(1);
             expect(result.materials[0].flatShading).to.equal(false);
+        });
+
+        it('uses the point mesh fallback when a primitive resource extension is not registered', async function () {
+            const result = await parsePrimitive({
+                mode: MODE_POINTS,
+                extensions: { TEST_points: {} }
+            });
+
+            expect(result.renders[0].meshes).to.have.lengthOf(1);
+            expect(result.testResources).to.be.undefined;
+        });
+
+        it('uses a registered primitive resource extension instead of the point mesh fallback', async function () {
+            const resource = {};
+            const extension = {
+                name: 'TEST_points',
+                resourceName: 'testResources',
+                handlesPrimitive: primitive => !!primitive.extensions?.TEST_points,
+                createResources: () => [[resource]]
+            };
+            const result = await parsePrimitive({
+                mode: MODE_POINTS,
+                extensions: { TEST_points: {} },
+                resourceExtensions: [extension]
+            });
+
+            expect(result.renders[0].meshes).to.be.empty;
+            expect(result.testResources).to.deep.equal([[resource]]);
+        });
+
+        it('asserts when a resource extension overwrites a core parse result member', async function () {
+            const error = stub(console, 'error');
+            const extension = {
+                name: 'TEST_collision',
+                resourceName: 'destroy',
+                handlesPrimitive: () => false,
+                createResources: () => []
+            };
+
+            await parsePrimitive({ resourceExtensions: [extension] });
+
+            expect(error.calledWith(
+                'ASSERT FAILED: ',
+                'GLB resource extension \'TEST_collision\' would overwrite \'destroy\''
+            )).to.equal(true);
         });
 
         it('builds a flat shaded default material for a primitive with no material of its own', async function () {

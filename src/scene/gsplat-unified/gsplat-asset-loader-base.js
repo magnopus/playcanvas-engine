@@ -1,8 +1,5 @@
 import { Debug } from '../../core/debug.js';
 
-// magnopus patched
-// GSplat asset load requests can carry both a final load URL and an original logical URL.
-
 /**
  * Base class for GSplat asset loaders. This provides the interface that all
  * GSplat asset loaders must implement.
@@ -16,11 +13,23 @@ class GSplatAssetLoaderBase {
      * the loading process.
      *
      * @param {string|{ url: string, originalUrl?: string }} url - The URL of the gsplat file to
-     * load.
+     * load, or a request with the load URL and the original (logical) URL it stands for. // magnopus patched
+     * @param {number} [priority] - Load priority, higher loads first. When omitted, a queued load
+     * keeps its current priority.
      * @abstract
      */
-    load(url) {
+    load(url, priority) {
         Debug.error('GSplatAssetLoaderBase#load: Not implemented');
+    }
+
+    /**
+     * Removes a load that has not started yet. Loaders without a queue have nothing to remove.
+     *
+     * @param {string} url - The URL of the gsplat file.
+     * @returns {boolean} True if a waiting load was removed.
+     */
+    dequeue(url) {
+        return false;
     }
 
     /**

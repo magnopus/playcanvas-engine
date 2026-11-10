@@ -1,5 +1,6 @@
 import { TRACEID_RENDER_QUEUE } from '../../../core/constants.js';
 import { Debug, DebugHelper } from '../../../core/debug.js';
+import { WebgpuDebug } from './webgpu-debug.js';
 
 /**
  * @import { WebgpuGraphicsDevice } from './webgpu-graphics-device.js'
@@ -42,6 +43,10 @@ class WebgpuBuffer {
 
     allocate(device, size) {
         Debug.assert(!this.buffer, 'Buffer already allocated');
+
+        WebgpuDebug.memory(device);
+        WebgpuDebug.validate(device);
+
         this.buffer = device.wgpu.createBuffer({
             size,
             usage: this.usageFlags
@@ -54,13 +59,18 @@ class WebgpuBuffer {
                         this.usageFlags & GPUBufferUsage.STORAGE ? 'StorageBuffer' :
                             ''
         );
+
+        WebgpuDebug.end(device, 'Buffer creation', { size, buffer: this });
+        WebgpuDebug.end(device, 'Buffer creation', { size, buffer: this });
     }
 
     /**
      * @param {WebgpuGraphicsDevice} device - Graphics device.
-     * @param {*} storage -
+     * @param {ArrayBuffer|ArrayBufferView} storage - CPU storage to upload.
+     * @param {number} [byteOffset] - Byte offset in both the storage and GPU buffer. Defaults to 0.
+     * @param {number} [byteLength] - Number of bytes to upload. Defaults to the remaining storage.
      */
-    unlock(device, storage) {
+    unlock(device, storage, byteOffset = 0, byteLength = storage.byteLength - byteOffset) {
 
         const wgpu = device.wgpu;
 
@@ -68,6 +78,10 @@ class WebgpuBuffer {
         // size of getMappedRange must be a multiple of 4
 
         if (!this.buffer) {
+            // Initialize all contents on first use, matching the WebGL allocation path.
+            byteOffset = 0;
+            byteLength = storage.byteLength;
+
             // size needs to be a multiple of 4
             // note: based on specs, descriptor.size must be a multiple of 4 if descriptor.mappedAtCreation is true
             const size = (storage.byteLength + 3) & ~3;
@@ -89,15 +103,21 @@ class WebgpuBuffer {
             // this.buffer.unmap();
         }
 
-        // src size needs to be a multiple of 4 as well
-        const srcOffset = storage.byteOffset ?? 0;
-        const srcData = new Uint8Array(storage.buffer ?? storage, srcOffset, storage.byteLength);
-        const data = new Uint8Array(this.buffer.size);
-        data.set(srcData);
-
         // copy data to the gpu buffer
         Debug.trace(TRACEID_RENDER_QUEUE, `writeBuffer: ${this.buffer.label}`);
-        wgpu.queue.writeBuffer(this.buffer, 0, data, 0, data.length);
+        const srcOffset = (storage.byteOffset ?? 0) + byteOffset;
+        const srcBuffer = storage.buffer ?? storage;
+        Debug.assert(byteOffset + byteLength <= this.buffer.size, 'Buffer data does not fit the allocated GPU buffer', this);
+
+        if ((byteLength & 3) !== 0 && byteOffset === 0 && byteLength === storage.byteLength) {
+            // Only full uploads can pad with zeros without overwriting live neighboring data.
+            const data = new Uint8Array((byteLength + 3) & ~3);
+            data.set(new Uint8Array(srcBuffer, srcOffset, byteLength));
+            wgpu.queue.writeBuffer(this.buffer, byteOffset, data, 0, data.length);
+        } else {
+            // Invalid internal partial uploads should fail WebGPU validation, not overwrite neighbors through padding.
+            wgpu.queue.writeBuffer(this.buffer, byteOffset, srcBuffer, srcOffset, byteLength);
+        }
     }
 
     read(device, offset, size, data, immediate) {
