@@ -611,6 +611,16 @@ class DynamicSkyEffect extends CameraFrameEffect {
     atlasSize = 512;
 
     /**
+     * Whether the lighting is assigned to {@link Scene#envAtlas}, where the materials read it. Turn
+     * it off when something else owns the environment lighting of the scene and takes the atlas
+     * from {@link DynamicSkyEffect#envAtlas} instead, for example a reflection probe system that
+     * copies it into its own texture. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    assignSceneLighting = true;
+
+    /**
      * The angle the sun moves by, in degrees, before the lighting is generated again - keeping the
      * cost of a day and night cycle down. Defaults to 0.5.
      *
@@ -868,6 +878,29 @@ class DynamicSkyEffect extends CameraFrameEffect {
      * @private
      */
     _envAtlas = null;
+
+    /**
+     * Incremented each time the content of the environment atlas of the lighting changes - when the
+     * lighting is generated, and on each frame of its blend when
+     * {@link DynamicSkyEffect#lightingInterpolation} is on. A consumer of the atlas that copies it,
+     * such as a reflection probe system, compares it with the value it last saw to know when to
+     * copy again.
+     *
+     * @type {number}
+     */
+    lightingVersion = 0;
+
+    /**
+     * The environment atlas the lighting is generated to, or null before it is first generated, or
+     * when {@link DynamicSkyEffect#lighting} is off. Its content is updated in place, see
+     * {@link DynamicSkyEffect#lightingVersion}, but the texture is replaced when its size
+     * changes.
+     *
+     * @type {Texture|null}
+     */
+    get envAtlas() {
+        return this._envAtlas;
+    }
 
     /**
      * With the lighting interpolated, the environment atlas the lighting is generated to, the one
@@ -1775,7 +1808,7 @@ class DynamicSkyEffect extends CameraFrameEffect {
         if (this.lighting) {
             this._createLightingTargets();
             const scene = this._scene ?? this.cameraFrame?.app.scene;
-            if (scene && scene.envAtlas !== this._envAtlas) {
+            if (scene && this.assignSceneLighting && scene.envAtlas !== this._envAtlas) {
                 scene.envAtlas = this._envAtlas;
                 this._scene = scene;
             }
@@ -2060,6 +2093,7 @@ class DynamicSkyEffect extends CameraFrameEffect {
         blendPass.shader = this._getBlendShader();
         blendPass.init(this._envAtlasTarget);
         blendPass.render();
+        this.lightingVersion++;
     }
 
     /**
@@ -2123,6 +2157,7 @@ class DynamicSkyEffect extends CameraFrameEffect {
         this._bakedSkyDir.copy(this._skyDir);
         this._bakedMoonDir.copy(this._moonWorldDir);
         this._bakedSettings.set(this._settings);
+        this.lightingVersion++;
     }
 }
 

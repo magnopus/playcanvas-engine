@@ -717,6 +717,34 @@ class ProceduralSky extends Script {
     /** @type {Texture|null} */
     _envAtlas = null;
 
+    /**
+     * Incremented each time the env-atlas is regenerated. The atlas is updated in place, so a
+     * consumer that copies it, such as a reflection probe system, compares this with the value it
+     * last saw to know when to copy again.
+     *
+     * @type {number}
+     */
+    lightingVersion = 0;
+
+    /**
+     * Whether the env-atlas is assigned to the scene (`scene.envAtlas`), where the materials read
+     * it. Turn it off when something else owns the environment lighting of the scene and takes the
+     * atlas from {@link ProceduralSky#envAtlas} instead, for example a reflection probe system that
+     * copies it into its own texture.
+     *
+     * @type {boolean}
+     */
+    assignSceneEnvAtlas = true;
+
+    /**
+     * The env-atlas the sky bakes its lighting to, or null before the first bake.
+     *
+     * @type {Texture|null}
+     */
+    get envAtlas() {
+        return this._envAtlas;
+    }
+
     /** @private */
     _origSkyboxGLSL = null;
 
@@ -904,9 +932,10 @@ class ProceduralSky extends Script {
 
         // assign once - later bakes reuse the same texture object, so materials pick up the new
         // content without recreating the sky mesh
-        if (firstBake) {
+        if (firstBake && this.assignSceneEnvAtlas) {
             this.app.scene.envAtlas = this._envAtlas;
         }
+        this.lightingVersion++;
     }
 
     /** @private */
