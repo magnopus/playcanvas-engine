@@ -4,7 +4,7 @@ import { TriData } from '../tri-data.js';
 import { Shape } from './shape.js';
 
 /** @import { ShapeArgs } from './shape.js' */
-/** @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js' */
+/** @import { AppBase } from '../../../framework/app-base.js' */
 
 const TORUS_RENDER_SEGMENTS = 80;
 const TORUS_INTERSECT_SEGMENTS = 20;
@@ -55,11 +55,11 @@ class ArcShape extends Shape {
     _triDataCache;
 
     /**
-     * @param {GraphicsDevice} device - The graphics device.
+     * @param {AppBase} app - The application the shape's entities belong to.
      * @param {ShapeArgs & ArcShapeArgs} args - The shape options.
      */
-    constructor(device, args = {}) {
-        super(device, 'disk', args);
+    constructor(app, args = {}) {
+        super(app, 'disk', args);
 
         this._tubeRadius = args.tubeRadius ?? this._tubeRadius;
         this._ringRadius = args.ringRadius ?? this._ringRadius;

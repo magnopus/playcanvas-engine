@@ -59,14 +59,14 @@ const GLANCE_EPSILON = 0.01;
  */
 class ScaleGizmo extends TransformGizmo {
     _shapes = {
-        xyz: new BoxShape(this._device, {
+        xyz: new BoxShape(this._app, {
             axis: 'xyz',
             layers: [this._layer.id],
             defaultColor: this._theme.shapeBase.xyz,
             hoverColor: this._theme.shapeHover.xyz,
             disabledColor: this._theme.disabled
         }),
-        yz: new PlaneShape(this._device, {
+        yz: new PlaneShape(this._app, {
             axis: 'x',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, -90),
@@ -75,7 +75,7 @@ class ScaleGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             depth: 1
         }),
-        xz: new PlaneShape(this._device, {
+        xz: new PlaneShape(this._app, {
             axis: 'y',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, 0),
@@ -84,7 +84,7 @@ class ScaleGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             depth: 1
         }),
-        xy: new PlaneShape(this._device, {
+        xy: new PlaneShape(this._app, {
             axis: 'z',
             layers: [this._layer.id],
             rotation: new Vec3(90, 0, 0),
@@ -93,7 +93,7 @@ class ScaleGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             depth: 1
         }),
-        x: new BoxLineShape(this._device, {
+        x: new BoxLineShape(this._app, {
             axis: 'x',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, -90),
@@ -101,7 +101,7 @@ class ScaleGizmo extends TransformGizmo {
             hoverColor: this._theme.shapeHover.x,
             disabledColor: this._theme.disabled
         }),
-        y: new BoxLineShape(this._device, {
+        y: new BoxLineShape(this._app, {
             axis: 'y',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, 0),
@@ -109,7 +109,7 @@ class ScaleGizmo extends TransformGizmo {
             hoverColor: this._theme.shapeHover.y,
             disabledColor: this._theme.disabled
         }),
-        z: new BoxLineShape(this._device, {
+        z: new BoxLineShape(this._app, {
             axis: 'z',
             layers: [this._layer.id],
             rotation: new Vec3(90, 0, 0),

@@ -4,7 +4,7 @@ import { TriData } from '../tri-data.js';
 import { Shape } from './shape.js';
 
 /** @import { ShapeArgs } from './shape.js' */
-/** @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js' */
+/** @import { AppBase } from '../../../framework/app-base.js' */
 
 /**
  * @typedef {object} SphereShapeArgs
@@ -23,11 +23,11 @@ class SphereShape extends Shape {
     /**
      * Create a new SphereShape.
      *
-     * @param {GraphicsDevice} device - The graphics device.
+     * @param {AppBase} app - The application the shape's entities belong to.
      * @param {ShapeArgs & SphereShapeArgs} args - The shape options.
      */
-    constructor(device, args = {}) {
-        super(device, 'sphereCenter', args);
+    constructor(app, args = {}) {
+        super(app, 'sphereCenter', args);
 
         this._radius = args.radius ?? this._radius;
 

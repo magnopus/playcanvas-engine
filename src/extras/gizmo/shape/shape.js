@@ -11,6 +11,7 @@ import { Geometry } from '../../../scene/geometry/geometry.js';
 import { unlitShader } from '../shaders.js';
 
 /**
+ * @import { AppBase } from '../../../framework/app-base.js';
  * @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js';
  * @import { Mesh } from '../../../scene/mesh.js';
  * @import { TriData } from '../tri-data.js';
@@ -129,6 +130,13 @@ class Shape {
     _depth = -1;
 
     /**
+     * The application the shape's entities belong to.
+     *
+     * @type {AppBase}
+     */
+    app;
+
+    /**
      * The graphics device.
      *
      * @type {GraphicsDevice}
@@ -166,12 +174,13 @@ class Shape {
     /**
      * Create a shape.
      *
-     * @param {GraphicsDevice} device - The graphics device.
+     * @param {AppBase} app - The application the shape's entities belong to.
      * @param {string} name - The name of the shape.
      * @param {ShapeArgs} args - The options for the shape.
      */
-    constructor(device, name, args) {
-        this.device = device;
+    constructor(app, name, args) {
+        this.app = app;
+        this.device = app.graphicsDevice;
         this.axis = args.axis ?? 'x';
 
         if (args.position instanceof Vec3) {
@@ -203,7 +212,7 @@ class Shape {
         this._depth = args.depth ?? this._depth;
 
         // entity
-        this.entity = new Entity(`${name}:${this.axis}`);
+        this.entity = new Entity(`${name}:${this.axis}`, app);
         this.entity.setLocalPosition(this._position);
         this.entity.setLocalEulerAngles(this._rotation);
         this.entity.setLocalScale(this._scale);

@@ -4,7 +4,7 @@ import { TriData } from '../tri-data.js';
 import { Shape } from './shape.js';
 
 /** @import { ShapeArgs } from './shape.js' */
-/** @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js' */
+/** @import { AppBase } from '../../../framework/app-base.js' */
 
 /**
  * @typedef {object} BoxShapeArgs
@@ -23,11 +23,11 @@ class BoxShape extends Shape {
     /**
      * Create a new BoxShape.
      *
-     * @param {GraphicsDevice} device - The graphics device.
+     * @param {AppBase} app - The application the shape's entities belong to.
      * @param {ShapeArgs & BoxShapeArgs} args - The shape options.
      */
-    constructor(device, args = {}) {
-        super(device, 'boxCenter', args);
+    constructor(app, args = {}) {
+        super(app, 'boxCenter', args);
 
         this._size = args.size ?? this._size;
 

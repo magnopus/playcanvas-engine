@@ -8,7 +8,7 @@ import { TriData } from '../tri-data.js';
 import { Shape } from './shape.js';
 
 /** @import { ShapeArgs } from './shape.js' */
-/** @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js' */
+/** @import { AppBase } from '../../../framework/app-base.js' */
 
 const tmpV1 = new Vec3();
 const tmpV2 = new Vec3();
@@ -87,11 +87,11 @@ class ArrowShape extends Shape {
     /**
      * Create a new ArrowShape.
      *
-     * @param {GraphicsDevice} device - The graphics device.
+     * @param {AppBase} app - The application the shape's entities belong to.
      * @param {ShapeArgs & ArrowShapeArgs} args - The shape options.
      */
-    constructor(device, args = {}) {
-        super(device, 'arrow', args);
+    constructor(app, args = {}) {
+        super(app, 'arrow', args);
 
         this._gap = args.gap ?? this._gap;
         this._lineThickness = args.lineThickness ?? this._lineThickness;
@@ -107,12 +107,12 @@ class ArrowShape extends Shape {
         ];
 
         // render
-        this._head = new Entity(`head:${this.axis}`);
+        this._head = new Entity(`head:${this.axis}`, this.app);
         this.entity.addChild(this._head);
         this._createRenderComponent(this._head, [
             Mesh.fromGeometry(this.device, new ConeGeometry())
         ]);
-        this._line = new Entity(`line:${this.axis}`);
+        this._line = new Entity(`line:${this.axis}`, this.app);
         this.entity.addChild(this._line);
         this._createRenderComponent(this._line, [
             Mesh.fromGeometry(this.device, new CylinderGeometry())

@@ -6,7 +6,7 @@ import { TriData } from '../tri-data.js';
 import { Shape } from './shape.js';
 
 /** @import { ShapeArgs } from './shape.js' */
-/** @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js' */
+/** @import { AppBase } from '../../../framework/app-base.js' */
 
 const UPDATE_EPSILON = 1e-6;
 
@@ -50,11 +50,11 @@ class PlaneShape extends Shape {
     /**
      * Create a new PlaneShape.
      *
-     * @param {GraphicsDevice} device - The graphics device.
+     * @param {AppBase} app - The application the shape's entities belong to.
      * @param {ShapeArgs & PlaneShapeArgs} args - The shape options.
      */
-    constructor(device, args = {}) {
-        super(device, 'plane', args);
+    constructor(app, args = {}) {
+        super(app, 'plane', args);
 
         this._size = args.size ?? this._size;
         this._gap = args.gap ?? this._gap;
