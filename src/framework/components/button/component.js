@@ -45,7 +45,8 @@ STATES_TO_SPRITE_FRAME_NAMES[VisualState.INACTIVE] = 'inactiveSpriteFrame';
  * The ButtonComponent enables an {@link Entity} to behave like a button, with different visual
  * states for hover and press interactions. It is designed to be used together with an
  * {@link ElementComponent} on the same entity, which provides the button's visual appearance and
- * input hit area.
+ * input hit area. Set {@link imageEntity}, usually to the button's own entity, to choose the
+ * element that is tinted, or has its sprite changed, for each visual state.
  *
  * You should never need to use the ButtonComponent constructor directly. To add a
  * ButtonComponent to an {@link Entity}, use {@link Entity#addComponent}:
@@ -56,7 +57,9 @@ STATES_TO_SPRITE_FRAME_NAMES[VisualState.INACTIVE] = 'inactiveSpriteFrame';
  *     type: ELEMENTTYPE_IMAGE,
  *     useInput: true
  * });
- * entity.addComponent('button');
+ * entity.addComponent('button', {
+ *     imageEntity: entity
+ * });
  * ```
  *
  * Once the ButtonComponent is added to the entity, you can access it via the
@@ -70,8 +73,8 @@ STATES_TO_SPRITE_FRAME_NAMES[VisualState.INACTIVE] = 'inactiveSpriteFrame';
  *
  * Relevant Engine API examples:
  *
- * - [Basic Button](https://playcanvas.github.io/#/user-interface/button-basic)
- * - [Sprite Button](https://playcanvas.github.io/#/user-interface/button-sprite)
+ * - [Buttons](https://playcanvas.github.io/#/user-interface/buttons)
+ * - [Toggles and radio groups](https://playcanvas.github.io/#/user-interface/common-widgets)
  *
  * @hideconstructor
  * @category User Interface
@@ -486,7 +489,7 @@ class ButtonComponent extends Component {
      * Sets the padding to be used in hit-test calculations. Can be used to expand the bounding box
      * so that the button is easier to tap. Defaults to `[0, 0, 0, 0]`.
      *
-     * @type {Vec4}
+     * @param {Vec4|number[]} arg - The padding, as a Vec4 or an array of 4 numbers.
      */
     set hitPadding(arg) {
         // Mirror the old schema-driven `type: 'vec4'` conversion in

@@ -122,13 +122,13 @@ fn getLTCLightSpecFres(uv: vec2f, specularity: vec3f) -> vec3f {
     return specularity * t2.x + ( vec3f( 1.0 ) - specularity) * t2.y;
 }
 
-fn calcLTCLightValues(gloss: f32, worldNormal: vec3f, viewDir: vec3f, specularity: vec3f, clearcoatGloss: f32, clearcoatWorldNormal: vec3f, clearcoatSpecularity: f32) {
+fn calcLTCLightValues(gloss: f32, worldNormal: vec3f, viewDir: vec3f, specularity: vec3f, clearcoatGloss: f32, clearcoatWorldNormal: vec3f, clearcoatReflectance: f32) {
     dLTCUV = getLTCLightUV(gloss, worldNormal, viewDir);
     dLTCSpecFres = getLTCLightSpecFres(dLTCUV, specularity);
 
     #ifdef LIT_CLEARCOAT
         ccLTCUV = getLTCLightUV(clearcoatGloss, clearcoatWorldNormal, viewDir);
-        ccLTCSpecFres = getLTCLightSpecFres(ccLTCUV, vec3f(clearcoatSpecularity));
+        ccLTCSpecFres = getLTCLightSpecFres(ccLTCUV, vec3f(clearcoatReflectance));
     #endif
 }
 
@@ -331,7 +331,7 @@ fn LTC_EvaluateDisk(N: vec3f, V: vec3f, P: vec3f, Minv: mat3x3f, points: Coords)
     return formFactor * scale;
 }
 
-// LTC_EvaluateDisk in some rare cases genereates NaN values in a or b, just before 'float c0 = a * b;'
+// LTC_EvaluateDisk in some rare cases generates NaN values in a or b, just before 'float c0 = a * b;'
 // Get rid of those Nan values before they propagate further, as in case of bloom / DOF blurs they
 // propagate to large areas. I didn't find the actual reason where those come from, so that is still TODO.
 // Note that only disk/sphere lights are causing it, so only handle those.
@@ -387,4 +387,19 @@ fn getDiskLightSpecular(worldNormal: vec3f, viewDir: vec3f) -> f32 {
 fn getSphereLightSpecular(worldNormal: vec3f, viewDir: vec3f) -> f32 {
     return calcDiskLightSpecular(worldNormal, viewDir, dLTCUV);
 }
+
+#ifdef LIT_CLEARCOAT
+    // the clear coat specular, with the LTC matrix of the clear coat gloss and normal
+    fn getRectLightSpecularCC(worldNormal: vec3f, viewDir: vec3f) -> f32 {
+        return calcRectLightSpecular(worldNormal, viewDir, ccLTCUV);
+    }
+
+    fn getDiskLightSpecularCC(worldNormal: vec3f, viewDir: vec3f) -> f32 {
+        return calcDiskLightSpecular(worldNormal, viewDir, ccLTCUV);
+    }
+
+    fn getSphereLightSpecularCC(worldNormal: vec3f, viewDir: vec3f) -> f32 {
+        return calcDiskLightSpecular(worldNormal, viewDir, ccLTCUV);
+    }
+#endif
 `;

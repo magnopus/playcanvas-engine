@@ -106,6 +106,9 @@ class ShadowRendererLocal {
 
     prepareLights(shadowLights, lights) {
 
+        // A previous frame may have been interrupted before the shadow pass cleared this list.
+        shadowLights.length = 0;
+
         let shadowCamera;
         for (let i = 0; i < lights.length; i++) {
             const light = lights[i];
@@ -144,7 +147,7 @@ class ShadowRendererLocal {
                 const faceCount = light.numShadowFaces;
                 for (let face = 0; face < faceCount; face++) {
                     const renderPass = new RenderPassShadowLocalNonClustered(this.device, this.shadowRenderer, light, face, applyVsm);
-                    frameGraph.addRenderPass(renderPass);
+                    frameGraph.addPass(renderPass);
                 }
             }
         }

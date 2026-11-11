@@ -6,6 +6,9 @@ import { Vec3 } from '../core/math/vec3.js';
 import { Vec4 } from '../core/math/vec4.js';
 import { math } from '../core/math/math.js';
 import { Frustum } from '../core/shape/frustum.js';
+import { MIPMAPFILTER_BOX } from '../platform/graphics/constants.js';
+import { SceneColorMapHandle } from '../platform/graphics/scene-color-map-handle.js';
+import { SceneDepthMapHandle } from '../platform/graphics/scene-depth-map-handle.js';
 import {
     VIEW_CENTER, ASPECT_AUTO, PROJECTION_PERSPECTIVE, PROJECTION_ORTHOGRAPHIC,
     LAYERID_WORLD, LAYERID_DEPTH, LAYERID_SKYBOX, LAYERID_UI, LAYERID_IMMEDIATE
@@ -13,10 +16,12 @@ import {
 import { FramePassColorGrab } from './graphics/frame-pass-color-grab.js';
 import { FramePassDepthGrab } from './graphics/frame-pass-depth-grab.js';
 import { CameraShaderParams } from './camera-shader-params.js';
+import { ClipPlanes, MAX_CLIP_PLANES } from './clip-planes.js';
 
 /**
  * @import { FramePass } from '../platform/graphics/frame-pass.js'
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
+ * @import { Plane } from '../core/shape/plane.js'
  * @import { RenderTarget } from '../platform/graphics/render-target.js'
  * @import { Texture } from '../platform/graphics/texture.js'
  * @import { FogParams } from './fog-params.js'
@@ -36,6 +41,8 @@ const _frustumViewInvMat = new Mat4();
 const _frustumViewMat = new Mat4();
 const _frustumViewProjMat = new Mat4();
 const _frustumPoints = [new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3()];
+
+let id = 0;
 
 /**
  * A camera.
@@ -125,34 +132,98 @@ class Camera {
 
     /**
      * Frame passes that execute before this camera's main scene rendering, after the camera's
-     * directional shadow passes. Entries are picked up by the RenderPassForward that renders
-     * this camera's layers.
+     * directional shadow passes. Entries are picked up by the first RenderPassForward rendering
+     * this camera's layers in the frame, including one in the camera's frame passes, so they do
+     * not execute when no RenderPassForward renders the camera. They cannot include a
+     * RenderPassForward, as that would be nested under the one picking them up. When rendering
+     * multiple XR views, they execute for each view, apart from a compute pass, which executes
+     * once, as selected by its xrViewIndex.
      *
      * @type {FramePass[]}
      */
     beforePasses = [];
 
     /**
-     * The scene depth texture most recently published for this camera, or null. The uniform it is
-     * published to is global - the last camera to render owns it - so anything wanting the depth of
-     * one camera in particular reads it from here instead. See {@link SceneDepthReader}.
+     * Frame passes that execute after everything this camera renders in the frame, including its
+     * frame passes when it uses those, and before the cameras rendering after it. When rendering
+     * multiple XR views, they execute once, after all the views.
      *
-     * @type {Texture|null}
-     * @ignore
+     * @type {FramePass[]}
      */
-    sceneDepthMap = null;
+    afterPasses = [];
 
     /**
-     * The render version {@link Camera#sceneDepthMap} was published in, so a consumer can tell a
-     * texture rendered this frame from one left over from an earlier one.
+     * The handle to the scene depth map most recently published for this camera. The uniform the
+     * depth map is published to is global - the last camera to render owns it - so anything wanting
+     * the depth of one camera in particular reads it from here instead. See {@link SceneDepthReader}.
      *
-     * @type {number}
+     * @type {SceneDepthMapHandle}
      * @ignore
      */
-    sceneDepthMapVersion = -1;
+    sceneDepthMapHandle = new SceneDepthMapHandle();
+
+    /**
+     * The handle to the scene color map most recently published for this camera. The uniform the
+     * color map is published to is global, the same as for the depth map.
+     *
+     * @type {SceneColorMapHandle}
+     * @ignore
+     */
+    sceneColorMapHandle = new SceneColorMapHandle();
+
+    /**
+     * Whether the scene color map has mipmaps. See {@link CameraComponent#sceneColorMapMipmaps}.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    sceneColorMapMipmaps = true;
+
+    /**
+     * The filter used to generate the mipmaps of the scene color map. See
+     * {@link CameraComponent#sceneColorMapMipmapFilter}.
+     *
+     * @type {string}
+     * @ignore
+     */
+    sceneColorMapMipmapFilter = MIPMAPFILTER_BOX;
 
     /** @type {number} */
     jitter = 0;
+
+    /**
+     * The scale of the exposure the camera renders with, multiplying the exposure of the scene, or
+     * of the physical camera with physical units. Set every frame by the effects adapting the
+     * exposure, such as the auto exposure of the camera frame.
+     *
+     * @type {number}
+     */
+    exposureScale = 1;
+
+    /**
+     * Whether the camera renders the sky of the scene. Cleared by the camera frame while one of its
+     * effects renders the sky for the camera in its place.
+     *
+     * @type {boolean}
+     */
+    skyVisible = true;
+
+    /**
+     * The clipping of the camera, see {@link Camera#clippingPlanes}. The renderer sets its uniforms
+     * for each pass of the camera.
+     *
+     * @type {ClipPlanes}
+     * @ignore
+     */
+    _clipPlanes = new ClipPlanes();
+
+    /**
+     * A unique id of the camera, used where the camera needs to be referenced without retaining
+     * it, for example as a key in {@link MeshInstance} draw command maps.
+     *
+     * @type {number}
+     */
+    id = id++;
 
     /**
      * The graphics device used by this camera. Required so the camera can compute its aspect
@@ -175,6 +246,7 @@ class Camera {
         this._calculateProjection = null;
         this._calculateTransform = null;
         this._clearColor = new Color(0.75, 0.75, 0.75, 1);
+        this._clearColors = null;
         this._clearColorBuffer = true;
         this._clearDepth = 1;
         this._clearDepthBuffer = true;
@@ -255,20 +327,81 @@ class Camera {
 
         this.framePasses.length = 0;
         this.beforePasses.length = 0;
-        this.sceneDepthMap = null;
+        this.afterPasses.length = 0;
+
+        // the handles can outlive the camera, held by whatever consumes the maps, so they record that
+        // their camera is gone instead of just being dropped
+        const depthHandle = this.sceneDepthMapHandle;
+        depthHandle.texture = null;
+        depthHandle.destroyed = true;
+
+        const colorHandle = this.sceneColorMapHandle;
+        colorHandle.texture = null;
+        colorHandle.destroyed = true;
     }
 
     /**
-     * Records the scene depth texture a producer has published for this camera, alongside the render
-     * version it was published in.
+     * Publishes the scene depth texture a producer has rendered for this camera, together with how
+     * it is encoded. Each producer passes its own encoding, as different producers store the depth
+     * differently. The camera parameters, the inverse view projection matrix and the viewport the
+     * depth was rendered with are captured as well. The texture is recorded on the handle of this
+     * camera, and also set to the global uniform, which holds the depth of whichever camera
+     * published last.
      *
      * @param {Texture} texture - The texture the depth was rendered to.
      * @param {number} renderVersion - The render version it was rendered in.
+     * @param {boolean} linear - True when the texture stores the linear camera depth, false when it
+     * stores the depth buffer values.
+     * @param {boolean} packed - True when each linear depth is bit-packed into an RGBA8 texel.
+     * @param {boolean} reciprocal - True when the texture stores the reciprocals of the linear
+     * depths.
+     * @param {boolean} [flipY] - The flipY of the render target the camera rendered the depth with,
+     * which the texture matches the layout of. Defaults to false.
      * @ignore
      */
-    publishSceneDepthMap(texture, renderVersion) {
-        this.sceneDepthMap = texture;
-        this.sceneDepthMapVersion = renderVersion;
+    publishSceneDepthMap(texture, renderVersion, linear, packed, reciprocal, flipY = false) {
+        const handle = this.sceneDepthMapHandle;
+        handle.texture = texture;
+        handle.renderVersion = renderVersion;
+        handle.linear = linear;
+        handle.packed = linear && packed;
+        handle.reciprocal = linear && reciprocal;
+        this.fillShaderParams(handle.cameraParams);
+
+        // the matrices the shaders were given this frame, captured when the camera first rendered
+        // in it - see Camera#_storeShaderMatrices
+        handle.viewProjectionInverse.copy(this._viewProjInverse);
+
+        // the viewport the camera rendered to, the way Renderer#setupViewport sets it. WebGPU places
+        // it from the top of the target, unless the target stores its rows from the bottom
+        // (RENDERTARGET_ORIGIN_BOTTOM), as its flipY reflects
+        const { width, height } = texture;
+        const rect = this._rect;
+        const viewport = handle.viewport;
+        const y = Math.floor(rect.y * height);
+        viewport[0] = Math.floor(rect.x * width);
+        viewport[2] = Math.floor(rect.z * width);
+        viewport[3] = Math.floor(rect.w * height);
+        viewport[1] = flipY ? y : height - y - viewport[3];
+
+        SceneDepthMapHandle.setUniform(this.device, texture);
+    }
+
+    /**
+     * Publishes the scene color texture a producer has rendered for this camera, together with how
+     * it is encoded. The texture is recorded on the handle of this camera, and also set to the
+     * global uniform, which holds the color of whichever camera published last.
+     *
+     * @param {Texture} texture - The texture the color was rendered to.
+     * @param {boolean} gamma - True when the texture stores gamma encoded colors.
+     * @ignore
+     */
+    publishSceneColorMap(texture, gamma) {
+        const handle = this.sceneColorMapHandle;
+        handle.texture = texture;
+        handle.gamma = gamma;
+
+        SceneColorMapHandle.setUniform(this.device, texture);
     }
 
     /**
@@ -356,6 +489,40 @@ class Camera {
         return this._clearColor;
     }
 
+    /**
+     * Sets the clear color of a color attachment of the render target. Attachment 0 is
+     * {@link Camera#clearColor}, and the other attachments of a multiple render target clear to the
+     * same color unless given their own. Passing null removes the color of an attachment, so it
+     * clears to the attachment 0 color again.
+     *
+     * @param {number} index - The index of the color attachment.
+     * @param {Color|null} color - The clear color, or null to clear to the attachment 0 color.
+     */
+    setClearColor(index, color) {
+        Debug.assert(Number.isInteger(index) && index >= 0, `Invalid color attachment index ${index}.`);
+
+        if (index === 0) {
+            Debug.assert(color, 'The clear color of the color attachment 0 cannot be removed.');
+            this._clearColor.copy(color);
+        } else if (color) {
+            // stored sparsely, most cameras render to a single color attachment
+            this._clearColors ??= [];
+            (this._clearColors[index] ??= new Color()).copy(color);
+        } else if (this._clearColors) {
+            this._clearColors[index] = undefined;
+        }
+    }
+
+    /**
+     * Gets the clear color of a color attachment of the render target.
+     *
+     * @param {number} index - The index of the color attachment.
+     * @returns {Color} The clear color of the attachment.
+     */
+    getClearColor(index) {
+        return this._clearColors?.[index] ?? this._clearColor;
+    }
+
     set clearColorBuffer(newValue) {
         this._clearColorBuffer = newValue;
     }
@@ -394,6 +561,53 @@ class Camera {
 
     get clearStencilBuffer() {
         return this._clearStencilBuffer;
+    }
+
+    /**
+     * Sets the planes that clip what the camera renders, in world space. The planes are copied.
+     * See {@link CameraComponent#clippingPlanes}.
+     *
+     * @type {Plane[]}
+     */
+    set clippingPlanes(value) {
+        Debug.assert(!value || value.length <= MAX_CLIP_PLANES,
+            `CameraComponent#clippingPlanes supports up to ${MAX_CLIP_PLANES} planes, the rest ` +
+            'are ignored.');
+        this._clipPlanes.set(value);
+        this._updateClipPlanes();
+    }
+
+    get clippingPlanes() {
+        return this._clipPlanes.returned;
+    }
+
+    /**
+     * Sets whether only the parts behind all of the {@link Camera#clippingPlanes} are clipped,
+     * instead of the parts behind any of them.
+     *
+     * @type {boolean}
+     */
+    set clipIntersection(value) {
+        if (this._clipPlanes.intersection !== value) {
+            this._clipPlanes.intersection = value;
+            this._updateClipPlanes();
+        }
+    }
+
+    get clipIntersection() {
+        return this._clipPlanes.intersection;
+    }
+
+    /**
+     * Writes the clipping into the uniforms the shader reads, from the planes as they were
+     * assigned, and enables the clipping shader code when there is any plane.
+     *
+     * @private
+     */
+    _updateClipPlanes() {
+        const clipPlanes = this._clipPlanes;
+        clipPlanes.updateUniforms();
+        this.shaderParams.clipPlanes = clipPlanes.assigned.length > 0;
     }
 
     set cullFaces(newValue) {
@@ -727,6 +941,8 @@ class Camera {
         this.calculateProjection = other.calculateProjection;
         this.calculateTransform = other.calculateTransform;
         this.clearColor = other.clearColor;
+        this._clearColors = null;
+        other._clearColors?.forEach((color, index) => this.setClearColor(index, color));
         this.clearColorBuffer = other.clearColorBuffer;
         this.clearDepth = other.clearDepth;
         this.clearDepthBuffer = other.clearDepthBuffer;
@@ -747,9 +963,15 @@ class Camera {
         this.sensitivity = other.sensitivity;
         // magnopus patched
         this.exposure = other.exposure;
+        this.sceneColorMapMipmaps = other.sceneColorMapMipmaps;
+        this.sceneColorMapMipmapFilter = other.sceneColorMapMipmapFilter;
+
+        this._clipPlanes.copy(other._clipPlanes);
+        this._updateClipPlanes();
 
         this.shaderPassInfo = other.shaderPassInfo;
         this.jitter = other.jitter;
+        this.exposureScale = other.exposureScale;
 
         this._projMatDirty = true;
 
@@ -759,7 +981,7 @@ class Camera {
     _enableRenderPassColorGrab(device, enable) {
         if (enable) {
             if (!this.renderPassColorGrab) {
-                this.renderPassColorGrab = new FramePassColorGrab(device);
+                this.renderPassColorGrab = new FramePassColorGrab(device, this);
             }
         } else {
             this.renderPassColorGrab?.destroy();
@@ -787,11 +1009,11 @@ class Camera {
 
     /**
      * Refreshes the derived per-view matrices of all {@link Camera#xrViews}, using this camera's
-     * parent world transform. The renderer (and the gsplat passes, which run earlier in the frame)
+     * parent world transform. The renderer, the gsplat passes and {@link Camera#updateXrFrustum}
      * call this before reading the per-view matrices.
      *
      * Note: this recomputes on every call. Within a frame the parent transform is stable, so the
-     * 2-3 calls/frame could be collapsed to a single recompute by guarding on
+     * several calls per frame could be collapsed to a single recompute by guarding on
      * `device.renderVersion` (as {@link Camera#_storeShaderMatrices} does) - left as a future
      * optimization, as it needs checking against cameras that render multiple times per frame
      * (e.g. multiple render targets).
@@ -823,6 +1045,10 @@ class Camera {
         if (!views?.length) {
             return false;
         }
+
+        // culling runs before the renderer refreshes the derived per-view matrices, so refresh them
+        // here, for the current pose of the views and transform of the camera's parent
+        this.updateViewTransforms();
 
         // first view establishes the base frustum
         _xrViewProjMat.mul2(views[0].projMat, views[0].viewOffMat);

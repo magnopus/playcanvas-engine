@@ -1,5 +1,7 @@
 export default /* glsl */`
-uniform float material_opacity;
+#ifndef MESH_COLOR
+    uniform float material_opacity;
+#endif
 uniform float material_alphaDitherScale;
 
 // magnopus patched
@@ -10,7 +12,11 @@ uniform uint opacityIsStereoFlipped; // 0: Not Flipped, 1: Flipped
 // end magnopus patched
 
 void getOpacity() {
-    dAlpha = material_opacity;
+    #ifdef MESH_COLOR
+        dAlpha = mesh_color.a;
+    #else
+        dAlpha = material_opacity;
+    #endif
 
     #ifdef STD_OPACITY_TEXTURE
         // magnopus patched
@@ -18,10 +24,10 @@ void getOpacity() {
             vec2 stereoUV = getStereoVideoUV({STD_OPACITY_TEXTURE_UV}, opacityStereoVideoType, opacityIsStereoFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
-            dAlpha *= texture2DBias({STD_OPACITY_TEXTURE_NAME}, stereoUV, textureBias).{STD_OPACITY_TEXTURE_CHANNEL};
+            dAlpha *= texture2DBias({STD_OPACITY_TEXTURE_NAME}, stereoUV, {STD_TEXTURE_BIAS}).{STD_OPACITY_TEXTURE_CHANNEL};
         #else
         // end magnopus patched
-    dAlpha *= texture2DBias({STD_OPACITY_TEXTURE_NAME}, {STD_OPACITY_TEXTURE_UV}, textureBias).{STD_OPACITY_TEXTURE_CHANNEL};
+    dAlpha *= texture2DBias({STD_OPACITY_TEXTURE_NAME}, {STD_OPACITY_TEXTURE_UV}, {STD_TEXTURE_BIAS}).{STD_OPACITY_TEXTURE_CHANNEL};
         // magnopus patched
         #endif
         // end magnopus patched

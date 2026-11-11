@@ -23,16 +23,16 @@ void getAO() {
         #ifdef MAG_STEREO_TEXTURE
             vec2 stereoUV = getStereoVideoUV({STD_AO_TEXTURE_UV}, aoStereoVideoType, aoIsStereoFlipped);
 
-            float aoBase = texture2DBias({STD_AO_TEXTURE_NAME}, stereoUV, textureBias).{STD_AO_TEXTURE_CHANNEL};
+            float aoBase = texture2DBias({STD_AO_TEXTURE_NAME}, stereoUV, {STD_TEXTURE_BIAS}).{STD_AO_TEXTURE_CHANNEL};
         #else
         // end magnopus patched
-        float aoBase = texture2DBias({STD_AO_TEXTURE_NAME}, {STD_AO_TEXTURE_UV}, textureBias).{STD_AO_TEXTURE_CHANNEL};
+        float aoBase = texture2DBias({STD_AO_TEXTURE_NAME}, {STD_AO_TEXTURE_UV}, {STD_TEXTURE_BIAS}).{STD_AO_TEXTURE_CHANNEL};
         // magnopus patched
         #endif
         // end magnopus patched
 
         #ifdef STD_AODETAIL_TEXTURE
-            float aoDetail = texture2DBias({STD_AODETAIL_TEXTURE_NAME}, {STD_AODETAIL_TEXTURE_UV}, textureBias).{STD_AODETAIL_TEXTURE_CHANNEL};
+            float aoDetail = texture2DBias({STD_AODETAIL_TEXTURE_NAME}, {STD_AODETAIL_TEXTURE_UV}, {STD_TEXTURE_BIAS}).{STD_AODETAIL_TEXTURE_CHANNEL};
             aoBase = detailMode_{STD_AODETAIL_DETAILMODE}(vec3(aoBase), vec3(aoDetail)).r;
         #endif
 

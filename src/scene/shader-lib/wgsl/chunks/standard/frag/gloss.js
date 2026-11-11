@@ -23,10 +23,10 @@ fn getGlossiness() {
             var stereoUV: vec2f = getStereoVideoUV({STD_GLOSS_TEXTURE_UV}, uniform.glossStereoVideoType, uniform.glossIsStereoFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
-            dGlossiness = dGlossiness * textureSampleBias({STD_GLOSS_TEXTURE_NAME}, {STD_GLOSS_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias).{STD_GLOSS_TEXTURE_CHANNEL};
+            dGlossiness = dGlossiness * textureSampleBias({STD_GLOSS_TEXTURE_NAME}, {STD_GLOSS_TEXTURE_NAME}Sampler, stereoUV, {STD_TEXTURE_BIAS}).{STD_GLOSS_TEXTURE_CHANNEL};
         #else
         // end magnopus patched
-    dGlossiness = dGlossiness * textureSampleBias({STD_GLOSS_TEXTURE_NAME}, {STD_GLOSS_TEXTURE_NAME}Sampler, {STD_GLOSS_TEXTURE_UV}, uniform.textureBias).{STD_GLOSS_TEXTURE_CHANNEL};
+    dGlossiness = dGlossiness * textureSampleBias({STD_GLOSS_TEXTURE_NAME}, {STD_GLOSS_TEXTURE_NAME}Sampler, {STD_GLOSS_TEXTURE_UV}, {STD_TEXTURE_BIAS}).{STD_GLOSS_TEXTURE_CHANNEL};
         // magnopus patched
         #endif
         // end magnopus patched

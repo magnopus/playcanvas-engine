@@ -29,6 +29,7 @@ import { Debug } from '../core/debug.js';
  *     evt.off();
  * });
  * events = [];
+ * @category Framework
  */
 class EventHandle {
     /**
@@ -60,6 +61,13 @@ class EventHandle {
      * @ignore
      */
     _once;
+
+    /**
+     * True if this once listener has already been called, including during a nested fire.
+     *
+     * @private
+     */
+    _onceFired = false;
 
     /**
      * True if event has been removed.

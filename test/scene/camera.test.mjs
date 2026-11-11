@@ -1,11 +1,18 @@
 import { expect } from 'chai';
 
+import { Color } from '../../src/core/math/color.js';
+import { Mat4 } from '../../src/core/math/mat4.js';
 import { Vec2 } from '../../src/core/math/vec2.js';
 import { Vec3 } from '../../src/core/math/vec3.js';
 import { Vec4 } from '../../src/core/math/vec4.js';
 import { Entity } from '../../src/framework/entity.js';
+import { SceneColorMapHandle } from '../../src/platform/graphics/scene-color-map-handle.js';
+import { SceneDepthMapHandle } from '../../src/platform/graphics/scene-depth-map-handle.js';
+import { Texture } from '../../src/platform/graphics/texture.js';
 import { Camera } from '../../src/scene/camera.js';
 import { ASPECT_AUTO, ASPECT_MANUAL, PROJECTION_ORTHOGRAPHIC } from '../../src/scene/constants.js';
+import { GraphNode } from '../../src/scene/graph-node.js';
+import { RenderView } from '../../src/scene/render-view.js';
 import { createApp } from '../app.mjs';
 import { jsdomSetup, jsdomTeardown } from '../jsdom.mjs';
 
@@ -40,6 +47,52 @@ describe('Camera', function () {
         it('defaults to ASPECT_AUTO', function () {
             const camera = new Camera(app.graphicsDevice);
             expect(camera.aspectRatioMode).to.equal(ASPECT_AUTO);
+        });
+    });
+
+    describe('#setClearColor', function () {
+
+        it('sets the attachment 0 color, which is the clearColor', function () {
+            const camera = new Camera(app.graphicsDevice);
+            camera.setClearColor(0, new Color(0.1, 0.2, 0.3, 0.4));
+            expect(camera.clearColor.equals(new Color(0.1, 0.2, 0.3, 0.4))).to.equal(true);
+            expect(camera.getClearColor(0)).to.equal(camera.clearColor);
+        });
+
+        it('other attachments clear to the attachment 0 color until given their own', function () {
+            const camera = new Camera(app.graphicsDevice);
+            expect(camera.getClearColor(1)).to.equal(camera.clearColor);
+
+            camera.setClearColor(1, new Color(1, 0, 0, 1));
+            expect(camera.getClearColor(1).equals(new Color(1, 0, 0, 1))).to.equal(true);
+            expect(camera.getClearColor(2)).to.equal(camera.clearColor);
+        });
+
+        it('copies the color rather than referencing it', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const color = new Color(1, 0, 0, 1);
+            camera.setClearColor(1, color);
+            color.set(0, 1, 0, 1);
+            expect(camera.getClearColor(1).equals(new Color(1, 0, 0, 1))).to.equal(true);
+        });
+
+        it('null removes the color of an attachment', function () {
+            const camera = new Camera(app.graphicsDevice);
+            camera.setClearColor(1, new Color(1, 0, 0, 1));
+            camera.setClearColor(1, null);
+            expect(camera.getClearColor(1)).to.equal(camera.clearColor);
+        });
+
+        it('is copied by clone()', function () {
+            const camera = new Camera(app.graphicsDevice);
+            camera.setClearColor(1, new Color(1, 0, 0, 1));
+            camera.setClearColor(3, new Color(0, 0, 1, 1));
+
+            const clone = camera.clone();
+            expect(clone.getClearColor(1).equals(new Color(1, 0, 0, 1))).to.equal(true);
+            expect(clone.getClearColor(2)).to.equal(clone.clearColor);
+            expect(clone.getClearColor(3).equals(new Color(0, 0, 1, 1))).to.equal(true);
+            expect(clone.getClearColor(1)).to.not.equal(camera.getClearColor(1));
         });
     });
 
@@ -243,6 +296,273 @@ describe('Camera', function () {
             expect(clone.device).to.equal(camera.device);
             expect(clone.aspectRatio).to.equal(2);
         });
+
+        it('gives the clone its own scene map handles', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const clone = camera.clone();
+            expect(clone.sceneDepthMapHandle).to.not.equal(camera.sceneDepthMapHandle);
+            expect(clone.sceneColorMapHandle).to.not.equal(camera.sceneColorMapHandle);
+        });
+    });
+
+    describe('#publishSceneDepthMap', function () {
+
+        it('updates the same handle on each publication', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const handle = camera.sceneDepthMapHandle;
+            const first = new Texture(app.graphicsDevice, { width: 4, height: 4 });
+            const second = new Texture(app.graphicsDevice, { width: 8, height: 8 });
+
+            camera.publishSceneDepthMap(first, 3, true, false, false);
+            expect(camera.sceneDepthMapHandle).to.equal(handle);
+            expect(handle.texture).to.equal(first);
+            expect(handle.renderVersion).to.equal(3);
+
+            camera.publishSceneDepthMap(second, 4, true, false, false);
+            expect(camera.sceneDepthMapHandle).to.equal(handle);
+            expect(handle.texture).to.equal(second);
+            expect(handle.renderVersion).to.equal(4);
+
+            first.destroy();
+            second.destroy();
+        });
+
+        it('gives the size of the depth map published most recently, and 0 before one is', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const handle = camera.sceneDepthMapHandle;
+            expect([handle.width, handle.height]).to.deep.equal([0, 0]);
+
+            const first = new Texture(app.graphicsDevice, { width: 4, height: 2 });
+            const second = new Texture(app.graphicsDevice, { width: 8, height: 6 });
+
+            camera.publishSceneDepthMap(first, 3, true, false, false);
+            expect([handle.width, handle.height]).to.deep.equal([4, 2]);
+
+            camera.publishSceneDepthMap(second, 4, true, false, false);
+            expect([handle.width, handle.height]).to.deep.equal([8, 6]);
+
+            first.destroy();
+            second.destroy();
+        });
+
+        it('sets the global uniform, which the static helper can clear', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const texture = new Texture(app.graphicsDevice, { width: 4, height: 4 });
+            const uniform = app.graphicsDevice.scope.resolve(SceneDepthMapHandle.uniformName);
+
+            camera.publishSceneDepthMap(texture, 1, true, false, false);
+            expect(uniform.value).to.equal(texture);
+
+            // clearing the uniform leaves the handle of the camera as it was
+            SceneDepthMapHandle.setUniform(app.graphicsDevice, null);
+            expect(uniform.value).to.equal(null);
+            expect(camera.sceneDepthMapHandle.texture).to.equal(texture);
+
+            texture.destroy();
+        });
+
+        it('records the encoding of each publication', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const handle = camera.sceneDepthMapHandle;
+            const texture = new Texture(app.graphicsDevice, { width: 4, height: 4 });
+
+            camera.publishSceneDepthMap(texture, 1, true, true, false);
+            expect(handle.linear).to.equal(true);
+            expect(handle.packed).to.equal(true);
+            expect(handle.reciprocal).to.equal(false);
+
+            camera.publishSceneDepthMap(texture, 2, true, false, true);
+            expect(handle.linear).to.equal(true);
+            expect(handle.packed).to.equal(false);
+            expect(handle.reciprocal).to.equal(true);
+
+            // the packed and reciprocal encodings only exist for a linear depth
+            camera.publishSceneDepthMap(texture, 3, false, true, true);
+            expect(handle.linear).to.equal(false);
+            expect(handle.packed).to.equal(false);
+            expect(handle.reciprocal).to.equal(false);
+
+            texture.destroy();
+        });
+
+        it('captures the camera parameters the depth was rendered with', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const handle = camera.sceneDepthMapHandle;
+            const texture = new Texture(app.graphicsDevice, { width: 4, height: 4 });
+
+            camera.nearClip = 0.5;
+            camera.farClip = 200;
+            camera.publishSceneDepthMap(texture, 1, false, false, false);
+
+            // a change made after the depth was rendered does not change how it decodes
+            camera.nearClip = 2;
+            camera.farClip = 50;
+            camera.projection = PROJECTION_ORTHOGRAPHIC;
+
+            expect(handle.cameraParams[0]).to.be.closeTo(1 / 200, 1e-7);
+            expect(handle.cameraParams[1]).to.equal(200);
+            expect(handle.cameraParams[2]).to.equal(0.5);
+            expect(handle.cameraParams[3]).to.equal(0);
+
+            camera.publishSceneDepthMap(texture, 2, false, false, false);
+            expect(handle.cameraParams[1]).to.equal(50);
+            expect(handle.cameraParams[2]).to.equal(2);
+            expect(handle.cameraParams[3]).to.equal(1);
+
+            texture.destroy();
+        });
+    });
+
+    describe('#publishSceneColorMap', function () {
+
+        it('updates the same handle on each publication', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const handle = camera.sceneColorMapHandle;
+            const texture = new Texture(app.graphicsDevice, { width: 4, height: 4 });
+
+            camera.publishSceneColorMap(texture, true);
+            expect(camera.sceneColorMapHandle).to.equal(handle);
+            expect(handle.texture).to.equal(texture);
+            expect(handle.gamma).to.equal(true);
+
+            camera.publishSceneColorMap(texture, false);
+            expect(handle.gamma).to.equal(false);
+
+            texture.destroy();
+        });
+
+        it('gives the size of the color map published most recently, and 0 before one is', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const handle = camera.sceneColorMapHandle;
+            expect([handle.width, handle.height]).to.deep.equal([0, 0]);
+
+            const first = new Texture(app.graphicsDevice, { width: 4, height: 2 });
+            const second = new Texture(app.graphicsDevice, { width: 8, height: 6 });
+
+            camera.publishSceneColorMap(first, true);
+            expect([handle.width, handle.height]).to.deep.equal([4, 2]);
+
+            camera.publishSceneColorMap(second, true);
+            expect([handle.width, handle.height]).to.deep.equal([8, 6]);
+
+            first.destroy();
+            second.destroy();
+        });
+
+        it('sets the global uniform, which the static helper can clear', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const texture = new Texture(app.graphicsDevice, { width: 4, height: 4 });
+            const uniform = app.graphicsDevice.scope.resolve(SceneColorMapHandle.uniformName);
+
+            camera.publishSceneColorMap(texture, false);
+            expect(uniform.value).to.equal(texture);
+
+            SceneColorMapHandle.setUniform(app.graphicsDevice, null);
+            expect(uniform.value).to.equal(null);
+            expect(camera.sceneColorMapHandle.texture).to.equal(texture);
+
+            texture.destroy();
+        });
+    });
+
+    describe('#destroy', function () {
+
+        it('marks the scene map handles destroyed', function () {
+            const camera = new Camera(app.graphicsDevice);
+            const depthHandle = camera.sceneDepthMapHandle;
+            const colorHandle = camera.sceneColorMapHandle;
+            const texture = new Texture(app.graphicsDevice, { width: 4, height: 4 });
+
+            camera.publishSceneDepthMap(texture, 1, true, false, false);
+            camera.publishSceneColorMap(texture, false);
+            expect(depthHandle.destroyed).to.equal(false);
+            expect(colorHandle.destroyed).to.equal(false);
+
+            camera.destroy();
+            expect(depthHandle.destroyed).to.equal(true);
+            expect(depthHandle.texture).to.equal(null);
+            expect(colorHandle.destroyed).to.equal(true);
+            expect(colorHandle.texture).to.equal(null);
+
+            texture.destroy();
+        });
+    });
+
+    describe('#updateFrustum (XR)', function () {
+
+        /**
+         * Creates a camera on a rig node, rendering a single XR view.
+         *
+         * @returns {{ camera: Camera, rig: GraphNode, view: RenderView }} The camera, its rig and
+         * its view.
+         */
+        const createXrCamera = () => {
+            const rig = new GraphNode();
+            const node = new GraphNode();
+            rig.addChild(node);
+
+            const camera = new Camera(app.graphicsDevice);
+            camera.node = node;
+
+            const view = new RenderView();
+            camera.xrViews = [view];
+
+            return { camera, rig, view };
+        };
+
+        /**
+         * Sets the pose of an XR view relative to the camera's parent, with a 90 degree field of
+         * view reaching 20 units.
+         *
+         * @param {RenderView} view - The view.
+         * @param {number} yaw - The rotation of the view around the y axis, in degrees.
+         */
+        const setViewPose = (view, yaw) => {
+            const projMat = new Mat4().setPerspective(90, 1, 0.1, 20);
+            const viewInvMat = new Mat4().setFromAxisAngle(Vec3.UP, yaw);
+            view.setView(projMat.data, viewInvMat.data);
+        };
+
+        it('culls with the current pose of the views', function () {
+            const { camera, view } = createXrCamera();
+
+            // the previous frame was rendered looking down -z
+            setViewPose(view, 0);
+            camera.updateViewTransforms();
+
+            // and the head has since turned to look down -x
+            setViewPose(view, 90);
+            camera.updateFrustum();
+
+            expect(camera.frustum.containsPoint(new Vec3(-10, 0, 0))).to.be.true;
+            expect(camera.frustum.containsPoint(new Vec3(0, 0, -10))).to.be.false;
+        });
+
+        it('culls with the current transform of the camera parent', function () {
+            const { camera, rig, view } = createXrCamera();
+            setViewPose(view, 0);
+
+            // the previous frame was rendered with the rig at the origin
+            camera.updateViewTransforms();
+
+            // and the rig has since been teleported
+            rig.setLocalPosition(0, 0, 50);
+            camera.updateFrustum();
+
+            expect(camera.frustum.containsPoint(new Vec3(0, 0, 40))).to.be.true;
+            expect(camera.frustum.containsPoint(new Vec3(0, 0, -10))).to.be.false;
+        });
+
+        it('culls with the pose of the views on the first frame of a session', function () {
+            const { camera, rig, view } = createXrCamera();
+            rig.setLocalPosition(0, 0, 50);
+            setViewPose(view, 0);
+
+            camera.updateFrustum();
+
+            expect(camera.frustum.containsPoint(new Vec3(0, 0, 40))).to.be.true;
+            expect(camera.frustum.containsPoint(new Vec3(0, 0, -10))).to.be.false;
+        });
     });
 });
 
@@ -281,6 +601,54 @@ describe('CameraComponent', function () {
 
             expect(entity.camera.calculateAspectRatio()).to.equal(2);
             expect(entity.camera.calculateAspectRatio({ width: 300, height: 100 })).to.equal(3);
+        });
+    });
+
+    describe('#sceneDepthMapHandle', function () {
+
+        it('returns the handle of the underlying Camera', function () {
+            const entity = new Entity();
+            entity.addComponent('camera');
+            app.root.addChild(entity);
+
+            const handle = entity.camera.sceneDepthMapHandle;
+            expect(handle).to.be.instanceOf(SceneDepthMapHandle);
+            expect(handle).to.equal(entity.camera.camera.sceneDepthMapHandle);
+            expect(handle.destroyed).to.equal(false);
+        });
+
+        it('is marked destroyed with the camera component', function () {
+            const entity = new Entity();
+            entity.addComponent('camera');
+            app.root.addChild(entity);
+
+            const handle = entity.camera.sceneDepthMapHandle;
+            entity.destroy();
+            expect(handle.destroyed).to.equal(true);
+        });
+    });
+
+    describe('#sceneColorMapHandle', function () {
+
+        it('returns the handle of the underlying Camera', function () {
+            const entity = new Entity();
+            entity.addComponent('camera');
+            app.root.addChild(entity);
+
+            const handle = entity.camera.sceneColorMapHandle;
+            expect(handle).to.be.instanceOf(SceneColorMapHandle);
+            expect(handle).to.equal(entity.camera.camera.sceneColorMapHandle);
+            expect(handle.destroyed).to.equal(false);
+        });
+
+        it('is marked destroyed with the camera component', function () {
+            const entity = new Entity();
+            entity.addComponent('camera');
+            app.root.addChild(entity);
+
+            const handle = entity.camera.sceneColorMapHandle;
+            entity.removeComponent('camera');
+            expect(handle.destroyed).to.equal(true);
         });
     });
 });

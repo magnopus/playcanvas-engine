@@ -22,6 +22,8 @@ import { FisheyeProjection } from '../graphics/fisheye-projection.js';
  * @typedef {object} GSplatRenderViewParams
  * @ignore
  * @property {GraphNode} cameraNode - The camera node for this view.
+ * @property {boolean} stochastic - Whether the forward view uses unsorted stochastic alpha.
+ * @property {string} dither - The noise pattern stochastic coverage is dithered against.
  * @property {boolean} radialSorting - Whether radial (vs linear) depth sorting is used.
  * @property {number} alphaClip - Alpha threshold for shadow/pick/prepass rendering.
  * @property {number} alphaClipForward - Alpha floor for the forward pass.
@@ -29,7 +31,10 @@ import { FisheyeProjection } from '../graphics/fisheye-projection.js';
  * @property {number} minContribution - Minimum visual contribution threshold.
  * @property {number} foveationStrength - Foveation strength.
  * @property {number} foveationCenter - Foveation center.
- * @property {boolean} antiAlias - Whether antialiasing is enabled.
+ * @property {number} antiAliasFilterSize - Variance in pixels squared of the anti-aliasing filter.
+ * @property {boolean} antiAlias - Whether the anti-aliasing compensation is compiled in.
+ * @property {boolean} antiAliasMixed - Whether the compensation is applied only to the splats
+ * flagged as trained with anti-aliasing (a per-splat bit in the work buffer), not to all of them.
  * @property {number} fisheye - Fisheye projection strength.
  * @property {ShaderMaterial} material - The scene gsplat template material.
  * @property {GSplatVaryings} varyings - User varying streams (provides the cache `words` count).
@@ -225,6 +230,16 @@ class GSplatRenderer {
      * @param {object} params - The gsplat parameters.
      */
     frameUpdate(params) {
+    }
+
+    /**
+     * Sets the anti-aliasing compensation the manager resolved for the splats of this renderer.
+     * Renderers that draw splats with the compensation in their own material apply it here.
+     *
+     * @param {boolean} antiAlias - Whether the compensation is compiled in.
+     * @param {boolean} mixed - Whether it applies only to the splats flagged in the work buffer.
+     */
+    setAntiAlias(antiAlias, mixed) {
     }
 
     /**

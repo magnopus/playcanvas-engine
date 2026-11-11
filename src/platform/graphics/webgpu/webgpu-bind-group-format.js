@@ -1,6 +1,7 @@
 import { Debug, DebugHelper } from '../../../core/debug.js';
 import { StringIds } from '../../../core/string-ids.js';
 import { SAMPLETYPE_FLOAT, SAMPLETYPE_UNFILTERABLE_FLOAT, SAMPLETYPE_DEPTH, SAMPLETYPE_INT, SAMPLETYPE_UINT } from '../constants.js';
+import { WebgpuDebug } from './webgpu-debug.js';
 import { WebgpuUtils } from './webgpu-utils.js';
 import { gpuTextureFormats } from './constants.js';
 
@@ -41,6 +42,14 @@ class WebgpuBindGroupFormat {
      */
     constructor(bindGroupFormat) {
 
+        this.bindGroupFormat = bindGroupFormat;
+        bindGroupFormat.device._bindGroupFormats.add(this);
+        this.restoreContext();
+    }
+
+    restoreContext() {
+        const bindGroupFormat = this.bindGroupFormat;
+
         /** @type {WebgpuGraphicsDevice} */
         const device = bindGroupFormat.device;
 
@@ -58,20 +67,28 @@ class WebgpuBindGroupFormat {
             this.desc = desc;
         });
 
+        WebgpuDebug.validate(device);
+
         /**
          * @type {GPUBindGroupLayout}
          * @private
          */
         this.bindGroupLayout = device.wgpu.createBindGroupLayout(desc);
         DebugHelper.setLabel(this.bindGroupLayout, bindGroupFormat.name);
+
+        WebgpuDebug.end(device, 'BindGroupLayout creation', {
+            desc,
+            bindGroupFormat
+        });
     }
 
     destroy() {
+        this.bindGroupFormat.device._bindGroupFormats.delete(this);
         this.bindGroupLayout = null;
     }
 
     loseContext() {
-        // this.bindGroupLayout = null;
+        this.bindGroupLayout = null;
     }
 
     /**

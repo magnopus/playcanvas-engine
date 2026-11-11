@@ -289,7 +289,12 @@ class ParticleEmitter {
         setProperty('orientation', PARTICLEORIENTATION_SCREEN);
 
         setProperty('depthWrite', false);
-        setProperty('noFog', false);
+        setProperty('useFog', true);
+        setProperty('useTonemap', true);
+        if (options.noFog !== undefined) {
+            Debug.deprecated('ParticleEmitter option noFog is deprecated. Use useFog instead.');
+            if (options.useFog === undefined) this.useFog = !options.noFog;
+        }
         setProperty('blendType', BLEND_NORMAL);
         setProperty('node', null);
         setProperty('startAngle', 0);
@@ -1157,6 +1162,9 @@ class ParticleEmitter {
         this.camera = null;
 
         this._destroyResources();
+
+        this._gpuUpdater.destroy();
+        this._gpuUpdater = null;
     }
 }
 

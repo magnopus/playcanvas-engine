@@ -5,9 +5,12 @@ import { isTouchPointer, movementState } from '../utils.js';
 const tmpVa = new Vec2();
 
 /**
- * Multi-touch input source class
+ * Multi-touch input source class. Attached to an element, it accumulates `touch` deltas for the
+ * movement of the touch points, `count` deltas for changes in the number of touches, and `pinch`
+ * deltas for the change in distance between two touches, which is what an orbiting camera needs
+ * on a touch screen.
  *
- * @category Input Source
+ * @category Input
  * @alpha
  *
  * @typedef {object} MultiTouchSourceDeltas
@@ -45,6 +48,7 @@ class MultiTouchSource extends InputSource {
         this._onPointerDown = this._onPointerDown.bind(this);
         this._onPointerMove = this._onPointerMove.bind(this);
         this._onPointerUp = this._onPointerUp.bind(this);
+        this._onPointerLeave = this._onPointerLeave.bind(this);
         this._onContextMenu = this._onContextMenu.bind(this);
     }
 
@@ -117,7 +121,8 @@ class MultiTouchSource extends InputSource {
         const { pointerType, pointerId } = event;
         this._movementState.up(event);
 
-        if (!isTouchPointer(pointerType)) {
+        // a touch ends once, whichever of an up, a cancel or a leave ends it
+        if (!isTouchPointer(pointerType) || !this._pointerEvents.has(pointerId)) {
             return;
         }
         this._element?.releasePointerCapture(pointerId);
@@ -130,6 +135,18 @@ class MultiTouchSource extends InputSource {
         }
 
         this._pointerPos.set(0, 0);
+    }
+
+    /**
+     * A captured touch leaves the element only after it ends, which has removed it already. One
+     * that is still tracked when it leaves has ended without an up or a cancel, as both touches of
+     * a two-handed pinch do in Safari on Apple Vision Pro, and would otherwise stay down for good.
+     *
+     * @param {PointerEvent} event - The pointer event.
+     * @private
+     */
+    _onPointerLeave(event) {
+        this._onPointerUp(event);
     }
 
     /**
@@ -180,6 +197,7 @@ class MultiTouchSource extends InputSource {
         this._element.addEventListener('pointermove', this._onPointerMove);
         this._element.addEventListener('pointerup', this._onPointerUp);
         this._element.addEventListener('pointercancel', this._onPointerUp);
+        this._element.addEventListener('pointerleave', this._onPointerLeave);
         this._element.addEventListener('contextmenu', this._onContextMenu);
     }
 
@@ -191,6 +209,7 @@ class MultiTouchSource extends InputSource {
         this._element.removeEventListener('pointermove', this._onPointerMove);
         this._element.removeEventListener('pointerup', this._onPointerUp);
         this._element.removeEventListener('pointercancel', this._onPointerUp);
+        this._element.removeEventListener('pointerleave', this._onPointerLeave);
         this._element.removeEventListener('contextmenu', this._onContextMenu);
 
         this._pointerEvents.clear();

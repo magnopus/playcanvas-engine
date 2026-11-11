@@ -77,8 +77,7 @@ class ComputeRadixSortOneSweep extends ComputeRadixSortBase {
     _threadBlocks = 0;
 
     /**
-     * Allocated thread-block capacity (buffer sizing). Buffers are only
-     * reallocated when this value changes. Always `>= _threadBlocks`.
+     * Allocated thread-block capacity (sizes `_passHist`). Always `>= _threadBlocks`.
      *
      * @type {number}
      */
@@ -94,7 +93,7 @@ class ComputeRadixSortOneSweep extends ComputeRadixSortBase {
 
     /**
      * Chained-scan lookback buffer: `MAX_PASSES × threadBlocks × RADIX` u32.
-     * Block 0's slot of each pass is initialised by Scan with FLAG_INCLUSIVE
+     * Block 0's slot of each pass is initialized by Scan with FLAG_INCLUSIVE
      * and the global exclusive prefix. Other blocks' slots are populated by
      * DigitBinningPass.
      *
@@ -295,6 +294,12 @@ class ComputeRadixSortOneSweep extends ComputeRadixSortBase {
     destroy() {
         this._destroyBuffers();
 
+        this._globalHistCompute?.destroy();
+        this._scanCompute?.destroy();
+        for (const compute of this._binningComputes) {
+            compute.destroy();
+        }
+
         this._globalHistShader?.destroy();
         this._scanShader?.destroy();
         this._binningShader?.destroy();
@@ -360,10 +365,9 @@ class ComputeRadixSortOneSweep extends ComputeRadixSortBase {
      * Allocates or resizes internal buffers.
      *
      * @param {number} elementCount - Number of elements to sort.
-     * @param {boolean} [forceRealloc] - Force buffer reallocation even if sizes match.
      * @private
      */
-    _allocateBuffers(elementCount, forceRealloc = false) {
+    _allocateBuffers(elementCount) {
         // Buffer sizing is driven by `capacity` (the high-water mark) to avoid
         // realloc churn when the workload shrinks. Dispatch/clear sizes must
         // track the CURRENT sort's elementCount - otherwise a 1M sort that
@@ -374,13 +378,17 @@ class ComputeRadixSortOneSweep extends ComputeRadixSortBase {
         const allocThreadBlocks = Math.max(1, Math.ceil(effectiveCount / PART_SIZE));
         const currentThreadBlocks = Math.max(1, Math.ceil(elementCount / PART_SIZE));
 
-        const needRealloc = forceRealloc || allocThreadBlocks !== this._allocatedThreadBlocks || !this._keys0;
+        // See ComputeRadixSortMultipass._allocateBuffers: grow on any effective-count increase,
+        // shrink only when a lowered capacity drops the thread-block count.
+        const needRealloc = !this._keys0 ||
+            effectiveCount > this._allocatedElementCount ||
+            allocThreadBlocks < this._allocatedThreadBlocks;
 
         if (needRealloc) {
             this._destroyBuffers();
 
             this._allocatedThreadBlocks = allocThreadBlocks;
-            this.capacity = effectiveCount;
+            this._capacity = effectiveCount;
 
             const device = this.device;
 
@@ -431,7 +439,7 @@ class ComputeRadixSortOneSweep extends ComputeRadixSortBase {
      * @param {number} [numBits] - Number of bits to sort. Must be a multiple
      * of 8 (the OneSweep radix width is fixed at 8). Defaults to 16.
      * @param {StorageBuffer} [initialValues] - Optional caller-supplied
-     * initial values for pass 0. When omitted, pass 0 synthesises
+     * initial values for pass 0. When omitted, pass 0 synthesizes
      * sequential indices and the sort returns sorted indices.
      * @param {boolean} [skipLastPassKeyWrite] - Skip writing sorted keys on
      * the last pass. Marginal perf win; only use when sorted keys are not
@@ -452,10 +460,9 @@ class ComputeRadixSortOneSweep extends ComputeRadixSortBase {
         this._hasInitialValues = hasInitialValues;
         this._skipLastPassKeyWrite = skipLastPassKeyWrite;
 
-        const prevDestructiveKeys = this._destructiveKeys;
-        this._destructiveKeys = destructiveKeys;
+        this._setDestructiveKeys(destructiveKeys);
 
-        this._allocateBuffers(elementCount, destructiveKeys !== prevDestructiveKeys);
+        this._allocateBuffers(elementCount);
         this._ensureBinningComputes(numPasses);
 
         if (destructiveKeys) {
@@ -575,10 +582,9 @@ class ComputeRadixSortOneSweep extends ComputeRadixSortBase {
         this._hasInitialValues = hasInitialValues;
         this._skipLastPassKeyWrite = skipLastPassKeyWrite;
 
-        const prevDestructiveKeys = this._destructiveKeys;
-        this._destructiveKeys = destructiveKeys;
+        this._setDestructiveKeys(destructiveKeys);
 
-        this._allocateBuffers(maxElementCount, destructiveKeys !== prevDestructiveKeys);
+        this._allocateBuffers(maxElementCount);
         this._ensureBinningComputes(numPasses);
 
         if (destructiveKeys) {

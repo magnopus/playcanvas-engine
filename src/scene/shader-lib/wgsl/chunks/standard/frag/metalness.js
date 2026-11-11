@@ -23,10 +23,10 @@ fn getMetalness() {
             var stereoUV: vec2f = getStereoVideoUV({STD_METALNESS_TEXTURE_UV}, uniform.metalnessStereoVideoType, uniform.metalnessIsStereoFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
-            metalness = metalness * textureSampleBias({STD_METALNESS_TEXTURE_NAME}, {STD_METALNESS_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias).{STD_METALNESS_TEXTURE_CHANNEL};
+            metalness = metalness * textureSampleBias({STD_METALNESS_TEXTURE_NAME}, {STD_METALNESS_TEXTURE_NAME}Sampler, stereoUV, {STD_TEXTURE_BIAS}).{STD_METALNESS_TEXTURE_CHANNEL};
         #else
         // end magnopus patched
-        metalness = metalness * textureSampleBias({STD_METALNESS_TEXTURE_NAME}, {STD_METALNESS_TEXTURE_NAME}Sampler, {STD_METALNESS_TEXTURE_UV}, uniform.textureBias).{STD_METALNESS_TEXTURE_CHANNEL};
+        metalness = metalness * textureSampleBias({STD_METALNESS_TEXTURE_NAME}, {STD_METALNESS_TEXTURE_NAME}Sampler, {STD_METALNESS_TEXTURE_UV}, {STD_TEXTURE_BIAS}).{STD_METALNESS_TEXTURE_CHANNEL};
         // magnopus patched
         #endif
         // end magnopus patched

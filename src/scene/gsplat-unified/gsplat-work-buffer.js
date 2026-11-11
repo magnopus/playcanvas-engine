@@ -7,7 +7,9 @@ import { RenderTarget } from '../../platform/graphics/render-target.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { UploadStream } from '../../platform/graphics/upload-stream.js';
+import { GSPLATDATA_COMPACT } from '../constants.js';
 import { QuadRender } from '../graphics/quad-render.js';
+import { ShaderMaterial } from '../materials/shader-material.js';
 import { ShaderUtils } from '../shader-lib/shader-utils.js';
 import glslGsplatCopyToWorkBufferPS from '../shader-lib/glsl/chunks/gsplat/frag/gsplatCopyToWorkbuffer.js';
 import wgslGsplatCopyToWorkBufferPS from '../shader-lib/wgsl/chunks/gsplat/frag/gsplatCopyToWorkbuffer.js';
@@ -18,12 +20,14 @@ import { GSplatWorkBufferRenderPass } from './gsplat-work-buffer-render-pass.js'
 import { GSplatStreams } from '../gsplat/gsplat-streams.js';
 
 let id = 0;
+const tempMap = new Map();
 
 /**
  * @import { GSplatFormat } from '../gsplat/gsplat-format.js'
  * @import { GSplatInfo } from "./gsplat-info.js"
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { GraphNode } from '../graph-node.js';
+ * @import { GSplatResourceBase } from '../gsplat/gsplat-resource-base.js'
  * @import { ShaderMaterial } from '../materials/shader-material.js'
  */
 
@@ -165,6 +169,14 @@ class GSplatWorkBuffer {
     colorRenderPass;
 
     /**
+     * Stream-set version the render targets were created for.
+     *
+     * @type {number}
+     * @private
+     */
+    _renderTargetsVersion = -1;
+
+    /**
      * GPU frustum culler for octree node visibility.
      *
      * @type {GSplatFrustumCuller}
@@ -220,6 +232,84 @@ class GSplatWorkBuffer {
     }
 
     /**
+     * Gets or creates the resource-specific render information used to copy splats into this work
+     * buffer. The cache remains on the resource because its material binds the resource's textures,
+     * parameters and format-specific shader chunks.
+     *
+     * @param {GSplatResourceBase} resource - The source GSplat resource.
+     * @param {boolean} colorOnly - Whether to render only color instead of the full MRT.
+     * @param {{ code: string, hash: number }|null} workBufferModifier - Optional custom modifier.
+     * @param {number} formatHash - Captured resource format hash for shader caching.
+     * @param {string} formatDeclarations - Captured resource format declarations.
+     * @returns {WorkBufferRenderInfo} The cached render information.
+     * @private
+     */
+    getRenderInfo(resource, colorOnly, workBufferModifier, formatHash, formatDeclarations) {
+        const workBufferFormat = this.format;
+
+        // configure defines to fetch cached data
+        resource.configureMaterialDefines(tempMap);
+        tempMap.set('GSPLAT_LOD', '');
+        if (colorOnly) {
+            tempMap.set('GSPLAT_COLOR_ONLY', '');
+
+            // source geometry from the work buffer instead of source textures
+            if (resource.supportsWorkBufferGeometry) {
+                tempMap.set('GSPLAT_WORKBUFFER_GEOMETRY', '');
+                if (workBufferFormat.dataFormat === GSPLATDATA_COMPACT) {
+                    tempMap.set('GSPLAT_WORKBUFFER_COMPACT', '');
+                }
+            }
+        }
+
+        let definesKey = '';
+        for (const [k, v] of tempMap) {
+            if (definesKey) definesKey += ';';
+            definesKey += `${k}=${v}`;
+        }
+        const key = `${formatHash};${workBufferFormat.hash};${workBufferModifier?.hash ?? 0};${definesKey}`;
+
+        // get or create quad render
+        let info = resource.workBufferRenderInfos.get(key);
+        if (!info) {
+
+            const material = new ShaderMaterial();
+            resource.configureMaterial(material, workBufferModifier, formatDeclarations);
+
+            // Inject work buffer output declarations
+            const chunks = this.device.isWebGPU ? material.shaderChunks.wgsl : material.shaderChunks.glsl;
+            // For color-only mode, only output color stream; otherwise output all streams
+            const outputStreams = colorOnly ?
+                [workBufferFormat.getStream('dataColor')] :
+                [...workBufferFormat.streams, ...workBufferFormat.extraStreams];
+            let outputCode = workBufferFormat.getOutputDeclarations(outputStreams);
+
+            // In color-only mode, generate no-op stubs for extra streams so user modifiers compile
+            if (colorOnly && workBufferFormat.extraStreams.length > 0) {
+                outputCode += `\n${workBufferFormat.getOutputStubs(workBufferFormat.extraStreams)}`;
+            }
+
+            chunks.set('gsplatWorkBufferOutputVS', outputCode);
+
+            // Inject format-specific write encoding chunk
+            const writeCode = workBufferFormat.getWriteCode();
+            if (writeCode) {
+                chunks.set('gsplatWriteVS', writeCode);
+            }
+
+            // copy tempMap to material defines
+            tempMap.forEach((v, k) => material.setDefine(k, v));
+
+            // create new cache entry
+            info = new WorkBufferRenderInfo(this.device, key, material, colorOnly, workBufferFormat);
+            resource.workBufferRenderInfos.set(key, info);
+        }
+
+        tempMap.clear();
+        return info;
+    }
+
+    /**
      * Creates or recreates render targets from current textures.
      *
      * @private
@@ -235,6 +325,7 @@ class GSplatWorkBuffer {
 
         // Collect all textures in order for MRT
         const colorBuffers = this.streams.getTexturesInOrder();
+        this._renderTargetsVersion = this.streams._formatVersion;
         // viewport rects used to fill the work buffer must address identical texel rows on all
         // graphics APIs, matching the WebGL layout
         this.renderTarget = new RenderTarget({
@@ -263,11 +354,13 @@ class GSplatWorkBuffer {
      * Call this before rendering to ensure all streams have textures.
      */
     syncWithFormat() {
-        const prevVersion = this.streams._formatVersion;
         this.streams.syncWithFormat(this.format);
 
-        // If format changed, recreate render targets to include new textures
-        if (prevVersion !== this.streams._formatVersion) {
+        // Recreate the render targets when they were built for an older stream set. Compared
+        // against the version the targets were built for, not the streams' version before this
+        // call: getTexture() syncs the streams on its own, so by the time this runs they can
+        // already be up to date while the targets still lack the new textures.
+        if (this._renderTargetsVersion !== this.streams._formatVersion) {
             this._createRenderTargets();
         }
     }
@@ -302,6 +395,16 @@ class GSplatWorkBuffer {
         const size = this.textureSize;
         if (this.device.isWebGPU) {
             Debug.assert(data.length <= size * size);
+
+            // grow here rather than on resize: only the CPU sort uploads an order, so with GPU
+            // sorting the buffer is never used and stays at its minimal size
+            const newByteSize = size * size * 4;
+            if (this.orderBuffer.byteSize < newByteSize) {
+                this.orderBuffer.destroy();
+                this.orderBuffer = new StorageBuffer(this.device, newByteSize, BUFFERUSAGE_COPY_DST);
+                DebugHelper.setName(this.orderBuffer, 'GsplatWorkBuffer.order');
+            }
+
             this.uploadStream.upload(data, this.orderBuffer, 0, data.length);
         } else {
             Debug.assert(data.length === size * size);
@@ -318,14 +421,8 @@ class GSplatWorkBuffer {
         this.colorRenderTarget.resize(textureSize, textureSize);
         this.streams.resize(textureSize, textureSize);
 
-        if (this.device.isWebGPU) {
-            const newByteSize = textureSize * textureSize * 4;
-            if (this.orderBuffer.byteSize < newByteSize) {
-                this.orderBuffer.destroy();
-                this.orderBuffer = new StorageBuffer(this.device, newByteSize, BUFFERUSAGE_COPY_DST);
-                DebugHelper.setName(this.orderBuffer, 'GsplatWorkBuffer.order');
-            }
-        } else {
+        // the WebGPU order buffer grows on upload, in setOrderData
+        if (!this.device.isWebGPU) {
             this.orderTexture.resize(textureSize, textureSize);
         }
     }

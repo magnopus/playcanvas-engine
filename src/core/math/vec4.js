@@ -4,37 +4,25 @@ import { Debug } from '../debug.js';
  * A 4-dimensional vector. Vec4 is commonly used to represent homogeneous coordinates or shader
  * uniforms requiring four components.
  *
+ * Operations follow one convention throughout the math classes: a method that modifies the vector
+ * it is called on returns it, so calls can be chained and nothing is allocated, while queries such
+ * as {@link length} and {@link dot} return a number. Two-operand forms such as {@link add2} and
+ * {@link mul2} write the result of `lhs op rhs` into `this`, and it is safe for `this` to also be
+ * one of the operands. Use {@link clone} for an independent copy and {@link copy} to overwrite one
+ * vector with another.
+ *
+ * The static constants {@link ZERO}, {@link HALF} and {@link ONE} are frozen shared instances: read
+ * them freely, but writing to one throws.
+ *
+ * @example
+ * // Interpolate between two 4-component values into a third, without allocating
+ * const from = new Vec4(0, 0, 0, 0);
+ * const to = new Vec4(1, 1, 1, 1);
+ * const result = new Vec4();
+ * result.lerp(from, to, 0.25);   // result is now [0.25, 0.25, 0.25, 0.25]
  * @category Math
  */
 class Vec4 {
-    /**
-     * The first component of the vector.
-     *
-     * @type {number}
-     */
-    x;
-
-    /**
-     * The second component of the vector.
-     *
-     * @type {number}
-     */
-    y;
-
-    /**
-     * The third component of the vector.
-     *
-     * @type {number}
-     */
-    z;
-
-    /**
-     * The fourth component of the vector.
-     *
-     * @type {number}
-     */
-    w;
-
     /**
      * Creates a new Vec4 instance.
      *
@@ -64,16 +52,43 @@ class Vec4 {
      */
     constructor(x = 0, y = 0, z = 0, w = 0) {
         if (x.length === 4) {
-            this.x = x[0];
-            this.y = x[1];
-            this.z = x[2];
-            this.w = x[3];
-        } else {
-            this.x = x;
-            this.y = y;
-            this.z = z;
-            this.w = w;
+            w = x[3];
+            z = x[2];
+            y = x[1];
+            x = x[0];
         }
+
+        // Fields are assigned once here instead of declared as class fields. A declaration without
+        // an initializer stores undefined first, so V8 never unboxes the field as a double and
+        // every fractional write allocates a heap number.
+
+        /**
+         * The first component of the vector.
+         *
+         * @type {number}
+         */
+        this.x = x;
+
+        /**
+         * The second component of the vector.
+         *
+         * @type {number}
+         */
+        this.y = y;
+
+        /**
+         * The third component of the vector.
+         *
+         * @type {number}
+         */
+        this.z = z;
+
+        /**
+         * The fourth component of the vector.
+         *
+         * @type {number}
+         */
+        this.w = w;
     }
 
     /**

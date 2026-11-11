@@ -2,8 +2,6 @@ export const computeGsplatCommonSource = /* wgsl */`
 
 #include "halfTypesCS"
 
-const TILE_SIZE: u32 = 16u;
-
 fn quatToMat3(r: half4) -> half3x3 {
     let r2: half4 = r + r;
     let x: half   = r2.x * r.w;
@@ -40,7 +38,7 @@ fn computeSplatCov(
     scale: half3,
     viewMatrix: mat4x4f,
     viewProj: mat4x4f,
-    focal: f32,
+    focal: vec2f,           // viewport size * projection scale per axis (= 2 x the focal length in pixels)
     viewportWidth: f32,
     viewportHeight: f32,
     nearClip: f32,
@@ -52,6 +50,7 @@ fn computeSplatCov(
     minContribution: f32,
     foveationStrength: f32,
     foveationCenter: f32,
+    antiAliasFilterSize: f32,   // GSplatParams#antiAliasFilterSize, in pixels squared
     #ifdef GSPLAT_FISHEYE
         fisheye_k: f32,
         fisheye_inv_k: f32,
@@ -160,11 +159,11 @@ fn computeSplatCov(
 
         // Compute TT columns directly without materializing full J and W matrices.
         // Original code:
-        //   let J = mat3x3f(vec3f(J1, 0.0, J2.x), vec3f(0.0, J1, J2.y), vec3f(0.0, 0.0, 0.0));
+        //   let J = mat3x3f(vec3f(J1.x, 0.0, J2.x), vec3f(0.0, J1.y, J2.y), vec3f(0.0, 0.0, 0.0));
         //   let W = transpose(mat3x3f(viewMatrix[0].xyz, viewMatrix[1].xyz, viewMatrix[2].xyz));
         //   let TT = W * J;
-        let tt0 = J1 * w0 + J2.x * w2;
-        let tt1 = J1 * w1 + J2.y * w2;
+        let tt0 = J1.x * w0 + J2.x * w2;
+        let tt1 = J1.y * w1 + J2.y * w2;
 
     #endif
 
@@ -177,8 +176,31 @@ fn computeSplatCov(
     let b = dot(b0, b1);
     let cRaw = dot(b1, b1);
 
-    let a = aRaw + 0.3;
-    let c = cRaw + 0.3;
+    // The size and contribution culls measure the footprint with GSPLAT_CULL_LOWPASS, the rendered footprint
+    // uses GSPLAT_LOWPASS (see gsplatHelpersVS). The size cull runs first, before the contribution and AA math.
+    let aCull = aRaw + GSPLAT_CULL_LOWPASS;
+    let cCull = cRaw + GSPLAT_CULL_LOWPASS;
+    if (gsplatFootprintSmallerThan(aCull, b, cCull, minPixelSize)) {
+        return result;
+    }
+
+    // Screen-space filter: the classic dilation, or for compensated splats the filter they were
+    // trained with (antiAliasFilterSize is in pixels squared, the covariance in half pixel units).
+    var lowpass = GSPLAT_LOWPASS;
+    #if GSPLAT_AA
+        var compensated = true;
+        #ifdef GSPLAT_AA_MIXED
+            // the scene mixes splats trained with and without anti-aliasing; only the ones flagged
+            // in the work buffer are compensated
+            compensated = getAntiAlias();
+        #endif
+        if (compensated) {
+            lowpass = 4.0 * antiAliasFilterSize;
+        }
+    #endif
+
+    let a = aRaw + lowpass;
+    let c = cRaw + lowpass;
 
     let det = a * c - b * b;
     if (det <= 0.0) {
@@ -189,20 +211,20 @@ fn computeSplatCov(
         // AA compensation: ratio of pre-blur to post-blur determinant. Matches the
         // quad renderer's GSPLAT_AA branch in gsplatCorner.js initCornerCov.
         let detOrig = aRaw * cRaw - b * b;
-        result.aaFactor = sqrt(max(detOrig / det, 0.0));
+        result.aaFactor = select(1.0, sqrt(max(detOrig / det, 0.0)), compensated);
     #endif
 
     // Rejects splats whose total visual contribution (opacity * projected area) is
     // negligible. Near the camera, projected areas are large so contributions naturally
     // exceed the threshold; at distance, areas shrink and low-impact splats are culled.
     //
-    // Foveation: the threshold is raised radially from the screen centre. Within
+    // Foveation: the threshold is raised radially from the screen center. Within
     // foveationCenter (NDC radius) there is no effect; the boost ramps with a smoothstep
     // to full foveationStrength at the screen edge (r = 1) and beyond (corners). With
     // strength 0 this is an exact no-op.
     let fovNdc = screen * vec2f(2.0 / viewportWidth, 2.0 / viewportHeight) - vec2f(1.0);
     #ifdef GSPLAT_XR
-        // Stereo: use the smaller of the two eyes' radii, so a splat near the centre of either
+        // Stereo: use the smaller of the two eyes' radii, so a splat near the center of either
         // eye is protected (the foveated boost only applies where it is peripheral in both).
         let fovR = min(length(fovNdc), length(ndc1));
     #else
@@ -212,19 +234,10 @@ fn computeSplatCov(
     let fovT = saturate((fovR - foveationCenter) / max(1.0 - foveationCenter, 1e-4));
     let effMinContribution = minContribution + foveationStrength * fovT * fovT * (3.0 - 2.0 * fovT);
 
-    let totalContribution = opacity * 6.283185 * sqrt(det);
+    let totalContribution = opacity * 6.283185 * sqrt(aCull * cCull - b * b);
     if (totalContribution < effMinContribution) {
         return result;
     }
-
-    // Opacity-aware radius tightening based on FlashGS
-    // https://github.com/InternLandMark/FlashGS
-    // The fixed factor 8.0 corresponds to power = -4.0 (exp(-4) ≈ 0.018).
-    // For low-opacity splats, pixels become invisible (alpha < alphaClip) at a closer
-    // distance. We solve for the power where opacity * exp(power) = alphaClip,
-    // giving radiusFactor = min(8.0, 2.0 * ln(opacity / alphaClip)). This shrinks
-    // the effective radius for low-opacity splats, reducing tile assignments.
-    let radiusFactor = computeRadiusFactor(half(opacity), alphaClip);
 
     let vmin = min(1024.0, min(viewportWidth, viewportHeight));
     let maxRadius = vmin;
@@ -232,10 +245,6 @@ fn computeSplatCov(
     let radiusYUncapped = sqrt(2.0 * c);
     let radiusX = min(radiusXUncapped, maxRadius);
     let radiusY = min(radiusYUncapped, maxRadius);
-
-    if (max(radiusX, radiusY) < minPixelSize) {
-        return result;
-    }
 
     // Frustum cull: reject splats entirely off-screen
     #ifdef GSPLAT_XR

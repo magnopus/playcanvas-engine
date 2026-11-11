@@ -1,6 +1,5 @@
 import { Debug, DebugHelper } from '../../core/debug.js';
 import { Mat4 } from '../../core/math/mat4.js';
-import { Vec2 } from '../../core/math/vec2.js';
 import { Vec3 } from '../../core/math/vec3.js';
 import { Compute } from '../../platform/graphics/compute.js';
 import { Shader } from '../../platform/graphics/shader.js';
@@ -21,6 +20,7 @@ import {
     SHADERLANGUAGE_WGSL,
     SHADERSTAGE_COMPUTE,
     UNIFORMTYPE_FLOAT,
+    UNIFORMTYPE_INT,
     UNIFORMTYPE_MAT4,
     UNIFORMTYPE_UINT,
     UNIFORMTYPE_UVEC4,
@@ -35,7 +35,6 @@ import { computeGsplatProjectorSource } from '../shader-lib/wgsl/chunks/gsplat/c
 import { computeGsplatProjectorWriteIndirectArgsSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-projector-write-indirect-args.js';
 import { computeGsplatProjectCommonSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-project-common.js';
 import { computeGsplatCommonSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-common.js';
-import { computeGsplatTileIntersectSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-tile-intersect.js';
 import computeSplatSource from '../shader-lib/wgsl/chunks/gsplat/vert/gsplatComputeSplat.js';
 import gsplatModifyDefaultSource from '../shader-lib/wgsl/chunks/gsplat/vert/gsplatModify.js';
 import gsplatHelpersSource from '../shader-lib/wgsl/chunks/gsplat/vert/gsplatHelpers.js';
@@ -47,22 +46,25 @@ import gsplatHelpersSource from '../shader-lib/wgsl/chunks/gsplat/vert/gsplatHel
  */
 
 const INDEX_COUNT = 6 * GSplatResourceBase.instanceSize;
-const PROJECTOR_WORKGROUP_SIZE = 256;
 
 // Defines owned by the projector itself - user render-stage material defines that collide with
 // these are ignored when merged into the projector compute, so user customization can't clobber
 // the projector's own variant/format configuration.
 const PROJECTOR_INTERNAL_DEFINES = new Set([
-    '{CACHE_STRIDE}', 'RADIAL_SORT', 'PICK_MODE', 'GSPLAT_FISHEYE', 'GSPLAT_AA', 'GSPLAT_COLOR_FLOAT', 'GSPLAT_XR'
+    '{CACHE_STRIDE}', 'RADIAL_SORT', 'PICK_MODE', 'GSPLAT_FISHEYE', 'GSPLAT_AA', 'GSPLAT_AA_MIXED', 'GSPLAT_COLOR_FLOAT',
+    'GSPLAT_XR'
 ]);
 
 const _cameraDir = new Vec3();
-const _dispatchSize = new Vec2();
 const _viewProjMat = new Mat4();
 const _viewProjData = new Float32Array(16);
 const _viewProj1Data = new Float32Array(16);
 const _viewData = new Float32Array(16);
 const _shaderProjMat = new Mat4();
+
+// scratch for reading a float's bit pattern, see the sort keys
+const _floatBits = new Float32Array(1);
+const _floatBitsI32 = new Int32Array(_floatBits.buffer);
 
 /**
  * Owns the per-splat compute pass for the hybrid GSplat renderer (Pass B in the pipeline):
@@ -248,11 +250,13 @@ class GSplatProjector {
         this.binWeightsBuffer?.destroy();
 
         for (const compute of this._projectorComputes.values()) {
+            compute.destroy();
             compute.shader?.destroy();
         }
         this._projectorComputes.clear();
 
         this._projectorBindGroupFormat?.destroy();
+        this._writeIndirectArgsCompute?.destroy();
         this._writeIndirectArgsCompute?.shader?.destroy();
         this._writeArgsBindGroupFormat?.destroy();
 
@@ -278,13 +282,14 @@ class GSplatProjector {
             new UniformFormat('splatTextureSize', UNIFORMTYPE_UINT),
             new UniformFormat('numBins', UNIFORMTYPE_UINT),
             new UniformFormat('isOrtho', UNIFORMTYPE_UINT),
-            new UniformFormat('pad0', UNIFORMTYPE_UINT),
+            new UniformFormat('stochastic', UNIFORMTYPE_UINT),
             new UniformFormat('viewProj', UNIFORMTYPE_MAT4),
             new UniformFormat('viewMatrix', UNIFORMTYPE_MAT4),
             new UniformFormat('cameraPosition', UNIFORMTYPE_VEC3),
             new UniformFormat('minPixelSize', UNIFORMTYPE_FLOAT),
             new UniformFormat('cameraDirection', UNIFORMTYPE_VEC3),
             new UniformFormat('focal', UNIFORMTYPE_FLOAT),
+            new UniformFormat('focalY', UNIFORMTYPE_FLOAT),
             new UniformFormat('viewportWidth', UNIFORMTYPE_FLOAT),
             new UniformFormat('viewportHeight', UNIFORMTYPE_FLOAT),
             new UniformFormat('nearClip', UNIFORMTYPE_FLOAT),
@@ -294,7 +299,11 @@ class GSplatProjector {
             new UniformFormat('minDist', UNIFORMTYPE_FLOAT),
             new UniformFormat('invRange', UNIFORMTYPE_FLOAT),
             new UniformFormat('foveationStrength', UNIFORMTYPE_FLOAT),
-            new UniformFormat('foveationCenter', UNIFORMTYPE_FLOAT)
+            new UniformFormat('foveationCenter', UNIFORMTYPE_FLOAT),
+            new UniformFormat('antiAliasFilterSize', UNIFORMTYPE_FLOAT),
+            new UniformFormat('sortKeyMinBits', UNIFORMTYPE_INT),
+            new UniformFormat('sortKeyScale', UNIFORMTYPE_FLOAT),
+            new UniformFormat('maxSortKey', UNIFORMTYPE_UINT)
         ];
 
         this._projectorUniformBufferFormat = new UniformBufferFormat(device, baseFields);
@@ -362,6 +371,7 @@ class GSplatProjector {
      */
     _destroyProjectorComputes() {
         for (const compute of this._projectorComputes.values()) {
+            compute.destroy();
             compute.shader?.destroy();
         }
         this._projectorComputes.clear();
@@ -376,12 +386,13 @@ class GSplatProjector {
      * @param {boolean} pickMode - Pick output mode.
      * @param {boolean} fisheyeMode - Fisheye projection mode.
      * @param {boolean} antiAlias - Anti-aliasing opacity compensation mode.
+     * @param {boolean} antiAliasMixed - Per-splat anti-aliasing mode.
      * @param {boolean} stereo - XR stereo (2-view) projection mode.
      * @returns {string} The cache key.
      * @private
      */
-    _projectorKey(radialSort, pickMode, fisheyeMode, antiAlias, stereo) {
-        return `${radialSort ? 'r' : 'l'}${pickMode ? 'p' : ''}${fisheyeMode ? 'f' : ''}${antiAlias ? 'a' : ''}${stereo ? 's' : ''}`;
+    _projectorKey(radialSort, pickMode, fisheyeMode, antiAlias, antiAliasMixed, stereo) {
+        return `${radialSort ? 'r' : 'l'}${pickMode ? 'p' : ''}${fisheyeMode ? 'f' : ''}${antiAlias ? 'a' : ''}${antiAliasMixed ? 'm' : ''}${stereo ? 's' : ''}`;
     }
 
     /**
@@ -393,11 +404,13 @@ class GSplatProjector {
      * @param {boolean} fisheyeMode - Whether to compile the GSPLAT_FISHEYE variant.
      * @param {boolean} antiAlias - Whether to compile the GSPLAT_AA variant (bakes the
      * anti-aliasing opacity compensation into the cached alpha).
+     * @param {boolean} antiAliasMixed - Whether to compile the GSPLAT_AA_MIXED variant (applies the
+     * compensation only to the splats flagged in the work buffer).
      * @param {boolean} stereo - Whether to compile the GSPLAT_XR (2-view stereo) variant.
      * @returns {Compute} The created compute instance.
      * @private
      */
-    _createProjectorCompute(workBuffer, radialSort, pickMode, fisheyeMode, antiAlias, stereo) {
+    _createProjectorCompute(workBuffer, radialSort, pickMode, fisheyeMode, antiAlias, antiAliasMixed, stereo) {
         const device = this.device;
         const wbFormat = workBuffer.format;
 
@@ -420,7 +433,6 @@ class GSplatProjector {
 
         const cincludes = new Map();
         cincludes.set('gsplatCommonCS', computeGsplatCommonSource);
-        cincludes.set('gsplatTileIntersectCS', computeGsplatTileIntersectSource);
         cincludes.set('gsplatComputeSplatCS', computeSplatSource);
         cincludes.set('gsplatFormatDeclCS', wbFormat.getComputeInputDeclarations(fixedBindings.length));
         cincludes.set('gsplatFormatReadCS', wbFormat.getReadCode());
@@ -450,6 +462,9 @@ class GSplatProjector {
         if (antiAlias) {
             cdefines.set('GSPLAT_AA', '');
         }
+        if (antiAliasMixed) {
+            cdefines.set('GSPLAT_AA_MIXED', '');
+        }
         if (stereo) {
             cdefines.set('GSPLAT_XR', '');
         }
@@ -470,7 +485,7 @@ class GSplatProjector {
             });
         }
 
-        const name = `GSplatProjector${radialSort ? 'Radial' : 'Linear'}${pickMode ? 'Pick' : ''}${fisheyeMode ? 'Fisheye' : ''}${antiAlias ? 'Aa' : ''}${stereo ? 'Stereo' : ''}`;
+        const name = `GSplatProjector${radialSort ? 'Radial' : 'Linear'}${pickMode ? 'Pick' : ''}${fisheyeMode ? 'Fisheye' : ''}${antiAlias ? 'Aa' : ''}${antiAliasMixed ? 'Mixed' : ''}${stereo ? 'Stereo' : ''}`;
 
         const ubFormat = stereo ?
             this._projectorUniformBufferFormatStereo :
@@ -526,21 +541,22 @@ class GSplatProjector {
      * @param {boolean} [pickMode] - Whether to use the pick-output variant.
      * @param {boolean} [fisheyeMode] - Whether to use the fisheye projection variant.
      * @param {boolean} [antiAlias] - Whether to use the anti-aliasing variant.
+     * @param {boolean} [antiAliasMixed] - Whether to use the per-splat anti-aliasing variant.
      * @param {boolean} [stereo] - Whether to use the XR stereo (2-view) variant.
      * @returns {Compute} The projector compute instance.
      * @private
      */
-    _getProjectorCompute(workBuffer, radialSort, pickMode = false, fisheyeMode = false, antiAlias = false, stereo = false) {
+    _getProjectorCompute(workBuffer, radialSort, pickMode = false, fisheyeMode = false, antiAlias = false, antiAliasMixed = false, stereo = false) {
         const wbFormat = workBuffer.format;
         if (this._formatVersion !== wbFormat.extraStreamsVersion) {
             this._destroyProjectorComputes();
             this._formatVersion = wbFormat.extraStreamsVersion;
         }
 
-        const key = this._projectorKey(radialSort, pickMode, fisheyeMode, antiAlias, stereo);
+        const key = this._projectorKey(radialSort, pickMode, fisheyeMode, antiAlias, antiAliasMixed, stereo);
         let compute = this._projectorComputes.get(key);
         if (!compute) {
-            compute = this._createProjectorCompute(workBuffer, radialSort, pickMode, fisheyeMode, antiAlias, stereo);
+            compute = this._createProjectorCompute(workBuffer, radialSort, pickMode, fisheyeMode, antiAlias, antiAliasMixed, stereo);
             this._projectorComputes.set(key, compute);
         }
         return compute;
@@ -616,17 +632,23 @@ class GSplatProjector {
      * sortKeys (typically `worldState.totalActiveSplats`).
      * @param {boolean} params.radialSort - Whether to use the radial sort key variant.
      * @param {number} params.numBits - Sort key bit count (defines bucket count = 1 << numBits).
-     * @param {number} params.minDist - Minimum distance for sort key normalisation.
-     * @param {number} params.maxDist - Maximum distance for sort key normalisation.
+     * @param {number} params.minDist - Minimum distance for sort key normalization.
+     * @param {number} params.maxDist - Maximum distance for sort key normalization.
      * @param {number} params.alphaClip - Alpha cull threshold.
-     * @param {number} params.minPixelSize - Minimum on-screen pixel size before culling.
+     * @param {number} params.minPixelSize - Minimum on-screen size in pixels (major-axis diameter of the
+     * drawn footprint, as in the quad renderers) before culling.
      * @param {number} params.minContribution - Minimum total contribution before culling.
      * @param {number} params.foveationStrength - Foveated culling strength added to
      * `minContribution` toward the screen edges (0 disables).
-     * @param {number} params.foveationCenter - Protected centre radius (NDC units) within which
+     * @param {number} params.foveationCenter - Protected center radius (NDC units) within which
      * foveated culling has no effect.
+     * @param {number} [params.antiAliasFilterSize] - Variance in pixels squared of the screen-space
+     * filter of the splats rendered with the anti-aliasing compensation.
      * @param {number} params.viewportWidth - Render viewport width in pixels.
      * @param {number} params.viewportHeight - Render viewport height in pixels.
+     * @param {boolean} [params.stochastic] - Write stable splat IDs instead of sort keys. The
+     * caller owns the invariant that this is never combined with `pickMode`, which always needs
+     * sorted depth semantics.
      * @param {boolean} [params.pickMode] - Whether to write picking IDs into the cache.
      * @param {import('../graphics/fisheye-projection.js').FisheyeProjection} [params.fisheyeProj]
      * Fisheye projection state. When `fisheyeProj.enabled` is true the projector picks the
@@ -634,6 +656,8 @@ class GSplatProjector {
      * @param {boolean} [params.antiAlias] - Whether to bake anti-aliasing opacity
      * compensation into the cached alpha. Ignored in pick mode (picking only gates on a
      * binary opacity threshold), which keeps the projector variant count down.
+     * @param {boolean} [params.antiAliasMixed] - Whether the compensation applies only to the
+     * splats flagged as trained with anti-aliasing in the work buffer.
      * @param {boolean} [params.isStereo] - Whether to project both XR eyes in a single pass
      * (GSPLAT_XR variant). Requires `cameraNode.camera.camera.xrViews` to have 2 views.
      * Mutually exclusive with pick and fisheye.
@@ -643,24 +667,33 @@ class GSplatProjector {
             workBuffer, cameraNode, compactedSplatIds, sortElementCountBuffer,
             totalCapacity, radialSort, numBits, minDist, maxDist,
             alphaClip, minPixelSize, minContribution,
-            foveationStrength = 0, foveationCenter = 0.3,
+            foveationStrength = 0, foveationCenter = 0.3, antiAliasFilterSize = 0.1,
             viewportWidth, viewportHeight,
             pickMode = false,
+            stochastic = false,
             fisheyeProj,
             antiAlias = false,
+            antiAliasMixed = false,
             isStereo = false,
             material,
             userCacheWords = 0
         } = params;
+
+        Debug.assert(!(stochastic && pickMode), 'GSplatProjector#dispatch: stochastic and pickMode are mutually exclusive.');
 
         const fisheyeMode = !!fisheyeProj?.enabled;
 
         // Stereo is XR perspective-only; never combined with pick (mono) or fisheye.
         const stereoMode = !!isStereo && !pickMode && !fisheyeMode;
 
+        // A stochastic view generates no sort key, so the sort direction cannot affect it. Fold it
+        // away rather than compiling a second, behaviorally identical RADIAL_SORT variant.
+        const radialMode = radialSort && !stochastic;
+
         // AA only matters for the forward color path; skip it for picking to avoid
         // doubling the projector variant count.
         const aaMode = antiAlias && !pickMode;
+        const aaMixedMode = aaMode && antiAliasMixed;
 
         // sync render-stage customization (modify chunk + defines) before fetching the compute,
         // so a change rebuilds the variant with the new source/defines
@@ -673,7 +706,7 @@ class GSplatProjector {
         // workgroups run their atomicAdds.
         this.renderCounter.clear();
 
-        const compute = this._getProjectorCompute(workBuffer, radialSort, pickMode, fisheyeMode, aaMode, stereoMode);
+        const compute = this._getProjectorCompute(workBuffer, radialMode, pickMode, fisheyeMode, aaMode, aaMixedMode, stereoMode);
 
         // Forward the user render-stage material parameters (uniforms/textures referenced by the
         // modify chunk, reflected into the projector's auto-generated bind group, matched by name).
@@ -696,12 +729,6 @@ class GSplatProjector {
         const range = maxDist - minDist;
         const invRange = range > 0 ? 1.0 / range : 1.0;
 
-        // Bin weights — same pattern as CPU-side sort key preparation.
-        const bucketCount = (1 << numBits);
-        const cameraBin = GSplatSortBinWeights.computeCameraBin(radialSort, minDist, range);
-        const binWeights = this.binWeightsUtil.compute(cameraBin, bucketCount);
-        this.binWeightsBuffer.write(0, binWeights);
-
         compute.setParameter('compactedSplatIds', compactedSplatIds);
         compute.setParameter('sortElementCount', sortElementCountBuffer);
         compute.setParameter('projCache', this.projCache);
@@ -720,8 +747,11 @@ class GSplatProjector {
         // Camera + projection uniforms.
         const cameraComponent = cameraNode.camera;
         const cam = cameraComponent.camera;
+        const orthographic = cam.projection === PROJECTION_ORTHOGRAPHIC;
         const webgpu = this.device.isWebGPU;
-        let focal;
+        // focal length in pixels per axis (they differ when the viewport's pixel aspect doesn't
+        // match the projection's)
+        let focal, focalY;
         if (stereoMode) {
             // XR stereo: use the per-eye matrices the forward path uses (raw projViewOffMat — NO
             // applyShaderProjectionTransform). Eye 0 drives the shared covariance/depth/sort; eye 1
@@ -732,8 +762,9 @@ class GSplatProjector {
             _viewProjData.set(views[0].projViewOffMat.data);
             _viewProj1Data.set(views[1].projViewOffMat.data);
             _viewData.set(views[0].viewOffMat.data);
-            // raw eye-0 projection x-scale; both eyes share it in standard stereo.
-            focal = viewportWidth * views[0].projMat.data[0];
+            // raw eye-0 projection scales; both eyes share them in standard stereo.
+            focal = viewportWidth * Math.abs(views[0].projMat.data[0]);
+            focalY = viewportHeight * Math.abs(views[0].projMat.data[5]);
         } else {
             // canonical (unflipped) projection - the cache stores canonical clip positions, and
             // the raster VS applies the per-pass target flip using the projectionFlipY uniform
@@ -741,7 +772,8 @@ class GSplatProjector {
             _viewProjMat.mul2(Camera.applyShaderProjectionTransform(cam.projectionMatrix, _shaderProjMat, false, webgpu), view);
             _viewProjData.set(_viewProjMat.data);
             _viewData.set(view.data);
-            focal = viewportWidth * _shaderProjMat.data[0];
+            focal = viewportWidth * Math.abs(_shaderProjMat.data[0]);
+            focalY = viewportHeight * Math.abs(_shaderProjMat.data[5]);
         }
 
         this.cameraPositionData[0] = cameraPos.x;
@@ -761,6 +793,7 @@ class GSplatProjector {
         }
 
         compute.setParameter('focal', focal);
+        compute.setParameter('focalY', focalY);
         compute.setParameter('viewportWidth', viewportWidth);
         compute.setParameter('viewportHeight', viewportHeight);
         compute.setParameter('nearClip', cam.nearClip);
@@ -770,12 +803,44 @@ class GSplatProjector {
         compute.setParameter('minContribution', minContribution);
         compute.setParameter('foveationStrength', foveationStrength);
         compute.setParameter('foveationCenter', foveationCenter);
-        compute.setParameter('isOrtho', cam.projection === PROJECTION_ORTHOGRAPHIC ? 1 : 0);
+        compute.setParameter('antiAliasFilterSize', antiAliasFilterSize);
+        compute.setParameter('isOrtho', orthographic ? 1 : 0);
         compute.setParameter('splatTextureSize', workBuffer.textureSize);
         compute.setParameter('numBins', GSplatSortBinWeights.NUM_BINS);
         compute.setParameter('minDist', minDist);
         compute.setParameter('invRange', invRange);
-        compute.setParameter('pad0', 0);
+        compute.setParameter('stochastic', stochastic ? 1 : 0);
+
+        // Sort keys - same as the CPU worker. Radial keys, and the depth keys of a perspective
+        // camera, are spaced by log distance: they span the bit patterns of the distances from ten
+        // doublings inside the near clip (the splats closer than it are drawn too, with their depth
+        // clamped) out to the far end of the range, squared for radial (see the shader). An
+        // orthographic or fisheye camera can draw splats at or behind it, so its depth keys keep the
+        // camera-weighted bins.
+        const logKeys = !stochastic && (radialMode || (!orthographic && !fisheyeMode));
+        let sortKeyMinBits = 0;
+        let sortKeyScale = 0;
+        const maxSortKey = logKeys ? (1 << numBits) - 1 : 0;
+        if (logKeys) {
+            // an orthographic near clip can be zero or negative, so a share of the range stands in
+            // for it then (radial only)
+            const nearDist = (cam.nearClip > 0 ? cam.nearClip : maxDist * 1e-6) / 1024;
+            _floatBits[0] = radialMode ? nearDist * nearDist : nearDist;
+            sortKeyMinBits = _floatBitsI32[0];
+            // a linear range runs along the camera's +Z, which points backwards, so its far end is
+            // at -minDist
+            _floatBits[0] = radialMode ? maxDist * maxDist : -minDist;
+            const bitsRange = _floatBitsI32[0] - sortKeyMinBits;
+            sortKeyScale = bitsRange > 0 ? maxSortKey / bitsRange : 0;
+        } else if (!stochastic) {
+            const bucketCount = (1 << numBits);
+            const cameraBin = GSplatSortBinWeights.computeCameraBin(minDist, range);
+            const binWeights = this.binWeightsUtil.compute(cameraBin, bucketCount);
+            this.binWeightsBuffer.write(0, binWeights);
+        }
+        compute.setParameter('sortKeyMinBits', sortKeyMinBits);
+        compute.setParameter('sortKeyScale', sortKeyScale);
+        compute.setParameter('maxSortKey', maxSortKey);
 
         if (fisheyeMode) {
             compute.setParameter('fisheye_k', fisheyeProj.k);
@@ -784,16 +849,10 @@ class GSplatProjector {
             compute.setParameter('fisheye_projMat11', fisheyeProj.projMat11);
         }
 
-        // 2D dispatch over the work-buffer capacity. The shader early-outs threads beyond
-        // sortElementCount[0]; sizing the dispatch for the full capacity (a CPU-known
-        // upper bound) avoids needing an extra indirect-args dispatch for this pass.
-        const workgroupCount = Math.ceil(totalCapacity / PROJECTOR_WORKGROUP_SIZE);
-        Compute.calcDispatchSize(
-            workgroupCount,
-            _dispatchSize,
-            this.device.limits.maxComputeWorkgroupsPerDimension || 65535
-        );
-        compute.setupDispatch(_dispatchSize.x, _dispatchSize.y, 1);
+        // a thread for each splat of the work-buffer capacity. The shader early-outs threads beyond
+        // sortElementCount[0]; sizing the dispatch for the full capacity (a CPU-known upper bound)
+        // avoids needing an extra indirect-args dispatch for this pass.
+        compute.setupDispatchThreads(totalCapacity);
         this.device.computeDispatch([compute], 'GSplatProjector');
     }
 

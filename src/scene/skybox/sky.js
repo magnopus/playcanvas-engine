@@ -22,6 +22,9 @@ class Sky {
      */
     _type = SKYTYPE_INFINITE;
 
+    /** @private */
+    _enabled = true;
+
     /**
      * The center of the sky.
      *
@@ -95,6 +98,40 @@ class Sky {
     }
 
     /**
+     * Sets whether the sky is rendered. When disabled, the sky is not rendered and its mesh and
+     * shader are not created, while the environment lighting of the scene, such as
+     * {@link Scene#envAtlas}, still lights the scene. Defaults to true.
+     *
+     * @type {boolean}
+     * @example
+     * // light the scene with the environment atlas, without rendering it as the sky
+     * app.scene.envAtlas = envAtlas;
+     * app.scene.sky.enabled = false;
+     */
+    set enabled(value) {
+        if (this._enabled !== value) {
+            this._enabled = value;
+
+            // the sky mesh is created and destroyed without updating the shaders of the materials,
+            // as the lighting they use does not change
+            if (value) {
+                this.updateSkyMesh();
+            } else {
+                this.resetSkyMesh();
+            }
+        }
+    }
+
+    /**
+     * Gets whether the sky is rendered.
+     *
+     * @type {boolean}
+     */
+    get enabled() {
+        return this._enabled;
+    }
+
+    /**
      * Sets the type of the sky. Can be:
      *
      * - {@link SKYTYPE_INFINITE}
@@ -145,10 +182,11 @@ class Sky {
      * Sets whether depth writing is enabled for the sky. Defaults to false.
      *
      * Writing a depth value for the skydome is supported when its type is not
-     * {@link SKYTYPE_INFINITE}. When enabled, the depth is written during a prepass render pass and
-     * can be utilized by subsequent passes to apply depth-based effects, such as Depth of Field.
+     * {@link SKYTYPE_INFINITE}. When enabled, the depth is written to the scene depth texture during
+     * the scene pass or a depth prepass, allowing subsequent passes to apply depth-based effects,
+     * such as Depth of Field.
      *
-     * Note: For the skydome to be rendered during the prepass, the Sky Layer must be ordered before
+     * Note: When a depth prepass is used, the Sky Layer must be ordered before
      * the Depth layer, which is the final layer used in the prepass.
      *
      * @type {boolean}
@@ -207,7 +245,7 @@ class Sky {
     }
 
     updateSkyMesh() {
-        const texture = this.scene._getSkyboxTex();
+        const texture = this._enabled ? this.scene._getSkyboxTex() : null;
         if (texture) {
             this.resetSkyMesh();
             this.skyMesh = new SkyMesh(this.device, this.scene, this.node, texture, this.type);

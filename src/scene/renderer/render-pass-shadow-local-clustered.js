@@ -10,8 +10,6 @@ class RenderPassShadowLocalClustered extends RenderPass {
     constructor(device, shadowRenderer, shadowRendererLocal) {
         super(device);
 
-        this.requiresCubemaps = false;
-
         this.shadowRenderer = shadowRenderer;
         this.shadowRendererLocal = shadowRendererLocal;
     }
@@ -31,6 +29,17 @@ class RenderPassShadowLocalClustered extends RenderPass {
             // setup render pass using any of the cameras, they all have the same pass related properties
             // Note that the render pass is set up to not clear the render target, as individual shadow maps clear it
             this.shadowRenderer.setupRenderPass(this, shadowCamera, false);
+        }
+    }
+
+    frameUpdate() {
+        super.frameUpdate();
+        if (this.enabled && this.executeEnabled) {
+            const lights = this.shadowRendererLocal.shadowLights;
+            const culler = this.shadowRenderer.renderer.culler;
+            for (let i = 0; i < lights.length; i++) {
+                culler.requestLocalShadowCull(lights[i]);
+            }
         }
     }
 

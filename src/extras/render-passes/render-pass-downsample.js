@@ -1,8 +1,8 @@
 import { SEMANTIC_POSITION, SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from '../../platform/graphics/constants.js';
 import { RenderPassShaderQuad } from '../../scene/graphics/render-pass-shader-quad.js';
 import { ShaderUtils } from '../../scene/shader-lib/shader-utils.js';
-import glslDownsamplePS from '../../scene/shader-lib/glsl/chunks/render-pass/frag/downsample.js';
-import wgslDownsamplePS from '../../scene/shader-lib/wgsl/chunks/render-pass/frag/downsample.js';
+import glslDownsamplePS from './glsl/downsample-ps.js';
+import wgslDownsamplePS from './wgsl/downsample-ps.js';
 import { ShaderChunks } from '../../scene/shader-lib/shader-chunks.js';
 
 /**
@@ -26,16 +26,47 @@ class RenderPassDownsample extends RenderPassShaderQuad {
      * with. Only supported when boxFilter is true.
      * @param {string} [options.premultiplySrcChannel] - The source channel to premultiply.
      * @param {boolean} [options.removeInvalid] - Whether to remove invalid pixels from the output.
-     * @param {boolean} [options.prefilter] - Whether to apply a soft-knee high-pass prefilter to
-     * the output, controlled by the `prefilterThreshold` and `prefilterKnee` properties. Used by
-     * the first bloom downsample pass. A threshold of 0 leaves the output unchanged.
+     * @param {boolean} [options.prefilter] - Whether to apply a soft-knee high pass to the output,
+     * scaling down what sits below {@link RenderPassDownsample#prefilterThreshold}. Used by the
+     * first bloom downsample to limit bloom to the brightest parts of the scene. Enabling this
+     * generates a separate shader variant, so leave it off when the threshold is zero.
      */
     constructor(device, sourceTexture, options = {}) {
         super(device);
+
+        /**
+         * The texture to downsample. Use {@link RenderPassDownsample#setSourceTexture} to change it,
+         * which also sizes the render target from the new texture.
+         *
+         * @type {Texture}
+         */
         this.sourceTexture = sourceTexture;
         this.premultiplyTexture = options.premultiplyTexture;
         this.prefilter = options.prefilter ?? false;
         this.prefilterThreshold = 0;
+        this.prefilterKnee = 0;
+
+        /**
+         * Whether the high pass is compiled into this pass' shader.
+         *
+         * @type {boolean}
+         * @readonly
+         */
+        this.prefilter = options.prefilter ?? false;
+
+        /**
+         * Brightness below which the high pass scales the output down, in the units of the source
+         * texture. Ignored unless the pass was created with the `prefilter` option.
+         *
+         * @type {number}
+         */
+        this.prefilterThreshold = 0;
+
+        /**
+         * Width of the quadratic transition below {@link RenderPassDownsample#prefilterThreshold}.
+         *
+         * @type {number}
+         */
         this.prefilterKnee = 0;
 
         // register shader chunks
@@ -64,15 +95,20 @@ class RenderPassDownsample extends RenderPassShaderQuad {
         this.premultiplyTextureId = device.scope.resolve('premultiplyTexture');
         this.sourceInvResolutionId = device.scope.resolve('sourceInvResolution');
         this.sourceInvResolutionValue = new Float32Array(2);
-        this.bloomThresholdKneeId = device.scope.resolve('bloomThresholdKnee');
-        this.bloomThresholdKneeValue = new Float32Array(2);
+        this.prefilterThresholdKneeId = device.scope.resolve('prefilterThresholdKnee');
+        this.prefilterThresholdKneeValue = new Float32Array(2);
     }
 
+    /**
+     * Sets the texture to downsample, and the texture the render target is sized from.
+     *
+     * @param {Texture} value - The source texture.
+     */
     setSourceTexture(value) {
-        this._sourceTexture = value;
+        this.sourceTexture = value;
 
         // change resize source
-        this.options.resizeSource = value;
+        this.resizeSource = value;
     }
 
     execute() {
@@ -86,9 +122,9 @@ class RenderPassDownsample extends RenderPassShaderQuad {
         this.sourceInvResolutionId.setValue(this.sourceInvResolutionValue);
 
         if (this.prefilter) {
-            this.bloomThresholdKneeValue[0] = this.prefilterThreshold;
-            this.bloomThresholdKneeValue[1] = this.prefilterKnee;
-            this.bloomThresholdKneeId.setValue(this.bloomThresholdKneeValue);
+            this.prefilterThresholdKneeValue[0] = this.prefilterThreshold;
+            this.prefilterThresholdKneeValue[1] = this.prefilterKnee;
+            this.prefilterThresholdKneeId.setValue(this.prefilterThresholdKneeValue);
         }
 
         super.execute();

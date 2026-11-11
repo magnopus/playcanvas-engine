@@ -8,6 +8,21 @@ import { Vec3 } from '../math/vec3.js';
  * An infinite plane. Internally, it's represented in a parametric equation form:
  * `ax + by + cz + distance = 0`.
  *
+ * A plane is a {@link normal} and a {@link distance} from the origin along that normal. Define one
+ * with the constructor or {@link setFromPointNormal} from a normal and a point the plane passes
+ * through, or with {@link set} from the four coefficients. None of these normalize the normal they
+ * are given, and {@link distance} is only a true distance when the normal is unit length, so call
+ * {@link normalize} afterwards if it is not. {@link intersectsRay} and {@link intersectsLine}
+ * return whether a hit occurred and write the hit point into an optional vector. The ray's
+ * direction must be normalized.
+ *
+ * @example
+ * // Find where a ray from the camera meets the ground plane at y = 0
+ * const ground = new Plane(Vec3.UP, 0);
+ * const hit = new Vec3();
+ * if (ground.intersectsRay(ray, hit)) {
+ *     marker.setPosition(hit);
+ * }
  * @category Math
  */
 class Plane {
@@ -15,13 +30,6 @@ class Plane {
      * The normal of the plane.
      */
     normal = new Vec3();
-
-    /**
-     * The distance from the plane to the origin, along its normal.
-     *
-     * @type {number}
-     */
-    distance;
 
     /**
      * Create a new Plane instance.
@@ -33,6 +41,15 @@ class Plane {
      */
     constructor(normal = Vec3.UP, distance = 0) {
         this.normal.copy(normal);
+
+        // Assigned here instead of declared as a class field, so V8 can store it as an unboxed
+        // double (see Vec3).
+
+        /**
+         * The distance from the plane to the origin, along its normal.
+         *
+         * @type {number}
+         */
         this.distance = distance;
     }
 

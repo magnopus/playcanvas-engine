@@ -40,7 +40,7 @@ PlayCanvas is an open-source WebGL/WebGPU game engine written in JavaScript. It'
   - `src/extras/` - Optional extras and utilities
   - `src/deprecated/` - Side-effect-free aliases for deprecated APIs (see section 9)
 - **Build output**: Generated files go in `build/` (never edit these directly)
-- **Examples**: Live in `examples/src/examples/`
+- **Examples**: Live in `examples/src/examples/<category>/<example>/`, one folder per example
 - **Tests**: Unit tests go in `test/` with `.mjs` extension
 - **File naming**: Module file names should match the main class they contain
   - Use kebab-case for file names (e.g., `graphics-device.js` for `GraphicsDevice` class)
@@ -94,7 +94,7 @@ This hierarchy ensures:
 
 - JSDoc comments are used to generate TypeScript definitions
 - Run `npm run build:types` to generate `.d.ts` files
-- Test types with `npm run test:types`
+- Test types with `npm run test:types`. This compiles the bundled declarations and the consumer-side type tests in `test/type-tests`, which check inference and augmentation against `build/playcanvas.d.ts`
 - Use proper JSDoc type annotations:
   - `@type {TypeName}` for variables
   - `@param {TypeName} paramName` for parameters
@@ -168,7 +168,7 @@ This is a **performance-critical** engine. Always consider:
 - **Source is in `src/`**: Never edit files in `build/` directory
 - **Module exports**: Main exports defined in `src/index.js`
 - **Bundler**: `build.mjs` drives esbuild (`utils/esbuild-build-target.mjs`). Each build type (`rel`, `dbg`, `prf`, `min`) is emitted as a UMD bundle (`build/playcanvas*.js`) and an ESM bundle (`build/playcanvas*.mjs`). The `rel`, `dbg` and `prf` ESM builds also emit an unbundled module tree (`build/playcanvas/src/`, `build/playcanvas.dbg/src/`, `build/playcanvas.prf/src/`), which is what `import 'playcanvas'` resolves to
-- **Type declarations**: `npm run build:types` runs `tsc` over the JSDoc, patches the output with `utils/plugins/rollup-types-fixup.mjs` (hand-declared `StandardMaterial` accessors) and bundles it with Rollup (`rollup-plugin-dts`) into `build/playcanvas.d.ts`
+- **Type declarations**: `npm run build:types` runs `tsc` over the JSDoc, patches the output with `utils/plugins/rollup-types-fixup.mjs` (hand-declared `StandardMaterial` accessors, optional `ScriptType` lifecycle methods, and the `AssetMap` typedef rewritten into an augmentable interface) and bundles it with Rollup (`rollup-plugin-dts`) into `build/playcanvas.d.ts`
 - **Debug stripping**: the `Debug`, `DebugHelper`, `DebugGraphics` and `WebgpuDebug` calls listed in `STRIP_FUNCTIONS` (`utils/esbuild-build-target.mjs`) are removed from every build except `dbg`. `// #if _DEBUG` blocks survive only in `dbg`; `// #if _PROFILER` blocks survive in `dbg` and `prf`
 - **Tree shaking**: `package.json` declares `"sideEffects": false`, so consumers' bundlers drop every module they don't import from. Therefore:
   - Never add module-scope side effects (top-level calls, prototype patches, registry writes, `window` access). Do registration inside constructors or functions
@@ -306,8 +306,8 @@ Always address the root cause of issues rather than implementing workarounds tha
 
 ### 21. When Creating Examples
 
-- Examples go in `examples/src/examples/`
-- Follow existing example structure (see other `.example.mjs` files)
+- Each example is a folder, `examples/src/examples/<category>/<example>/`, holding `example.mjs`, optional `controls.jsx`, any other files it imports, and its `thumbnail-large.webp` / `thumbnail-small.webp`
+- Follow existing example structure (see other `example.mjs` files)
 - Include descriptive comments
 - Keep examples simple and focused on one feature
 

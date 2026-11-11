@@ -35,22 +35,8 @@ mat4 dModelMatrix;
     #include "uv1VS"
 #endif
 
-//magnopus patched additional UVS
-#ifdef UV2
-    attribute vec2 vertex_texCoord2;
-    #include "uv2VS"
-#endif
-
-#ifdef UV3
-    attribute vec2 vertex_texCoord3;
-    #include "uv3VS"
-#endif
-
-#ifdef UV4
-    attribute vec2 vertex_texCoord4;
-    #include "uv4VS"
-#endif
-
+// expand attributes for additional uv sets (UV2 and up)
+#include "uvSetAttributeVS, UV_SET_COUNT"
 
 #ifdef LINEAR_DEPTH
     #ifndef VIEWMATRIX
@@ -80,8 +66,9 @@ mat4 dModelMatrix;
 #include  "litUserCodeVS"
 
 #ifdef VERTEX_COLOR
+    // the exact sRGB transfer, as decodePS decodes colors in the fragment shader
     vec3 decodeGamma(vec3 raw) {
-        return pow(raw, vec3(2.2));
+        return mix(pow(raw * 0.9478672986 + 0.0521327014, vec3(2.4)), raw * 0.0773993808, lessThanEqual(raw, vec3(0.04045)));
     }
     vec4 gammaCorrectInput(vec4 color) {
         return vec4(decodeGamma(color.xyz), color.w);
@@ -123,26 +110,9 @@ void main(void) {
         #endif
     #endif
 
-        #ifdef UV2
-        vec2 uv2 = getUv2();
-        #ifdef UV2_UNMODIFIED
-            vUv2 = uv2;
-        #endif
-    #endif
-
-        #ifdef UV3
-        vec2 uv3 = getUv3();
-        #ifdef UV3_UNMODIFIED
-            vUv3 = uv3;
-        #endif
-    #endif
-
-        #ifdef UV4
-        vec2 uv4 = getUv4();
-        #ifdef UV4_UNMODIFIED
-            vUv4 = uv4;
-        #endif
-    #endif
+    // expand code for additional uv sets (UV2 and up)
+    #include "uvSetVS, UV_SET_COUNT"
+    #include "uvSetVaryingVS, UV_VARYING_SET_COUNT"
 
     // expand code for uv transforms
     #include "uvTransformVS, UV_TRANSFORMS_COUNT"
@@ -158,6 +128,16 @@ void main(void) {
     #ifdef LINEAR_DEPTH
         // linear depth from the worldPosition, see getLinearDepth
         vLinearDepth = -(matrix_view * vec4(vPositionW, 1.0)).z;
+    #endif
+
+    #ifdef LIT_DYNAMIC_REFRACTION
+        // the scale of the model matrix, which scales the thickness of the refraction
+        vModelScale = vec3(length(dModelMatrix[0].xyz), length(dModelMatrix[1].xyz), length(dModelMatrix[2].xyz));
+    #endif
+
+    #ifdef LIT_DITHER_ID
+        // per-mesh offset of the dither pattern, hashed from the position of the model matrix
+        vDitherId = 64.0 * fract(sin(dot(dModelMatrix[3].xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
     #endif
 
     #ifdef MSDF

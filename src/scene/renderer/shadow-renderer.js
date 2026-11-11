@@ -2,15 +2,16 @@ import { Debug } from '../../core/debug.js';
 import { now } from '../../core/time.js';
 import { Color } from '../../core/math/color.js';
 import { math } from '../../core/math/math.js';
+import { Mat3 } from '../../core/math/mat3.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { Vec3 } from '../../core/math/vec3.js';
 import { Vec4 } from '../../core/math/vec4.js';
 import {
     SEMANTIC_POSITION,
-    UNIFORMTYPE_MAT4
+    UNIFORMTYPE_FLOAT, UNIFORMTYPE_MAT4, UNIFORMTYPE_VEC3, UNIFORMTYPE_VEC4
 } from '../../platform/graphics/constants.js';
 import { DebugGraphics } from '../../platform/graphics/debug-graphics.js';
-import { drawQuadWithShader } from '../graphics/quad-render-utils.js';
+import { RenderPassShaderQuad } from '../graphics/render-pass-shader-quad.js';
 import {
     BLUR_GAUSSIAN,
     EVENT_POSTCULL,
@@ -22,21 +23,30 @@ import {
 } from '../constants.js';
 import { ShaderPass } from '../shader-pass.js';
 import { ShaderUtils } from '../shader-lib/shader-utils.js';
+import { LightList } from '../lighting/light-list.js';
 import { LightCamera } from './light-camera.js';
 import { UniformBufferFormat, UniformFormat } from '../../platform/graphics/uniform-buffer-format.js';
+import { warnViewUniformMaterialParameters, warnViewUniformMeshInstanceParameters } from '../materials/material-debug.js';
 import { BlendState } from '../../platform/graphics/blend-state.js';
 
 /**
  * @import { Camera } from '../camera.js'
+ * @import { Culler } from './culler.js'
  * @import { LayerComposition } from '../composition/layer-composition.js'
  * @import { LightTextureAtlas } from '../lighting/light-texture-atlas.js'
  * @import { Light } from '../light.js'
  * @import { MeshInstance } from '../mesh-instance.js'
  * @import { Renderer } from './renderer.js'
+ * @import { RenderTarget } from '../../platform/graphics/render-target.js'
+ * @import { Shader } from '../../platform/graphics/shader.js'
  * @import { ShaderPassInfo } from '../shader-pass.js'
  */
 
 const tempSet = new Set();
+
+// the lights of a shadow pass: none, as the shader pass carries the type of the light rendered
+// from, so the shadow shaders of a caster do not depend on the lights of its layers
+const _noLights = new LightList();
 
 // per-face scratch state for the omni cull - the visible caster list and the shadow camera of each
 // of the six cube map faces of the light currently being culled
@@ -48,6 +58,20 @@ const shadowCamViewProj = new Mat4();
 const pixelOffset = new Float32Array(2);
 const blurScissorRect = new Vec4(1, 1, 0, 0);
 const viewportMatrix = new Mat4();
+
+/**
+ * Tests whether a light needs its shadow rendered this frame without consuming one-shot updates.
+ * Shadow-pass scheduling and splat caster culling share this predicate. One-shot requests are
+ * consumed by {@link Culler#consumeOneShotShadows} after both have read the update mode.
+ * Per-face overrides and atlas allocation are checked separately by callers.
+ *
+ * @param {Light} light - The light to test.
+ * @returns {boolean} Whether the light needs a shadow update.
+ * @ignore
+ */
+function needsShadowRendering(light) {
+    return light.enabled && light.castShadows && light.shadowUpdateMode !== SHADOWUPDATE_NONE && light.visibleThisFrame;
+}
 
 function gauss(x, sigma) {
     return Math.exp(-(x * x) / (2.0 * sigma * sigma));
@@ -88,6 +112,14 @@ class ShadowRenderer {
     _casterLists = [];
 
     /**
+     * The passes blurring VSM shadow maps, one for each blur shader, reused every frame.
+     *
+     * @type {Map<Shader, RenderPassShaderQuad>}
+     * @private
+     */
+    _vsmBlurPasses = new Map();
+
+    /**
      * @param {Renderer} renderer - The renderer.
      * @param {LightTextureAtlas} lightTextureAtlas - The shadow map atlas.
      */
@@ -114,6 +146,9 @@ class ShadowRenderer {
 
         // uniforms
         this.shadowMapLightRadiusId = scope.resolve('light_radius');
+
+        // part of the view uniform buffer of every shadow face, and set only for local lights
+        this.shadowMapLightRadiusId.setValue(0);
 
         // format of the view uniform buffer
         this.viewUniformFormat = null;
@@ -156,7 +191,8 @@ class ShadowRenderer {
         for (let i = 0; i < numInstances; i++) {
             const meshInstance = meshInstances[i];
 
-            if (meshInstance.castShadow) {
+            // test visible here, as _isVisible, which also tests it, is skipped when culling is off
+            if (meshInstance.castShadows && meshInstance.visible) {
                 if (!meshInstance.cull || meshInstance._isVisible(camera)) {
                     meshInstance.visibleThisFrame = true;
                     visible.push(meshInstance);
@@ -189,8 +225,8 @@ class ShadowRenderer {
             this._cullShadowCastersInternal(casterLists[i], visible, camera);
         }
 
-        // this sorts the shadow casters by the shader id
-        visible.sort(this.sortCompareShader);
+        // group the shadow casters by material and mesh, as the forward renderer does
+        this.renderer.meshInstanceSorter.sortMaterialMesh(visible);
 
         // event after culling - the camera is null as this is internal (shadow) culling rather
         // than culling for a user camera
@@ -321,7 +357,7 @@ class ShadowRenderer {
             for (let i = 0; i < numInstances; i++) {
 
                 const meshInstance = meshInstances[i];
-                if (!meshInstance.castShadow) {
+                if (!meshInstance.castShadows || !meshInstance.visible) {
                     continue;
                 }
 
@@ -334,10 +370,6 @@ class ShadowRenderer {
                             _faceLists[face].push(meshInstance);
                         }
                     }
-                    continue;
-                }
-
-                if (!meshInstance.visible) {
                     continue;
                 }
 
@@ -430,9 +462,10 @@ class ShadowRenderer {
             }
         }
 
-        // this sorts the shadow casters by the shader id
+        // group the shadow casters by material and mesh, as the forward renderer does
+        const sorter = this.renderer.meshInstanceSorter;
         for (let face = 0; face < 6; face++) {
-            _faceLists[face].sort(this.sortCompareShader);
+            sorter.sortMaterialMesh(_faceLists[face]);
             _faceLists[face] = null;
             _faceCameras[face] = null;
         }
@@ -440,17 +473,6 @@ class ShadowRenderer {
         // event after culling - the camera is null as this is internal (shadow) culling rather
         // than culling for a user camera
         this.renderer.scene?.fire(EVENT_POSTCULL, null);
-    }
-
-    sortCompareShader(drawCallA, drawCallB) {
-        const keyA = drawCallA._sortKeyShadow;
-        const keyB = drawCallB._sortKeyShadow;
-
-        if (keyA === keyB) {
-            return drawCallB.mesh.id - drawCallA.mesh.id;
-        }
-
-        return keyB - keyA;
     }
 
     setupRenderState(device, light) {
@@ -540,6 +562,17 @@ class ShadowRenderer {
         // reverse face culling when shadow map has flipY set to true which cases reversed winding order
         const flipFactor = camera.renderTarget.flipY ? -1 : 1;
 
+        // the casters are sorted by shader and material, and the state of a material is set when
+        // it changes, as in the forward render loop. The mesh instance of the previous caster may
+        // have overridden some of that state, see the restore below
+        let prevMaterial = null;
+        let prevMeshInstance = null;
+
+        // the casters set no normal matrix - the shadow pass of normalCoreVS derives it from the model
+        // matrix - so a shader declaring the uniform itself reads the identity, not the normal matrix
+        // of whichever mesh was rendered last
+        renderer.normalMatrixId.setValue(Mat3.IDENTITY.data);
+
         // Render
         const count = visibleCasters.length;
         for (let i = 0; i < count; i++) {
@@ -559,30 +592,52 @@ class ShadowRenderer {
 
             DebugGraphics.pushGpuMarker(device, `Node: ${meshInstance.node.name}, Material: ${material.name}`);
 
-            // set basic material states/parameters
-            renderer.setBaseConstants(device, material);
             renderer.setSkinning(device, meshInstance);
 
-            material.prepareForRender(device, scene);
+            if (material !== prevMaterial) {
+                prevMaterial = material;
+
+                // Uniforms I (shadow): material - on the scope, and through the material bind group.
+                // The cull mode and the front face are set per caster below, as the caster can flip
+                // the front face - setting them from the material here too would change them twice
+                // per caster, dirtying the render pipeline each time
+                material.prepareForRender(device, scene);
+                material.setParameters(device);
+                renderer.setupMaterialBindGroup(material);
+                renderer.alphaTestId.setValue(material.alphaTest);
+                Debug.call(() => warnViewUniformMaterialParameters(material, this.viewUniformFormat));
+
+            } else {
+
+                // the same material: unset the overrides of the previous caster's mesh instance
+                renderer.restoreMaterialOverrides(prevMeshInstance, material);
+            }
 
             renderer.setupCullModeAndFrontFace(true, flipFactor, meshInstance);
 
-            // Uniforms I (shadow): material
-            material.setParameters(device);
-
             // Uniforms II (shadow): meshInstance overrides
+            if (renderer.needsMaterialOverrideBindGroup(meshInstance, material)) {
+                renderer.setupMaterialOverrideBindGroup(meshInstance);
+            }
             meshInstance.setParameters(device);
+            Debug.call(() => warnViewUniformMeshInstanceParameters(meshInstance, this.viewUniformFormat));
+            prevMeshInstance = meshInstance;
 
-            const shaderInstance = meshInstance.getShaderInstance(shadowPass, 0, scene, cameraShaderParams, this.viewUniformFormat);
+            const shaderInstance = meshInstance.getShaderInstance(shadowPass, _noLights, scene,
+                cameraShaderParams, this.viewUniformFormat);
             const shadowShader = shaderInstance.shader;
             Debug.assert(shadowShader, `no shader for pass ${shadowPass}`, material);
 
-            if (shadowShader.failed) continue;
-
-            // sort shadow casters by shader
-            meshInstance._sortKeyShadow = shadowShader.id;
+            if (shadowShader.failed) {
+                if (meshInstance._scopeParameters.length > 0) {
+                    meshInstance.restoreReplacedParameters(material);
+                }
+                DebugGraphics.popGpuMarker(device);
+                continue;
+            }
 
             device.setShader(shadowShader);
+            renderer.setupViewBindGroup(shadowShader);
 
             // set buffers
             renderer.setVertexBuffers(device, mesh);
@@ -592,15 +647,37 @@ class ShadowRenderer {
                 device.setVertexBuffer(instancingData.vertexBuffer);
             }
 
-            // mesh / mesh normal matrix
+            // mesh / mesh normal matrix - on the scope, or in the mesh instance storage for a shader
+            // reading it, which the draw indexes by its first instance
             renderer.setMeshInstanceMatrices(meshInstance);
+            const firstInstance = shadowShader.usesMeshInstanceStorage ? renderer.updateStorageSlot(meshInstance, shadowShader) : 0;
 
             renderer.setupMeshUniformBuffers(shaderInstance);
 
             // draw
             const style = meshInstance.renderStyle;
             const indirectData = meshInstance.getDrawCommands(camera);
-            device.draw(mesh.primitive[style], mesh.indexBuffer[style], instancingData?.count, indirectData);
+            device.draw(mesh.primitive[style], mesh.indexBuffer[style], instancingData?.count, indirectData, true, true, firstInstance);
+
+            // the parameters its material does not have are restored to the values they replaced,
+            // such as global ones, whatever the next caster - no material sets them again
+            if (meshInstance._scopeParameters.length > 0) {
+                meshInstance.restoreReplacedParameters(material);
+            }
+
+            // warn about a shader reading the normal matrix, which is the identity here (see above), once
+            // that is known - after the draw, which links it on WebGL
+            Debug.call(() => {
+                if (!shadowShader._debugNormalMatrixChecked) {
+                    const readsNormalMatrix = shadowShader.debugReadsUniform('matrix_normal');
+                    if (readsNormalMatrix !== null) {
+                        shadowShader._debugNormalMatrixChecked = true;
+                    }
+                    if (readsNormalMatrix) {
+                        Debug.warnOnce(`Shader [${shadowShader.label}] reads matrix_normal in the shadow pass, where it is the identity. Use getNormalMatrix() of normalCoreVS, which derives it from the model matrix in the shadow pass.`);
+                    }
+                }
+            });
 
             renderer._shadowDrawCalls++;
             if (instancingData) {
@@ -611,12 +688,8 @@ class ShadowRenderer {
         }
     }
 
-    // Pure predicate - whether the light needs its shadow rendered this frame. Has no side effects:
-    // the SHADOWUPDATE_THISFRAME -> SHADOWUPDATE_NONE consume and the shadow-map-update stat are
-    // applied once per frame in Renderer#consumeOneShotShadows, after the frame graph is built and
-    // shadow casters are culled (so build and cull can both read shadowUpdateMode before it changes).
     needsShadowRendering(light) {
-        return light.enabled && light.castShadows && light.shadowUpdateMode !== SHADOWUPDATE_NONE && light.visibleThisFrame;
+        return needsShadowRendering(light);
     }
 
     getLightRenderData(light, camera, face) {
@@ -629,23 +702,18 @@ class ShadowRenderer {
         const rt = shadowCamera.renderTarget;
         renderPass.init(rt);
 
-        renderPass.depthStencilOps.clearDepthValue = 1;
-        renderPass.depthStencilOps.clearDepth = clearRenderTarget;
+        renderPass.setClearDepth(clearRenderTarget ? 1 : undefined);
 
         // if rendering to depth buffer
         if (rt.depthBuffer) {
 
-            renderPass.depthStencilOps.storeDepth = true;
+            renderPass.setStoreDepth(true);
 
         } else { // rendering to color buffer
 
-            renderPass.colorOps.clearValue.copy(shadowCamera.clearColor);
-            renderPass.colorOps.clear = clearRenderTarget;
-            renderPass.depthStencilOps.storeDepth = false;
+            renderPass.setClearColor(clearRenderTarget ? shadowCamera.clearColor : undefined);
+            renderPass.setStoreDepth(false);
         }
-
-        // not sampling dynamically generated cubemaps
-        renderPass.requiresCubemaps = false;
     }
 
     // prepares render target / render target settings to allow render pass to be set up
@@ -703,7 +771,7 @@ class ShadowRenderer {
         // #endif
     }
 
-    renderVsm(light, camera) {
+    renderVsm(light, camera, cascadeMask = (1 << light.numShadowFaces) - 1) {
 
         // VSM blur if light supports vsm (directional and spot in general)
         if (light._isVsm && light._vsmBlurSize > 1) {
@@ -711,7 +779,7 @@ class ShadowRenderer {
             // in clustered mode, only directional light can be vms
             const isClustered = this.renderer.scene.clusteredLightingEnabled;
             if (!isClustered || light._type === LIGHTTYPE_DIRECTIONAL) {
-                this.applyVsmBlur(light, camera);
+                this.applyVsmBlur(light, camera, cascadeMask);
             }
         }
     }
@@ -741,7 +809,41 @@ class ShadowRenderer {
         return blurShader;
     }
 
-    applyVsmBlur(light, camera) {
+    /**
+     * Releases the resources of the shadow renderer.
+     */
+    destroy() {
+        this._vsmBlurPasses.forEach(pass => pass.destroy());
+        this._vsmBlurPasses.clear();
+    }
+
+    /**
+     * Renders the VSM blur of a shadow map into a render target, within the blur scissor rectangle.
+     *
+     * @param {Shader} blurShader - The blur shader.
+     * @param {RenderTarget} target - The render target to render into.
+     * @private
+     */
+    _renderVsmBlur(blurShader, target) {
+        let pass = this._vsmBlurPasses.get(blurShader);
+        if (!pass) {
+            pass = new RenderPassShaderQuad(this.device);
+            pass.name = 'VSMShadowBlur';
+            pass.shader = blurShader;
+
+            // the viewport is set to the whole render target, as the pass uses the scissor rectangle
+            // only together with it
+            pass.viewport = new Vec4();
+            pass.scissor = blurScissorRect;
+            this._vsmBlurPasses.set(blurShader, pass);
+        }
+
+        pass.init(target);
+        pass.viewport.set(0, 0, target.width, target.height);
+        pass.render();
+    }
+
+    applyVsmBlur(light, camera, cascadeMask) {
 
         const device = this.device;
 
@@ -764,23 +866,39 @@ class ShadowRenderer {
         const filterSize = light._vsmBlurSize;
         const blurShader = this.getVsmBlurShader(blurMode, filterSize);
 
-        blurScissorRect.z = light._shadowResolution - 2;
-        blurScissorRect.w = blurScissorRect.z;
+        const resolution = light._shadowResolution;
+        blurScissorRect.set(1, 1, resolution - 2, resolution - 2);
 
-        // Blur horizontal
+        // Blur horizontal into scratch storage, including the samples needed at cascade edges.
         this.sourceId.setValue(origShadowMap.colorBuffer);
         pixelOffset[0] = 1 / light._shadowResolution;
         pixelOffset[1] = 0;
         this.pixelOffsetId.setValue(pixelOffset);
         if (blurMode === BLUR_GAUSSIAN) this.weightId.setValue(this.blurVsmWeights[filterSize]);
-        drawQuadWithShader(device, tempRt, blurShader, null, blurScissorRect);
+        this._renderVsmBlur(blurShader, tempRt);
 
         // Blur vertical
         this.sourceId.setValue(tempRt.colorBuffer);
         pixelOffset[1] = pixelOffset[0];
         pixelOffset[0] = 0;
         this.pixelOffsetId.setValue(pixelOffset);
-        drawQuadWithShader(device, origShadowMap, blurShader, null, blurScissorRect);
+        if (light._type === LIGHTTYPE_DIRECTIONAL && cascadeMask !== (1 << light.shadowCascadeCount) - 1) {
+            // Cached cascades already contain filtered moments. Blurring them again would
+            // progressively soften their shadows until their next scheduled update.
+            for (let cascade = 0; cascade < light.shadowCascadeCount; cascade++) {
+                if (!(cascadeMask & (1 << cascade))) continue;
+
+                const viewport = light.cascades[cascade];
+                const x = Math.max(1, viewport.x * resolution);
+                const y = Math.max(1, viewport.y * resolution);
+                const right = Math.min(resolution - 1, (viewport.x + viewport.z) * resolution);
+                const top = Math.min(resolution - 1, (viewport.y + viewport.w) * resolution);
+                blurScissorRect.set(x, y, right - x, top - y);
+                this._renderVsmBlur(blurShader, origShadowMap);
+            }
+        } else {
+            this._renderVsmBlur(blurShader, origShadowMap);
+        }
 
         // return the temporary shadow map back to the cache
         this.renderer.shadowMapCache.add(light, tempShadowMap);
@@ -793,10 +911,18 @@ class ShadowRenderer {
         // view uniforms always go through a uniform buffer (on all backends)
         if (!this.viewUniformFormat) {
 
-            // format of the view uniform buffer
+            // format of the view uniform buffer - the uniforms constant for a shadow face, so that
+            // none of them is uploaded per caster: the camera params and the blue noise jitter of the
+            // shadow camera, the position and the range of a local light, which dispatchUniforms sets
+            // per face, and the texture bias
             this.viewUniformFormat = new UniformBufferFormat(this.device, [
-                new UniformFormat('matrix_viewProjection', UNIFORMTYPE_MAT4)
-            ]);
+                new UniformFormat('matrix_viewProjection', UNIFORMTYPE_MAT4),
+                new UniformFormat('camera_params', UNIFORMTYPE_VEC4),
+                new UniformFormat('blueNoiseJitter', UNIFORMTYPE_VEC4),
+                new UniformFormat('view_position', UNIFORMTYPE_VEC3),
+                new UniformFormat('light_radius', UNIFORMTYPE_FLOAT),
+                new UniformFormat('textureBias', UNIFORMTYPE_FLOAT)
+            ], { pack: true });
         }
     }
 
@@ -805,4 +931,4 @@ class ShadowRenderer {
     }
 }
 
-export { ShadowRenderer };
+export { ShadowRenderer, needsShadowRendering };

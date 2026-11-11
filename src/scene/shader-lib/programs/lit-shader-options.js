@@ -1,4 +1,7 @@
-import { BLEND_NONE, DITHER_NONE, FOG_NONE, GAMMA_NONE, REFLECTIONSRC_NONE } from '../../constants.js';
+import {
+    BLEND_NONE, DITHER_NONE, FOG_NONE, GAMMA_NONE, LIGHTSHAPE_DISK, LIGHTSHAPE_RECT, LIGHTSHAPE_SPHERE,
+    REFLECTIONSRC_NONE
+} from '../../constants.js';
 
 /**
  * @import { ShaderChunks } from '../shader-chunks.js';
@@ -7,6 +10,13 @@ import { BLEND_NONE, DITHER_NONE, FOG_NONE, GAMMA_NONE, REFLECTIONSRC_NONE } fro
 /**
  * The lit shader options determines how the lit-shader gets generated. It specifies a set of
  * parameters which triggers different fragment and vertex shader generation in the backend.
+ *
+ * You do not create one. The engine fills a LitShaderOptions from the material and scene state
+ * each time a {@link StandardMaterial} needs a shader variant, and every distinct set of values
+ * produces a distinct compiled shader. Developers rarely need to touch it: the material properties
+ * such as `useFog`, `useLighting` and `useSkybox` on {@link StandardMaterial} cover the usual
+ * cases, and the values here mirror them together with the scene state. It is exposed for the
+ * rare case of customizing shader generation through {@link StandardMaterial#onUpdateShader}.
  *
  * @category Graphics
  */
@@ -73,6 +83,15 @@ class LitShaderOptions {
 
     clusteredLightingAreaLightsEnabled = false;
 
+    /**
+     * Bit mask (1 << shape) of the area light shapes the clustered lighting compiles code for.
+     * Defaults to all shapes.
+     *
+     * @type {number}
+     * @ignore
+     */
+    clusteredLightingAreaLightShapes = (1 << LIGHTSHAPE_RECT) | (1 << LIGHTSHAPE_DISK) | (1 << LIGHTSHAPE_SPHERE);
+
     vertexColors = false;
 
     useVertexColorGamma = false;
@@ -89,8 +108,6 @@ class LitShaderOptions {
 
     useAo = false;
 
-    diffuseMapEnabled = false;
-
     pixelSnap = false;
 
     /**
@@ -103,16 +120,6 @@ class LitShaderOptions {
      * Apply SSAO during the lighting.
      */
     ssao = false;
-
-    /**
-     * The value of {@link StandardMaterial#twoSidedLighting}.
-     */
-    twoSidedLighting = false;
-
-    /**
-     * The value of {@link StandardMaterial#occludeDirect}.
-     */
-    occludeDirect = false;
 
     /**
      * The value of {@link StandardMaterial#occludeSpecular}.
@@ -184,6 +191,12 @@ class LitShaderOptions {
     useIridescence = false;
 
     /**
+     * If some of the diffuse light is transmitted through the surface. See
+     * {@link StandardMaterial#diffuseTransmission}.
+     */
+    useDiffuseTransmission = false;
+
+    /**
      * The value of {@link StandardMaterial#useMetalness}.
      */
     useMetalness = false;
@@ -245,6 +258,13 @@ class LitShaderOptions {
      */
     useCubeMapRotation = false;
 
+    /**
+     * If the environment chunks sample the scene environment, published by the renderer as
+     * `scene_envAtlas` and `scene_skybox`, instead of the textures owned by the material
+     * (`texture_envAtlas`, `texture_cubeMap`).
+     */
+    useSceneEnv = false;
+
     lightMapWithoutAmbient = false;
 
     lights = [];
@@ -269,6 +289,13 @@ class LitShaderOptions {
      * Shader outputs the accumulated shadow value, used for shadow catcher materials.
      */
     shadowCatcher = false;
+
+    /**
+     * Discard the fragments the clipping planes of the mesh instance clip. See
+     * {@link MeshInstance#clippingPlanes}. The clipping planes of the camera are enabled by the
+     * camera, see {@link CameraComponent#clippingPlanes}.
+     */
+    useClipPlanes = false;
 }
 
 export { LitShaderOptions };

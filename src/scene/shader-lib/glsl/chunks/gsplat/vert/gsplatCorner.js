@@ -1,6 +1,9 @@
 export default /* glsl */`
 uniform vec4 viewport_size;             // viewport width, height, 1/width, 1/height
 uniform float minPixelSize;
+#if GSPLAT_AA
+    uniform float antiAliasFilterSize;    // GSplatParams#antiAliasFilterSize, in pixels squared
+#endif
 
 // compute 3d covariance from rotation (w,x,y,z format) and scale
 void computeCovariance(vec4 rotation, vec3 scale, out vec3 covA, out vec3 covB) {
@@ -26,11 +29,11 @@ bool initCornerCov(SplatSource source, SplatCenter center, out SplatCorner corne
         covA.z, covB.y, covB.z
     );
 
-    float focal = viewport_size.x * center.projMat00;
-
     vec3 v = center.view.xyz;
 
     #ifdef GSPLAT_FISHEYE
+
+        float focal = viewport_size.x * center.projMat00;
 
         // Generalized fisheye Jacobian for g(θ) = k·tan(θ/k)
         // fisheyeSinTK, fisheyeCosTK, fisheyeRxy are shared from center shader
@@ -48,15 +51,23 @@ bool initCornerCov(SplatSource source, SplatCenter center, out SplatCorner corne
             0.0,                           0.0,                            0.0
         );
 
+        // mirror the footprint along with the center when the target flips Y
+        J[1] *= sign(center.projMat11);
+
     #else
 
-        // Standard perspective Jacobian
+        // Standard perspective Jacobian. The focal length in pixels is taken per axis: the two
+        // differ when the viewport's pixel aspect doesn't match the projection's (e.g. a
+        // full-frame projection drawn into half the width of a side-by-side stereo target). The
+        // signs are kept: the footprint is added to the center in clip space, so it must be
+        // mirrored along with it when the projection flips an axis (e.g. a flipY render target).
+        vec2 focal = viewport_size.xy * vec2(center.projMat00, center.projMat11);
         vec3 vp = camera_params.w == 1.0 ? vec3(0.0, 0.0, 1.0) : v;
-        float J1 = focal / vp.z;
+        vec2 J1 = focal / vp.z;
         vec2 J2 = -J1 / vp.z * vp.xy;
         mat3 J = mat3(
-            J1, 0.0, J2.x,
-            0.0, J1, J2.y,
+            J1.x, 0.0, J2.x,
+            0.0, J1.y, J2.y,
             0.0, 0.0, 0.0
         );
 
@@ -66,16 +77,35 @@ bool initCornerCov(SplatSource source, SplatCenter center, out SplatCorner corne
     mat3 T = W * J;
     mat3 cov = transpose(T) * Vrk * T;
 
+    // early-out gaussians smaller than minPixelSize, before paying for the eigen-decomposition (the vmin
+    // cap below is left out: it only matters on a viewport under minPixelSize / 2 pixels)
+    if (gsplatFootprintSmallerThan(cov[0][0] + GSPLAT_CULL_LOWPASS, cov[0][1], cov[1][1] + GSPLAT_CULL_LOWPASS, minPixelSize)) {
+        return false;
+    }
+
+    // screen-space filter: the classic dilation, or for compensated splats the filter they were
+    // trained with (antiAliasFilterSize is in pixels squared, cov in half pixel units)
+    float lowpass = GSPLAT_LOWPASS;
     #if GSPLAT_AA
+        bool compensated = true;
+        #ifdef GSPLAT_AA_MIXED
+            // the scene mixes splats trained with and without anti-aliasing; only the ones flagged
+            // in the work buffer are compensated
+            compensated = getAntiAlias();
+        #endif
+        if (compensated) {
+            lowpass = 4.0 * antiAliasFilterSize;
+        }
+
         // calculate AA factor
         float detOrig = cov[0][0] * cov[1][1] - cov[0][1] * cov[0][1];
-        float detBlur = (cov[0][0] + 0.3) * (cov[1][1] + 0.3) - cov[0][1] * cov[0][1];
-        corner.aaFactor = sqrt(max(detOrig / detBlur, 0.0));
+        float detBlur = (cov[0][0] + lowpass) * (cov[1][1] + lowpass) - cov[0][1] * cov[0][1];
+        corner.aaFactor = compensated ? sqrt(max(detOrig / detBlur, 0.0)) : 1.0;
     #endif
 
-    float diagonal1 = cov[0][0] + 0.3;
+    float diagonal1 = cov[0][0] + lowpass;
     float offDiagonal = cov[0][1];
-    float diagonal2 = cov[1][1] + 0.3;
+    float diagonal2 = cov[1][1] + lowpass;
 
     float mid = 0.5 * (diagonal1 + diagonal2);
     float radius = length(vec2((diagonal1 - diagonal2) / 2.0, offDiagonal));
@@ -87,11 +117,6 @@ bool initCornerCov(SplatSource source, SplatCenter center, out SplatCorner corne
 
     float l1 = 2.0 * min(sqrt(2.0 * lambda1), vmin);
     float l2 = 2.0 * min(sqrt(2.0 * lambda2), vmin);
-
-    // early-out gaussians smaller than minPixelSize
-    if (max(l1, l2) < minPixelSize) {
-        return false;
-    }
 
     vec2 c = center.proj.ww * viewport_size.zw;
 
