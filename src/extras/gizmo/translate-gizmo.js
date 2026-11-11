@@ -60,14 +60,14 @@ const AXES = /** @type {('x' | 'y' | 'z')[]} */ (['x', 'y', 'z']);
  */
 class TranslateGizmo extends TransformGizmo {
     _shapes = {
-        xyz: new SphereShape(this._device, {
+        xyz: new SphereShape(this._app, {
             axis: 'xyz',
             layers: [this._layer.id],
             defaultColor: this._theme.shapeBase.xyz,
             hoverColor: this._theme.shapeHover.xyz,
             disabledColor: this._theme.disabled
         }),
-        yz: new PlaneShape(this._device, {
+        yz: new PlaneShape(this._app, {
             axis: 'x',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, -90),
@@ -76,7 +76,7 @@ class TranslateGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             depth: 1
         }),
-        xz: new PlaneShape(this._device, {
+        xz: new PlaneShape(this._app, {
             axis: 'y',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, 0),
@@ -85,7 +85,7 @@ class TranslateGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             depth: 1
         }),
-        xy: new PlaneShape(this._device, {
+        xy: new PlaneShape(this._app, {
             axis: 'z',
             layers: [this._layer.id],
             rotation: new Vec3(90, 0, 0),
@@ -94,7 +94,7 @@ class TranslateGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             depth: 1
         }),
-        x: new ArrowShape(this._device, {
+        x: new ArrowShape(this._app, {
             axis: 'x',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, -90),
@@ -102,7 +102,7 @@ class TranslateGizmo extends TransformGizmo {
             hoverColor: this._theme.shapeHover.x,
             disabledColor: this._theme.disabled
         }),
-        y: new ArrowShape(this._device, {
+        y: new ArrowShape(this._app, {
             axis: 'y',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, 0),
@@ -110,7 +110,7 @@ class TranslateGizmo extends TransformGizmo {
             hoverColor: this._theme.shapeHover.y,
             disabledColor: this._theme.disabled
         }),
-        z: new ArrowShape(this._device, {
+        z: new ArrowShape(this._app, {
             axis: 'z',
             layers: [this._layer.id],
             rotation: new Vec3(90, 0, 0),

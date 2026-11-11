@@ -8,7 +8,7 @@ import { TriData } from '../tri-data.js';
 import { Shape } from './shape.js';
 
 /** @import { ShapeArgs } from './shape.js' */
-/** @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js' */
+/** @import { AppBase } from '../../../framework/app-base.js' */
 
 const tmpV1 = new Vec3();
 const tmpV2 = new Vec3();
@@ -86,11 +86,11 @@ class BoxLineShape extends Shape {
     /**
      * Create a new BoxLineShape.
      *
-     * @param {GraphicsDevice} device - The graphics device.
+     * @param {AppBase} app - The application the shape's entities belong to.
      * @param {ShapeArgs & BoxLineShapeArgs} args - The shape options.
      */
-    constructor(device, args = {}) {
-        super(device, 'boxLine', args);
+    constructor(app, args = {}) {
+        super(app, 'boxLine', args);
 
         this._gap = args.gap ?? this._gap;
         this._lineThickness = args.lineThickness ?? this._lineThickness;
@@ -105,12 +105,12 @@ class BoxLineShape extends Shape {
         ];
 
         // render
-        this._box = new Entity(`box:${this.axis}`);
+        this._box = new Entity(`box:${this.axis}`, this.app);
         this.entity.addChild(this._box);
         this._createRenderComponent(this._box, [
             Mesh.fromGeometry(this.device, new BoxGeometry())
         ]);
-        this._line = new Entity(`line:${this.axis}`);
+        this._line = new Entity(`line:${this.axis}`, this.app);
         this.entity.addChild(this._line);
         this._createRenderComponent(this._line, [
             Mesh.fromGeometry(this.device, new CylinderGeometry())

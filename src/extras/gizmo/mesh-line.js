@@ -30,7 +30,7 @@ class MeshLine {
     /**
      * @type {Entity}
      */
-    entity = new Entity('mesh-line');
+    entity;
 
     /**
      * @param {AppBase} app - The application instance
@@ -45,6 +45,8 @@ class MeshLine {
         this._material.setDefine('DEPTH_WRITE', '1');
         this._material.setParameter('uDepth', 0);
         this._material.update();
+
+        this.entity = new Entity('mesh-line', app);
 
         const mesh = Mesh.fromGeometry(app.graphicsDevice, new CylinderGeometry());
         const meshInstance = new MeshInstance(mesh, this._material);

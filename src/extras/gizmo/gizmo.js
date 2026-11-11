@@ -292,7 +292,7 @@ class Gizmo extends EventHandler {
         this._app = this._camera.system.app;
         this._device = this._app.graphicsDevice;
 
-        this.root = new Entity(name);
+        this.root = new Entity(name, this._app);
         this._app.root.addChild(this.root);
         this.root.enabled = false;
 

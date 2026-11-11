@@ -67,7 +67,7 @@ const AXES = /** @type {('x' | 'y' | 'z')[]} */ (['x', 'y', 'z']);
  */
 class RotateGizmo extends TransformGizmo {
     _shapes = {
-        z: new ArcShape(this._device, {
+        z: new ArcShape(this._app, {
             axis: 'z',
             layers: [this._layer.id],
             rotation: new Vec3(90, 0, 90),
@@ -76,7 +76,7 @@ class RotateGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             sectorAngle: 180
         }),
-        x: new ArcShape(this._device, {
+        x: new ArcShape(this._app, {
             axis: 'x',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, -90),
@@ -85,7 +85,7 @@ class RotateGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             sectorAngle: 180
         }),
-        y: new ArcShape(this._device, {
+        y: new ArcShape(this._app, {
             axis: 'y',
             layers: [this._layer.id],
             rotation: new Vec3(0, 0, 0),
@@ -94,7 +94,7 @@ class RotateGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             sectorAngle: 180
         }),
-        f: new ArcShape(this._device, {
+        f: new ArcShape(this._app, {
             axis: 'f',
             layers: [this._layer.id],
             defaultColor: this._theme.shapeBase.f,
@@ -102,7 +102,7 @@ class RotateGizmo extends TransformGizmo {
             disabledColor: this._theme.disabled,
             ringRadius: 0.55
         }),
-        xyz: new SphereShape(this._device, {
+        xyz: new SphereShape(this._app, {
             axis: 'xyz',
             layers: [this._layer.id],
             defaultColor: this._theme.shapeBase.xyz,
