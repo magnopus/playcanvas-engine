@@ -818,6 +818,10 @@ class FramePassCameraFrame extends FramePass {
         // matches the back-buffer size with the optional scale. Note that the scale parameters
         // allow us to render the 3d scene at lower resolution, improving performance.
         this.scenePass = new RenderPassForward(device, scene, this.cameraComponent);
+
+        // magnopus patched - the scene render target is sized to the camera's viewport (see
+        // updateSceneScale), so the scene fills it instead of applying the viewport a second time
+        this.scenePass.fullViewport = true;
         this.setupScenePassSettings(this.scenePass);
         this.scenePass.init(this.rt, this.sceneOptions);
 
@@ -852,6 +856,7 @@ class FramePassCameraFrame extends FramePass {
 
             // render the remaining layers after the split (otherwise they were already rendered)
             this.scenePassTransparent = new RenderPassForward(device, scene, this.cameraComponent);
+            this.scenePassTransparent.fullViewport = true;
             this.setupScenePassSettings(this.scenePassTransparent);
             this.scenePassTransparent.init(this.rt);
             ret.lastAddedIndex = this.addCameraLayers(this.scenePassTransparent, ret.lastAddedIndex, ret.clearRenderTarget, options.lastSceneLayerId, options.lastSceneLayerIsTransparent);

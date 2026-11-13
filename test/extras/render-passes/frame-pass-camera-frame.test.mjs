@@ -230,6 +230,22 @@ describe('FramePassCameraFrame', function () {
         expect(taaExposure.value).to.equal(1);
     });
 
+    it('renders the scene whole into a render target sized to the camera viewport', function () {
+
+        // a viewport covering a quarter of the output. The scene render target is sized to it, so the
+        // scene passes must fill it - applying the viewport again would shrink the scene to a
+        // sixteenth of the output
+        cameraFrame.cameraComponent.rect.set(0.5, 0, 0.5, 0.5);
+        cameraFrame.rendering.sceneColorMap = true;
+        cameraFrame.update();
+
+        const { scenePass, scenePassTransparent } = cameraFrame.renderPassCamera;
+        expect(scenePass.fullViewport).to.equal(true);
+        if (scenePassTransparent) {
+            expect(scenePassTransparent.fullViewport).to.equal(true);
+        }
+    });
+
     it('removes and destroys its own pass when disabled, returning the camera to its own rendering', function () {
         cameraFrame.update();
         const ownDestroy = spy(cameraFrame.renderPassCamera, 'destroy');
