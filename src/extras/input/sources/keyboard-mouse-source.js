@@ -52,9 +52,12 @@ const KEY_COUNT = Object.keys(KEY_CODES).length;
 const array = Array(KEY_COUNT).fill(0);
 
 /**
- * Keyboard and mouse input source class
+ * Keyboard and mouse input source class. Attached to an element, it accumulates `key` deltas for
+ * the keys listed in {@link keyCode}, `button` deltas for the mouse buttons, `mouse` deltas for
+ * pointer movement and `wheel` deltas for the scroll wheel. Pass `pointerLock: true` to use
+ * pointer lock for mouse movement.
  *
- * @category Input Source
+ * @category Input
  * @alpha
  *
  * @typedef {object} KeyboardMouseSourceDeltas
@@ -158,6 +161,7 @@ class KeyboardMouseSource extends InputSource {
         this._onContextMenu = this._onContextMenu.bind(this);
         this._onKeyDown = this._onKeyDown.bind(this);
         this._onKeyUp = this._onKeyUp.bind(this);
+        this._onBlur = this._onBlur.bind(this);
     }
 
     /**
@@ -278,6 +282,16 @@ class KeyboardMouseSource extends InputSource {
         this._setKey(event.code, 0);
     }
 
+    /**
+     * Releases held keys, as their keyup lands in whichever window took focus. Only the current
+     * state is cleared so the next read reports the release.
+     *
+     * @private
+     */
+    _onBlur() {
+        this._keyNow.fill(0);
+    }
+
     /** @private */
     _clearButtons() {
         for (let i = 0; i < this._button.length; i++) {
@@ -319,6 +333,7 @@ class KeyboardMouseSource extends InputSource {
 
         window.addEventListener('keydown', this._onKeyDown, false);
         window.addEventListener('keyup', this._onKeyUp, false);
+        window.addEventListener('blur', this._onBlur, false);
     }
 
     detach() {
@@ -336,6 +351,7 @@ class KeyboardMouseSource extends InputSource {
 
         window.removeEventListener('keydown', this._onKeyDown, false);
         window.removeEventListener('keyup', this._onKeyUp, false);
+        window.removeEventListener('blur', this._onBlur, false);
 
         this._keyNow.fill(0);
         this._keyPrev.fill(0);

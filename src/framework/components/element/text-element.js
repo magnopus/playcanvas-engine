@@ -3,8 +3,17 @@ import { string } from '../../../core/string.js';
 import { math } from '../../../core/math/math.js';
 import { Color } from '../../../core/math/color.js';
 import { Vec2 } from '../../../core/math/vec2.js';
+import { Vec3 } from '../../../core/math/vec3.js';
 import { BoundingBox } from '../../../core/shape/bounding-box.js';
-import { SEMANTIC_POSITION, SEMANTIC_TEXCOORD0, SEMANTIC_COLOR, SEMANTIC_ATTR8, SEMANTIC_ATTR9, TYPE_FLOAT32 } from '../../../platform/graphics/constants.js';
+import {
+    BUFFER_STATIC, INDEXFORMAT_UINT16, INDEXFORMAT_UINT32, PRIMITIVE_TRIANGLES, SEMANTIC_POSITION,
+    SEMANTIC_NORMAL, SEMANTIC_TEXCOORD0, SEMANTIC_COLOR, SEMANTIC_ATTR8, SEMANTIC_ATTR9,
+    TYPE_FLOAT32, TYPE_UINT8
+} from '../../../platform/graphics/constants.js';
+import { DeviceCache } from '../../../platform/graphics/device-cache.js';
+import { IndexBuffer } from '../../../platform/graphics/index-buffer.js';
+import { VertexBuffer } from '../../../platform/graphics/vertex-buffer.js';
+import { VertexFormat } from '../../../platform/graphics/vertex-format.js';
 import { VertexIterator } from '../../../platform/graphics/vertex-iterator.js';
 import { GraphNode } from '../../../scene/graph-node.js';
 import { MeshInstance } from '../../../scene/mesh-instance.js';
@@ -17,6 +26,7 @@ import { Markup } from './markup.js';
 
 /**
  * @import { CanvasFont } from '../../../framework/font/canvas-font.js'
+ * @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js'
  * @import { Font } from '../../../framework/font/font.js'
  */
 
@@ -30,14 +40,10 @@ class MeshInfo {
         this.lines = {};
         // float array for positions
         this.positions = [];
-        // float array for normals
-        this.normals = [];
         // float array for UVs
         this.uvs = [];
         // float array for vertex colors
         this.colors = [];
-        // float array for indices
-        this.indices = [];
         // float array for outline
         this.outlines = [];
         // float array for shadows
@@ -49,26 +55,54 @@ class MeshInfo {
     }
 }
 
+// per device cached vertex format, to share it by all text meshes
+const _vertexFormatDeviceCache = new DeviceCache();
+
 /**
- * Creates a new text mesh object from the supplied vertex information and topology.
+ * Creates a text mesh with room for the given number of quads. Only the indices are filled in
+ * here, as they never change - the vertices and the bounding box are written by _updateMeshes.
  *
- * @param {object} device - The graphics device used to manage the mesh.
- * @param {MeshInfo} [meshInfo] - An object that specifies optional inputs for the function as follows:
- * @returns {Mesh} A new Mesh constructed from the supplied vertex and triangle data.
+ * @param {GraphicsDevice} device - The graphics device used to manage the mesh.
+ * @param {number} numQuads - The number of quads the mesh can hold.
+ * @returns {Mesh} The new mesh.
  * @ignore
  */
-function createTextMesh(device, meshInfo) {
+function createTextMesh(device, numQuads) {
+    const vertexFormat = _vertexFormatDeviceCache.get(device, () => {
+        return new VertexFormat(device, [
+            { semantic: SEMANTIC_POSITION, components: 3, type: TYPE_FLOAT32 },
+            { semantic: SEMANTIC_NORMAL, components: 3, type: TYPE_FLOAT32 },
+            { semantic: SEMANTIC_COLOR, components: 4, type: TYPE_UINT8, normalize: true },
+            { semantic: SEMANTIC_TEXCOORD0, components: 2, type: TYPE_FLOAT32 },
+            { semantic: SEMANTIC_ATTR8, components: 3, type: TYPE_FLOAT32 },
+            { semantic: SEMANTIC_ATTR9, components: 3, type: TYPE_FLOAT32 }
+        ]);
+    });
+
+    const numVertices = numQuads * 4;
+    const numIndices = numQuads * 6;
+    const uint32 = numVertices > 0xffff;
+    const indices = uint32 ? new Uint32Array(numIndices) : new Uint16Array(numIndices);
+    for (let q = 0; q < numQuads; q++) {
+        const i = q * 6;
+        const v = q * 4;
+        indices[i + 0] = v;
+        indices[i + 1] = v + 1;
+        indices[i + 2] = v + 3;
+        indices[i + 3] = v + 2;
+        indices[i + 4] = v + 3;
+        indices[i + 5] = v + 1;
+    }
+    const indexFormat = uint32 ? INDEXFORMAT_UINT32 : INDEXFORMAT_UINT16;
+
     const mesh = new Mesh(device);
-
-    mesh.setPositions(meshInfo.positions);
-    mesh.setNormals(meshInfo.normals);
-    mesh.setColors32(meshInfo.colors);
-    mesh.setUvs(0, meshInfo.uvs);
-    mesh.setIndices(meshInfo.indices);
-    mesh.setVertexStream(SEMANTIC_ATTR8, meshInfo.outlines, 3, undefined, TYPE_FLOAT32, false);
-    mesh.setVertexStream(SEMANTIC_ATTR9, meshInfo.shadows, 3, undefined, TYPE_FLOAT32, false);
-
-    mesh.update();
+    mesh.vertexBuffer = new VertexBuffer(device, vertexFormat, numVertices);
+    mesh.indexBuffer[0] = new IndexBuffer(device, indexFormat, numIndices, BUFFER_STATIC,
+        indices.buffer);
+    mesh.primitive[0].type = PRIMITIVE_TRIANGLES;
+    mesh.primitive[0].base = 0;
+    mesh.primitive[0].count = numIndices;
+    mesh.primitive[0].indexed = true;
     return mesh;
 }
 
@@ -145,9 +179,10 @@ class TextElement {
         this._font = null;
 
         this._color = new Color(1, 1, 1, 1);
-        this._colorUniform = new Float32Array(3);
+        this._colorUniform = new Float32Array([1, 1, 1, 1]);
 
         this._spacing = 1;
+        this._letterSpacing = 0;
         this._fontSize = 32;
         this._fontMinY = 0;
         this._fontMaxY = 0;
@@ -609,7 +644,7 @@ class TextElement {
             this._symbolShadowParams = null;
         }
 
-        this._updateMaterialEmissive();
+        this._updateColorUniform();
         this._updateMaterialOutline();
         this._updateMaterialShadow();
 
@@ -635,8 +670,7 @@ class TextElement {
                 }
 
                 meshInfo.count = l;
-                meshInfo.positions.length = meshInfo.normals.length = l * 3 * 4;
-                meshInfo.indices.length = l * 3 * 2;
+                meshInfo.positions.length = l * 3 * 4;
                 meshInfo.uvs.length = l * 2 * 4;
                 meshInfo.colors.length = l * 4 * 4;
                 meshInfo.outlines.length = l * 4 * 3;
@@ -654,40 +688,12 @@ class TextElement {
                     continue;
                 }
 
-                // set up indices and normals whose values don't change when we call _updateMeshes
-                for (let v = 0; v < l; v++) {
-                    // create index and normal arrays since they don't change
-                    // if the length doesn't change
-                    meshInfo.indices[v * 3 * 2 + 0] = v * 4;
-                    meshInfo.indices[v * 3 * 2 + 1] = v * 4 + 1;
-                    meshInfo.indices[v * 3 * 2 + 2] = v * 4 + 3;
-                    meshInfo.indices[v * 3 * 2 + 3] = v * 4 + 2;
-                    meshInfo.indices[v * 3 * 2 + 4] = v * 4 + 3;
-                    meshInfo.indices[v * 3 * 2 + 5] = v * 4 + 1;
-
-                    meshInfo.normals[v * 4 * 3 + 0] = 0;
-                    meshInfo.normals[v * 4 * 3 + 1] = 0;
-                    meshInfo.normals[v * 4 * 3 + 2] = -1;
-
-                    meshInfo.normals[v * 4 * 3 + 3] = 0;
-                    meshInfo.normals[v * 4 * 3 + 4] = 0;
-                    meshInfo.normals[v * 4 * 3 + 5] = -1;
-
-                    meshInfo.normals[v * 4 * 3 + 6] = 0;
-                    meshInfo.normals[v * 4 * 3 + 7] = 0;
-                    meshInfo.normals[v * 4 * 3 + 8] = -1;
-
-                    meshInfo.normals[v * 4 * 3 + 9] = 0;
-                    meshInfo.normals[v * 4 * 3 + 10] = 0;
-                    meshInfo.normals[v * 4 * 3 + 11] = -1;
-                }
-
-                const mesh = createTextMesh(this._system.app.graphicsDevice, meshInfo);
+                const mesh = createTextMesh(this._system.app.graphicsDevice, l);
 
                 const mi = new MeshInstance(mesh, this._material, this._node);
                 mi.name = `Text Element: ${this._entity.name}`;
-                mi.castShadow = false;
-                mi.receiveShadow = false;
+                mi.castShadows = false;
+                mi.receiveShadows = false;
                 mi.cull = !screenSpace;
                 mi.screenSpace = screenSpace;
                 mi.drawOrder = this._drawOrder;
@@ -699,8 +705,8 @@ class TextElement {
 
                 this._setTextureParams(mi, this._font.textures[i]);
 
-                mi.setParameter('material_emissive', this._colorUniform);
-                mi.setParameter('material_opacity', this._color.a);
+                // Text materials are system-supplied and always enable MESH_COLOR.
+                mi.setParameter('mesh_color', this._colorUniform);
                 mi.setParameter('font_sdfIntensity', this._font.intensity);
                 mi.setParameter('font_pxrange', this._getPxRange(this._font));
 
@@ -790,9 +796,9 @@ class TextElement {
         }
     }
 
-    _updateMaterialEmissive() {
+    _updateColorUniform() {
         if (this._symbolColors) {
-            // when per-vertex coloring is present, disable material emissive color
+            // Markup supplies vertex colors, so keep the uniform tint white.
             this._colorUniform[0] = 1;
             this._colorUniform[1] = 1;
             this._colorUniform[2] = 1;
@@ -893,6 +899,10 @@ class TextElement {
         let prevWasWhitespace = false;
         let seenNonWhitespaceThisLine = false;
 
+        // whether a glyph has been laid out on the current line yet - the letter spacing goes in
+        // front of every glyph after the first
+        let lineHasGlyph = false;
+
         const splitHorizontalAnchors = Math.abs(this._element.anchor.x - this._element.anchor.z) >= 0.0001;
 
         let maxLineWidth = this._element.calculatedWidth;
@@ -945,6 +955,7 @@ class TextElement {
             numGapsAtWordStart = 0;
             prevWasWhitespace = false;
             seenNonWhitespaceThisLine = false;
+            lineHasGlyph = false;
             wordStartX = 0;
             lineStartIndex = lineBreakIndex;
         }
@@ -983,8 +994,12 @@ class TextElement {
             numGapsAtWordStart = 0;
             prevWasWhitespace = false;
             seenNonWhitespaceThisLine = false;
+            lineHasGlyph = false;
 
             const scale = this._fontSize / MAGIC;
+
+            // the letter spacing is a fraction of the font size, so it follows the auto fitting
+            const letterSpacing = this._letterSpacing * this._fontSize;
 
             // scale max font extents
             fontMinY = this._fontMinY * scale;
@@ -1098,7 +1113,14 @@ class TextElement {
                     this._font.data.info.maps[meshInfoId].height;
                 const meshInfo = this._meshInfo[meshInfoId];
 
-                const candidateLineWidth = _x + this._spacing * advance;
+                // The letter spacing goes in front of every glyph but the first on a line, as the
+                // kerning does, so it never widens a line past its last glyph. Glyphs that take up
+                // no space, like the zero width control characters, take none - whether the font
+                // supplies them or not.
+                const zeroWidth = !data || data.xadvance === 0;
+                const letterGap = lineHasGlyph && !zeroWidth ? letterSpacing : 0;
+
+                const candidateLineWidth = _x + letterGap + this._spacing * advance;
 
                 // If we've exceeded the maximum line width, move everything from the beginning of
                 // the current word onwards down onto a new line.
@@ -1136,6 +1158,12 @@ class TextElement {
                             continue;
                         }
                     }
+                }
+
+                // the glyph goes after its letter spacing, unless the line was just broken in front
+                // of it, which made it the first glyph on its line
+                if (lineHasGlyph) {
+                    _x += letterGap;
                 }
 
                 quad = meshInfo.quad;
@@ -1227,6 +1255,10 @@ class TextElement {
                 // whitespaces.
                 if (!isWhitespace) {
                     _xMinusTrailingWhitespace = _x;
+                }
+
+                if (!zeroWidth) {
+                    lineHasGlyph = true;
                 }
 
                 if (this._isWordBoundary(char) || (this._isValidNextChar(nextchar) && (this._isNextCJKBoundary(char, nextchar) || this._isNextCJKWholeWord(nextchar)))) {
@@ -1430,6 +1462,7 @@ class TextElement {
             const vertMax = this._meshInfo[i].quad * 4;  // number of verts we need (usually count minus line break characters)
             const it = new VertexIterator(this._meshInfo[i].meshInstance.mesh.vertexBuffer);
             for (let v = 0; v < numVertices; v++) {
+                it.element[SEMANTIC_NORMAL].set(0, 0, -1);
                 if (v >= vertMax) {
                     // clear unused vertices
                     it.element[SEMANTIC_POSITION].set(0, 0, 0);
@@ -1457,7 +1490,13 @@ class TextElement {
             }
             it.end();
 
-            this._meshInfo[i].meshInstance.mesh.aabb.compute(this._meshInfo[i].positions);
+            // bound only the vertices in use, the rest are cleared to the origin
+            const aabb = this._meshInfo[i].meshInstance.mesh.aabb;
+            if (vertMax > 0) {
+                aabb.compute(this._meshInfo[i].positions, vertMax);
+            } else {
+                aabb.setMinMax(Vec3.ZERO, Vec3.ZERO);
+            }
 
             // force update meshInstance aabb
             this._meshInfo[i].meshInstance._aabbVer = -1;
@@ -1652,6 +1691,9 @@ class TextElement {
                     mesh.primitive[0].base = start * 3 * 2;
                     mesh.primitive[0].count = (end - start) * 3 * 2;
                 }
+
+                // a texture page with no characters in the range would draw 0 indices, so skip it
+                instance.visible = end > start;
             }
         }
     }
@@ -1725,7 +1767,7 @@ class TextElement {
 
             for (let i = 0, len = this._model.meshInstances.length; i < len; i++) {
                 const mi = this._model.meshInstances[i];
-                mi.setParameter('material_emissive', this._colorUniform);
+                mi.setParameter('mesh_color', this._colorUniform);
             }
         }
 
@@ -1741,11 +1783,12 @@ class TextElement {
     set opacity(value) {
         if (this._color.a !== value) {
             this._color.a = value;
+            this._colorUniform[3] = value;
 
             if (this._model) {
                 for (let i = 0, len = this._model.meshInstances.length; i < len; i++) {
                     const mi = this._model.meshInstances[i];
-                    mi.setParameter('material_opacity', value);
+                    mi.setParameter('mesh_color', this._colorUniform);
                 }
             }
         }
@@ -1810,6 +1853,18 @@ class TextElement {
 
     get spacing() {
         return this._spacing;
+    }
+
+    set letterSpacing(value) {
+        const _prev = this._letterSpacing;
+        this._letterSpacing = value;
+        if (_prev !== value && this._font) {
+            this._updateText();
+        }
+    }
+
+    get letterSpacing() {
+        return this._letterSpacing;
     }
 
     set fontSize(value) {

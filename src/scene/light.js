@@ -1,10 +1,10 @@
+import { Debug } from '../core/debug.js';
 import { math } from '../core/math/math.js';
 import { Color } from '../core/math/color.js';
 import { Mat4 } from '../core/math/mat4.js';
 import { Vec2 } from '../core/math/vec2.js';
 import { Vec3 } from '../core/math/vec3.js';
 import { Vec4 } from '../core/math/vec4.js';
-import { BoundingBox } from '../core/shape/bounding-box.js';
 import {
     BLUR_GAUSSIAN,
     LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI, LIGHTTYPE_SPOT,
@@ -22,6 +22,7 @@ import { DepthState } from '../platform/graphics/depth-state.js';
 import { FloatPacking } from '../core/math/float-packing.js';
 
 /**
+ * @import { BoundingBox } from '../core/shape/bounding-box.js'
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
  * @import { EventHandle } from '../core/event-handle.js';
  */
@@ -65,7 +66,9 @@ const channelMap = {
 let id = 0;
 
 /**
- * Class storing shadow rendering related private information
+ * Class storing shadow rendering related private information.
+ *
+ * @ignore
  */
 class LightRenderData {
     constructor(camera, face, light) {
@@ -96,13 +99,11 @@ class LightRenderData {
 
         // Cascade reuse (see Light#cascadeUpdateIntervals), directional cascades only, per
         // camera: what the cascade was last fitted to, so a skipped cascade can tell when the
-        // view has outgrown it, and the casters it saw, so PCSS depth ranges stay stable
+        // view has outgrown it. PCSS caster bounds are retained in shadowCasterAabb below.
         this.fitValid = false;
         this.fitCenter = new Vec3();
         this.fitRadius = 0;
         this.fitLightDir = new Vec3();
-        this.fitCasterAabb = new BoundingBox();
-        this.fitCasterAabbValid = false;
 
         // whether this cascade's shadow map region is rendered this frame for this camera
         this.cascadeRefresh = true;
@@ -115,6 +116,24 @@ class LightRenderData {
         // - omni: cubemap face, 0..5
         // - directional: 0 for simple shadows, cascade index for cascaded shadow map
         this.face = face;
+
+        // Face 0 stores the cull request: per camera for directional lights, or with a null camera
+        // for local lights. Retained until the next frame so mesh and splat culling share requests.
+        this.shadowCullRequested = false;
+
+        // On directional face 0, the cascades requested by this camera's scheduled shadow passes.
+        this.shadowCascadeMask = 0;
+
+        // On directional face 0, the cascade split distances the cull fitted to this camera. All
+        // cameras are culled before any of them renders, so the camera's shadow pass copies them to
+        // the light when it renders the shared shadow map, as it does with the cascade matrices.
+        /** @type {Float32Array|null} */
+        this.shadowCascadeDistances = null;
+
+        // Retain PCSS caster bounds so cached cascades remain part of the depth-fitting union.
+        /** @type {BoundingBox|null} */
+        this.shadowCasterAabb = null;
+        this.shadowCasterAabbValid = false;
 
         // visible shadow casters
         this.visibleCasters = [];
@@ -259,6 +278,14 @@ class Light {
         this._cascadeBlend = 0;
         this.cascadeDistribution = 0.5;
 
+        /**
+         * The world space bounds the directional shadow covers, or null for cascades fitted to
+         * each camera.
+         *
+         * @type {BoundingBox|null}
+         */
+        this._shadowBounds = null;
+
         // Light source shape properties
         this._shape = LIGHTSHAPE_PUNCTUAL;
 
@@ -275,12 +302,16 @@ class Light {
 
         // Shadow mapping resources
         this._shadowMap = null;
+
+        // Keep a recreated directional map's refresh pending even when the application replaces
+        // shadowUpdateOverrides each frame. Cleared only after all cascades have rendered.
+        this._shadowCascadesInvalidated = false;
         this._shadowRenderParams = [];
         this._shadowCameraParams = [];
 
-        // per-cascade ortho radii for directional PCSS, packed into a vec4 (max 4 cascades).
-        // lazily allocated by the renderer only for directional lights that use PCSS.
-        this._shadowCascadeRadii = null;
+        // Per-cascade camera parameters for directional PCSS, packed into four vec4s.
+        // Lazily allocated by the renderer only for directional lights that use PCSS.
+        this._shadowCascadeParams = null;
 
         // Shadow mapping properties
         this.shadowDistance = 40;
@@ -424,6 +455,69 @@ class Light {
         return this._cascadeBlend;
     }
 
+    /**
+     * Sets the world space bounds enclosing the shadow casters of a directional light. When set,
+     * the light renders a single shadow map fitted to the bounds, used by all cameras, instead of
+     * cascades fitted to each camera. The bounds are copied. Null to render the cascades.
+     *
+     * @type {BoundingBox|null}
+     */
+    set shadowBounds(value) {
+        if (value) {
+            if (!this._shadowBounds) {
+                this._shadowBounds = value.clone();
+                this._destroyShadowMap();
+                this.updateKey();
+
+            // the bounds returned by the getter could have been modified before they are set again,
+            // so setting them is a change too
+            } else if (value === this._shadowBounds || !this._shadowBounds.equals(value)) {
+                this._shadowBounds.copy(value);
+
+                // a cached shadow renders once for the new bounds, including a cascade cached by
+                // shadowUpdateOverrides
+                this._shadowCascadesInvalidated = true;
+                if (this.shadowUpdateMode === SHADOWUPDATE_NONE) {
+                    this.shadowUpdateMode = SHADOWUPDATE_THISFRAME;
+                }
+            }
+        } else if (this._shadowBounds) {
+            this._shadowBounds = null;
+            this._destroyShadowMap();
+            this.updateKey();
+        }
+    }
+
+    /**
+     * Gets the world space bounds enclosing the shadow casters of a directional light.
+     *
+     * @type {BoundingBox|null}
+     */
+    get shadowBounds() {
+        return this._shadowBounds;
+    }
+
+    /**
+     * The number of cascades the shadow of a directional light renders: one with shadow bounds,
+     * which render a single shadow map, else {@link Light#numCascades}.
+     *
+     * @type {number}
+     */
+    get shadowCascadeCount() {
+        return this._shadowBounds ? 1 : this.numCascades;
+    }
+
+    /**
+     * True if the shadow of a directional light blends between its cascades and fades out at the
+     * shadow distance. A shadow with shadow bounds does neither, as it covers the bounds at any
+     * distance.
+     *
+     * @type {boolean}
+     */
+    get usesCascadeBlend() {
+        return this._cascadeBlend > 0 && !this._shadowBounds;
+    }
+
     set shadowMap(shadowMap) {
         if (this._shadowMap !== shadowMap) {
             this._destroyShadowMap();
@@ -436,6 +530,13 @@ class Light {
     }
 
     set mask(value) {
+
+        // a mesh instance only holds these values of a mask, so only they can match, see
+        // MeshInstance#mask
+        const all = MASK_AFFECT_DYNAMIC | MASK_AFFECT_LIGHTMAPPED | MASK_BAKE;
+        Debug.assert((value & ~all) === 0, `Light#mask ${value} has bits other than MASK_AFFECT_DYNAMIC, MASK_AFFECT_LIGHTMAPPED and MASK_BAKE`);
+        value &= all;
+
         if (this._mask !== value) {
             this._mask = value;
             this.updateKey();
@@ -451,7 +552,7 @@ class Light {
     get numShadowFaces() {
         const type = this._type;
         if (type === LIGHTTYPE_DIRECTIONAL) {
-            return this.numCascades;
+            return this.shadowCascadeCount;
         } else if (type === LIGHTTYPE_OMNI) {
             return 6;
         }
@@ -868,6 +969,9 @@ class Light {
         this.releaseRenderData();
 
         if (this._shadowMap) {
+            if (this._type === LIGHTTYPE_DIRECTIONAL) {
+                this._shadowCascadesInvalidated = true;
+            }
             if (!this._shadowMap.cached) {
                 this._shadowMap.destroy();
             }
@@ -950,6 +1054,7 @@ class Light {
         clone.numCascades = this.numCascades;
         clone.cascadeDistribution = this.cascadeDistribution;
         clone.cascadeBlend = this._cascadeBlend;
+        clone.shadowBounds = this._shadowBounds;
 
         // shape properties
         clone.shape = this._shape;
@@ -1118,13 +1223,14 @@ class Light {
         }
 
         // Note: This is slightly unconventional, ideally we'd convert color to linear space and then
-        // multiply by intensity, but keeping this for backwards compatibility
+        // multiply by intensity, but keeping this for backwards compatibility: below 1, intensity
+        // scales the color in gamma 2.2 space, which the lightmapper's virtual lights rely on
         const color = this._color;
         const colorLinear = this._colorLinear;
         if (intensity >= 1) {
             tmpColor.linear(color).mulScalar(intensity);
         } else {
-            tmpColor.copy(color).mulScalar(intensity).linear();
+            tmpColor.linear(color).mulScalar(Math.pow(intensity, 2.2));
         }
 
         colorLinear[0] = tmpColor.r;
@@ -1172,8 +1278,8 @@ class Light {
         // 14 - 15 : cookie channel B
         // 12      : cookie transform
         // 10 - 11 : light source shape
-        //  9      : use cascades
-        //  8      : cascade blend
+        //  9      : use cascades (never with shadow bounds, which render a single shadow map)
+        //  8      : cascade blend (never with shadow bounds, as it fades at the shadow distance)
         //  7      : disable specular
         //  6 -  4 : mask
         //  3      : cast shadows
@@ -1187,8 +1293,8 @@ class Light {
                (chanId[this._cookieChannel.charAt(0)]     << 18) |
                ((this._cookieTransform ? 1 : 0)           << 12) |
                ((this._shape)                             << 10) |
-               ((this.numCascades > 1 ? 1 : 0)            <<  9) |
-               ((this._cascadeBlend > 0 ? 1 : 0)          <<  8) |
+               ((this.shadowCascadeCount > 1 ? 1 : 0)     <<  9) |
+               ((this.usesCascadeBlend ? 1 : 0)           <<  8) |
                ((this.affectSpecularity ? 1 : 0)          <<  7) |
                ((this.mask)                               <<  6) |
                ((this._castShadows ? 1 : 0)               <<  3);
@@ -1277,4 +1383,4 @@ class Light {
     }
 }
 
-export { Light, lightTypes };
+export { Light, LightRenderData, lightTypes };

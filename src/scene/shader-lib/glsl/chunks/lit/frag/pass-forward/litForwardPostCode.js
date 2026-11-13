@@ -41,6 +41,8 @@ export default /* glsl */`
     #include "reflectionCubePS"
 #elif LIT_REFLECTION_SOURCE == SPHEREMAP
     #include "reflectionSpherePS"
+#elif LIT_REFLECTION_SOURCE == PLANAR
+    #include "reflectionPlanarPS"
 #endif
 
 #ifdef LIT_REFLECTIONS
@@ -65,8 +67,6 @@ export default /* glsl */`
 #ifdef LIT_SHEEN
     #include "lightSheenPS"
 #endif
-
-uniform vec3 material_ambient;
 
 #ifdef LIT_SPECULAR
     #ifdef LIT_LIGHTING

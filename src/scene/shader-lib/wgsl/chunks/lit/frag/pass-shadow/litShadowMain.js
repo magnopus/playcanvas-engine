@@ -10,10 +10,19 @@ export default /* wgsl */`
     #include "linearizeDepthPS"
 #endif
 
+#if SHADOW_TYPE == VSM_16F || SHADOW_TYPE == VSM_32F
+    #include "shadowEVSMExponentPS"
+#endif
+
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
     #include "litEngineMainStartPS"
+
+    #ifdef CLIP_PLANES
+        applyClipPlanes(vPositionW);
+    #endif
+
     #include "litUserMainStartPS"
 
     var output: FragmentOutput;
@@ -28,7 +37,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
             // spot/omni shadows currently use linear depth.
             // TODO: use perspective depth for spot/omni the same way as directional
             #if LIGHT_TYPE != DIRECTIONAL
-                depth = linearizeDepthWithParams(depth, camera_params);
+                depth = linearizeDepthWithParams(depth, uniform.camera_params);
             #endif
         #endif
 
@@ -55,9 +64,9 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         }
 
         #if SHADOW_TYPE == VSM_32F
-            var exponent: f32 = 15.0;
+            var exponent: f32 = VSM_EXPONENT_32F;
         #else
-            var exponent: f32 = 5.54;
+            var exponent: f32 = VSM_EXPONENT_16F;
         #endif
 
         var depth_vsm = 2.0 * depth - 1.0;

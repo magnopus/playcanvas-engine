@@ -1,5 +1,7 @@
 export default /* glsl */`
-uniform vec3 material_emissive;
+#ifndef MESH_COLOR
+    uniform vec3 material_emissive;
+#endif
 uniform float material_emissiveIntensity;
 
 // magnopus patched
@@ -10,7 +12,11 @@ uniform uint emissiveIsStereoFlipped; // 0: Not Flipped, 1: Flipped
 // end magnopus patched
 
 void getEmission() {
-    dEmission = material_emissive * material_emissiveIntensity;
+    #ifdef MESH_COLOR
+        dEmission = mesh_color.rgb * material_emissiveIntensity;
+    #else
+        dEmission = material_emissive * material_emissiveIntensity;
+    #endif
 
     #ifdef STD_EMISSIVE_TEXTURE
         // magnopus patched
@@ -18,10 +24,10 @@ void getEmission() {
             vec2 stereoUV = getStereoVideoUV({STD_EMISSIVE_TEXTURE_UV}, emissiveStereoVideoType, emissiveIsStereoFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
-            dEmission *= {STD_EMISSIVE_TEXTURE_DECODE}(texture2DBias({STD_EMISSIVE_TEXTURE_NAME}, stereoUV, textureBias)).{STD_EMISSIVE_TEXTURE_CHANNEL};
+            dEmission *= {STD_EMISSIVE_TEXTURE_DECODE}(texture2DBias({STD_EMISSIVE_TEXTURE_NAME}, stereoUV, {STD_TEXTURE_BIAS})).{STD_EMISSIVE_TEXTURE_CHANNEL};
         #else
         // end magnopus patched
-    dEmission *= {STD_EMISSIVE_TEXTURE_DECODE}(texture2DBias({STD_EMISSIVE_TEXTURE_NAME}, {STD_EMISSIVE_TEXTURE_UV}, textureBias)).{STD_EMISSIVE_TEXTURE_CHANNEL};
+    dEmission *= {STD_EMISSIVE_TEXTURE_DECODE}(texture2DBias({STD_EMISSIVE_TEXTURE_NAME}, {STD_EMISSIVE_TEXTURE_UV}, {STD_TEXTURE_BIAS})).{STD_EMISSIVE_TEXTURE_CHANNEL};
         // magnopus patched
         #endif
         // end magnopus patched

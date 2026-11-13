@@ -111,7 +111,7 @@ const SKY_CORE_GLSL = /* glsl */ `
 
         vec3 col = (Lin + L0) * 0.04 + vec3(0.0, 0.0003, 0.00075);
         // Clamp the sun disc to a value the bloom can handle. The WebGPU bloom down/upsample
-        // shaders sum 4 neighbour taps in f16 (half) before scaling, and accumulate mip levels
+        // shaders sum 4 neighbor taps in f16 (half) before scaling, and accumulate mip levels
         // additively - so a very bright pixel overflows those intermediate f16 sums (max 65504)
         // to Inf/NaN and corrupts the whole screen. 6000 keeps every intermediate well in range.
         return min(col * procSkyLuminance, vec3(6000.0));
@@ -177,7 +177,7 @@ const SKY_CORE_WGSL = /* wgsl */ `
 
         let col = (Lin + L0) * 0.04 + vec3f(0.0, 0.0003, 0.00075);
         // Clamp the sun disc to a value the bloom can handle. The WebGPU bloom down/upsample
-        // shaders sum 4 neighbour taps in f16 (half) before scaling, and accumulate mip levels
+        // shaders sum 4 neighbor taps in f16 (half) before scaling, and accumulate mip levels
         // additively - so a very bright pixel overflows those intermediate f16 sums (max 65504)
         // to Inf/NaN and corrupts the whole screen. 6000 keeps every intermediate well in range.
         return min(col * uniform.procSkyLuminance, vec3f(6000.0));
@@ -193,7 +193,7 @@ const SKY_CORE_WGSL = /* wgsl */ `
 // to the visible sky (not the IBL bake), so it lives outside SKY_CORE.
 const NIGHT_CORE_GLSL = /* glsl */ `
     uniform float procSkyNightBlend;       // 0 = day, 1 = night
-    uniform vec3 procSkyNightColor;        // deep night sky base colour
+    uniform vec3 procSkyNightColor;        // deep night sky base color
     uniform float procSkyNightBrightness;
     uniform float procSkyStarBrightness;
     uniform float procSkyStarDensity;      // 0..1 fraction of cells holding a star
@@ -608,7 +608,7 @@ class ProceduralSky extends Script {
     _baseSunIntensity = null;
 
     /**
-     * Colour of the moonlight the directional light fades to once the sun is below the horizon.
+     * Color of the moonlight the directional light fades to once the sun is below the horizon.
      *
      * @attribute
      * @type {Color}
@@ -635,7 +635,7 @@ class ProceduralSky extends Script {
     moonDirection = new Vec3(-1.53, 0.85, 0.35);
 
     /**
-     * Deep night sky base colour.
+     * Deep night sky base color.
      *
      * @attribute
      * @type {Color}
@@ -717,6 +717,34 @@ class ProceduralSky extends Script {
     /** @type {Texture|null} */
     _envAtlas = null;
 
+    /**
+     * Incremented each time the env-atlas is regenerated. The atlas is updated in place, so a
+     * consumer that copies it, such as a reflection probe system, compares this with the value it
+     * last saw to know when to copy again.
+     *
+     * @type {number}
+     */
+    lightingVersion = 0;
+
+    /**
+     * Whether the env-atlas is assigned to the scene (`scene.envAtlas`), where the materials read
+     * it. Turn it off when something else owns the environment lighting of the scene and takes the
+     * atlas from {@link ProceduralSky#envAtlas} instead, for example a reflection probe system that
+     * copies it into its own texture.
+     *
+     * @type {boolean}
+     */
+    assignSceneEnvAtlas = true;
+
+    /**
+     * The env-atlas the sky bakes its lighting to, or null before the first bake.
+     *
+     * @type {Texture|null}
+     */
+    get envAtlas() {
+        return this._envAtlas;
+    }
+
     /** @private */
     _origSkyboxGLSL = null;
 
@@ -766,7 +794,14 @@ class ProceduralSky extends Script {
         // force a lighting bake on the first update
         this._bakedParams = '';
 
+        device.on('devicerestored', this._onDeviceRestored, this);
         this.on('destroy', this._onDestroy, this);
+    }
+
+    /** @private */
+    _onDeviceRestored() {
+        // Rebuild GPU-generated lighting on the next update, after the sky uniforms are set.
+        this._bakedParams = '';
     }
 
     /** @private */
@@ -897,9 +932,10 @@ class ProceduralSky extends Script {
 
         // assign once - later bakes reuse the same texture object, so materials pick up the new
         // content without recreating the sky mesh
-        if (firstBake) {
+        if (firstBake && this.assignSceneEnvAtlas) {
             this.app.scene.envAtlas = this._envAtlas;
         }
+        this.lightingVersion++;
     }
 
     /** @private */
@@ -938,7 +974,7 @@ class ProceduralSky extends Script {
         sunRotQuat.setFromMat4(sunRotMat);
         this.sunLight.setRotation(sunRotQuat);
 
-        // colour: warm -> white sun by day, cold moon by night
+        // color: warm -> white sun by day, cold moon by night
         const y = this._sunDir.y;
         const t = Math.max(0, Math.min(1, y / 0.4));
         this._sunColor.lerp(this._warmColor, this._zenithColor, t);
@@ -968,7 +1004,7 @@ class ProceduralSky extends Script {
         scope.resolve('procSkyLuminance').setValue(this.luminance);
 
         // night sky: blend factor from the sun elevation (day above +2 deg, night below -8 deg),
-        // plus the night layer parameters. The moon disk reuses the moon light direction/colour.
+        // plus the night layer parameters. The moon disk reuses the moon light direction/color.
         scope.resolve('procSkyNightBlend').setValue(Math.max(0, Math.min(1, (2 - this.elevation) / 10)));
         scope.resolve('procSkyNightColor').setValue([this.nightColor.r, this.nightColor.g, this.nightColor.b]);
         scope.resolve('procSkyNightBrightness').setValue(this.nightBrightness);
@@ -998,6 +1034,7 @@ class ProceduralSky extends Script {
     /** @private */
     _onDestroy() {
         const device = this.app.graphicsDevice;
+        device.off('devicerestored', this._onDeviceRestored, this);
 
         // restore the original sky shader chunks
         if (this._origSkyboxGLSL !== null) {

@@ -43,9 +43,7 @@ class GSplatOctreeParser {
         const options = {
             retry: this.handler.maxRetries > 0,
             maxRetries: this.handler.maxRetries,
-            responseType: Http.ResponseType.JSON,
-            // Magnopus patched - add withCredentials option
-            withCredentials: asset?.options?.crossOrigin === 'use-credentials'
+            responseType: Http.ResponseType.JSON
         };
 
         http.get(url.load, options, (err, data) => {

@@ -2,12 +2,14 @@ import { Debug } from '../../../core/debug.js';
 import { basisTranscode } from '../../handlers/basis.js';
 import { MESHLET_DATA_U32S } from '../../../scene/meshlet/constants.js';
 import { MeshletDirectorGroup } from '../../../scene/meshlet/meshlet-director-group.js';
-import { restoreMeshletRecords } from '../../parsers/glb/extensions/mag-meshlets.js';
+import { magMeshlets, restoreMeshletRecords } from '../../parsers/glb/extensions/mag-meshlets.js';
+import { registerGlbResourceExtension, unregisterGlbResourceExtension } from '../../parsers/glb-resource-extension.js';
 import { ComponentSystem } from '../system.js';
 import { MeshletComponent } from './component.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { ResourceHandler } from '../../handlers/handler.js'
  * @import { ByteCache } from '../../../platform/net/byte-cache.js'
  * @import { CameraComponent } from '../camera/component.js'
  * @import { MeshletDirector } from '../../../scene/meshlet/meshlet-director.js'
@@ -77,6 +79,14 @@ class MeshletComponentSystem extends ComponentSystem {
 
     /** @private */
     _initialized = false;
+
+    /**
+     * Container handler this system registered its glTF extension with.
+     *
+     * @type {ResourceHandler|null}
+     * @private
+     */
+    _containerHandler = null;
 
     /**
      * The meshlet pipeline - one director per world - or null on non-WebGPU devices. Created on
@@ -235,6 +245,13 @@ class MeshletComponentSystem extends ComponentSystem {
 
         this.id = 'meshlet';
         this.ComponentType = MeshletComponent;
+
+        // Resource handlers are created before component systems, so register glTF meshlet support
+        // here to keep its resource implementation tree-shakeable when this system is omitted.
+        const containerHandler = app.loader.getHandler('container');
+        if (containerHandler && registerGlbResourceExtension(containerHandler, magMeshlets)) {
+            this._containerHandler = containerHandler;
+        }
 
         this.on('beforeremove', this.onBeforeRemove, this);
     }
@@ -1167,6 +1184,10 @@ class MeshletComponentSystem extends ComponentSystem {
         this.app.off('framerender', this._onFrameRender, this);
         this._group?.destroy();
         this._group = null;
+        if (this._containerHandler) {
+            unregisterGlbResourceExtension(this._containerHandler, magMeshlets.name);
+            this._containerHandler = null;
+        }
     }
 }
 

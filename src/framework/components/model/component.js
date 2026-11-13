@@ -384,8 +384,8 @@ class ModelComponent extends Component {
             const meshInstances = this._model.meshInstances;
 
             for (let i = 0; i < meshInstances.length; i++) {
-                meshInstances[i].castShadow = this._castShadows;
-                meshInstances[i].receiveShadow = this._receiveShadows;
+                meshInstances[i].castShadows = this._castShadows;
+                meshInstances[i].receiveShadows = this._receiveShadows;
                 meshInstances[i].setCustomAabb(this._customAabb);
             }
 
@@ -481,7 +481,7 @@ class ModelComponent extends Component {
 
             const meshInstances = model.meshInstances;
             for (let i = 0; i < meshInstances.length; i++) {
-                meshInstances[i].castShadow = value;
+                meshInstances[i].castShadows = value;
             }
 
             if (!this._castShadows && value) {
@@ -518,7 +518,7 @@ class ModelComponent extends Component {
         if (this._model) {
             const meshInstances = this._model.meshInstances;
             for (let i = 0, len = meshInstances.length; i < len; i++) {
-                meshInstances[i].receiveShadow = value;
+                meshInstances[i].receiveShadows = value;
             }
         }
     }
@@ -621,10 +621,11 @@ class ModelComponent extends Component {
     set batchGroupId(value) {
         if (this._batchGroupId === value) return;
 
-        if (this.entity.enabled && this._batchGroupId >= 0) {
+        // a disabled component is not in its batch group, onEnable inserts it
+        if (this.enabled && this.entity.enabled && this._batchGroupId >= 0) {
             this.system.app.batcher?.remove(BatchGroup.MODEL, this.batchGroupId, this.entity);
         }
-        if (this.entity.enabled && value >= 0) {
+        if (this.enabled && this.entity.enabled && value >= 0) {
             this.system.app.batcher?.insert(BatchGroup.MODEL, value, this.entity);
         }
 
@@ -958,7 +959,7 @@ class ModelComponent extends Component {
         }
 
         if (materialAsset.resource) {
-            meshInstance.material = materialAsset.resource;
+            meshInstance.material = /** @type {Material} */ (materialAsset.resource);
 
             this._setMaterialEvent(index, 'remove', materialAsset.id, function () {
                 meshInstance.material = this.system.defaultMaterial;
@@ -1146,7 +1147,7 @@ class ModelComponent extends Component {
      * @private
      */
     _onMaterialAssetLoad(asset) {
-        this._setMaterial(asset.resource);
+        this._setMaterial(/** @type {Material} */ (asset.resource));
     }
 
     /**
@@ -1221,7 +1222,7 @@ class ModelComponent extends Component {
      * @private
      */
     _onModelAssetLoad(asset) {
-        this.model = asset.resource.clone();
+        this.model = /** @type {Model} */ (asset.resource).clone();
         this._clonedModel = true;
     }
 

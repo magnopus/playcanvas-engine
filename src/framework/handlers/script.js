@@ -5,7 +5,7 @@ import { ScriptTypes } from '../script/script-types.js';
 import { registerScript } from '../script/script-create.js';
 import { ResourceLoader } from './loader.js';
 import { ResourceHandler } from './handler.js';
-import { Script, getScriptRegistryName, toLowerCamelCase } from '../script/script.js';
+import { Script, getDeclaredScriptName, getScriptRegistryName, toLowerCamelCase } from '../script/script.js';
 
 /**
  * @import { AppBase } from '../app-base.js'
@@ -16,7 +16,7 @@ import { Script, getScriptRegistryName, toLowerCamelCase } from '../script/scrip
  * loaded, PlayCanvas scripts which contain calls to {@link createScript}, or regular JavaScript
  * files, such as third-party libraries.
  *
- * @category Script
+ * @category Asset
  */
 class ScriptHandler extends ResourceHandler {
     /**
@@ -119,15 +119,22 @@ class ScriptHandler extends ResourceHandler {
 
     _loadModule(url, callback) {
 
-        // if we're in the browser, we need to use the full URL
-        const isBrowserWithOrigin = platform.browser && window.location.origin !== 'null';
-        const baseUrl = isBrowserWithOrigin ? window.location.origin + window.location.pathname : import.meta.url;
+        // resolve a relative URL as the page would in a browser, and against the working directory
+        // in Node.js, rather than against the location of the engine module
+        let baseUrl = import.meta.url;
+        if (platform.browser && window.location.origin !== 'null') {
+            baseUrl = window.location.origin + window.location.pathname;
+        } else if (platform.environment === 'node') {
+            const cwdUrl = new URL('file:///');
+            cwdUrl.pathname = `${process.cwd()}/`;
+            baseUrl = cwdUrl.href;
+        }
         const importUrl = new URL(url, baseUrl);
 
         // @ts-ignore
         import(importUrl.toString()).then((module) => {
 
-            const filename = importUrl.pathname.split('/').pop();
+            const filename = /** @type {string} */ (importUrl.pathname.split('/').pop());
             const scriptSchema = this._app.assets.find(filename, 'script')?.data?.scripts;
 
             for (const key in module) {
@@ -136,10 +143,16 @@ class ScriptHandler extends ResourceHandler {
 
                 if (extendsScriptType) {
 
-                    // a `scriptName` declared on THIS class; an inherited one belongs to a base
-                    const ownScriptName = Object.prototype.hasOwnProperty.call(scriptClass, 'scriptName') && scriptClass.scriptName;
+                    // the name declared on THIS class, as a static field or through the setter; an
+                    // inherited one belongs to a base
+                    const declaredName = getDeclaredScriptName(scriptClass);
 
-                    if (!ownScriptName) {
+                    // a base class extended by scripts declares a null name, and is not a script itself
+                    if (declaredName === null) {
+                        continue;
+                    }
+
+                    if (!declaredName) {
                         Debug.warnOnce(`The Script class "${scriptClass.name}" must have a static "scriptName" property: \`${scriptClass.name}.scriptName = "${toLowerCamelCase(scriptClass.name)}";\`. This will be an error in future versions of PlayCanvas.`);
                     }
 

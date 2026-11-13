@@ -13,6 +13,11 @@ export default /* wgsl */`
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
     #include "litEngineMainStartPS"
+
+    #ifdef CLIP_PLANES
+        applyClipPlanes(vPositionW);
+    #endif
+
     #include "litUserMainStartPS"
 
     var output: FragmentOutput;

@@ -10,8 +10,6 @@ class RenderPassShadowLocalNonClustered extends RenderPass {
         super(device);
         DebugHelper.setName(this, `${this.name}-${light._node.name}`);
 
-        this.requiresCubemaps = false;
-
         this.shadowRenderer = shadowRenderer;
         this.light = light;
         this.face = face;
@@ -22,12 +20,19 @@ class RenderPassShadowLocalNonClustered extends RenderPass {
         shadowRenderer.setupRenderPass(this, this.shadowCamera, true);
     }
 
+    frameUpdate() {
+        super.frameUpdate();
+        if (this.enabled && this.executeEnabled) {
+            this.shadowRenderer.renderer.culler.requestLocalShadowCull(this.light);
+        }
+    }
+
     execute() {
         this.shadowRenderer.renderFace(this.light, null, this.face, false);
     }
 
     after() {
-        if (this.applyVsm) {
+        if (this.executeEnabled && this.applyVsm) {
             this.shadowRenderer.renderVsm(this.light, this.shadowCamera);
         }
     }

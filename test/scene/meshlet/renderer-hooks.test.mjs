@@ -40,7 +40,7 @@ describe('ForwardRenderer meshlet hooks', function () {
         const layerComposition = { _renderActions: [renderAction(), renderAction(true)] };
         const frameGraph = {
             passes: [],
-            addRenderPass(pass) {
+            addPass(pass) {
                 this.passes.push(pass);
             }
         };

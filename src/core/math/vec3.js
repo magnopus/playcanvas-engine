@@ -1,33 +1,37 @@
 import { Debug } from '../debug.js';
 
 /**
- * A 3-dimensional vector. Vec3 is commonly used to represent 3D positions, directions, Euler
- * angles or scales.
+ * A 3-dimensional vector. Vec3 is commonly used to represent 3D positions, directions, Euler angles
+ * or scales.
  *
+ * Operations follow one convention throughout the math classes: a method that modifies the vector
+ * it is called on returns it, so calls can be chained and nothing is allocated, while queries such
+ * as {@link distance} and {@link dot} return a number. Two-operand forms such as {@link add2},
+ * {@link sub2} and {@link cross} write the result of `lhs op rhs` into `this`, and it is safe for
+ * `this` to also be one of the operands. Use {@link clone} for an independent copy and {@link copy}
+ * to overwrite one vector with another.
+ *
+ * The static constants such as {@link ZERO}, {@link UP} and {@link FORWARD} are frozen shared
+ * instances: read them freely, but writing to one throws. Vectors returned by engine getters such
+ * as {@link GraphNode#getPosition} are internal storage and should be treated as read-only; clone
+ * them if you need to keep or modify the value.
+ *
+ * @example
+ * // Move a point 5 units along a direction without allocating
+ * const position = new Vec3(1, 2, 3);
+ * const direction = new Vec3(0, 0, -1);
+ * position.addScaled(direction, 5);   // position is now [1, 2, -2]
+ * @example
+ * // Chain mutating operations; each returns the vector it was called on
+ * const toTarget = new Vec3().sub2(target, origin).normalize();
+ * const distance = target.distance(origin);
+ * @example
+ * // Keep a copy of an entity's position, then modify it safely
+ * const start = entity.getPosition().clone();
+ * start.y += 1;
  * @category Math
  */
 class Vec3 {
-    /**
-     * The first component of the vector.
-     *
-     * @type {number}
-     */
-    x;
-
-    /**
-     * The second component of the vector.
-     *
-     * @type {number}
-     */
-    y;
-
-    /**
-     * The third component of the vector.
-     *
-     * @type {number}
-     */
-    z;
-
     /**
      * Creates a new Vec3 instance.
      *
@@ -55,14 +59,35 @@ class Vec3 {
      */
     constructor(x = 0, y = 0, z = 0) {
         if (x.length === 3) {
-            this.x = x[0];
-            this.y = x[1];
-            this.z = x[2];
-        } else {
-            this.x = x;
-            this.y = y;
-            this.z = z;
+            z = x[2];
+            y = x[1];
+            x = x[0];
         }
+
+        // Fields are assigned once here instead of declared as class fields. A declaration without
+        // an initializer stores undefined first, so V8 never unboxes the field as a double and
+        // every fractional write allocates a heap number.
+
+        /**
+         * The first component of the vector.
+         *
+         * @type {number}
+         */
+        this.x = x;
+
+        /**
+         * The second component of the vector.
+         *
+         * @type {number}
+         */
+        this.y = y;
+
+        /**
+         * The third component of the vector.
+         *
+         * @type {number}
+         */
+        this.z = z;
     }
 
     /**
@@ -235,6 +260,24 @@ class Vec3 {
         const y = this.y - rhs.y;
         const z = this.z - rhs.z;
         return Math.sqrt(x * x + y * y + z * z);
+    }
+
+    /**
+     * Returns the squared distance between the two specified 3-dimensional vectors.
+     *
+     * @param {Vec3} rhs - The second 3-dimensional vector to test.
+     * @returns {number} The squared distance between the two vectors.
+     * @example
+     * const v1 = new Vec3(5, 10, 20);
+     * const v2 = new Vec3(10, 20, 40);
+     * const d = v1.distanceSq(v2);
+     * console.log("The squared distance between v1 and v2 is: " + d);
+     */
+    distanceSq(rhs) {
+        const x = this.x - rhs.x;
+        const y = this.y - rhs.y;
+        const z = this.z - rhs.z;
+        return x * x + y * y + z * z;
     }
 
     /**

@@ -16,11 +16,11 @@ import { RenderPass } from '../../platform/graphics/render-pass.js';
  * loads everything. Driven entirely by the GPU-written indirect draw args each instance was
  * pointed at.
  *
- * Lighting rides on a borrowed layer (the camera's World layer): its splitLights feed the
- * directional/local light uniforms and its light hash keys the shader variants. For clustered
- * lighting the pass exposes a one-entry layerRenderSteps array - WorldClustersAllocator assigns
- * real clusters to any pass carrying that property, hash-deduped with the main pass, so meshlet
- * draws share the World layer's cluster data with no allocator changes.
+ * Lighting rides on a borrowed layer (the camera's World layer): its light list feeds the
+ * light uniforms and keys the shader variants. For clustered
+ * lighting the pass requests a cluster for a one-entry layerRenderSteps array - the
+ * WorldClustersAllocator hash-dedupes it with the main pass, so meshlet draws share the World
+ * layer's cluster data.
  *
  * @ignore
  */
@@ -61,8 +61,9 @@ class RenderPassMeshletDraw extends RenderPass {
     toneMapping;
 
     /**
-     * Duck-typed {@link LayerRenderStep} list for WorldClustersAllocator._assignClustersForPass:
-     * one entry pointing at the borrowed light layer; the allocator writes lightClusters.
+     * Duck-typed {@link LayerRenderStep} list, requested from WorldClustersAllocator in
+     * frameUpdate: one entry pointing at the borrowed light layer; the allocator writes
+     * lightClusters.
      *
      * @type {Array<{ layer: Layer|null, lightClusters: object|null }>}
      */
@@ -73,7 +74,7 @@ class RenderPassMeshletDraw extends RenderPass {
      *
      * @private
      */
-    _forwardOptions = { meshInstances: null, lightLayer: null, lightClusters: undefined };
+    _forwardOptions = { meshInstances: null, lightList: undefined, lightClusters: undefined };
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
@@ -132,6 +133,13 @@ class RenderPassMeshletDraw extends RenderPass {
         const camera = this.cameraComponent?.camera;
         const renderer = this.renderer;
         if (!camera) return;
+
+        // under clustered lighting, request the borrowed light layer's cluster (shared with the
+        // scene passes rendering the same light set), as RenderPassForward does for its steps
+        const step = this.layerRenderSteps[0];
+        if (step.layer && renderer.scene.clusteredLightingEnabled) {
+            renderer.worldClustersAllocator.request(step);
+        }
         const shadowDirLights = renderer.culler.cameraDirShadowLights.get(camera);
         if (shadowDirLights) {
             for (let l = 0; l < shadowDirLights.length; l++) {
@@ -175,7 +183,7 @@ class RenderPassMeshletDraw extends RenderPass {
         const shaderPass = camera.shaderPassInfo?.index ?? SHADER_FORWARD;
         const options = this._forwardOptions;
         options.meshInstances = this.meshInstances;
-        options.lightLayer = step.layer;
+        options.lightList = step.layer?.getLightList(this.renderer.scene.clusteredLightingEnabled);
         options.lightClusters = step.lightClusters ?? undefined;
         this.renderer.renderForwardLayer(camera, this.renderTarget, null, false, shaderPass, options);
 

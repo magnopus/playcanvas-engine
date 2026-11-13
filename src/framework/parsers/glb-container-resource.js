@@ -67,8 +67,9 @@ class GlbContainerResource {
         this.gsplats = gsplats;
         this._meshGSplats = meshGSplats;
 
-        // streamed meshlet resources (MAG_meshlets_gpu v2) - raw resources, one per document
-        this.meshlets = data.meshlets ? [data.meshlets] : [];
+        // streamed meshlet resources (MAG_meshlets_gpu v2) - at most one per document, populated
+        // by the magMeshlets resource extension when the meshlet component system is registered
+        this.meshlets = data.meshlets ?? [];
     }
 
     get model() {

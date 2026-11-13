@@ -1,6 +1,6 @@
 import { expect } from 'chai';
 
-import { createMeshlets, hasMeshletExtension } from '../../../src/framework/parsers/glb/extensions/mag-meshlets.js';
+import { createMeshlets, hasMeshletExtension, magMeshlets } from '../../../src/framework/parsers/glb/extensions/mag-meshlets.js';
 import { GlbParser } from '../../../src/framework/parsers/glb-parser.js';
 import { MATERIAL_RECORD_U32S, MESHLET_DATA_U32S, PAGE_TABLE_FIELDS } from '../../../src/scene/meshlet/constants.js';
 import { MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
@@ -279,14 +279,15 @@ describe('MAG_meshlets extensions', function () {
             const data = new TextEncoder().encode(JSON.stringify(gltf));
 
             return new Promise((resolve, reject) => {
-                GlbParser.parse('meshlets.gltf', '', '', data, app.graphicsDevice, app.assets, {}, (err, result) => {
+                GlbParser.parse('meshlets.gltf', '', '', data, app.graphicsDevice, app.assets, {}, [magMeshlets], (err, result) => {
                     if (err) {
                         reject(err);
                         return;
                     }
                     try {
-                        expect(result.meshlets).to.be.an.instanceof(MeshletResource);
-                        expect(result.meshlets.instances).to.have.lengthOf(1 + SCATTER.length);
+                        expect(result.meshlets).to.have.lengthOf(1);
+                        expect(result.meshlets[0]).to.be.an.instanceof(MeshletResource);
+                        expect(result.meshlets[0].instances).to.have.lengthOf(1 + SCATTER.length);
                         // the primitive's inline geometry is a placeholder and must not become a mesh
                         expect(result.renders).to.have.lengthOf(1);
                         expect(result.renders[0].meshes).to.deep.equal([]);

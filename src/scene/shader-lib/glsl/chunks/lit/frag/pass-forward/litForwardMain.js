@@ -5,6 +5,10 @@ export default /* glsl */`
 
 void main(void) {
 
+    #ifdef CLIP_PLANES
+        applyClipPlanes(vPositionW);
+    #endif
+
     #include "litUserMainStartPS"
 
     dReflection = vec4(0);
@@ -38,11 +42,13 @@ void main(void) {
 
         #ifdef LIT_TBN
             getTBN(dTangentW, dBinormalW, dVertexNormalW);
-
-            #ifdef LIT_TWO_SIDED_LIGHTING
-                handleTwoSidedLighting();
-            #endif
         #endif
+
+        // after the TBN matrix, which is built from the unflipped normal. twoSidedLighting is 0 or 1,
+        // the same for every pixel the material renders.
+        if (material_twoSidedLighting != 0.0) {
+            handleTwoSidedLighting();
+        }
     #endif
 
     // invoke frontend functions

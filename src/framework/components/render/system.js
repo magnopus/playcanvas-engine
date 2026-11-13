@@ -6,6 +6,23 @@ import { RenderComponent } from './component.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
+ */
+
+/**
+ * Options of the `render` component accepted by {@link RenderComponentSystem} that differ from the
+ * properties of {@link RenderComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} RenderComponentOptionsOverrides
+ * @property {number[]} [aabbCenter] - Center `[x, y, z]` of a custom bounding box; with
+ * `aabbHalfExtents`, sets {@link RenderComponent#customAabb}.
+ * @property {number[]} [aabbHalfExtents] - Half-extents `[x, y, z]` of a custom bounding box; with
+ * `aabbCenter`, sets {@link RenderComponent#customAabb}.
+ * @property {number | null} [batchGroupId] - Same as {@link RenderComponent#batchGroupId}. `null`
+ * selects no batch group.
+ * @ignore
  */
 
 // order matters here
@@ -17,6 +34,8 @@ const _properties = [
     'castShadows',
     'shadowCascadeMask',
     'receiveShadows',
+    'clippingPlanes',
+    'clipIntersection',
     'castShadowsLightmap',
     'lightmapped',
     'lightmapSizeMultiplier',
@@ -81,11 +100,16 @@ class RenderComponentSystem extends ComponentSystem {
 
     cloneComponent(entity, clone) {
 
-        // copy properties
+        // copy properties, and the clipping planes as assigned, without changes to the returned
+        // planes that are not assigned
         const data = {};
         for (let i = 0; i < _properties.length; i++) {
-            data[_properties[i]] = entity.render[_properties[i]];
+            const property = _properties[i];
+            if (property !== 'clippingPlanes') {
+                data[property] = entity.render[property];
+            }
         }
+        data.clippingPlanes = entity.render._clipPlanes?.assigned ?? null;
         data.enabled = entity.render.enabled;
 
         // mesh instances cannot be used this way, remove them and manually clone them later

@@ -1,24 +1,21 @@
 import {
     SEMANTIC_ATTR8, SEMANTIC_ATTR9, SEMANTIC_ATTR12, SEMANTIC_ATTR11, SEMANTIC_ATTR14, SEMANTIC_ATTR15,
     SEMANTIC_BLENDINDICES, SEMANTIC_BLENDWEIGHT, SEMANTIC_COLOR, SEMANTIC_NORMAL, SEMANTIC_POSITION, SEMANTIC_TANGENT,
-    SEMANTIC_TEXCOORD0, SEMANTIC_TEXCOORD1,
-    // Magnopus patched start
-    SEMANTIC_TEXCOORD2,
-    SEMANTIC_TEXCOORD3,
-    SEMANTIC_TEXCOORD4,
-    // Magnopus patched end
+    SEMANTIC_TEXCOORD0, SEMANTIC_TEXCOORD1, SEMANTIC_TEXCOORD2, SEMANTIC_TEXCOORD3,
+    SEMANTIC_TEXCOORD4, SEMANTIC_TEXCOORD5, SEMANTIC_TEXCOORD6, SEMANTIC_TEXCOORD7,
     SHADERLANGUAGE_GLSL,
     SHADERLANGUAGE_WGSL,
-    primitiveGlslToWgslTypeMap
+    primitiveGlslToWgslTypeMap,
+    semanticToLocation
 } from '../../../platform/graphics/constants.js';
 import {
-    LIGHTSHAPE_PUNCTUAL,
+    LIGHTSHAPE_PUNCTUAL, LIGHTSHAPE_RECT, LIGHTSHAPE_DISK, LIGHTSHAPE_SPHERE,
     LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI, LIGHTTYPE_SPOT,
     SHADER_PICK, SHADER_NORMAL_PICK,
     SPRITE_RENDERMODE_SLICED, SPRITE_RENDERMODE_TILED, shadowTypeInfo, SHADER_PREPASS,
     lightTypeNames, lightShapeNames, spriteRenderModeNames, fresnelNames, blendNames, lightFalloffNames,
     cubemaProjectionNames, specularOcclusionNames, reflectionSrcNames, ambientSrcNames,
-    ditherNames,
+    ditherNames, DITHER_NONE,
     REFLECTIONSRC_NONE
 } from '../../constants.js';
 import { ChunkUtils } from '../chunk-utils.js';
@@ -37,10 +34,12 @@ const builtinAttributes = {
     vertex_tangent: SEMANTIC_TANGENT,
     vertex_texCoord0: SEMANTIC_TEXCOORD0,
     vertex_texCoord1: SEMANTIC_TEXCOORD1,
-    // Magnopus patched: additional UV channels, needed for lightmaps
     vertex_texCoord2: SEMANTIC_TEXCOORD2,
     vertex_texCoord3: SEMANTIC_TEXCOORD3,
     vertex_texCoord4: SEMANTIC_TEXCOORD4,
+    vertex_texCoord5: SEMANTIC_TEXCOORD5,
+    vertex_texCoord6: SEMANTIC_TEXCOORD6,
+    vertex_texCoord7: SEMANTIC_TEXCOORD7,
     vertex_color: SEMANTIC_COLOR,
     vertex_boneWeights: SEMANTIC_BLENDWEIGHT,
     vertex_boneIndices: SEMANTIC_BLENDINDICES
@@ -76,14 +75,14 @@ class LitShader {
     /**
      * The vertex shader defines needed for the shader compilation.
      *
-     * @type {Map<string, string>}
+     * @type {Map<string, string|number|boolean>}
      */
     vDefines = new Map();
 
     /**
      * The fragment shader defines needed for the shader compilation.
      *
-     * @type {Map<string, string>}
+     * @type {Map<string, string|number|boolean>}
      */
     fDefines = new Map();
 
@@ -214,7 +213,7 @@ class LitShader {
      *
      * @param {boolean} condition - The define is added if the condition is true.
      * @param {string} name - The define name.
-     * @param {string} [value] - The define value.
+     * @param {string|boolean} [value] - The define value.
      */
     sharedDefineSet(condition, name, value = '') {
         if (condition) {
@@ -251,6 +250,21 @@ class LitShader {
             varyings.set('vLinearDepth', 'float');
         }
 
+        // dynamic refraction, evaluated by the forward pass, scales the refraction by the scale of
+        // the model matrix
+        if (options.useRefraction && options.useDynamicRefraction && this.shaderPassInfo.isForward) {
+            vDefines.set('LIT_DYNAMIC_REFRACTION', true);
+            varyings.set('vModelScale', 'vec3');
+        }
+
+        // opacity dithering, which uses a per-mesh value derived from the model matrix to offset the
+        // dither pattern, so that overlapping meshes do not all discard the same pixels
+        const ditherMode = this.shaderPassInfo.isForward ? options.opacityDither : options.opacityShadowDither;
+        if (ditherMode !== DITHER_NONE) {
+            this.sharedDefineSet(true, 'LIT_DITHER_ID', true);
+            varyings.set('vDitherId', 'float');
+        }
+
         if (this.needsNormal) vDefines.set('NORMALS', true);
 
         if (this.options.useInstancing) {
@@ -285,19 +299,30 @@ class LitShader {
                 varyings.set('vObjectSpaceUpW', 'vec3');
             }
         }
-        // Magnopus patched: up max num of uvs
-        const maxUvSets = 5;
-
-        for (let i = 0; i < maxUvSets; i++) {
+        // uv sets 0 and 1 have dedicated chunks (uv0VS handles nine-slicing), the additional sets
+        // are expanded by looped includes indexed through the UV_SET defines
+        let numUvSets = 0;
+        let numUvVaryings = 0;
+        for (let i = 0; i < useUv.length; i++) {
             if (useUv[i]) {
                 vDefines.set(`UV${i}`, true);
                 attributes[`vertex_texCoord${i}`] = `TEXCOORD${i}`;
+                if (i >= 2) {
+                    vDefines.set(`{UV_SET_${numUvSets++}}`, i);
+                }
             }
             if (useUnmodifiedUv[i]) {
                 vDefines.set(`UV${i}_UNMODIFIED`, true);
                 varyings.set(`vUv${i}`, 'vec2');
+                if (i >= 2) {
+                    vDefines.set(`{UV_VARYING_SET_${numUvVaryings++}}`, i);
+                }
             }
         }
+
+        // number of additional uv sets, these drive the looped includes
+        vDefines.set('UV_SET_COUNT', numUvSets);
+        vDefines.set('UV_VARYING_SET_COUNT', numUvVaryings);
 
         // prepare defines for texture transforms
         let numTransforms = 0;
@@ -364,6 +389,19 @@ class LitShader {
             }
         }
 
+        // attribute locations are fixed per semantic, so two attributes on one location cannot share
+        // a shader. UV sets 6 and 7 sit on the locations of the default instancing format and UV
+        // sets 3 and 4 on those of the MSDF text attributes.
+        Debug.call(() => {
+            const used = new Map();
+            for (const name in attributes) {
+                const location = semanticToLocation[attributes[name]];
+                Debug.assert(!used.has(location),
+                    `Vertex attributes ${used.get(location)} and ${name} both use attribute location ${location} and cannot be combined in one shader. UV sets 6 and 7 share their locations with the default instancing vertex format, UV sets 3 and 4 with the MSDF text attributes - use a custom instancing vertex format or a different UV set.`);
+                used.set(location, name);
+            }
+        });
+
         // object level defines, exposed to both vertex and fragment shaders
         this.sharedDefineSet(options.useInstancing, 'INSTANCING', true);
         this.sharedDefineSet(options.screenSpace, 'SCREENSPACE', true);
@@ -404,15 +442,17 @@ class LitShader {
         // clustered lights defines
         if (clusteredLightingEnabled && this.lighting) {
             fDefines.set('LIT_CLUSTERED_LIGHTS', true);
-            if (options.clusteredLightingCookiesEnabled) {
-                fDefines.set('CLUSTER_COOKIES', true);
-            }
+            if (options.clusteredLightingCookiesEnabled) fDefines.set('CLUSTER_COOKIES', true);
             if (options.clusteredLightingAreaLightsEnabled) {
                 fDefines.set('CLUSTER_AREALIGHTS', true);
+
+                // only the code of the area light shapes enabled in the LightingParams
+                const shapes = options.clusteredLightingAreaLightShapes;
+                if (shapes & (1 << LIGHTSHAPE_RECT)) fDefines.set('CLUSTER_AREALIGHT_RECT', true);
+                if (shapes & (1 << LIGHTSHAPE_DISK)) fDefines.set('CLUSTER_AREALIGHT_DISK', true);
+                if (shapes & (1 << LIGHTSHAPE_SPHERE)) fDefines.set('CLUSTER_AREALIGHT_SPHERE', true);
             }
-            if (options.lightMaskDynamic) {
-                fDefines.set('CLUSTER_MESH_DYNAMIC_LIGHTS', true);
-            }
+            if (options.lightMaskDynamic) fDefines.set('CLUSTER_MESH_DYNAMIC_LIGHTS', true);
 
             // shadows
             if (options.clusteredLightingShadowsEnabled && !options.noShadow) {
@@ -425,9 +465,14 @@ class LitShader {
             }
         }
 
-        // generate defines for all non-clustered lights
+        // generate defines for all non-clustered lights. options.lights is indexed by light slot
+        // and is sparse: a slot reserved by a light this mask does not select is a hole, and gets
+        // no defines, so the `#if defined(LIGHT<N>)` in the repeated light chunks compiles that
+        // slot out of both the declarations and the lighting code.
         for (let i = 0; i < options.lights.length; i++) {
             const light = options.lights[i];
+            if (!light) continue;
+
             const lightType = light._type;
 
             // when clustered lighting is enabled, skip non-directional lights
@@ -483,18 +528,8 @@ class LitShader {
                 }
                 if (lightType === LIGHTTYPE_DIRECTIONAL) {
                     fDefines.set(`LIGHT${i}_SHADOW_SAMPLE_ORTHO`, true);
-                    if (light.cascadeBlend > 0) {
-                        fDefines.set(`LIGHT${i}_SHADOW_CASCADE_BLEND`, true);
-                    }
-                    if (light.numCascades > 1) {
-                        fDefines.set(`LIGHT${i}_SHADOW_CASCADES`, true);
-                    }
-                }
-                if (shadowInfo.pcf || shadowInfo.pcss || this.device.isWebGPU) {
-                    fDefines.set(`LIGHT${i}_SHADOW_SAMPLE_SOURCE_ZBUFFER`, true);
-                }
-                if (lightType === LIGHTTYPE_OMNI) {
-                    fDefines.set(`LIGHT${i}_SHADOW_SAMPLE_POINT`, true);
+                    if (light.usesCascadeBlend) fDefines.set(`LIGHT${i}_SHADOW_CASCADE_BLEND`, true);
+                    if (light.shadowCascadeCount > 1) fDefines.set(`LIGHT${i}_SHADOW_CASCADES`, true);
                 }
             }
 
@@ -545,7 +580,6 @@ class LitShader {
         this.fDefineSet(options.useCubeMapRotation, 'CUBEMAP_ROTATION');
         this.fDefineSet(options.occludeSpecularFloat, 'LIT_OCCLUDE_SPECULAR_FLOAT');
         this.fDefineSet(options.separateAmbient, 'LIT_SEPARATE_AMBIENT');
-        this.fDefineSet(options.twoSidedLighting, 'LIT_TWO_SIDED_LIGHTING');
         this.fDefineSet(options.lightMapEnabled, 'LIT_LIGHTMAP');
         this.fDefineSet(options.dirLightMapEnabled, 'LIT_DIR_LIGHTMAP');
         this.fDefineSet(options.skyboxIntensity > 0, 'LIT_SKYBOX_INTENSITY');
@@ -565,6 +599,7 @@ class LitShader {
         this.fDefineSet(options.useRefraction, 'LIT_REFRACTION');
         this.fDefineSet(options.useDynamicRefraction, 'LIT_DYNAMIC_REFRACTION');
         this.fDefineSet(options.dispersion, 'LIT_DISPERSION');
+        this.fDefineSet(options.useDiffuseTransmission, 'LIT_DIFFUSE_TRANSMISSION');
         this.fDefineSet(options.useHeights, 'LIT_HEIGHTS');
         this.fDefineSet(options.opacityFadesSpecular, 'LIT_OPACITY_FADES_SPECULAR');
         this.fDefineSet(options.alphaToCoverage, 'LIT_ALPHA_TO_COVERAGE');
@@ -572,9 +607,7 @@ class LitShader {
         this.fDefineSet(options.useMsdf, 'LIT_MSDF');
         this.fDefineSet(options.ssao, 'LIT_SSAO');
         this.fDefineSet(options.useAo, 'LIT_AO');
-        this.fDefineSet(options.occludeDirect, 'LIT_OCCLUDE_DIRECT');
         this.fDefineSet(options.msdfTextAttribute, 'LIT_MSDF_TEXT_ATTRIBUTE');
-        this.fDefineSet(options.diffuseMapEnabled, 'LIT_DIFFUSE_MAP');
         this.fDefineSet(options.shadowCatcher, 'LIT_SHADOW_CATCHER');
         this.fDefineSet(
             true,
@@ -626,6 +659,10 @@ class LitShader {
             ChunkUtils.decodeFunc(options.ambientEncoding)
         );
 
+        // environment textures are owned by the scene or by the material, under different uniform names
+        this.fDefineSet(true, '{LIT_ENV_ATLAS}', options.useSceneEnv ? 'scene_envAtlas' : 'texture_envAtlas');
+        this.fDefineSet(true, '{LIT_ENV_CUBEMAP}', options.useSceneEnv ? 'scene_skybox' : 'texture_cubeMap');
+
         // lighting defines
         this._setupLightingDefines(hasAreaLights, options.clusteredLightingEnabled);
     }
@@ -658,6 +695,13 @@ class LitShader {
         // generated code is exposed as an include
         this.includes.set('frontendDeclPS', frontendDecl ?? '');
         this.includes.set('frontendCodePS', frontendCode ?? '');
+
+        // the planes of the mesh instance clip all passes, so that what they clip neither renders,
+        // casts shadows, writes depth nor gets picked. The planes of the camera are enabled by
+        // the defines of the camera shader params instead, so they do not clip the shadow passes,
+        // which render with the shadow camera
+        this.fDefineSet(options.useClipPlanes, 'CLIP_PLANES');
+        this.fDefineSet(options.useClipPlanes, 'CLIP_PLANES_MESH');
 
         if (options.pass === SHADER_PICK) {
             // nothing to prepare currently

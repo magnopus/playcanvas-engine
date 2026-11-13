@@ -15,21 +15,35 @@ class GlbModelParser {
     }
 
     load(url, callback, asset) {
+        const loadUrl = typeof url === 'string' ? url : url.load;
+        // magnopus patched
+        const originalUrl = typeof url === 'string' ? url : url.original;
         this.handler.fetch(url, Http.ResponseType.ARRAY_BUFFER, (err, data) => {
             if (err) {
                 callback(err);
             } else {
-                this.parse(data, callback, asset);
+                this.parse(data, callback, asset, loadUrl, originalUrl);
             }
         }, asset);
     }
 
-    parse(data, callback, asset) {
+    /**
+     * @param {ArrayBuffer} data - The glb data.
+     * @param {Function} callback - Invoked with the resulting model.
+     * @param {Asset} [asset] - The asset being loaded.
+     * @param {string} [loadUrl] - The URL the glb was loaded from. Buffers and images the glb
+     * references by a relative uri resolve against its directory, so without this they would be
+     * requested relative to the document instead. Defaults to the asset's file URL.
+     * @param {string} [originalUrl] - The original (unresolved) URL of the glb, which relative uris
+     * are also resolved against so a url resolver can repoint them. Defaults to the asset's
+     * original file URL.
+     */
+    parse(data, callback, asset, loadUrl = '', originalUrl = '') {
         // magnopus patched
-        const loadUrlBase = asset ? path.extractPath(asset.getFileUrl()) : '';
-        const originalUrlBase = asset ? path.extractPath(asset.getFileOriginalUrl()) : '';
+        const loadUrlBase = path.extractPath(loadUrl || (asset?.getFileUrl() ?? ''));
+        const originalUrlBase = path.extractPath(originalUrl || (asset?.getFileOriginalUrl() ?? ''));
 
-        GlbParser.parse('filename.glb', loadUrlBase, originalUrlBase, data, this._device, this._assets, asset?.options ?? {}, (err, result) => {
+        GlbParser.parse('filename.glb', loadUrlBase, originalUrlBase, data, this._device, this._assets, asset?.options ?? {}, [], (err, result) => {
             if (err) {
                 callback(err);
             } else {

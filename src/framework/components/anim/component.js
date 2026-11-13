@@ -122,7 +122,7 @@ class AnimComponent extends Component {
         }
 
         if (_asset.resource) {
-            this._stateGraph = _asset.resource;
+            this._stateGraph = /** @type {any} */ (_asset.resource);
             this.loadStateGraph(this._stateGraph);
             _asset.on('change', this._onStateGraphAssetChangeEvent, this);
         } else {
@@ -223,17 +223,6 @@ class AnimComponent extends Component {
      */
     get playing() {
         return this._playing;
-    }
-
-    // magnopus patched: Move the animation from one entity to another, used by lods
-    transferOwnership(entity, opts) {
-        // change the animation skeleton to the new mesh
-        this.rootBone = entity;
-        this.animationFrameSkip = opts.animationFrameSkip;
-        // ensure the new mesh is in sync
-        this.update(0);
-        this._mi = undefined;
-        this.setupDelayed = false;
     }
 
     /**
@@ -386,14 +375,15 @@ class AnimComponent extends Component {
      *
      * @param {string} name - The name of the layer to create.
      * @param {number} [weight] - The blending weight of the layer. Defaults to 1.
-     * @param {object[]} [mask] - A list of paths to bones in the model which should be animated in
-     * this layer. If omitted the full model is used. Defaults to null.
+     * @param {object} [mask] - The mask of bones in the model which should be animated in this
+     * layer, keyed by bone path (see {@link AnimComponentLayer#mask}). If omitted the full model is
+     * used. Defaults to null.
      * @param {string} [blendType] - Defines how properties animated by this layer blend with
      * animations of those properties in previous layers. Defaults to ANIM_LAYER_OVERWRITE.
      * @returns {AnimComponentLayer} The created anim component layer.
      */
     addLayer(name, weight, mask, blendType) {
-        const layer = this.findAnimationLayer(name);
+        const layer = this.findLayer(name);
         if (layer) return layer;
         const states = [
             {
@@ -496,7 +486,7 @@ class AnimComponent extends Component {
                 if (ANIM_CONTROL_STATES.indexOf(stateName) !== -1) continue;
                 const animationAsset = this._animationAssets[`${layer.name}:${stateName}`];
                 if (!animationAsset || !animationAsset.asset) {
-                    this.findAnimationLayer(layer.name).assignAnimation(stateName, AnimTrack.EMPTY);
+                    this.findLayer(layer.name).assignAnimation(stateName, AnimTrack.EMPTY);
                     continue;
                 }
                 const assetId = animationAsset.asset;
@@ -519,7 +509,7 @@ class AnimComponent extends Component {
     }
 
     onAnimationAssetLoaded(layerName, stateName, asset) {
-        this.findAnimationLayer(layerName).assignAnimation(stateName, asset.resource);
+        this.findLayer(layerName).assignAnimation(stateName, asset.resource);
     }
 
     /**
@@ -590,9 +580,10 @@ class AnimComponent extends Component {
      * Finds an {@link AnimComponentLayer} in this component.
      *
      * @param {string} name - The name of the anim component layer to find.
-     * @returns {AnimComponentLayer} Layer.
+     * @returns {AnimComponentLayer|null} The layer, or null if this component has no layer with
+     * the given name.
      */
-    findAnimationLayer(name) {
+    findLayer(name) {
         const layerIndex = this._layerIndices[name];
         return this._layers[layerIndex] || null;
     }
@@ -626,7 +617,7 @@ class AnimComponent extends Component {
                 'parameters': {}
             }));
         }
-        const layer = this.findAnimationLayer(layerName);
+        const layer = this.findLayer(layerName);
         if (layer) {
             layer.assignAnimation(nodeName, animTrack, speed, loop);
         } else {
@@ -685,7 +676,7 @@ class AnimComponent extends Component {
             this.baseLayer.assignAnimation(nodePath, animTrack);
             return;
         }
-        const layer = layerName ? this.findAnimationLayer(layerName) : this.baseLayer;
+        const layer = layerName ? this.findLayer(layerName) : this.baseLayer;
         if (!layer) {
             Debug.error('assignAnimation: Trying to assign an anim track to a layer that doesn\'t exist');
             return;
@@ -701,7 +692,7 @@ class AnimComponent extends Component {
      * default layer is used.
      */
     removeNodeAnimations(nodeName, layerName) {
-        const layer = layerName ? this.findAnimationLayer(layerName) : this.baseLayer;
+        const layer = layerName ? this.findLayer(layerName) : this.baseLayer;
         if (!layer) {
             Debug.error('removeStateAnimations: Trying to remove animation tracks from a state before the state graph has been loaded. Have you called loadStateGraph?');
             return;
@@ -875,6 +866,22 @@ class AnimComponent extends Component {
             this.rebind();
         }
     }
+
+    // ---- deprecated block start ----
+
+    /**
+     * @param {string} name - The name of the anim component layer to find.
+     * @returns {AnimComponentLayer} The layer, or null if not found. Typed as non-null, as it was
+     * before the rename, so existing callers keep compiling under strictNullChecks.
+     * @deprecated Use {@link AnimComponent#findLayer} instead.
+     * @ignore
+     */
+    findAnimationLayer(name) {
+        Debug.deprecated('AnimComponent#findAnimationLayer is deprecated. Use AnimComponent#findLayer instead.');
+        return /** @type {AnimComponentLayer} */ (this.findLayer(name));
+    }
+
+    // ---- deprecated block end ----
 }
 
 export { AnimComponent };

@@ -3,7 +3,6 @@ import { expect } from 'chai';
 import { Color } from '../../../src/core/math/color.js';
 import { Camera } from '../../../src/scene/camera.js';
 import { SHADER_FORWARD } from '../../../src/scene/constants.js';
-import { GraphNode } from '../../../src/scene/graph-node.js';
 import { RenderPassMeshletDraw } from '../../../src/scene/meshlet/render-pass-meshlet-draw.js';
 import { createApp } from '../../app.mjs';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
@@ -59,11 +58,18 @@ describe('RenderPassMeshletDraw', function () {
         expect(pass.depthStencilOps.clearStencil).to.equal(false);
     });
 
-    it('renders its mesh instances through renderForwardLayer with the borrowed light layer', function () {
+    it('renders its mesh instances through renderForwardLayer with the light list of the borrowed layer', function () {
         const pass = new RenderPassMeshletDraw(app.graphicsDevice, renderer, 'MeshletDraw');
         const calls = [];
         renderer.renderForwardLayer = (...args) => calls.push(args);
-        const lightLayer = { splitLights: [[], [], []] };
+        const lightList = {};
+        const clustered = [];
+        const lightLayer = {
+            getLightList: (c) => {
+                clustered.push(c);
+                return lightList;
+            }
+        };
         pass.setup(cameraComponent, null, lightLayer, null);
         expect(pass.layerRenderSteps[0].layer).to.equal(lightLayer);
 
@@ -81,7 +87,8 @@ describe('RenderPassMeshletDraw', function () {
         expect(transparent).to.equal(false);
         expect(shaderPass).to.equal(SHADER_FORWARD);
         expect(options.meshInstances).to.equal(pass.meshInstances);
-        expect(options.lightLayer).to.equal(lightLayer);
+        expect(options.lightList).to.equal(lightList);
+        expect(clustered).to.deep.equal([app.scene.clusteredLightingEnabled]);
         expect(options.lightClusters, 'unassigned clusters fall through to the allocator default').to.equal(undefined);
     });
 
@@ -121,52 +128,5 @@ describe('RenderPassMeshletDraw', function () {
 
         pass.after();
         expect(pass.beforePasses).to.deep.equal([]);
-    });
-});
-
-describe('ForwardRenderer.renderForwardLayer with a borrowed light layer', function () {
-
-    let app;
-
-    beforeEach(function () {
-        jsdomSetup();
-        app = createApp();
-    });
-
-    afterEach(function () {
-        app.destroy();
-        app = null;
-        jsdomTeardown();
-    });
-
-    it('takes the split lights and the layer for shader variants from options.lightLayer', function () {
-        const renderer = app.renderer;
-        const calls = [];
-        renderer.renderForward = (...args) => calls.push(args);
-        const camera = new Camera(app.graphicsDevice);
-        camera.node = new GraphNode();
-        // view uniforms the scene would normally have set before any layer renders
-        const scope = app.graphicsDevice.scope;
-        scope.resolve('cubeMapRotationMatrix').setValue(new Float32Array(9));
-        scope.resolve('skyboxIntensity').setValue(1);
-        scope.resolve('shadowAtlasParams').setValue(new Float32Array(2));
-        const splitLights = [[{}], [], []];
-        const lightLayer = { splitLights };
-        const meshInstances = [];
-
-        renderer.renderForwardLayer(camera, null, null, false, SHADER_FORWARD, { meshInstances, lightLayer });
-        expect(calls).to.have.lengthOf(1);
-        const [, , visible, lights, , , layer] = calls[0];
-        expect(visible).to.equal(meshInstances);
-        expect(lights).to.equal(splitLights);
-        expect(layer).to.equal(lightLayer);
-
-        const explicit = [[], [], []];
-        renderer.renderForwardLayer(camera, null, null, false, SHADER_FORWARD, { meshInstances, lightLayer, splitLights: explicit });
-        expect(calls[1][3], 'explicit split lights win').to.equal(explicit);
-
-        renderer.renderForwardLayer(camera, null, null, false, SHADER_FORWARD, { meshInstances });
-        expect(calls[2][3], 'no layer, no lights').to.deep.equal([[], [], []]);
-        expect(calls[2][6]).to.equal(null);
     });
 });

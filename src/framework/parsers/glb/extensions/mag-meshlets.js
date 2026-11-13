@@ -17,6 +17,7 @@ const streamExtensionName = 'MAG_meshlets_stream';
 
 /**
  * @import { GraphicsDevice } from '../../../../platform/graphics/graphics-device.js'
+ * @import { GlbResourceExtension } from '../../glb-resource-extension.js'
  */
 
 /**
@@ -354,4 +355,23 @@ const restoreMeshletRecords = async (url, resource, credentials = null) => {
     resource.restoreRecords(records);
 };
 
-export { createMeshlets, hasMeshletExtension, restoreMeshletRecords };
+/**
+ * glTF resource extension for streamed meshlet bakes. Registered on the container handler by the
+ * meshlet component system, which keeps the meshlet resource code tree-shakeable when unused.
+ * The created resource list holds at most one {@link MeshletResource} per document.
+ *
+ * @type {GlbResourceExtension}
+ * @ignore
+ */
+const magMeshlets = {
+    name: gpuExtensionName,
+    resourceName: 'meshlets',
+    handlesPrimitive: hasMeshletExtension,
+    createResources: (device, gltf, bufferViews) => {
+        const resource = createMeshlets(device, gltf, bufferViews);
+        return resource ? [resource] : [];
+    },
+    placesInstances: true
+};
+
+export { createMeshlets, hasMeshletExtension, magMeshlets, restoreMeshletRecords };

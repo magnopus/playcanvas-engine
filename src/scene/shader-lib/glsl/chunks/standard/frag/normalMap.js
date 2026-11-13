@@ -28,17 +28,17 @@ void getNormal() {
     vec2 stereoUV = getStereoVideoUV({STD_NORMAL_TEXTURE_UV}, normalStereoVideoType, normalIsStereoFlipped);
 
     // Identical to the unpatched version except for the texture coordinates
-    vec3 normalMap = {STD_NORMAL_TEXTURE_DECODE}(texture2DBias({STD_NORMAL_TEXTURE_NAME}, stereoUV, textureBias));
+    vec3 normalMap = {STD_NORMAL_TEXTURE_DECODE}(texture2DBias({STD_NORMAL_TEXTURE_NAME}, stereoUV, {STD_TEXTURE_BIAS}));
     #else
     // end magnopus patched
-    vec3 normalMap = {STD_NORMAL_TEXTURE_DECODE}(texture2DBias({STD_NORMAL_TEXTURE_NAME}, {STD_NORMAL_TEXTURE_UV}, textureBias));
+    vec3 normalMap = {STD_NORMAL_TEXTURE_DECODE}(texture2DBias({STD_NORMAL_TEXTURE_NAME}, {STD_NORMAL_TEXTURE_UV}, {STD_TEXTURE_BIAS}));
     // magnopus patched
     #endif
     // end magnopus patched
     normalMap = mix(vec3(0.0, 0.0, 1.0), normalMap, material_bumpiness);
 
     #ifdef STD_NORMALDETAIL_TEXTURE
-        vec3 normalDetailMap = {STD_NORMALDETAIL_TEXTURE_DECODE}(texture2DBias({STD_NORMALDETAIL_TEXTURE_NAME}, {STD_NORMALDETAIL_TEXTURE_UV}, textureBias));
+        vec3 normalDetailMap = {STD_NORMALDETAIL_TEXTURE_DECODE}(texture2DBias({STD_NORMALDETAIL_TEXTURE_NAME}, {STD_NORMALDETAIL_TEXTURE_UV}, {STD_TEXTURE_BIAS}));
         normalDetailMap = mix(vec3(0.0, 0.0, 1.0), normalDetailMap, material_normalDetailMapBumpiness);
         normalMap = blendNormals(normalMap, normalDetailMap);
     #endif

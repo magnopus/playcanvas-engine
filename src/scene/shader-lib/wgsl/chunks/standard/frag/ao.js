@@ -24,16 +24,16 @@ fn getAO() {
             var stereoUV: vec2f = getStereoVideoUV({STD_AO_TEXTURE_UV}, uniform.aoStereoVideoType, uniform.aoIsStereoFlipped);
 
             // Identical to the unpatched version except for the texture coordinates
-            var aoBase: f32 = textureSampleBias({STD_AO_TEXTURE_NAME}, {STD_AO_TEXTURE_NAME}Sampler, stereoUV, uniform.textureBias).{STD_AO_TEXTURE_CHANNEL};
+            var aoBase: f32 = textureSampleBias({STD_AO_TEXTURE_NAME}, {STD_AO_TEXTURE_NAME}Sampler, stereoUV, {STD_TEXTURE_BIAS}).{STD_AO_TEXTURE_CHANNEL};
         #else
         // end magnopus patched
-        var aoBase: f32 = textureSampleBias({STD_AO_TEXTURE_NAME}, {STD_AO_TEXTURE_NAME}Sampler, {STD_AO_TEXTURE_UV}, uniform.textureBias).{STD_AO_TEXTURE_CHANNEL};
+        var aoBase: f32 = textureSampleBias({STD_AO_TEXTURE_NAME}, {STD_AO_TEXTURE_NAME}Sampler, {STD_AO_TEXTURE_UV}, {STD_TEXTURE_BIAS}).{STD_AO_TEXTURE_CHANNEL};
         // magnopus patched
         #endif
         // end magnopus patched
 
         #ifdef STD_AODETAIL_TEXTURE
-            var aoDetail: f32 = textureSampleBias({STD_AODETAIL_TEXTURE_NAME}, {STD_AODETAIL_TEXTURE_NAME}Sampler, {STD_AODETAIL_TEXTURE_UV}, uniform.textureBias).{STD_AODETAIL_TEXTURE_CHANNEL};
+            var aoDetail: f32 = textureSampleBias({STD_AODETAIL_TEXTURE_NAME}, {STD_AODETAIL_TEXTURE_NAME}Sampler, {STD_AODETAIL_TEXTURE_UV}, {STD_TEXTURE_BIAS}).{STD_AODETAIL_TEXTURE_CHANNEL};
             aoBase = detailMode_{STD_AODETAIL_DETAILMODE}(vec3f(aoBase), vec3f(aoDetail)).r;
         #endif
 

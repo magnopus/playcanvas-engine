@@ -46,17 +46,20 @@ import { ABSOLUTE_URL } from '../asset/constants.js';
 
 import { createInstancing } from './glb/extensions/ext-mesh-gpu-instancing.js';
 import { createDracoMesh } from './glb/extensions/khr-draco-mesh-compression.js';
-import { createGSplats, hasGSplatExtension } from './glb/extensions/khr-gaussian-splatting.js';
-import { createMeshlets, hasMeshletExtension } from './glb/extensions/mag-meshlets.js';
 import { createLights } from './glb/extensions/khr-lights-punctual.js';
 import { createVariants, registerMeshVariants } from './glb/extensions/khr-materials-variants.js';
+import {
+    decodeMeshoptBufferView, getMeshoptCompression, skipMeshoptFallbackBuffer
+} from './glb/extensions/meshopt-compression.js';
 import { getTextureSource } from './glb/extensions/texture-source.js';
 import { glbMaterialExtensions } from './glb/extensions/index.js';
 import { extractTextureTransform } from './glb/extensions/khr-texture-transform.js';
 import { GltfAccessor, getPrimitiveType, isTriangleMode, gltfToEngineSemanticMap } from './glb/gltf-accessor.js';
 
 /**
+ * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { Material } from '../../scene/materials/material.js'
+ * @import { GlbResourceExtension } from './glb-resource-extension.js'
  */
 
 // resources loaded from GLB file that the parser returns
@@ -418,19 +421,14 @@ const createSkin = (device, gltfSkin, accessors, bufferViews, nodes, glbSkins) =
     return skin;
 };
 
-const createMesh = (device, gltfMesh, accessors, bufferViews, vertexBufferDict, meshVariants, meshDefaultMaterials, flatShadedMeshes, assetOptions, promises) => {
+const createMesh = (device, gltfMesh, accessors, bufferViews, vertexBufferDict, meshVariants, meshDefaultMaterials, flatShadedMeshes, assetOptions, resourceExtensions, promises) => {
     const meshes = [];
+    const extensions = /** @type {GlbResourceExtension[]} */ (resourceExtensions);
 
     gltfMesh.primitives.forEach((primitive) => {
 
-        if (hasGSplatExtension(primitive)) {
-            // gaussian splat primitives are handled by createGSplats instead
-            return;
-        }
-
-        if (hasMeshletExtension(primitive)) {
-            // streamed meshlet primitives are handled by createMeshlets instead - their inline
-            // geometry is only a 3-vertex AABB placeholder, never meant to be drawn
+        if (extensions.some(extension => extension.handlesPrimitive(primitive))) {
+            // the registered extension creates its own resource instead of a mesh
             return;
         }
 
@@ -1016,7 +1014,7 @@ const createSkins = (device, gltf, nodes, bufferViews) => {
     });
 };
 
-const createMeshes = (device, gltf, bufferViews, options) => {
+const createMeshes = (device, gltf, bufferViews, options, resourceExtensions) => {
     // dictionary of vertex buffers to avoid duplicates
     const vertexBufferDict = {};
     const meshVariants = {};
@@ -1033,11 +1031,12 @@ const createMeshes = (device, gltf, bufferViews, options) => {
         if (preprocess) {
             preprocess(gltfMesh);
         }
-        const mesh = process(device, gltfMesh, gltf.accessors, bufferViews, vertexBufferDict, meshVariants, meshDefaultMaterials, flatShadedMeshes, options, promises);
+        const mesh = process(device, gltfMesh, gltf.accessors, bufferViews, vertexBufferDict, meshVariants, meshDefaultMaterials, flatShadedMeshes, options, resourceExtensions, promises);
         if (postprocess) {
             postprocess(gltfMesh, mesh, index, gltf, bufferViews);
         }
         return mesh;
+
     }) : [];
 
     return {
@@ -1186,21 +1185,23 @@ const createNodes = (gltf, options, nodeInstancingMap) => {
 };
 
 /**
- * Whether the document is a pure streamed-meshlet bake: every mesh primitive is a meshlet
- * placeholder, and nothing (skins, animations, lights, cameras) needs the node hierarchy. Such a
- * document renders only through its meshlets, which carry their own placements, so building a
+ * Whether every mesh primitive is handled by a resource extension that carries its own instance
+ * placements (such as a streamed-meshlet bake), and nothing (skins, animations, lights, cameras)
+ * needs the node hierarchy. Such a document renders only through those resources, so building a
  * GraphNode per glTF node would only hold heap (large scattered bakes carry millions of
  * placement nodes).
  *
  * @param {object} gltf - The glTF document.
+ * @param {GlbResourceExtension[]} resourceExtensions - The registered resource extensions.
  * @returns {boolean} True when the node hierarchy can be skipped.
  */
-const isMeshletOnlyDocument = (gltf) => {
-    if (!gltf.meshes?.length || gltf.skins?.length || gltf.animations?.length || gltf.cameras?.length ||
+const isSelfPlacedDocument = (gltf, resourceExtensions) => {
+    const placing = resourceExtensions.filter(extension => extension.placesInstances);
+    if (!placing.length || !gltf.meshes?.length || gltf.skins?.length || gltf.animations?.length || gltf.cameras?.length ||
         gltf.extensions?.KHR_lights_punctual?.lights?.length) {
         return false;
     }
-    return gltf.meshes.every(mesh => mesh.primitives?.every(hasMeshletExtension));
+    return gltf.meshes.every(mesh => mesh.primitives?.every(primitive => placing.some(extension => extension.handlesPrimitive(primitive))));
 };
 
 const createScenes = (gltf, nodes) => {
@@ -1280,7 +1281,7 @@ const linkSkins = (gltf, renders, skins) => {
 };
 
 // create engine resources from the downloaded GLB data
-const createResources = async (device, gltf, bufferViews, textures, options, app) => {
+const createResources = async (device, gltf, bufferViews, textures, options, app, resourceExtensions) => {
     const preprocess = options?.global?.preprocess;
     const postprocess = options?.global?.postprocess;
 
@@ -1299,19 +1300,18 @@ const createResources = async (device, gltf, bufferViews, textures, options, app
     }
 
     const nodeInstancingMap = new Map();
-    // a pure meshlet bake keeps an empty root per scene instead of its (placement-only) nodes
-    const meshletOnly = isMeshletOnlyDocument(gltf);
-    const nodes = meshletOnly ? [] : createNodes(gltf, options, nodeInstancingMap);
-    const scenes = meshletOnly ? (gltf.scenes ?? []).map(scene => new GraphNode(scene.name)) : createScenes(gltf, nodes);
+    // a self-placed bake (e.g. meshlets) keeps an empty root per scene instead of its
+    // (placement-only) nodes
+    const selfPlaced = isSelfPlacedDocument(gltf, resourceExtensions);
+    const nodes = selfPlaced ? [] : createNodes(gltf, options, nodeInstancingMap);
+    const scenes = selfPlaced ? (gltf.scenes ?? []).map(scene => new GraphNode(scene.name)) : createScenes(gltf, nodes);
     const lights = createLights(gltf, nodes, options, app);
     const cameras = createCameras(gltf, nodes, options, app);
     const variants = createVariants(gltf);
 
     // buffer data must have finished loading in order to create meshes and animations
     const bufferViewData = await Promise.all(bufferViews);
-    const { meshes, meshVariants, meshDefaultMaterials, flatShadedMeshes, promises } = createMeshes(device, gltf, bufferViewData, options);
-    const gsplats = options.skipMeshes ? [] : createGSplats(device, gltf, bufferViewData);
-    const meshlets = options.skipMeshes ? null : createMeshlets(device, gltf, bufferViewData);
+    const { meshes, meshVariants, meshDefaultMaterials, flatShadedMeshes, promises } = createMeshes(device, gltf, bufferViewData, options, resourceExtensions);
     const animations = createAnimations(gltf, nodes, bufferViewData, options);
     createInstancing(device, gltf, nodeInstancingMap, bufferViewData);
 
@@ -1347,12 +1347,16 @@ const createResources = async (device, gltf, bufferViews, textures, options, app
     result.meshVariants = meshVariants;
     result.meshDefaultMaterials = meshDefaultMaterials;
     result.renders = renders;
-    result.gsplats = gsplats;
-    result.meshlets = meshlets;
     result.skins = skins;
     result.lights = lights;
     result.cameras = cameras;
     result.nodeInstancingMap = nodeInstancingMap;
+
+    /** @type {GlbResourceExtension[]} */ (resourceExtensions).forEach((extension) => {
+        Debug.assert(!(extension.resourceName in result) || result[extension.resourceName] === undefined,
+            `GLB resource extension '${extension.name}' would overwrite '${extension.resourceName}'`);
+        result[extension.resourceName] = options.skipMeshes ? [] : extension.createResources(device, gltf, bufferViewData);
+    });
 
     if (postprocess) {
         postprocess(gltf, result);
@@ -1537,8 +1541,7 @@ const createImages = (gltf, bufferViews, loadUrlBase, originalUrlBase, registry,
                 // magnopus patched
                 const resolvedLoadUrl = ABSOLUTE_URL.test(gltfImage.uri) ? gltfImage.uri : path.join(loadUrlBase, gltfImage.uri);
                 const resolvedOriginalUrl = ABSOLUTE_URL.test(gltfImage.uri) ? gltfImage.uri : path.join(originalUrlBase, gltfImage.uri);
-                // Magnopus patched - add crossOrigin opts check
-                return loadTexture(gltfImage, resolvedLoadUrl, resolvedOriginalUrl, null, null, { crossOrigin: options?.crossOrigin ?? 'anonymous' }, srgb);
+                return loadTexture(gltfImage, resolvedLoadUrl, resolvedOriginalUrl, null, null, { crossOrigin: 'anonymous' }, srgb);
             } else if (gltfImage.hasOwnProperty('bufferView') && gltfImage.hasOwnProperty('mimeType')) {
                 // bufferview
                 return loadTexture(gltfImage, null, null, bufferViews[gltfImage.bufferView], gltfImage.mimeType, null, srgb);
@@ -1657,6 +1660,9 @@ const loadBuffers = (gltf, binaryChunk, loadUrlBase, originalUrlBase, registry, 
         promise = promise.then((arrayBuffer) => {
             if (arrayBuffer) {
                 return arrayBuffer;
+            } else if (skipMeshoptFallbackBuffer(gltfBuffer, i)) {
+                // the buffer views using it are decoded from compressed data instead
+                return null;
             } else if (gltfBuffer.hasOwnProperty('uri')) {
                 if (isDataURI(gltfBuffer.uri)) {
                     // convert base64 to raw binary data held in a string
@@ -1688,9 +1694,7 @@ const loadBuffers = (gltf, binaryChunk, loadUrlBase, originalUrlBase, registry, 
                         {
                             cache: true,
                             responseType: 'arraybuffer',
-                            retry: false,
-                            // Magnopus patched - add withCredentials option
-                            withCredentials: options?.crossOrigin === 'use-credentials'
+                            retry: false
                         },
                         (err, result) => {
                             if (err) {
@@ -1866,8 +1870,19 @@ const createBufferViews = (gltf, buffers, options) => {
                 return buffer;
             }
 
+            const decoded = decodeMeshoptBufferView(gltfBufferView, buffers);
+            if (decoded) {
+                return decoded;
+            }
+
             // convert buffer to typed array
             return buffers[gltfBufferView.buffer].then((buffer) => {
+                if (!buffer) {
+                    const reason = getMeshoptCompression(gltfBufferView) ?
+                        'is meshopt compressed, call meshoptInitialize to load it' :
+                        `references buffer ${gltfBufferView.buffer}, which has no data`;
+                    throw new Error(`glTF buffer view ${i} ${reason}`);
+                }
                 return new Uint8Array(buffer.buffer,
                     buffer.byteOffset + (gltfBufferView.byteOffset || 0),
                     gltfBufferView.byteLength);
@@ -1897,7 +1912,8 @@ const createBufferViews = (gltf, buffers, options) => {
 
 class GlbParser {
     // parse the gltf or glb data asynchronously, loading external resources
-    static parse(filename, loadUrlBase, originalUrlBase, data, device, registry, options, callback) {
+    static parse(filename, loadUrlBase, originalUrlBase, data, device, registry, options, resourceExtensions, callback) {
+
         // parse the data
         parseChunk(filename, data, (err, chunks) => {
             if (err) {
@@ -1917,7 +1933,7 @@ class GlbParser {
                 const images = createImages(gltf, bufferViews, loadUrlBase, originalUrlBase, registry, options);
                 const textures = createTextures(gltf, images, options);
 
-                createResources(device, gltf, bufferViews, textures, options, registry.loader._app)
+                createResources(device, gltf, bufferViews, textures, options, registry.loader._app, resourceExtensions)
                 .then(result => callback(null, result))
                 .catch(err => callback(err));
             });

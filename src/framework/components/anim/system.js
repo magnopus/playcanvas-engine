@@ -1,4 +1,3 @@
-import { createDelayedExecutionRunner } from '../../../core/delayed-execution-runner.js';
 import { AnimTrack } from '../../anim/evaluator/anim-track.js';
 import { ComponentSystem } from '../system.js';
 import { AnimComponent } from './component.js';
@@ -6,10 +5,28 @@ import { AnimComponent } from './component.js';
 /**
  * @import { AppBase } from '../../app-base.js'
  * @import { Component } from '../component.js'
+ * @import { Entity } from '../../entity.js'
  */
 
 /**
- * The AnimComponentSystem manages creating and deleting AnimComponents.
+ * Options of the `anim` component accepted by {@link AnimComponentSystem} that differ from the
+ * properties of {@link AnimComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} AnimComponentOptionsOverrides
+ * @property {{ name: string, weight?: number, mask?: object, blendType?: string }[]} [layers] -
+ * Layers to add with {@link AnimComponent#addLayer}, each with a `name` and optional `weight`,
+ * `mask` and `blendType`.
+ * @property {{ [layer: string]: { mask: object } }} [masks] - Bone masks to assign to the added
+ * layers, keyed by layer name.
+ * @ignore
+ */
+
+/**
+ * Manages the {@link AnimComponent}s of an application and advances their state graphs each
+ * frame. Reach it through `app.systems.anim`; components are created with
+ * {@link Entity#addComponent}, never by calling the system directly.
  *
  * @category Animation
  */
@@ -27,7 +44,6 @@ class AnimComponentSystem extends ComponentSystem {
 
         this.ComponentType = AnimComponent;
 
-        this.delayedExecutors = new Map();
         // 'layers' is read-only (managed via addLayer) and 'masks' is not a component property; both
         // are consumed directly in initializeComponentData
         this.extraDataProperties = ['layers', 'masks'];
@@ -90,99 +106,18 @@ class AnimComponentSystem extends ComponentSystem {
         }
     }
 
-    // magnopus patched: create Delayed Executor and defer updating animation frames based on lod
-    createExecutor(queueSize) {
-        const executor = createDelayedExecutionRunner(
-            (animComponent, dt) => {
-                this.updateMeshInstanceCache(animComponent);
-                // The entity has been delete, remove it from the executor
-                if (!animComponent.entity.parent) {
-                    this.delayedExecutors.forEach((e) => {
-                        e.remove(animComponent);
-                    });
-                    return;
-                }
-                // magnopus patched
-                if (
-                    animComponent._mi &&
-                  animComponent._mi.visible &&
-                  animComponent.entity.enabled &&
-                  animComponent.playing
-                ) {
-                    animComponent.update(dt);
-                }
-                if (animComponent.animationFrameSkip !== queueSize - 1) {
-                    executor.remove(animComponent);
-                    const newExecutor = this.delayedExecutors.get(animComponent.animationFrameSkip + 1);
-                    if (newExecutor) {
-                        newExecutor.add(animComponent);
-                    }
-                }
-            },
-            {
-                queueSize
-            }
-        );
-        return executor;
-    }
-
-    updateMeshInstanceCache(animComponent, id) {
-        const components = this.store;
-        if (!animComponent._mi) {
-            const renderComp = (animComponent.rootBone ?? animComponent.entity).findComponent('render');
-            if (renderComp) {
-                animComponent._mi = renderComp.meshInstances[0];
-            } else {
-                delete components[id];
-            }
-        }
-    }
-
     onAnimationUpdate(dt) {
         const components = this.store;
-        if (this.delayedExecutors === undefined) {
-            this.delayedExecutors = new Map();
-        }
+
         for (const id in components) {
             if (components.hasOwnProperty(id)) {
-                const entity = components[id].entity;
-                const animComponent = entity.anim;
-                if (!animComponent) {
-                    delete components[id];
-                    return;
-                }
-                if (!animComponent.setupDelayed) {
-                    let _animComponent$animat; // Magnopus patched
-                    const divisor =
-                  Math.round(
-                      (_animComponent$animat = animComponent.animationFrameSkip) != null ? _animComponent$animat : -1
-                  ) + 1;
-                    if (divisor > 1) {
-                        let executor = this.delayedExecutors.get(divisor);
-                        if (!executor) {
-                            executor = this.createExecutor(divisor);
-                            this.delayedExecutors.set(divisor, executor);
-                        }
-                        executor.add(animComponent);
-                    }
-                    animComponent.update(dt);
-                    animComponent.setupDelayed = true;
-                }
-                // magnopus patched
-                if (!animComponent.animationFrameSkip) {
-                    this.updateMeshInstanceCache(animComponent, id);
-                    if (animComponent._mi &&
-                      animComponent._mi.visible &&
-                      // componentData.enabled &&
-                      animComponent.entity.enabled &&
-                      animComponent.playing
-                    ) {
-                        animComponent.update(dt);
-                    }
+                const component = components[id].entity.anim;
+
+                if (component.enabled && component.entity.enabled && component.playing) {
+                    component.update(dt);
                 }
             }
         }
-        this.delayedExecutors.forEach((e, divisor) => e.tick(dt * divisor));
     }
 
     /**

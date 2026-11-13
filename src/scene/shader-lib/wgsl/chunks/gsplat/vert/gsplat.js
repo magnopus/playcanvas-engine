@@ -5,20 +5,20 @@ export default /* wgsl */`
 #include "gsplatCommonVS"
 
 varying gaussianUV: half2;
-varying gaussianColor: half4;
+varying @interpolate(flat, either) gaussianColor: half4;
 
 #ifndef DITHER_NONE
-    varying id: f32;
+    varying @interpolate(flat, either) id: f32;
 #endif
 
 const discardVec: vec4f = vec4f(0.0, 0.0, 2.0, 1.0);
 
 #if defined(PREPASS_PASS) || defined(SCENE_TEXTURE_DEPTH)
-    varying vLinearDepth: f32;
+    varying @interpolate(flat, either) vLinearDepth: f32;
 #endif
 
 #if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
-    varying @interpolate(flat) vPickId: u32;
+    varying @interpolate(flat, either) vPickId: u32;
 #endif
 
 #ifdef GSPLAT_OVERDRAW
@@ -72,13 +72,15 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
     // evaluate spherical harmonics
     #if SH_BANDS > 0
-        // calculate the model-space view direction
+        // calculate the model-space view direction. Orthographic view rays are all parallel to the
+        // camera forward, rather than running from the camera position to the splat.
         // Firefox on Windows (D3D12) returns a transposed matrix when a struct member is indexed
         // through a pointer, so load the whole matrix into a local first. Remove the local once the
         // fix has shipped: https://bugzilla.mozilla.org/show_bug.cgi?id=2059727
         let modelView = center.modelView;
         let modelView3x3 = mat3x3f(modelView[0].xyz, modelView[1].xyz, modelView[2].xyz);
-        let dir = normalize(center.view * modelView3x3);
+        let viewDir = select(center.view, vec3f(0.0, 0.0, -1.0), uniform.camera_params.w == 1.0);
+        let dir = normalize(viewDir * modelView3x3);
 
         // read sh coefficients
         var sh: array<half3, SH_COEFFS>;
@@ -107,6 +109,12 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
     clipCorner(&corner, clr.w);
 
+    // over-unity opacity (see gsplatHelpersVS): above 1, the alpha passed to the fragment shader is
+    // 1 + the core radius instead, drawn with peak alpha 1
+    if (clr.w > half(1.0)) {
+        clr.w = half(1.0 + gsplatPlateauCore(f32(clr.w)));
+    }
+
     // write output
     #if GSPLAT_2DGS
         // 2DGS: Project world corner directly
@@ -127,7 +135,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         // Overdraw visualization mode: color by elevation
         let t: f32 = clamp(center.modelCenterOriginal.y / 20.0, 0.0, 1.0);
         let rampColor: vec3f = textureSampleLevel(colorRamp, colorRampSampler, vec2f(t, 0.5), 0.0).rgb;
-        clr.a = clr.a * half(1.0 / 32.0) * half(uniform.colorRampIntensity);
+        clr.a = min(clr.a, half(1.0)) * half(1.0 / 32.0) * half(uniform.colorRampIntensity);
         output.gaussianColor = half4(half3(rampColor), clr.a);
     #else
         output.gaussianColor = half4(half3(prepareOutputFromGamma(max(vec3f(clr.xyz), vec3f(0.0)), -center.view.z)), clr.w);

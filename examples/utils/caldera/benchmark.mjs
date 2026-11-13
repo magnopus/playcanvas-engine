@@ -4,7 +4,7 @@
  *
  * The camera flies a fixed low-altitude loop through the main regions twice: once looking along
  * the direction of travel, once looking at the mountain. See the benchmark section of
- * examples/src/examples/graphics/meshlet-caldera.example.mjs for the route.
+ * examples/src/examples/graphics/meshlet-caldera/example.mjs for the route.
  *
  *   npm run bench:caldera -- [options]
  *

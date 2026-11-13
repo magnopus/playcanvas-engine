@@ -122,7 +122,9 @@ describe('ShadowRendererDirectional', function () {
         expect(refreshes(light, cameraA)).to.deep.equal([true, true, true, true]);
 
         const shadowRenderer = app.renderer.shadowRenderer;
-        expect(shadowRenderer.isCascadeRendering(light, cameraA, 1)).to.equal(true);
+        expect(shadowRenderer.isCascadeRendering(light, cameraA, 1, 0b1111)).to.equal(true);
+        // a cascade outside of the pass's cascade mask never renders
+        expect(shadowRenderer.isCascadeRendering(light, cameraA, 1, 0b0001)).to.equal(false);
     });
 
     it('clears per cascade when scheduled, so a cascade skipped this frame keeps its map', function () {

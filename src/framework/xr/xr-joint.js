@@ -1,3 +1,4 @@
+import { Debug } from '../../core/debug.js';
 import { platform } from '../../core/platform.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { Quat } from '../../core/math/quat.js';
@@ -128,8 +129,9 @@ class XrJoint {
             this._localTransform.setTRS(this._localPosition, this._localRotation, Vec3.ONE);
         }
 
+        // the camera is null once the session has ended
         const manager = this._hand._manager;
-        const parent = manager.camera.parent;
+        const parent = manager.camera?.parent;
 
         if (parent) {
             this._worldTransform.mul2(parent.getWorldTransform(), this._localTransform);
@@ -202,7 +204,7 @@ class XrJoint {
      *
      * @type {boolean}
      */
-    get wrist() {
+    get isWrist() {
         return this._wrist;
     }
 
@@ -211,7 +213,7 @@ class XrJoint {
      *
      * @type {boolean}
      */
-    get tip() {
+    get isTip() {
         return this._tip;
     }
 
@@ -223,6 +225,30 @@ class XrJoint {
     get radius() {
         return this._radius || 0.005;
     }
+
+    // ---- deprecated block start ----
+
+    /**
+     * @type {boolean}
+     * @deprecated Use {@link XrJoint#isWrist} instead.
+     * @ignore
+     */
+    get wrist() {
+        Debug.deprecated('XrJoint#wrist is deprecated. Use XrJoint#isWrist instead.');
+        return this.isWrist;
+    }
+
+    /**
+     * @type {boolean}
+     * @deprecated Use {@link XrJoint#isTip} instead.
+     * @ignore
+     */
+    get tip() {
+        Debug.deprecated('XrJoint#tip is deprecated. Use XrJoint#isTip instead.');
+        return this.isTip;
+    }
+
+    // ---- deprecated block end ----
 }
 
 export { XrJoint };

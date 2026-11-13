@@ -1,9 +1,6 @@
 import { Debug } from '../../core/debug.js';
 import { BoundingBox } from '../../core/shape/bounding-box.js';
-import { GSPLATDATA_COMPACT } from '../constants.js';
 import { Mesh } from '../mesh.js';
-import { ShaderMaterial } from '../materials/shader-material.js';
-import { WorkBufferRenderInfo } from '../gsplat-unified/gsplat-work-buffer.js';
 import { GSplatStreams } from './gsplat-streams.js';
 import { GSplatResourceCleanup } from './gsplat-resource-cleanup.js';
 
@@ -13,17 +10,20 @@ import { GSplatResourceCleanup } from './gsplat-resource-cleanup.js';
  * @import { GSplatCompressedData } from './gsplat-compressed-data.js'
  * @import { GSplatSogData } from './gsplat-sog-data.js'
  * @import { GSplatFormat } from './gsplat-format.js'
+ * @import { ShaderMaterial } from '../materials/shader-material.js'
  * @import { Texture } from '../../platform/graphics/texture.js'
  * @import { Vec2 } from '../../core/math/vec2.js'
+ * @import { WorkBufferRenderInfo } from '../gsplat-unified/gsplat-work-buffer.js'
  */
 
 let id = 0;
-const tempMap = new Map();
 
 /**
- * Base class for a GSplat resource and defines common properties.
+ * Base class for Gaussian splat resources, with the properties all of them share. The resource of
+ * a loaded gsplat {@link Asset} is one of its subclasses, except for streamed level-of-detail data,
+ * which uses {@link GSplatOctreeResource}. {@link GSplatContainer} creates one procedurally.
  *
- * @ignore
+ * @category Graphics
  */
 class GSplatResourceBase {
     /**
@@ -52,10 +52,11 @@ class GSplatResourceBase {
     }
 
     /**
-     * True when a centers buffer has been allocated ({@link GSplatResourceBase#centers} is non-null).
+     * True when a centers buffer has been allocated (`centers` is non-null).
      * Reads internal storage only so checks do not trigger lazy allocation in {@link GSplatContainer}.
      *
      * @type {boolean}
+     * @ignore
      */
     get hasCenters() {
         return this._centers != null;
@@ -75,8 +76,11 @@ class GSplatResourceBase {
      */
     centersVersion = 0;
 
-    /** @type {BoundingBox} */
-    aabb;
+    /**
+     * @type {BoundingBox}
+     * @protected
+     */
+    _aabb;
 
     /**
      * @type {Mesh|null}
@@ -127,6 +131,9 @@ class GSplatResourceBase {
     parameters = new Map();
 
     /** @private */
+    _antiAlias = false;
+
+    /** @private */
     _refCount = 0;
 
     /** @private */
@@ -137,8 +144,9 @@ class GSplatResourceBase {
      * @param {object} gsplatData - Data source with getCenters(), calcAabb(), numSplats, etc.
      * @param {object} [options] - Construction options.
      * @param {boolean} [options.prepareCenters] - When omitted or true, calls gsplatData.getCenters()
-     * and stores the result. When false, {@link GSplatResourceBase#centers} stays null until set or
+     * and stores the result. When false, `centers` stays null until set or
      * materialized by a subclass (e.g. lazy allocation in GSplatContainer).
+     * @ignore
      */
     constructor(device, gsplatData, options = {}) {
         this.device = device;
@@ -151,8 +159,8 @@ class GSplatResourceBase {
             this._centers = null;
         }
 
-        this.aabb = new BoundingBox();
-        gsplatData.calcAabb(this.aabb);
+        this._aabb = new BoundingBox();
+        gsplatData.calcAabb(this._aabb);
     }
 
     /**
@@ -256,78 +264,14 @@ class GSplatResourceBase {
     }
 
     /**
-     * Get or create a QuadRender for rendering to work buffer.
+     * Application-defined data stored with the splat file, as in glTF's `extras`: the `extras`
+     * value of a SOG's meta.json. The engine attaches no meaning to it. Undefined when the file
+     * has none, and for formats that cannot carry it.
      *
-     * @param {boolean} colorOnly - Whether to render only color (not full MRT).
-     * @param {{ code: string, hash: number }|null} workBufferModifier - Optional custom modifier (object with code and pre-computed hash).
-     * @param {number} formatHash - Captured format hash for shader caching.
-     * @param {string} formatDeclarations - Captured format declarations for shader compilation.
-     * @param {GSplatFormat} workBufferFormat - The work buffer format descriptor.
-     * @returns {WorkBufferRenderInfo} The WorkBufferRenderInfo instance.
-     * @ignore
+     * @type {*}
      */
-    getWorkBufferRenderInfo(colorOnly, workBufferModifier, formatHash, formatDeclarations, workBufferFormat) {
-
-        // configure defines to fetch cached data
-        this.configureMaterialDefines(tempMap);
-        tempMap.set('GSPLAT_LOD', '');
-        if (colorOnly) {
-            tempMap.set('GSPLAT_COLOR_ONLY', '');
-
-            // source geometry from the work buffer instead of source textures
-            if (this.supportsWorkBufferGeometry) {
-                tempMap.set('GSPLAT_WORKBUFFER_GEOMETRY', '');
-                if (workBufferFormat.dataFormat === GSPLATDATA_COMPACT) {
-                    tempMap.set('GSPLAT_WORKBUFFER_COMPACT', '');
-                }
-            }
-        }
-
-        let definesKey = '';
-        for (const [k, v] of tempMap) {
-            if (definesKey) definesKey += ';';
-            definesKey += `${k}=${v}`;
-        }
-        const key = `${formatHash};${workBufferFormat.hash};${workBufferModifier?.hash ?? 0};${definesKey}`;
-
-        // get or create quad render
-        let info = this.workBufferRenderInfos.get(key);
-        if (!info) {
-
-            const material = new ShaderMaterial();
-            this.configureMaterial(material, workBufferModifier, formatDeclarations);
-
-            // Inject work buffer output declarations
-            const chunks = this.device.isWebGPU ? material.shaderChunks.wgsl : material.shaderChunks.glsl;
-            // For color-only mode, only output color stream; otherwise output all streams
-            const outputStreams = colorOnly ?
-                [workBufferFormat.getStream('dataColor')] :
-                [...workBufferFormat.streams, ...workBufferFormat.extraStreams];
-            let outputCode = workBufferFormat.getOutputDeclarations(outputStreams);
-
-            // In color-only mode, generate no-op stubs for extra streams so user modifiers compile
-            if (colorOnly && workBufferFormat.extraStreams.length > 0) {
-                outputCode += `\n${workBufferFormat.getOutputStubs(workBufferFormat.extraStreams)}`;
-            }
-
-            chunks.set('gsplatWorkBufferOutputVS', outputCode);
-
-            // Inject format-specific write encoding chunk
-            const writeCode = workBufferFormat.getWriteCode();
-            if (writeCode) {
-                chunks.set('gsplatWriteVS', writeCode);
-            }
-
-            // copy tempMap to material defines
-            tempMap.forEach((v, k) => material.setDefine(k, v));
-
-            // create new cache entry
-            info = new WorkBufferRenderInfo(this.device, key, material, colorOnly, workBufferFormat);
-            this.workBufferRenderInfos.set(key, info);
-        }
-
-        tempMap.clear();
-        return info;
+    get extras() {
+        return undefined;
     }
 
     static createMesh(device) {
@@ -364,8 +308,46 @@ class GSplatResourceBase {
         return 128; // number of splats per instance
     }
 
+    /**
+     * Gets the number of splats in the resource.
+     *
+     * @type {number}
+     */
     get numSplats() {
         return this.gsplatData.numSplats;
+    }
+
+    /**
+     * Gets the bounding box of the splats, in the local space of the resource. It is computed from
+     * the splat data; use {@link GSplatComponent#customAabb} to override the bounds of a component.
+     *
+     * @type {BoundingBox}
+     */
+    get aabb() {
+        return this._aabb;
+    }
+
+    /**
+     * Sets whether the splats were trained with anti-aliasing (a screen-space filter with opacity
+     * compensation, as in Mip-Splatting), which they need to be rendered with to look right. Loaded
+     * resources set this from the file, when it records the training mode: the
+     * `postshot.anti_aliasing=1` or `SplatRenderMode: mip` PLY header comment, the `model` field of a SOG file, or the
+     * anti-aliased flag of an SPZ file. Set it for files that do not record the training mode.
+     * Used when {@link GSplatParams#antiAlias} is undefined, its default. Defaults to false.
+     *
+     * @type {boolean}
+     */
+    set antiAlias(value) {
+        this._antiAlias = value;
+    }
+
+    /**
+     * Gets whether the splats were trained with anti-aliasing.
+     *
+     * @type {boolean}
+     */
+    get antiAlias() {
+        return this._antiAlias;
     }
 
     /**

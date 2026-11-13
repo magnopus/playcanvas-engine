@@ -2,25 +2,22 @@ import { expect } from 'chai';
 
 import { BUFFER_STATIC, INDEXFORMAT_UINT16, INDEXFORMAT_UINT32 } from '../../../src/platform/graphics/constants.js';
 import { IndexBuffer } from '../../../src/platform/graphics/index-buffer.js';
-import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { WebglBuffer } from '../../../src/platform/graphics/webgl/webgl-buffer.js';
 import { WebgpuBuffer } from '../../../src/platform/graphics/webgpu/webgpu-buffer.js';
-import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
+import { createGraphicsDevice } from '../../device.mjs';
 
 describe('IndexBuffer', function () {
 
-    /** @type {NullGraphicsDevice} */
+    /** @type {import('../../../src/platform/graphics/graphics-device.js').GraphicsDevice} */
     let device;
 
     beforeEach(function () {
-        jsdomSetup();
-        device = new NullGraphicsDevice(document.createElement('canvas'));
+        device = createGraphicsDevice({ width: 100, height: 100 });
     });
 
     afterEach(function () {
         device.destroy();
         device = null;
-        jsdomTeardown();
     });
 
     describe('CPU copy', function () {
@@ -178,12 +175,12 @@ describe('WebglBuffer.unlock', function () {
     it('allocates from byteSize without uploading when there is no CPU copy', function () {
         const { gl, calls } = makeGl();
         const buffer = new WebglBuffer();
-        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, null, 64);
+        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, null, undefined, undefined, 64);
         expect(calls).to.deep.equal([['bufferData', 64, gl.STATIC_DRAW]]);
         expect(buffer.initialized).to.equal(true);
 
         // a later unlock with still no CPU copy is a no-op
-        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, null, 64);
+        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, null, undefined, undefined, 64);
         expect(calls).to.have.lengthOf(1);
     });
 
@@ -191,8 +188,8 @@ describe('WebglBuffer.unlock', function () {
         const { gl, calls } = makeGl();
         const buffer = new WebglBuffer();
         const data = new Uint16Array([1, 2, 3]);
-        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, data, 6);
-        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, data, 6);
+        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, data);
+        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, data);
         expect(calls).to.deep.equal([['bufferData', data, gl.STATIC_DRAW], ['bufferSubData', data]]);
     });
 });
@@ -223,7 +220,9 @@ describe('WebgpuBuffer.unlock', function () {
                         created.push(desc.size);
                         return { size: desc.size, label: '' };
                     },
-                    queue: { writeBuffer: (buffer, offset, data) => writes.push(data.byteLength) }
+                    queue: { writeBuffer: (buffer, offset, data) => writes.push(data.byteLength) },
+                    pushErrorScope() {},
+                    popErrorScope: () => Promise.resolve(null)
                 }
             }
         };
@@ -232,19 +231,19 @@ describe('WebgpuBuffer.unlock', function () {
     it('allocates the rounded byteSize and skips the staging upload when there is no CPU copy', function () {
         const { device, created, writes } = makeDevice();
         const buffer = new WebgpuBuffer(GPUBufferUsage.INDEX);
-        buffer.unlock(device, null, 10);
+        buffer.unlock(device, null, undefined, undefined, 10);
         expect(created).to.deep.equal([12]);
         expect(writes).to.deep.equal([]);
         expect(buffer.usageFlags & GPUBufferUsage.COPY_DST).to.not.equal(0);
 
-        buffer.unlock(device, null, 10);
+        buffer.unlock(device, null, undefined, undefined, 10);
         expect(created, 'no reallocation').to.have.lengthOf(1);
     });
 
     it('sizes from the CPU copy and uploads it when one is given', function () {
         const { device, created, writes } = makeDevice();
         const buffer = new WebgpuBuffer(GPUBufferUsage.INDEX);
-        buffer.unlock(device, new Uint16Array([1, 2, 3]), 6);
+        buffer.unlock(device, new Uint16Array([1, 2, 3]));
         expect(created).to.deep.equal([8]);
         expect(writes).to.deep.equal([8]);
     });

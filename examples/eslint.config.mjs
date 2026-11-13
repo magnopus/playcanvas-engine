@@ -16,9 +16,12 @@ const booleanFlags = new Set([
     'HIDDEN_IN_DEV',
     'NO_DEVICE_SELECTOR',
     'NO_MINISTATS',
+    'NO_INSPECTOR',
+    'CREDITS_HIDDEN',
     'WEBGPU_DISABLED',
     'WEBGPU_BARE_DISABLED',
-    'WEBGL_DISABLED'
+    'WEBGL_DISABLED',
+    'WEBGL_BARE_DISABLED'
 ]);
 const engineTypes = new Set(['development', 'performance', 'debug']);
 const preferredDeviceTypes = new Set(['webgpu', 'webgl2']);
@@ -581,7 +584,7 @@ export default [
         }
     },
     {
-        files: ['src/examples/**/*.example.mjs'],
+        files: ['src/examples/**/example.mjs'],
         rules: {
             'examples/asset-loader-top-level-await': 'error',
             'examples/config-block-at-top': 'error',
