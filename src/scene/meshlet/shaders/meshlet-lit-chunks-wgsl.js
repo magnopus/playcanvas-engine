@@ -276,13 +276,10 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
                     ${texDebug('mix(mix(vec3f(0.2, 1.0, 0.2), vec3f(0.0, 0.3, 0.0), comb / max(fineTop + 1.0, 1.0)), vec3f(1.0, 0.0, 1.0), starved)')}
                     let fineColor = textureSampleLevel(meshletFine${n}, meshletFine${n}Sampler, uv, i32(slotLayer), fineLod);
                     let tailWeight = clamp(lod - (tailStart - 1.0), 0.0, 1.0);
-                    // MESHLET_MATERIAL_LITE: no second sample across the fine/tail band
-                    #ifndef MESHLET_MATERIAL_LITE
                     if (tailWeight > 0.0) {
                         let tailColor = textureSampleLevel(meshletTail${n}, meshletTail${n}Sampler, uv, tailLayer, tailFloor);
                         return mix(fineColor, tailColor, tailWeight);
                     }
-                    #endif
                     return fineColor;
                 }
                 let tailLod = clamp(comb - ${slotLevels}, tailFloor, ${tailMaxLod});
@@ -294,27 +291,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     const texDispatch = textures ? famNames.map((name, family) => /* wgsl */ `
             if (family == ${family}u) {
                 let srcSize = ${(familySizes[family] ?? 4).toFixed(1)} / exp2(sizeBias);
-                let isotropicLod = meshletTexLod(ddx, ddy, srcSize);
-                #ifndef MESHLET_ANISOTROPY
-                return meshletSample${name}(uv, isotropicLod, minLod, sizeBias, tailStart, slotLayer, tailLayer);
-                #else
-                let footprint = meshletTexFootprint(ddx, ddy);
-                let major = footprint.w * srcSize;
-                let minor = footprint.z * srcSize;
-                let filterWidth = max(max(minor, major / uniform.meshletTextureAnisotropy), exp2(minLod));
-                let sampleCount = u32(clamp(ceil(major / filterWidth), 1.0, uniform.meshletTextureAnisotropy));
-                if (sampleCount == 1u) {
-                    return meshletSample${name}(uv, isotropicLod, minLod, sizeBias, tailStart, slotLayer, tailLayer);
-                }
-                let wanted = log2(filterWidth);
-                var color = vec4f(0.0);
-                for (var sampleIndex = 0u; sampleIndex < sampleCount; sampleIndex++) {
-                    let offset = (f32(sampleIndex) + 0.5) / f32(sampleCount) - 0.5;
-                    let sampleUv = uv + footprint.xy * footprint.w * offset;
-                    color += meshletSample${name}(sampleUv, wanted, minLod, sizeBias, tailStart, slotLayer, tailLayer);
-                }
-                return color / f32(sampleCount);
-                #endif
+                return meshletSample${name}(uv, meshletTexLod(ddx, ddy, srcSize), minLod, sizeBias, tailStart, slotLayer, tailLayer);
             }`).join('') : '';
 
     const litEngineDeclarationPS = /* wgsl */ `
@@ -361,32 +338,6 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         #endif
 
         ${texFunctions}
-
-        // software anisotropy: several isotropic samples along the footprint's major axis
-        // (MESHLET_ANISOTROPY, set while textureAnisotropy is above 1)
-        #ifdef MESHLET_ANISOTROPY
-        uniform meshletTextureAnisotropy: f32;
-
-        fn meshletTexFootprint(ddx: vec2f, ddy: vec2f) -> vec4f {
-            let covariance = vec3f(ddx.x * ddx.x + ddy.x * ddy.x,
-                                   ddx.x * ddx.y + ddy.x * ddy.y,
-                                   ddx.y * ddx.y + ddy.y * ddy.y);
-            let trace = covariance.x + covariance.z;
-            let difference = covariance.x - covariance.z;
-            let discriminant = length(vec2f(difference, 2.0 * covariance.y));
-            let majorSquared = max(0.5 * (trace + discriminant), 0.0);
-            let determinant = ddx.x * ddy.y - ddx.y * ddy.x;
-            let minorSquared = determinant * determinant / max(majorSquared, 1e-20);
-            var axis = vec2f(1.0, 0.0);
-            if (covariance.z > covariance.x) { axis = vec2f(0.0, 1.0); }
-            let eigenvector = select(vec2f(majorSquared - covariance.z, covariance.y),
-                                     vec2f(covariance.y, majorSquared - covariance.x), covariance.z > covariance.x);
-            if (dot(eigenvector, eigenvector) > 1e-30) {
-                axis = normalize(eigenvector);
-            }
-            return vec4f(axis, sqrt(max(minorSquared, 0.0)), sqrt(majorSquared));
-        }
-        #endif
 
         fn meshletTexLod(ddx: vec2f, ddy: vec2f, size: f32) -> f32 {
             let dx = ddx * size;
@@ -465,15 +416,11 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             return dMeshletBaseTex;
         }
         fn meshletOrmTex() -> vec4f {
-            #ifdef MESHLET_MATERIAL_LITE
-            return vec4f(1.0);
-            #else
             if (!dMeshletOrmTexReady) {
                 dMeshletOrmTex = meshletSampleSlot(${MATERIAL_SLOT.ORM}u, vec4f(1.0));
                 dMeshletOrmTexReady = true;
             }
             return dMeshletOrmTex;
-            #endif
         }` : ''}
         ${lightmapped ? /* wgsl */ `
         ${meshletTexResidencyWGSL}

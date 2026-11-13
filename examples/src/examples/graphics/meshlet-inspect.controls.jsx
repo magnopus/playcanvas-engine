@@ -28,8 +28,7 @@ export function Controls({ observer }) {
                         type='number'
                         options={[
                             { v: 0, t: 'Material' },
-                            { v: 2, t: 'Meshlet' },
-                            { v: 1, t: 'LOD tier' }
+                            { v: 2, t: 'Meshlet' }
                         ]}
                     />
                 </LabelGroup>
@@ -45,12 +44,19 @@ export function Controls({ observer }) {
                         ]}
                     />
                 </LabelGroup>
+                <LabelGroup text='Meshlets'>
+                    <BooleanInput
+                        type='toggle'
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'data.meshlets' }}
+                    />
+                </LabelGroup>
                 <LabelGroup text='Bunnies'>
                     <SliderInput
                         binding={new BindingTwoWay()}
                         link={{ observer, path: 'data.gridSize' }}
                         min={1}
-                        max={24}
+                        max={100}
                         step={1}
                         precision={0}
                     />

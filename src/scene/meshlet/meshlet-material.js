@@ -37,12 +37,6 @@ const vertexWGSL = /* wgsl */ `
     ${meshletDecodeOct16WGSL}
     ${meshletPageLayoutWGSL}
 
-    // debug tint per LOD tier
-    fn lodTint(level : u32) -> vec3f {
-        let h = f32(level % 8u) / 8.0;
-        return clamp(abs(fract(vec3f(h) + vec3f(0.0, 0.33, 0.67)) * 6.0 - 3.0) - 1.0, vec3f(0.0), vec3f(1.0)) * 0.8 + 0.2;
-    }
-
     // debug colour per meshlet (integer hash)
     fn meshletColor(id : u32) -> vec3f {
         var h = id * 747796405u + 2891336453u;
@@ -85,9 +79,7 @@ const vertexWGSL = /* wgsl */ `
         let normalMatrix = mat3x3f(c0, cross(m2, m0), cross(m0, m1)) * select(1.0, -1.0, dot(m0, c0) < 0.0);
         output.vNormal = normalize(normalMatrix * meshletDecodeOct16(pagePool[pageLayout.normalBase + vertex]));
 
-        if (uniform.colorMode == ${MESHLET_COLOR_MODE.LOD_TIER}u) {
-            output.vColor = lodTint(meshletData[meshlet].lodLevel);
-        } else if (uniform.colorMode == ${MESHLET_COLOR_MODE.MESHLET}u) {
+        if (uniform.colorMode == ${MESHLET_COLOR_MODE.MESHLET}u) {
             output.vColor = meshletColor(meshlet);
         } else {
             output.vColor = materialTable[objectData[instance].material].baseColor.rgb;

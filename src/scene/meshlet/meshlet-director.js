@@ -64,7 +64,7 @@ const MIN_INDIRECT_DISPATCH_SLOTS = 1024;
 const _noViews = [];
 
 /**
- * Fills a view's phase-1 draw list in place: its bucket mesh instances, then its billboards.
+ * Fills a view's phase-1 draw list in place: its phase-1 bucket mesh instances.
  *
  * @param {MeshletView} view - The view.
  */
@@ -73,7 +73,6 @@ const fillPhase1Draws = (view) => {
     const out = view.drawPass1.meshInstances;
     out.length = 0;
     for (let i = 0; i < MESHLET_BUCKET_COUNT; i++) out.push(mis[i]);
-    if (view.impostorInstance) out.push(view.impostorInstance);
 };
 
 /**
@@ -250,15 +249,6 @@ class MeshletDirector {
     bucketRootMinScales = [1, 1, 1];
 
     /**
-     * Projected size in pixels of a whole impostor prototype (a tree) under which its instances
-     * draw as one billboard instead of meshlets. 0 turns impostors off. Needs {@link impostors}.
-     * Billboards still vanish under {@link rootMinPixels}.
-     *
-     * @type {number}
-     */
-    impostorPixels = 0;
-
-    /**
      * Measure the screen-space thresholds - {@link dagPixelThreshold}, {@link rootMinPixels} and
      * {@link shadowRootMinPixels} - in CSS pixels instead of render target pixels, for cameras
      * rendering to the canvas. On a high-density display a render target pixel is a fraction of
@@ -321,9 +311,6 @@ class MeshletDirector {
     /** @private */
     _transcode = null;
 
-    /** @type {import('./meshlet-impostors.js').MeshletImpostors|null} */
-    _impostors = null;
-
     /** @type {number} - the budget value the shortfall warning was last printed for. @private */
     _budgetWarnedAt = -1;
 
@@ -351,21 +338,6 @@ class MeshletDirector {
 
     get transcode() {
         return this._transcode;
-    }
-
-    /**
-     * The impostor set: baked views of whole prototypes, matched to the glTF meshes of the
-     * loaded assets by name. Set it before the assets load - it tags their instances.
-     *
-     * @type {import('./meshlet-impostors.js').MeshletImpostors|null}
-     */
-    set impostors(value) {
-        this._impostors = value;
-        this.world.impostors = value;
-    }
-
-    get impostors() {
-        return this._impostors;
     }
 
     /**
@@ -502,16 +474,6 @@ class MeshletDirector {
     get byteCache() {
         return this.fetchScheduler.byteCache;
     }
-
-    /**
-     * Split the cull chains into separate submissions around GPU-written indirect dispatch args
-     * (see {@link MeshletCuller#forceSubmitBoundaries}). Propagated to every view - camera and
-     * shadow - so enabling it does not leave the shadow cascades broken on the platforms it
-     * exists for.
-     *
-     * @type {boolean}
-     */
-    forceSubmitBoundaries = false;
 
     /**
      * Fraction of the world's initial index budget a shadow cascade starts with. The budget is
@@ -769,14 +731,11 @@ class MeshletDirector {
         this.world.poolBytes = poolBytes;
         this.world.texturePoolBytes = texturePoolBytes;
         this.world.maxFineTextureSize = maxFineTextureSize;
-        this.world.textureAnisotropy = prevWorld.textureAnisotropy;
-        this.world.liteMaterials = prevWorld.liteMaterials;
         this.world.maxInstallBytesPerFrame = prevWorld.maxInstallBytesPerFrame;
         this.world.initialIndices = initialIndices;
         this.world.indexBudgetFraction = indexBudgetFraction;
         this.world.initialRecords = initialRecords;
         this.world.transcode = this._transcode;
-        this.world.impostors = this._impostors;
         this.world.fetchScheduler = this.fetchScheduler;
         this.budget._lastDropped = 0;
         this.budget._lastEvicted = 0;
@@ -1040,7 +999,6 @@ class MeshletDirector {
         view._passesAdded = false;
         view.syncMaterials();
         view.culler.pressureScale = this.budget.pressureScale;
-        view.culler.forceSubmitBoundaries = this.forceSubmitBoundaries;
         // grow first, then read demand: buffers must not change once the frame is encoding
         view.applyPendingGrowth();
         view.monitorIndexDemand();
@@ -1076,7 +1034,6 @@ class MeshletDirector {
         view.culler.rootHysteresis = this.rootHysteresis;
         view.culler.bucketThresholdScales = this.bucketThresholdScales;
         view.culler.bucketRootMinScales = this.bucketRootMinScales;
-        view.culler.impostorPixels = this.impostorPixels * this.pixelScale;
         // shadow views rank their casters' root admission by this camera's view of them
         this.priorityOrigin.copy(cameraComponent.entity.getPosition());
         this.priorityProjScale = projScale;
@@ -1382,10 +1339,7 @@ class MeshletDirector {
     /** @type {MeshInstance[]} - all views' mesh instances (shader-update sweep). */
     get allMeshInstances() {
         const mis = [];
-        this.views.forEach((v) => {
-            mis.push(...v.meshInstances);
-            if (v.impostorInstance) mis.push(v.impostorInstance);
-        });
+        this.views.forEach(v => mis.push(...v.meshInstances));
         this.shadowRenderer?.entries.forEach((entry) => {
             entry.views.forEach(v => mis.push(...v.meshInstances));
         });

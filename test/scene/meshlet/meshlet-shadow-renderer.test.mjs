@@ -128,8 +128,7 @@ describe('MeshletShadowRenderer', function () {
             dagPixelThreshold: 2,
             pixelScale: 1,
             shadowThresholdScale: 1.5,
-            budget: { pressureScale: 1.25 },
-            forceSubmitBoundaries: false
+            budget: { pressureScale: 1.25 }
         };
         layer = makeLayer();
         comp = { getLayerById: id => (id === LAYERID_WORLD ? layer : null) };

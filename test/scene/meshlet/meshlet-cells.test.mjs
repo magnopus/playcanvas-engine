@@ -2,8 +2,7 @@ import { expect } from 'chai';
 
 import { createCutFixture } from './meshlet-cut-fixture.mjs';
 import {
-    MESHLET_CELL_SIZE, OBJECT_DATA as O, OBJECT_DATA_U32S,
-    OBJECT_FLAG_IMPOSTOR_PRIMARY, OBJECT_IMPOSTOR_LAYER_SHIFT
+    MESHLET_CELL_SIZE, OBJECT_DATA as O, OBJECT_DATA_U32S
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCells } from '../../../src/scene/meshlet/meshlet-cells.js';
 import { MeshletCutData } from '../../../src/scene/meshlet/meshlet-cut-data.js';
@@ -96,21 +95,6 @@ describe('MeshletCells', function () {
             const sphere = Array.from(cells.spheres.subarray(cell * 4, cell * 4 + 4));
             expect(contains(sphere, worldSphere(f, moved))).to.equal(true);
             expect(cells.boundsBuffer.impl.writes).to.deep.equal([{ offset: cell * 16, dataOffset: cell * 4, size: 4 }]);
-        } finally {
-            cells.destroy();
-        }
-    });
-
-    it('encloses a primary impostor instance\'s whole prototype sphere in its cell and maxRadius', function () {
-        const { objects, f } = createObjects([[10, 20, 30]], [1.5]);
-        objects[O.FLAGS] = OBJECT_FLAG_IMPOSTOR_PRIMARY | (1 << OBJECT_IMPOSTOR_LAYER_SHIFT);
-        const protos = new Float32Array(16);
-        protos.set([0, 4, 0, 12, 6, 12, 0, 0], 8);
-        const cells = new MeshletCells(createDevice(), f, 1, protos);
-        try {
-            const sphere = Array.from(cells.spheres.subarray(0, 4));
-            expect(contains(sphere, [10, 24, 30, 12])).to.equal(true);
-            expect(cells.maxRadii[0]).to.be.at.least(12);
         } finally {
             cells.destroy();
         }

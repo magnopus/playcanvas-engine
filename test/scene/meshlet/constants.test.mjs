@@ -83,7 +83,7 @@ describe('meshlet constants', function () {
         expect(Object.values(MATERIAL_SLOT).sort()).to.deep.equal([0, 1, 2, 3]);
         expect(TEX_RESIDENCY_U32S).to.equal(2);
         expect(MESHLET_MAX_UV_CHANNELS, 'per-instance lightmaps address UV channels 0-4').to.equal(5);
-        expect(new Set(Object.values(MESHLET_COLOR_MODE)).size).to.equal(4);
+        expect(new Set(Object.values(MESHLET_COLOR_MODE)).size).to.equal(3);
     });
 
     it('lays the counter blocks out contiguously, one word per bucket', function () {

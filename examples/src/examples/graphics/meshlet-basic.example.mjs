@@ -185,7 +185,7 @@ app.on('framerender', () => {
     // split across several worlds, so their stats are summed.
     const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
     const visualization = data.get('data.visualization');
-    const colorMode = visualization === 'meshlet' ? 2 : visualization === 'lod' ? 1 : 0;
+    const colorMode = visualization === 'meshlet' ? 2 : 0;
     let meshlets = 0, indices = 0, resident = 0, pages = 0, demand = false;
     for (const director of directors) {
         director.world.setColorMode(colorMode);

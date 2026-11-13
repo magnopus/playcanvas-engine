@@ -150,7 +150,7 @@ describe('MeshletCuller', function () {
         expect(culler.rootClassify.getParameter('rootList')).to.equal(view.workItemsBuffer);
         expect(culler.rootArgs.getParameter('counterIndex')).to.equal(MESHLET_COUNTER.ROOT_CANDIDATES);
 
-        device.gpuProfiler = { enabled: true, destroy() {} };
+        device.gpuProfiler = { enabled: true, passDetail: true, destroy() {} };
         culler.beginFrame(planes, camera, 640, viewProj, null);
         expect(log.dispatches[0].name).to.equal('MeshletCellCull');
         expect(log.dispatches[0].computes).to.deep.equal(['MeshletcellCull', 'MeshletdispatchArgs']);
@@ -274,6 +274,14 @@ describe('MeshletCuller', function () {
         culler.destroy();
     });
 
+    it('keeps one compute pass while the profiler only measures the frame total', function () {
+        const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
+        device.gpuProfiler = { enabled: true, passDetail: false, destroy() {} };
+        culler.beginFrame(planes, camera, 640, viewProj, null);
+        expect(log.dispatches.map(d => d.name)).to.deep.equal(['MeshletCull']);
+        culler.destroy();
+    });
+
     it('destroys every compute it owns, keeping the shared shaders', function () {
         const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
         const computes = [culler.cellCull, culler.rootClassify, ...culler.rootAdmit, culler.queueStages[0].args,
@@ -286,7 +294,7 @@ describe('MeshletCuller', function () {
     it('clears the counters and claim bits in-encoder and dispatches the phase-1 chain in order', function () {
         const view = makeView();
         const culler = new MeshletCuller(device, makeWorld(), view, shaders);
-        device.gpuProfiler = { enabled: true, destroy() {} };
+        device.gpuProfiler = { enabled: true, passDetail: true, destroy() {} };
         culler.beginFrame(planes, camera, 640, viewProj, null);
 
         const base = claimPersistBase(1000, 130);
@@ -345,15 +353,6 @@ describe('MeshletCuller', function () {
         const culler = new MeshletCuller(device, makeWorld(), view, shaders);
         culler.beginFrame(planes, camera, 640, viewProj, null);
         expect(log.drawSlot).to.equal(MESHLET_BUCKET_COUNT);
-        culler.destroy();
-    });
-
-    it('splits the chains into submissions around the indirect arguments when asked', function () {
-        const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
-        culler.forceSubmitBoundaries = true;
-        culler.beginFrame(planes, camera, 640, viewProj, null);
-        expect(log.dispatches.map(d => d.name)).to.deep.equal(['MeshletCellCull', 'MeshletRootClassify', 'MeshletRootAdmit', 'MeshletCutArgs', 'MeshletResidentCut', 'MeshletCompacta', 'MeshletCompactb', 'MeshletCullPhase1b', 'MeshletCullPhase1c']);
-        expect(log.submits).to.equal(6);
         culler.destroy();
     });
 

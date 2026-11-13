@@ -71,6 +71,17 @@ class GpuProfiler {
     }
 
     /**
+     * Requests a per-stage breakdown in {@link passTimings}: work that can be encoded either as
+     * one pass or as several (such as the meshlet cull chain) is split into a pass per stage.
+     * Each extra pass costs GPU time, so leave this off when only the frame total is needed.
+     * Defaults to false.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    passDetail = false;
+
+    /**
      * True to enable the profiler.
      *
      * @type {boolean}

@@ -106,8 +106,6 @@ class MeshletGroupCamera {
         for (const view of views) {
             const mis = view.meshInstances;
             for (let i = 0; i < MESHLET_BUCKET_COUNT; i++) mis1.push(mis[i]);
-            // billboards draw with their world's phase 1, after its buckets
-            if (view.impostorInstance) mis1.push(view.impostorInstance);
             if (view.useOcclusion) {
                 for (let i = MESHLET_BUCKET_COUNT; i < MESHLET_BUCKET_COUNT * 2; i++) mis2.push(mis[i]);
             }
@@ -181,13 +179,10 @@ class MeshletDirectorGroup {
         rootHysteresis: 0.75,
         bucketThresholdScales: [4, 1, 1],
         bucketRootMinScales: [1, 1, 1],
-        impostorPixels: 0,
-        impostors: /** @type {import('./meshlet-impostors.js').MeshletImpostors|null} */ (null),
         shadowRootMinPixels: 2,
         shadowMatchCameraLod: false,
         cssPixels: true,
         fastLoad: true,
-        forceSubmitBoundaries: false,
         transcode: /** @type {MeshletTranscodeFn|null} */ (null)
     };
 
@@ -256,13 +251,10 @@ class MeshletDirectorGroup {
         director.rootHysteresis = s.rootHysteresis;
         director.bucketThresholdScales = s.bucketThresholdScales;
         director.bucketRootMinScales = s.bucketRootMinScales;
-        director.impostorPixels = s.impostorPixels;
-        director.impostors = s.impostors;
         director.shadowRootMinPixels = s.shadowRootMinPixels;
         director.shadowMatchCameraLod = s.shadowMatchCameraLod;
         director.cssPixels = s.cssPixels;
         director.fastLoad = s.fastLoad;
-        director.forceSubmitBoundaries = s.forceSubmitBoundaries;
         director.transcode = s.transcode;
     }
 
@@ -378,24 +370,6 @@ class MeshletDirectorGroup {
         return this._settings.bucketRootMinScales;
     }
 
-    /** @type {number} */
-    set impostorPixels(value) {
-        this._set('impostorPixels', value);
-    }
-
-    get impostorPixels() {
-        return this._settings.impostorPixels;
-    }
-
-    /** @type {import('./meshlet-impostors.js').MeshletImpostors|null} */
-    set impostors(value) {
-        this._set('impostors', value);
-    }
-
-    get impostors() {
-        return this._settings.impostors;
-    }
-
     /** @type {boolean} */
     set cssPixels(value) {
         this._set('cssPixels', !!value);
@@ -430,15 +404,6 @@ class MeshletDirectorGroup {
 
     get fastLoad() {
         return this._settings.fastLoad;
-    }
-
-    /** @type {boolean} */
-    set forceSubmitBoundaries(value) {
-        this._set('forceSubmitBoundaries', !!value);
-    }
-
-    get forceSubmitBoundaries() {
-        return this._settings.forceSubmitBoundaries;
     }
 
     /** @type {MeshletTranscodeFn|null} */

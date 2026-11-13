@@ -79,7 +79,6 @@ export function Controls({ observer }) {
                     options={[
                         { v: 'material', t: 'Material' },
                         { v: 'meshlet', t: 'Meshlet colours' },
-                        { v: 'lod', t: 'LOD tier' },
                         { v: 'normals', t: 'World normals' }
                     ]}
                 />

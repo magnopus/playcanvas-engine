@@ -8,6 +8,8 @@
 // to inspect the clusters and watch the DAG cut coarsen with distance and the error threshold.
 // Click a bunny to select it: the GPU picker identifies the individual instance behind the
 // pixel, and that same index outlines it - shift-click to add to the selection.
+// Untick "Meshlets" (or ?meshlets=0) to draw the same bunnies as ordinary meshes - one render
+// component and draw call per bunny, at full resolution, culled on the CPU - for comparison.
 //
 // @flag WEBGL_DISABLED
 
@@ -20,6 +22,7 @@ import {
     CameraComponentSystem,
     Color,
     ContainerHandler,
+    CULLFACE_NONE,
     Entity,
     FILLMODE_FILL_WINDOW,
     FILTER_LINEAR,
@@ -34,6 +37,8 @@ import {
     EVENT_MOUSEDOWN,
     EVENT_MOUSEMOVE,
     Layer,
+    Mesh,
+    MeshInstance,
     MeshletComponentSystem,
     Mouse,
     OutlineRenderer,
@@ -148,6 +153,125 @@ const buildInstances = (n) => {
     return instances;
 };
 
+// The finest DAG level of the bake is the source geometry: decode it from the resident pages
+// into an ordinary mesh for the non-meshlet comparison. Page layout as in meshlet-page-wgsl.js:
+// a 48-byte header, positions (u16x3 anchor-relative, or i32x3 when wide), oct16 normals, then
+// tangents, UVs and colours when the resource has them, the meshlet-vertex remap table and the
+// u8 triangle corner stream. (Layout constants are not exported from the engine.)
+const MESHLET_DATA_U32S = 32;
+const PAGE_TABLE_FIELDS = 8;
+const PAGE_HEADER_WORDS = 12;
+const PAGE_FLAG_WIDE_POSITIONS = 1 << 2;
+const decodeOct16 = (word, out, o) => {
+    const sx = ((word << 16) >> 16) / 32767;
+    const sy = (word >> 16) / 32767;
+    let x = sx, y = sy;
+    const z = 1 - Math.abs(sx) - Math.abs(sy);
+    if (z < 0) {
+        x = (1 - Math.abs(sy)) * (sx >= 0 ? 1 : -1);
+        y = (1 - Math.abs(sx)) * (sy >= 0 ? 1 : -1);
+    }
+    const len = Math.hypot(x, y, z) || 1;
+    out[o] = x / len;
+    out[o + 1] = y / len;
+    out[o + 2] = z / len;
+};
+const decodeFinestMesh = () => {
+    const { manifest } = resource;
+    const layout = manifest.attributeLayout;
+    const uvFloats = (layout.uvComponents ?? 0) * 2;
+    const { origin, step } = manifest.positionGrid;
+    const pageWords = new Map();
+    const pageOf = (page) => {
+        let words = pageWords.get(page);
+        if (!words) {
+            const t = page * PAGE_TABLE_FIELDS;
+            const blob = manifest.pageTable[t];
+            const offset = manifest.pageTable[t + 1] + manifest.pageTable[t + 2] * 2 ** 32;
+            words = new Uint32Array(shardBuffers[blob], offset, manifest.pageTable[t + 3] / 4);
+            pageWords.set(page, words);
+        }
+        return words;
+    };
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const n = [0, 0, 0];
+    for (const prim of resource.primitives) {
+        const records = prim.meshletData;
+        for (let m = 0; m < prim.meshletCount; m++) {
+            const r = m * MESHLET_DATA_U32S;
+            if (records[r + 22] !== 0) continue;  // lodLevel: 0 is the source geometry
+            const words = pageOf(records[r + 23]);
+            const vertexCount = words[2];
+            const wide = (words[5] & PAGE_FLAG_WIDE_POSITIONS) !== 0;
+            const normalBase = PAGE_HEADER_WORDS + vertexCount * (wide ? 3 : 2);
+            const remapBase = normalBase + vertexCount * (1 + (layout.tangents ? 1 : 0) + uvFloats + (layout.colors ? 1 : 0));
+            const cornerByte = (remapBase + words[6]) * 4 + records[r + 3];
+            const bytes = new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
+            const first = positions.length / 3;
+            for (let v = 0; v < records[r + 2]; v++) {
+                const pv = words[remapBase + records[r] + v];
+                let x, y, z;
+                if (wide) {
+                    const b = PAGE_HEADER_WORDS + pv * 3;
+                    x = words[b] | 0; y = words[b + 1] | 0; z = words[b + 2] | 0;
+                } else {
+                    const b = PAGE_HEADER_WORDS + pv * 2;
+                    x = (words[7] | 0) + (words[b] & 0xFFFF);
+                    y = (words[8] | 0) + (words[b] >>> 16);
+                    z = (words[9] | 0) + (words[b + 1] & 0xFFFF);
+                }
+                positions.push(x * step + origin[0], y * step + origin[1], z * step + origin[2]);
+                decodeOct16(words[normalBase + pv], n, 0);
+                normals.push(n[0], n[1], n[2]);
+            }
+            for (let c = 0; c < records[r + 1] * 3; c++) indices.push(first + bytes[cornerByte + c]);
+        }
+    }
+    const mesh = new Mesh(device);
+    mesh.setPositions(positions);
+    mesh.setNormals(normals);
+    mesh.setIndices(indices);
+    mesh.update();
+    // held here: the grid's mesh instances come and go with each rebuild, and the last one
+    // destroyed would otherwise destroy the shared mesh
+    mesh.incRefCount();
+    return { mesh, triangles: indices.length / 3 };
+};
+
+/** @type {{ mesh: Mesh, triangles: number }|null} */
+let plainBunny = null;
+const plainRoot = new Entity('PlainBunnies');
+app.root.addChild(plainRoot);
+const plainMaterial = new StandardMaterial();
+plainMaterial.diffuse.fromArray(resource.primitives[0].baseColorFactor);
+plainMaterial.gloss = 0.4;
+// the same face culling the meshlet draw buckets apply
+if (resource.materialTable && (resource.materialTable[11] & 1)) plainMaterial.cull = CULLFACE_NONE;
+plainMaterial.update();
+
+/**
+ * Rebuilds the grid of ordinary mesh bunnies: n x n render components sharing one mesh, laid out
+ * as the meshlet instances are. n = 0 removes them.
+ *
+ * @param {number} n - Bunnies per side.
+ */
+const buildPlainGrid = (n) => {
+    while (plainRoot.children.length) plainRoot.children[0].destroy();
+    if (!n) return;
+    plainBunny ??= decodeFinestMesh();
+    for (const { matrix } of buildInstances(n)) {
+        const entity = new Entity();
+        const m = new Mat4();
+        m.data.set(matrix);
+        entity.setLocalPosition(m.getTranslation());
+        entity.setLocalEulerAngles(m.getEulerAngles());
+        entity.addComponent('render', { meshInstances: [new MeshInstance(plainBunny.mesh, plainMaterial)] });
+        plainRoot.addChild(entity);
+    }
+};
+
 // the component system owns the director (and wires the KTX2 transcoder); this example
 // drives the director directly instead of adding meshlet components
 const director = app.systems.meshlet.director;
@@ -179,6 +303,7 @@ if (params.get('timers') === '1') {
 }
 
 data.set('data', {
+    meshlets: params.get('meshlets') !== '0',
     gridSize: parseInt(params.get('grid') ?? '8', 10),
     colorMode: parseInt(params.get('color') ?? '0', 10),
     threshold: parseFloat(params.get('threshold') ?? '1'),
@@ -201,13 +326,18 @@ director.shadowBudgetCascades = 16;
 const numCascades = Math.max(1, Math.min(4, parseInt(params.get('cascades') ?? '1', 10)));
 
 let builtSize = 0;
+let builtMeshlets = true;
 let gridExtent = 1;
 const rebuild = (n) => {
+    const meshlets = !!data.get('data.meshlets');
     builtSize = n;
+    builtMeshlets = meshlets;
     gridExtent = Math.max(n, 2) * SPACING;
+    // one of the two at a time: the meshlet world, or the ordinary meshes
     director.rebuild((world) => {
-        world.addResource(resource, null, shardBuffers, buildInstances(n));
+        if (meshlets) world.addResource(resource, null, shardBuffers, buildInstances(n));
     });
+    buildPlainGrid(meshlets ? 0 : n);
 };
 rebuild(data.get('data.gridSize'));
 
@@ -574,7 +704,10 @@ app.on('update', (dt) => {
 
     // debounce the grid slider - a resize rebuilds the world
     const wanted = Math.round(data.get('data.gridSize'));
-    if (wanted !== builtSize) {
+    if (!!data.get('data.meshlets') !== builtMeshlets) {
+        sizeChangedAt = -1;
+        rebuild(wanted);
+    } else if (wanted !== builtSize) {
         if (sizeChangedAt < 0) sizeChangedAt = time;
         if (time - sizeChangedAt > 0.35) {
             sizeChangedAt = -1;

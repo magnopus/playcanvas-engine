@@ -256,52 +256,6 @@ app.systems.meshlet.occlusion = true;
 app.systems.meshlet.cssPixels = params.get('cssPixels') !== '0';
 app.systems.meshlet.deferRebuildWhileLoading = params.get('progressive') !== '1';
 
-// Impostors: the meshlet LOD erases distant leaf cards, so beyond ?impostorPx (the radius, in
-// pixels, a tree projects to) each tree is one billboard sampling views baked by
-// examples/utils/jungle (protos.py, bake_server.py, the meshlet-impostor-bake example).
-// ?impostors=0 turns them off.
-const impostorManifest = params.get('impostors') === '0' ? null :
-    await fetch(`${BASE}jungle_impostors.json`).then(r => (r.ok ? r.json() : null)).catch(() => null);
-if (impostorManifest) {
-    const atlas = async (/** @type {string} */ kind, /** @type {boolean} */ srgb) => {
-        // one UASTC KTX2 per layer (bake_server.py), transcoded to the device's block format by the
-        // engine's own transcoder
-        const transcode = app.systems.meshlet.group.transcode;
-        const layers = await Promise.all(impostorManifest.prototypes.map(async (/** @type {{ layer: number }} */ p) => {
-            const bytes = await fetch(`${BASE}impostor_${kind}_${p.layer}.ktx2`).then(r => r.arrayBuffer());
-            return new Promise((resolve, reject) => {
-                transcode(device, `impostor-${kind}-${p.layer}`, bytes, (err, result) => {
-                    return err || !result ? reject(new Error(err ?? 'impostor transcode failed')) : resolve(result);
-                }, { isKTX2: true, isTextureArray: true });
-            });
-        }));
-        const { format, width, height } = layers[0];
-        return new Texture(device, {
-            name: `impostor-${kind}`,
-            width,
-            height,
-            format,
-            srgb,
-            arrayLength: layers.length,
-            mipmaps: true,
-            numLevels: layers[0].levels.length,
-            levels: layers[0].levels.map((_, mip) => layers.map(layer => new Uint8Array(layer.levels[mip]))),
-            addressU: ADDRESS_CLAMP_TO_EDGE,
-            addressV: ADDRESS_CLAMP_TO_EDGE,
-            minFilter: FILTER_LINEAR_MIPMAP_LINEAR,
-            magFilter: FILTER_LINEAR
-        });
-    };
-    app.systems.meshlet.impostors = {
-        albedo: await atlas('albedo', true),
-        normal: await atlas('normal', false),
-        grid: impostorManifest.grid,
-        prototypes: Object.fromEntries(impostorManifest.prototypes.map((/** @type {{ name: string, layer: number, center: number[], radius: number, half: number[] }} */ p) => [p.name, {
-            layer: p.layer, center: p.center, radius: p.radius, half: p.half
-        }]))
-    };
-}
-
 const scene = new Entity('Jungle');
 app.root.addChild(scene);
 for (const group of groups) {
@@ -440,11 +394,7 @@ data.set('data', {
     visualization: 'material',
     occlusion: true,
     threshold: Number(params.get('threshold') ?? 6),
-    impostorPx: impostorManifest ? Number(params.get('impostorPx') ?? 128) : 0,
-    impostorTint: false,
     taa: cameraFrame.taa.enabled,
-    impostorBrightness: Number(params.get('impostorBrightness') ?? 0.85),
-    impostorOcclusion: Number(params.get('impostorAo') ?? 0.1),
     stats: ''
 });
 data.on('data.taa:set', (/** @type {boolean} */ value) => {
@@ -461,10 +411,6 @@ data.on('data.threshold:set', (value) => {
     app.systems.meshlet.dagPixelThreshold = value;
 });
 app.systems.meshlet.dagPixelThreshold = data.get('data.threshold');
-app.systems.meshlet.impostorPixels = data.get('data.impostorPx');
-data.on('data.impostorPx:set', (/** @type {number} */ value) => {
-    app.systems.meshlet.impostorPixels = value;
-});
 
 // canopy strengths, live from the panel (seeded from the query parameters)
 const canopyParams = new Float32Array(4);
@@ -516,27 +462,11 @@ const startLook = vecParam('look') ?? new Vec3(manifest.start?.look ?? [544, 5, 
 cc.reset(startLook, startPos);
 
 let statFrames = 0;
-const impostorDebugApplied = new WeakMap();
 app.on('framerender', () => {
     const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
     if (!directors.length) return;
-    // ?impostorDebug=N: 1 magenta tint, 2 albedo, 3 normal, 4 alpha; the panel toggle tints
-    const impostorDebug = data.get('data.impostorTint') ? 1 : Number(params.get('impostorDebug') ?? 0);
-    const impostorBrightness = data.get('data.impostorBrightness');
-    const impostorOcclusion = data.get('data.impostorOcclusion');
-    for (const director of directors) {
-        // a rebuilt world brings a fresh material, so the value is tracked per material
-        const material = director.world.impostorMaterial;
-        const key = `${impostorDebug},${impostorBrightness},${impostorOcclusion}`;
-        if (material && impostorDebugApplied.get(material) !== key) {
-            impostorDebugApplied.set(material, key);
-            material.setParameter('impostorDebug', impostorDebug);
-            // crown normal blend 0, lower-crown darkening, albedo scale
-            material.setParameter('impostorShading', [0, impostorOcclusion, impostorBrightness, 0]);
-        }
-    }
     const visualization = data.get('data.visualization');
-    const colorMode = visualization === 'meshlet' ? 2 : visualization === 'lod' ? 1 : 0;
+    const colorMode = visualization === 'meshlet' ? 2 : 0;
     let meshlets = 0, indices = 0, resident = 0, pages = 0, instances = 0, demand = false;
     for (const director of directors) {
         director.world.setColorMode(colorMode);

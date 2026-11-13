@@ -68,8 +68,7 @@ export function Controls({ observer }) {
                         type='number'
                         options={[
                             { v: 0, t: 'Material' },
-                            { v: 2, t: 'Meshlet' },
-                            { v: 1, t: 'LOD tier' }
+                            { v: 2, t: 'Meshlet' }
                         ]}
                     />
                 </LabelGroup>

@@ -59,12 +59,6 @@ class MeshletPrimitive {
 
     /** @type {number} - index of the primitive within its gltf mesh. */
     primIndex;
-
-    /** @type {string|null} - name of the gltf mesh this primitive belongs to. */
-    meshName = null;
-
-    /** @type {boolean} - true for the first meshlet primitive of its gltf mesh. */
-    firstOfMesh = false;
 }
 
 /**

@@ -129,19 +129,16 @@ export const CULL_PARAMS = {
     ROOT_BANDS: 15,
     CASTER_PLANES: 16,
     MAX_CASTER_PLANES: 12,
-    // impostor switch: projected size (px) of a whole prototype under which its instances draw
-    // as one billboard instead of meshlets (0 = impostors off)
-    IMPOSTOR: 28,
     // per draw bucket (MESHLET_BUCKET_*), the LOD threshold in xyz - LOD.x scaled by the bucket's
     // scale - and their smallest in w (for tests over mixed buckets)
-    BUCKET_LOD: 29,
+    BUCKET_LOD: 28,
     // per draw bucket, the root admission size cut (px) in xyz; w = the fraction of it an
     // instance admitted last frame may shrink to before it is dropped (hysteresis)
-    BUCKET_ROOT: 30
+    BUCKET_ROOT: 29
 };
 
 /** vec4 rows in the cull parameter buffer. @type {number} */
-export const CULL_PARAMS_VEC4S = 31;
+export const CULL_PARAMS_VEC4S = 30;
 
 /**
  * Priority bands of GPU root admission. Instances are ranked by projected size - the quantity
@@ -276,7 +273,7 @@ export const MESHLET_BUCKET_MASKED = 2;
  *
  * @type {number}
  */
-export const MESHLET_COUNTER_U32S = 32;
+export const MESHLET_COUNTER_U32S = 28;
 
 /**
  * Word offsets into the counter buffer; the three per-bucket blocks are indexed as
@@ -300,10 +297,9 @@ export const MESHLET_COUNTER = {
     ROOT_UNREADY_INSTANCES: 22,   // instances whose root pages were not resident
     ROOT_SUBPIXEL: 23,            // instances below the admission size threshold
     VISIBLE_CELLS: 24,            // cells the cell cull appended to the visible list
-    IMPOSTORS: 25,                // billboards the root classify appended to the impostor list
-    CUT_QUEUE_END: 26,            // cut tasks appended to the queue (unclamped - the queue's demand)
-    CUT_STAGE_BEGIN: 27,          // the current cut stage's range of the queue
-    CUT_STAGE_END: 28
+    CUT_QUEUE_END: 25,            // cut tasks appended to the queue (unclamped - the queue's demand)
+    CUT_STAGE_BEGIN: 26,          // the current cut stage's range of the queue
+    CUT_STAGE_END: 27
 };
 
 /**
@@ -406,40 +402,6 @@ export const OBJECT_FLAG_OUTLINED = 1 << 8;
 export const OBJECT_FLAG_HOVERED = 1 << 9;
 
 /**
- * objectData flags word (23), bit 12: the instance belongs to an impostor prototype (a mesh the
- * world's impostor set names). While the prototype projects under the impostor switch size none
- * of its instances draw meshlets; the primary one emits a billboard instead.
- *
- * @type {number}
- */
-export const OBJECT_FLAG_IMPOSTOR = 1 << 12;
-
-/**
- * objectData flags word (23), bit 13: the instance is the prototype's primary primitive - the one
- * that emits the billboard for the whole tree (its other primitives share its transform).
- *
- * @type {number}
- */
-export const OBJECT_FLAG_IMPOSTOR_PRIMARY = 1 << 13;
-
-/**
- * Width of the impostor fade-in band, as a fraction of the switch size. Between the switch size
- * and (1 + band) times it a tree draws meshlets as usual with its billboard dithered in over them;
- * at the switch size the meshlets drop and the billboard is fully opaque.
- *
- * @type {number}
- */
-export const MESHLET_IMPOSTOR_FADE_BAND = 0.25;
-
-/**
- * objectData flags word (23), bits 16-31: the instance's impostor atlas layer, when
- * {@link OBJECT_FLAG_IMPOSTOR} is set.
- *
- * @type {number}
- */
-export const OBJECT_IMPOSTOR_LAYER_SHIFT = 16;
-
-/**
  * Material record - 32 u32 words (128 B) per glTF material, baked by gltf-tools (root
  * MAG_meshlets_gpu block) and uploaded verbatim; synthesized engine-side for assets without the
  * baked table. Mixed u32/f32 via bitcast. Word offsets:
@@ -508,13 +470,13 @@ export const TEX_RESIDENCY_U32S = 2;
 
 /**
  * Debug colour modes of the meshlet world (see MeshletWorld#setColorMode): the engine-lit
- * material, or the flat debug material tinted per LOD tier or per meshlet.
+ * material, or the flat debug material tinted per meshlet. Values are stable (2 and 3 are
+ * referenced by number from example URL parameters).
  *
  * @ignore
  */
 export const MESHLET_COLOR_MODE = {
     LIT: 0,
-    LOD_TIER: 1,
     MESHLET: 2,
     /** Lit materials, painted with the state of each pixel's base-colour texture sample. */
     TEXTURES: 3

@@ -425,7 +425,7 @@ app.on('framerender', () => {
     const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
     if (!directors.length) return;
     const visualization = data.get('data.visualization');
-    const colorMode = visualization === 'meshlet' ? 2 : visualization === 'lod' ? 1 : 0;
+    const colorMode = visualization === 'meshlet' ? 2 : 0;
     let meshlets = 0, indices = 0, resident = 0, pages = 0, demand = false;
     for (const director of directors) {
         director.world.setColorMode(colorMode);
@@ -554,7 +554,11 @@ const runBenchmark = async () => {
     };
 
     const gpuProfiler = device.gpuProfiler;
-    if (gpuProfiler) gpuProfiler.enabled = true;
+    if (gpuProfiler) {
+        gpuProfiler.enabled = true;
+        // the benchmark reports per-stage timings
+        gpuProfiler.passDetail = true;
+    }
     const directors = () => app.systems.meshlet.directors.filter(d => d.world.finalized);
     const streamCounters = () => directors().reduce((acc, d) => {
         acc.fetched += d.residency?.fetchedPages ?? 0;
@@ -734,6 +738,7 @@ if (params.get('gpuStats') === '1') {
         panel.textContent = 'GPU timings unavailable: no timestamp-query support on this device';
     } else {
         profiler.enabled = true;
+        profiler.passDetail = true;
         app.on('frameend', () => {
             if (profiler._frameTime) {
                 frames++;

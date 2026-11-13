@@ -188,12 +188,6 @@ class MeshletComponentSystem extends ComponentSystem {
     _maxFineTextureSize = 2048;
 
     /** @private */
-    _textureAnisotropy = 1;
-
-    /** @private */
-    _liteMaterials = false;
-
-    /** @private */
     _maxDrawIndices = 0;
 
     /** @private */
@@ -329,52 +323,6 @@ class MeshletComponentSystem extends ComponentSystem {
 
     get maxWorldMeshlets() {
         return this._maxWorldMeshlets;
-    }
-
-    /**
-     * Maximum shader samples for streamed texture anisotropy: 1, 2, 4 or 8. Defaults to
-     * 1 (isotropic). Rounded down to a supported level and clamped; non-finite values
-     * select 1. Takes effect immediately without reloading assets or rebuilding pools.
-     * Higher values improve grazing-angle detail at additional texture-sampling cost.
-     *
-     * @type {number}
-     * @example
-     * app.systems.meshlet.textureAnisotropy = 4;
-     */
-    set textureAnisotropy(value) {
-        this._textureAnisotropy = value;
-        const directors = this._group?.directors;
-        if (directors) {
-            for (const director of directors) director.world.textureAnisotropy = value;
-        }
-    }
-
-    get textureAnisotropy() {
-        return this._group?.directors[0].world.textureAnisotropy ?? 1;
-    }
-
-    /**
-     * Uses cheaper lit materials, for mobile GPUs and standalone headsets: roughness and
-     * metalness come from the material factors alone (no ORM texture), and streamed textures
-     * take a single sample rather than blending across the fine/tail mip boundary. Base colour,
-     * normal and emissive textures are kept. Takes effect immediately (the lit materials
-     * recompile). Defaults to false.
-     *
-     * @type {boolean}
-     * @example
-     * // a mobile GPU, or a standalone headset
-     * app.systems.meshlet.liteMaterials = true;
-     */
-    set liteMaterials(value) {
-        this._liteMaterials = !!value;
-        const directors = this._group?.directors;
-        if (directors) {
-            for (const director of directors) director.world.liteMaterials = this._liteMaterials;
-        }
-    }
-
-    get liteMaterials() {
-        return this._liteMaterials;
     }
 
     /**
@@ -594,37 +542,6 @@ class MeshletComponentSystem extends ComponentSystem {
 
     get rootMinPixels() {
         return this._group?.rootMinPixels ?? 3;
-    }
-
-    /**
-     * Projected size on screen, in pixels, of a whole impostor prototype (a tree) under which its
-     * instances draw as one billboard of the baked {@link impostors} instead of meshlets. The
-     * meshlet LOD cannot keep distant foliage - it erases the leaf cards - so this takes over
-     * beyond the switch size. 0 (the default) draws meshlets at every distance.
-     *
-     * @type {number}
-     */
-    set impostorPixels(value) {
-        if (this.group) this.group.impostorPixels = value;
-    }
-
-    get impostorPixels() {
-        return this._group?.impostorPixels ?? 0;
-    }
-
-    /**
-     * Pre-baked octahedral impostors of whole prototypes, matched to the glTF mesh names of the
-     * loaded assets. Set it before the assets load. See `MeshletImpostors`.
-     *
-     * @type {import('../../../scene/meshlet/meshlet-impostors.js').MeshletImpostors|null}
-     * @ignore
-     */
-    set impostors(value) {
-        if (this.group) this.group.impostors = value;
-    }
-
-    get impostors() {
-        return this._group?.impostors ?? null;
     }
 
     /**
@@ -1153,8 +1070,6 @@ class MeshletComponentSystem extends ComponentSystem {
         world.poolBytes = poolBytes;
         world.texturePoolBytes = texturePoolBytes;
         world.maxFineTextureSize = this._maxFineTextureSize;
-        world.textureAnisotropy = this._textureAnisotropy;
-        world.liteMaterials = this._liteMaterials;
         world.initialIndices = INITIAL_DRAW_INDICES;
         world.maxIndices = this._maxDrawIndices;
     }

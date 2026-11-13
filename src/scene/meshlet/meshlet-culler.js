@@ -3,10 +3,12 @@ import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import {
     CULL_FLAG_HZB_LINEAR, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_CULL_SLICE,
-    MESHLET_COMPACT_SLICE, MESHLET_IMPOSTOR_FADE_BAND, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS,
+    MESHLET_COMPACT_SLICE, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS,
     MESHLET_ROOT_BAND_OCTAVES, WORK_ITEM_U32S, claimLevelBase, claimPersistBase
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
+import { TRACEID_GPU_TIMINGS } from '../../core/constants.js';
+import { Tracing } from '../../core/tracing.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
@@ -59,19 +61,12 @@ const makePassNames = suffix => ({
     cellCull: `MeshletCellCull${suffix}`,
     rootClassify: `MeshletRootClassify${suffix}`,
     rootAdmit: `MeshletRootAdmit${suffix}`,
-    cutArgs: `MeshletCutArgs${suffix}`,
     residentCut: `MeshletResidentCut${suffix}`,
     instanceCull: `MeshletInstanceCull${suffix}`,
     compact: `MeshletCompact${suffix}`,
     cullPhase1: `MeshletCullPhase1${suffix}`,
     indexWrite: `MeshletIndexWrite${suffix}`,
-    compactA: `MeshletCompacta${suffix}`,
-    compactB: `MeshletCompactb${suffix}`,
-    cullPhase1B: `MeshletCullPhase1b${suffix}`,
-    cullPhase1C: `MeshletCullPhase1c${suffix}`,
-    cullPhase2: `MeshletCullPhase2${suffix}`,
-    cullPhase2A: `MeshletCullPhase2a${suffix}`,
-    cullPhase2B: `MeshletCullPhase2b${suffix}`
+    cullPhase2: `MeshletCullPhase2${suffix}`
 });
 
 class MeshletCuller {
@@ -130,15 +125,6 @@ class MeshletCuller {
      * @type {number}
      */
     rootHysteresis = 0.75;
-
-    /**
-     * Projected size in pixels of a whole impostor prototype under which its instances draw as
-     * one billboard instead of meshlets (0 turns impostors off, as every shadow view has them).
-     * Billboards still vanish below {@link rootMinPixels}.
-     *
-     * @type {number}
-     */
-    impostorPixels = 0;
 
     /**
      * Keep last frame's admissions for hysteresis. Views sharing one claim buffer (shadow
@@ -208,17 +194,6 @@ class MeshletCuller {
      */
     hzbLinear = false;
 
-
-    /**
-     * Split the culling chains into separate submissions around GPU-written indirect dispatch
-     * args. On some drivers (observed on Windows/D3D12, see the same workaround in
-     * gsplat-hybrid-renderer.js) args written by a compute pass are intermittently not visible
-     * to dispatchWorkgroupsIndirect recorded in the same command buffer. Off by default; enable
-     * on affected platforms.
-     *
-     * @type {boolean}
-     */
-    forceSubmitBoundaries = false;
 
     /** @private */
     _passSuffix = '';
@@ -339,15 +314,7 @@ class MeshletCuller {
         this.rootClassify.setParameter('rootList', view.workItemsBuffer);
         this.rootClassify.setParameter('rootBands', this.rootBandsBuffer);
         this.rootClassify.setParameter('cellInstances', cells.instancesBuffer);
-        this.rootClassify.setParameter('impostorProtos', world.impostorProtosBuffer);
-        // a view that draws no billboards still binds a list: the shader always declares it
-        this.rootClassify.setParameter('impostorList', view.impostorListBuffer ?? world.impostorDummyBuffer);
         bindCells(this.rootClassify);
-        if (view.impostorInstance) {
-            this.impostorArgs = makeCompute('impostorArgs');
-            this.impostorArgs.setParameter('capacity', world.impostorCount);
-            this.impostorArgs.setParameter('counters', view.countersBuffer);
-        }
         this.rootArgs = makeCompute('dispatchArgs');
         this.rootArgs.setParameter('counterIndex', MESHLET_COUNTER.ROOT_CANDIDATES);
         this.rootArgs.setParameter('groupSize', 64);
@@ -481,14 +448,11 @@ class MeshletCuller {
      * @private
      */
     _buildChains() {
-        const classify = [this.rootClassify];
-        if (this.impostorArgs) classify.push(this.impostorArgs);
-        classify.push(this.rootArgs, this.rootBandArgs);
         const cut = [];
         for (const { args, compute } of this.queueStages) cut.push(args, compute);
 
         const cells = [this.cellCull, this.cellArgs];
-        const classifyScatter = [...classify, this.rootScatter];
+        const classifyScatter = [this.rootClassify, this.rootArgs, this.rootBandArgs, this.rootScatter];
         const instance = [this.instanceCull, this.dispatchArgs];
         const compact = [this.compactMeshlets, this.selectedArgs];
         const cull = [this.meshletCull, this.finalizeArgs];
@@ -505,14 +469,7 @@ class MeshletCuller {
             write,
             // the whole phase-1 chain in one compute pass
             phase1: [...cells, ...classifyScatter, ...this.rootAdmit, ...cut, ...instance, ...compact, ...cull, ...write],
-            // forceSubmitBoundaries splits
-            classify,
-            scatterAdmit: [this.rootScatter, ...this.rootAdmit],
-            stageArgs: this.queueStages.map(({ args }) => [args]),
-            stageComputes: this.queueStages.map(({ compute }) => [compute]),
-            phase2: [this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2, this.indexWritePhase2],
-            phase2A: [this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2],
-            phase2B: [this.indexWritePhase2]
+            phase2: [this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2, this.indexWritePhase2]
         };
     }
 
@@ -644,7 +601,7 @@ class MeshletCuller {
         params[row(CULL_PARAMS.ROOT_BANDS) + 1] = MESHLET_ROOT_BANDS / MESHLET_ROOT_BAND_OCTAVES;
         params[row(CULL_PARAMS.ROOT_BANDS) + 2] = MESHLET_ROOT_BANDS;
         // per-bucket LOD thresholds and size cuts; the shared rows carry their smallest, for the
-        // tests that cover mixed buckets (chunk skipping, the cell size cull, impostor fades)
+        // tests that cover mixed buckets (chunk skipping, the cell size cull)
         const lod = this.dagPixelThreshold * this.pressureScale;
         let minLod = Infinity, minRoot = Infinity;
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
@@ -658,8 +615,6 @@ class MeshletCuller {
         params[row(CULL_PARAMS.BUCKET_LOD) + 3] = minLod;
         params[row(CULL_PARAMS.BUCKET_ROOT) + 3] = this.rootHysteresis;
         params[row(CULL_PARAMS.ROOT_BANDS) + 3] = minRoot;
-        params[row(CULL_PARAMS.IMPOSTOR) + 0] = this.impostorPixels;
-        params[row(CULL_PARAMS.IMPOSTOR) + 1] = MESHLET_IMPOSTOR_FADE_BAND;
 
         // queue.writeBuffer executes before this frame's command buffer, so these clears land
         // ahead of every dispatch below. The requests buffer is not cleared here - the residency
@@ -703,12 +658,6 @@ class MeshletCuller {
         this._dispatchSlotBands = device.getIndirectDispatchSlot(MESHLET_ROOT_BANDS);
         this._dispatchSlotSelected = device.getIndirectDispatchSlot();
         this._dispatchSlotWrite = device.getIndirectDispatchSlot();
-        if (this.impostorArgs) {
-            this._impostorSlot = device.getIndirectDrawSlot();
-            this.impostorArgs.setParameter('drawSlot', this._impostorSlot);
-            this.impostorArgs.setParameter('indirectDraw', device.indirectDrawBuffer);
-            this.impostorArgs.setupDispatch(1);
-        }
 
         this._hzbTexture = twoPhase ? hzb.texture : null;
         this.meshletCull.setParameter('hzbTexture', this._hzbTexture ?? this.dummyHzb);
@@ -759,25 +708,8 @@ class MeshletCuller {
 
         const chains = this._chains;
         const names = this._passNames;
-        if (this.forceSubmitBoundaries) {
-            device.computeDispatch(chains.cells, names.cellCull);
-            device.submit();
-            device.computeDispatch(chains.classify, names.rootClassify);
-            device.submit();
-            device.computeDispatch(chains.scatterAdmit, names.rootAdmit);
-            for (let i = 0; i < queueStages.length; i++) {
-                device.computeDispatch(chains.stageArgs[i], names.cutArgs);
-                device.submit();
-                device.computeDispatch(chains.stageComputes[i], names.residentCut);
-            }
-            device.computeDispatch(chains.instance, names.compactA);
-            device.submit();
-            device.computeDispatch(chains.compact, names.compactB);
-            device.submit();
-            device.computeDispatch(chains.cull, names.cullPhase1B);
-            device.submit();
-            device.computeDispatch(chains.write, names.cullPhase1C);
-        } else if (device.gpuProfiler?.enabled) {
+        const profiler = device.gpuProfiler;
+        if (profiler?.enabled && (profiler.passDetail || Tracing.get(TRACEID_GPU_TIMINGS))) {
             // each stage in its own pass, so the profiler times them apart: classification
             // scales with the instances in view, admission with the root pages it checks, and
             // triangle emission apart from the cluster cull
@@ -798,7 +730,6 @@ class MeshletCuller {
         for (let i = 0; i < view.meshInstances.length; i++) {
             view.meshInstances[i].setIndirect(null, this._drawSlots[i]);
         }
-        view.impostorInstance?.setIndirect(null, this._impostorSlot);
     }
 
     /**
@@ -822,15 +753,7 @@ class MeshletCuller {
         this.finalizeArgsPhase2.setupDispatch(1);
         this.indexWritePhase2.setupIndirectDispatch(this._dispatchSlotWrite);
 
-        const chains = this._chains;
-        const names = this._passNames;
-        if (this.forceSubmitBoundaries) {
-            device.computeDispatch(chains.phase2A, names.cullPhase2A);
-            device.submit();
-            device.computeDispatch(chains.phase2B, names.cullPhase2B);
-        } else {
-            device.computeDispatch(chains.phase2, names.cullPhase2);
-        }
+        device.computeDispatch(this._chains.phase2, this._passNames.cullPhase2);
     }
 }
 

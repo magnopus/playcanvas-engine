@@ -64,8 +64,11 @@ const delayedStartStats = new Set([
  * @property {MiniStatsProcessorOptions} gpu - GPU graph options.
  * @property {MiniStatsGraphOptions[]} stats - Array of options to render additional graphs based
  * on stats collected into Application.stats.
+ * @property {number} [gpuMinSize] - Minimum size index at which to show the GPU graph. GPU timing
+ * runs the GPU profiler, which adds timestamp queries to every pass, so the smallest size leaves
+ * it off by default and shows only the cheap stats. Set to 0 to always show it. Defaults to 1.
  * @property {number} [gpuTimingMinSize] - Minimum size index at which to show GPU pass timing
- * graphs. Defaults to 1.
+ * graphs. Never below {@link MiniStatsOptions#gpuMinSize}. Defaults to 1.
  * @property {number} [cpuTimingMinSize] - Minimum size index at which to show CPU sub-timing
  * graphs (script, anim, physics, render). Defaults to 1.
  * @property {number} [vramTimingMinSize] - Minimum size index at which to show VRAM subcategory
@@ -75,7 +78,8 @@ const delayedStartStats = new Set([
 
 /**
  * MiniStats is a small graphical overlay that displays realtime performance metrics. By default,
- * it shows CPU and GPU utilization, frame timings and draw call count. It can also be configured
+ * it starts compact, showing frame rate, frame time, CPU time, draw calls and VRAM; clicking it
+ * cycles to larger sizes, which add the GPU time (running the GPU profiler) and per-pass graphs. It can also be configured
  * to display additional graphs based on data collected into `AppBase#stats`.
  *
  * The detailed per-frame sub-timings — script, anim, physics and gsplat sort — are measured in
@@ -130,7 +134,8 @@ class MiniStats {
         this._activeSizeIndex = options.startSizeIndex;
 
         // if GPU pass tracking, CPU timing or VRAM detail is enabled, use the last width for medium/large sizes
-        const gpuTimingMinSize = options.gpuTimingMinSize ?? 1;
+        const gpuMinSize = options.gpuMinSize ?? 1;
+        const gpuTimingMinSize = Math.max(options.gpuTimingMinSize ?? 1, gpuMinSize);
         const cpuTimingMinSize = options.cpuTimingMinSize ?? 1;
         const vramTimingMinSize = options.vramTimingMinSize ?? 1;
         if (gpuTimingMinSize < this.sizes.length || cpuTimingMinSize < this.sizes.length || vramTimingMinSize < this.sizes.length) {
@@ -181,7 +186,8 @@ class MiniStats {
 
         this._enabled = true;
 
-        // GPU pass tracking
+        // GPU graph and pass tracking
+        this.gpuMinSize = gpuMinSize;
         this.gpuTimingMinSize = gpuTimingMinSize;
         this.gpuPassGraphs = new Map(); // Map<passName, { graph, lastNonZeroFrame }>
 
@@ -214,6 +220,7 @@ class MiniStats {
         this.app.off('postrender', this.postRender, this);
 
         this.graphs.forEach(graph => graph.destroy());
+        if (this._gpuGraph && !this.graphs.includes(this._gpuGraph)) this._gpuGraph.destroy();
         this.gpuPassGraphs.clear();
         this.cpuGraphs.clear();
         this.vramGraphs.clear();
@@ -291,6 +298,12 @@ class MiniStats {
             // array of options to render additional graphs based on stats collected into Application.stats
             stats: [
                 {
+                    // frames rendered over the last second
+                    name: 'FPS',
+                    stats: ['frame.fps'],
+                    watermark: 60
+                },
+                {
                     // display name
                     name: 'Frame',
 
@@ -324,6 +337,9 @@ class MiniStats {
                     watermark: 1024
                 }
             ],
+
+            // minimum size index to show the GPU graph (and run the GPU profiler)
+            gpuMinSize: 1,
 
             // minimum size index to show GPU pass timing graphs
             gpuTimingMinSize: 1,
@@ -374,6 +390,8 @@ class MiniStats {
         if (value < this.vramTimingMinSize && this.vramGraphs) {
             this.clearSubGraphs(this.vramGraphs);
         }
+
+        this._updateGpuGraph();
     }
 
     /**
@@ -384,6 +402,31 @@ class MiniStats {
      */
     get activeSizeIndex() {
         return this._activeSizeIndex;
+    }
+
+    /**
+     * Shows the GPU graph and runs the GPU profiler only while the overlay is enabled at a size
+     * of at least {@link gpuMinSize}, and requests per-stage pass detail only while the pass
+     * graphs show.
+     *
+     * @private
+     */
+    _updateGpuGraph() {
+        const graph = this._gpuGraph;
+        if (!graph) return;
+        const active = this._enabled && this._activeSizeIndex >= this.gpuMinSize;
+        const index = this.graphs.indexOf(graph);
+        if (active && index === -1) {
+            // back in its place: above the graph it was created after (graphs render bottom to top)
+            const after = this.graphs.indexOf(this._gpuGraphAfter);
+            this.graphs.splice(after + 1, 0, graph);
+            graph.enabled = this.sizes[this._activeSizeIndex].graphs;
+        } else if (!active && index !== -1) {
+            this.graphs.splice(index, 1);
+        }
+        graph.timer.enabled = active;
+        const profiler = this.device.gpuProfiler;
+        if (profiler) profiler.passDetail = active && this._activeSizeIndex >= this.gpuTimingMinSize;
     }
 
     /**
@@ -430,6 +473,7 @@ class MiniStats {
                 this.graphs[i].enabled = value;
                 this.graphs[i].timer.enabled = value;
             }
+            this._updateGpuGraph();
         }
     }
 
@@ -477,6 +521,8 @@ class MiniStats {
             const timer = new GpuTimer(device);
             const graph = new Graph('GPU', app, options.gpu.watermark, options.textRefreshRate, timer);
             graph.graphType = 0.33;
+            this._gpuGraphAfter = this.graphs[this.graphs.length - 1] ?? null;
+            this._gpuGraph = graph;
             this.graphs.push(graph);
         }
 

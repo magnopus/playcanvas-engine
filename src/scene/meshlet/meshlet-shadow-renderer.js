@@ -584,7 +584,6 @@ class MeshletShadowRenderer {
         culler.rootHysteresis = director.rootHysteresis;
         culler.bucketThresholdScales = director.bucketThresholdScales;
         culler.bucketRootMinScales = director.bucketRootMinScales;
-        culler.forceSubmitBoundaries = director.forceSubmitBoundaries;
         // rank casters by what they cover on screen, not in the light's (orthographic) view;
         // before the scene camera has culled, the face ranks by its own projection
         if (director.priorityProjScale > 0) {

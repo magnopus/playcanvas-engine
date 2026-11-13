@@ -1,6 +1,6 @@
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
-import { MESHLET_CELL_SIZE, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_IMPOSTOR_PRIMARY, OBJECT_IMPOSTOR_LAYER_SHIFT } from './constants.js';
+import { MESHLET_CELL_SIZE, OBJECT_DATA, OBJECT_DATA_U32S } from './constants.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
@@ -84,26 +84,18 @@ class MeshletCells {
     /** @type {StorageBuffer|null} - {@link spheres} on the GPU. */
     boundsBuffer = null;
 
-    /** @type {Float32Array|null} - prototype spheres per impostor layer (8 floats/layer). @private */
-    _impostorProtos = null;
-
     /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {Float32Array} objectDataF - The world's objectData rows, as floats.
      * @param {number} instanceCount - The instance count.
-     * @param {Float32Array|null} [impostorProtos] - Per impostor layer, the whole-prototype sphere
-     * (8 floats per layer, sphere in the first 4) so a primary impostor instance's cell encloses
-     * its billboard as well as its own primitive.
      */
-    constructor(device, objectDataF, instanceCount, impostorProtos = null) {
+    constructor(device, objectDataF, instanceCount) {
         this.device = device;
         this.cellCount = Math.ceil(instanceCount / MESHLET_CELL_SIZE);
-        this._impostorProtos = impostorProtos;
 
-        const objectDataU = impostorProtos ? new Uint32Array(objectDataF.buffer, objectDataF.byteOffset, objectDataF.length) : null;
         const centers = new Float32Array(instanceCount * 4);
         for (let i = 0; i < instanceCount; i++) {
-            MeshletCells._instanceSphere(objectDataF, i, centers, i * 4, objectDataU, impostorProtos);
+            MeshletCells._instanceSphere(objectDataF, i, centers, i * 4);
         }
 
         this.instanceOrder = MeshletCells._order(centers, instanceCount);
@@ -152,13 +144,12 @@ class MeshletCells {
         for (let i = first; i < first + count; i++) {
             touched.add(this.instanceCell[i]);
         }
-        const objectDataU = this._impostorProtos ? new Uint32Array(objectDataF.buffer, objectDataF.byteOffset, objectDataF.length) : null;
         const centers = new Float32Array(MESHLET_CELL_SIZE * 4);
         touched.forEach((cell) => {
             const start = cell * MESHLET_CELL_SIZE;
             const end = Math.min(start + MESHLET_CELL_SIZE, this.instanceOrder.length);
             for (let p = start; p < end; p++) {
-                MeshletCells._instanceSphere(objectDataF, this.instanceOrder[p], centers, (p - start) * 4, objectDataU, this._impostorProtos);
+                MeshletCells._instanceSphere(objectDataF, this.instanceOrder[p], centers, (p - start) * 4);
             }
             this._fitSphere(cell, centers, end - start);
             lo = Math.min(lo, cell);
@@ -223,41 +214,19 @@ class MeshletCells {
     }
 
     /**
-     * World-space bounding sphere of one instance, as the cull shaders compute it. For the
-     * primary primitive of an impostor prototype, encloses the whole prototype sphere as well so
-     * the cell cull keeps the cell alive whenever its billboard is in view and above rootMin.
+     * World-space bounding sphere of one instance, as the cull shaders compute it.
      *
      * @param {Float32Array} objectDataF - The objectData rows, as floats.
      * @param {number} instance - The instance.
      * @param {Float32Array} out - Destination.
      * @param {number} offset - Destination offset.
-     * @param {Uint32Array|null} [objectDataU] - The objectData rows, as u32s.
-     * @param {Float32Array|null} [impostorProtos] - Prototype table (8 floats per layer).
      * @private
      */
-    static _instanceSphere(objectDataF, instance, out, offset, objectDataU = null, impostorProtos = null) {
+    static _instanceSphere(objectDataF, instance, out, offset) {
         const row = instance * OBJECT_DATA_U32S;
         const m = OBJECT_DATA.MATRIX + row;
         const s = OBJECT_DATA.SPHERE + row;
-        let x = objectDataF[s], y = objectDataF[s + 1], z = objectDataF[s + 2], r = objectDataF[s + 3];
-        if (objectDataU && impostorProtos) {
-            const flags = objectDataU[row + OBJECT_DATA.FLAGS];
-            if ((flags & OBJECT_FLAG_IMPOSTOR_PRIMARY) !== 0) {
-                const p = (flags >>> OBJECT_IMPOSTOR_LAYER_SHIFT) * 8;
-                const px = impostorProtos[p], py = impostorProtos[p + 1], pz = impostorProtos[p + 2], pr = impostorProtos[p + 3];
-                const d = Math.hypot(x - px, y - py, z - pz);
-                if (pr >= d + r) {
-                    x = px; y = py; z = pz; r = pr;
-                } else if (r < d + pr) {
-                    const nr = (r + d + pr) * 0.5;
-                    const t = (nr - r) / d;
-                    x += (px - x) * t;
-                    y += (py - y) * t;
-                    z += (pz - z) * t;
-                    r = nr;
-                }
-            }
-        }
+        const x = objectDataF[s], y = objectDataF[s + 1], z = objectDataF[s + 2], r = objectDataF[s + 3];
         out[offset] = objectDataF[m] * x + objectDataF[m + 4] * y + objectDataF[m + 8] * z + objectDataF[m + 12];
         out[offset + 1] = objectDataF[m + 1] * x + objectDataF[m + 5] * y + objectDataF[m + 9] * z + objectDataF[m + 13];
         out[offset + 2] = objectDataF[m + 2] * x + objectDataF[m + 6] * y + objectDataF[m + 10] * z + objectDataF[m + 14];

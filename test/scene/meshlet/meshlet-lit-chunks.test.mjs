@@ -171,37 +171,16 @@ describe('buildMeshletLitChunks', function () {
         expect(custom.indexOf('if (meshletUnlit())')).to.be.below(custom.indexOf('#include "outputAlphaPS"'));
     });
 
-    it('compiles the anisotropic and texture-debug paths only when their defines are set', function () {
+    it('compiles the texture-debug path only when its define is set', function () {
         const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
         const output = buildMeshletLitChunks(textured).outputPS;
         const plain = Preprocessor.run(source);
-        expect(plain).to.not.include('meshletTexFootprint');
-        expect(plain).to.not.include('meshletTextureAnisotropy');
         expect(plain).to.not.include('dMeshletTexDebug');
         expect(Preprocessor.run(output).trim()).to.equal('');
 
-        const aniso = Preprocessor.run(`#define MESHLET_ANISOTROPY\n${source}`);
-        expect(aniso).to.include('fn meshletTexFootprint');
-        expect(aniso).to.include('uniform meshletTextureAnisotropy: f32');
-        expect(aniso).to.not.include('dMeshletTexDebug');
-
         const debug = Preprocessor.run(`#define MESHLET_TEX_DEBUG\n${source}`);
         expect(debug).to.include('dMeshletTexDebugBase = dMeshletTexDebug;');
-        expect(debug).to.not.include('meshletTexFootprint');
         expect(Preprocessor.run(`#define MESHLET_TEX_DEBUG\n${output}`)).to.include('gammaCorrectOutput(dMeshletTexDebugBase)');
-    });
-
-    it('bounds anisotropic taps by the runtime limit and the resident footprint', function () {
-        const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
-        expect(source).to.include('uniform meshletTextureAnisotropy: f32');
-        expect(source).to.include('#ifndef MESHLET_ANISOTROPY');
-        expect(source).to.include('max(max(minor, major / uniform.meshletTextureAnisotropy), exp2(minLod))');
-        expect(source).to.include('clamp(ceil(major / filterWidth), 1.0, uniform.meshletTextureAnisotropy)');
-        expect(source).to.include('sampleIndex < sampleCount');
-        expect(source).to.include('return color / f32(sampleCount)');
-        for (const family of ['Srgb', 'Srgba', 'Normal', 'Linear']) {
-            expect(source).to.include(`color += meshletSample${family}(sampleUv, wanted, minLod, sizeBias, tailStart, slotLayer, tailLayer)`);
-        }
     });
 
     it('reverses tangent handedness for mirrored normal-mapped placements', function () {
@@ -352,7 +331,6 @@ describe('meshlet materials', function () {
         expect(opaque.cull).to.equal(CULLFACE_BACK);
         expect(masked.cull).to.equal(CULLFACE_NONE);
         const vertex = opaque.shaderDesc?.vertexWGSL ?? opaque._shaderDesc?.vertexWGSL ?? '';
-        expect(vertex).to.include(`uniform.colorMode == ${MESHLET_COLOR_MODE.LOD_TIER}u`);
         expect(vertex).to.include(`uniform.colorMode == ${MESHLET_COLOR_MODE.MESHLET}u`);
         expect(vertex).to.include('struct MeshletPageLayout');
         expect(vertex).to.include('let hue = f32(h & 65535u) / 65536.0;');

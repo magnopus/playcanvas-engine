@@ -74,7 +74,7 @@ if (!variant) {
     const root = document.createElement('main');
     root.innerHTML = `<div class="toolbar"><strong>Mission ISS · LOD comparison</strong>
         <label>Compare <select id="comparison"><option value="0">Group sizes</option><option value="1">Bake approaches (trial)</option></select></label>
-        <label>View <select id="colour"><option value="0">Material</option><option value="2">Meshlet colours</option><option value="1">LOD colours</option></select></label>
+        <label>View <select id="colour"><option value="0">Material</option><option value="2">Meshlet colours</option></select></label>
         <label>LOD error <input id="error" type="range" min="-2" max="6" step="0.25" value="0"><output>1 px</output></label>
         <button id="coarse">Coarsest LOD</button><button id="reset">Reset view</button></div>
         <div class="panes"></div><p class="hint">Drag to orbit · Shift-drag or right-drag to pan · Scroll to zoom · All views stay synchronized${approaches ? ' · Trials use group 8; joined trial welds exact positions only' : ''}</p>`;

@@ -200,7 +200,6 @@ const createMeshlets = (device, gltf, bufferViews) => {
 
     const primitives = [];
     gltf.meshes?.forEach((gltfMesh, meshIndex) => {
-        let firstOfMesh = true;
         gltfMesh.primitives.forEach((primitive, primIndex) => {
             const ext = primitive.extensions?.[gpuExtensionName];
             if (!ext) return;
@@ -230,9 +229,6 @@ const createMeshlets = (device, gltf, bufferViews) => {
             prim.baseColorFactor = materialDef?.pbrMetallicRoughness?.baseColorFactor ?? [1, 1, 1, 1];
             prim.meshIndex = meshIndex;
             prim.primIndex = primIndex;
-            prim.meshName = gltfMesh.name ?? null;
-            prim.firstOfMesh = firstOfMesh;
-            firstOfMesh = false;
             primitives.push(prim);
         });
     });
