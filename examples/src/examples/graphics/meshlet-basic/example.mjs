@@ -46,12 +46,8 @@ const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('applic
 window.focus();
 
 const params = new URLSearchParams(location.search);
-// ?chunk=018 picks another baked Zorah chunk; ?bake=zorah-smooth another linked bake directory
-const zorahChunk = (params.get('chunk') ?? '003').padStart(3, '0');
-const zorahBake = (params.get('bake') ?? 'zorah').replace(/[^\w-]/g, '');
 const models = {
     bunny: { name: 'Bunny', url: './assets/meshlets/bunny-v2.glb' },
-    zorah: { name: `Zorah chunk ${zorahChunk}`, url: `./assets/meshlets/${zorahBake}/chunk_${zorahChunk}.streamed.glb` },
     magoffice: { name: 'MagOffice', url: './assets/meshlets/magoffice_streamed.glb' }
 };
 const requestedAsset = params.get('asset') ?? '';
@@ -103,8 +99,8 @@ await new Promise((resolve, reject) => {
     assetListLoader.load((error) => (error ? reject(error) : resolve()));
 });
 
-// Zorah chunk 003 needs ~279 MiB of metadata, ~126 MiB of root pages and ~347 MiB of
-// root draw indices alone. Reserve room for the cut tables, records and streamed detail too.
+// Large local bakes need room for their metadata, root pages and draw indices, plus the cut
+// tables, records and streamed detail.
 app.systems.meshlet.poolBytes = 2048 * 1024 * 1024;
 const model = new Entity(selectedModel.name);
 model.addComponent('meshlet', { asset: assets.model });

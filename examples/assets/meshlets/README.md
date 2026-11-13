@@ -2,8 +2,7 @@
 
 ## Basic demo asset and material inspection
 
-The **Asset** dropdown in `graphics/meshlet-basic` selects Bunny, Zorah chunk 003, or
-MagOffice. Switching reloads the example to release the previous asset's geometry and texture
+The **Asset** dropdown in `graphics/meshlet-basic` selects Bunny or MagOffice. Switching reloads the example to release the previous asset's geometry and texture
 pools. A direct office link is `/iframe/graphics_meshlet-basic.html?deviceType=webgpu&asset=magoffice`.
 The **Visualisation** dropdown includes meshlet colours, LOD tiers, world normals (including
 normal maps), albedo, metalness and roughness.
@@ -23,45 +22,8 @@ tangents; pass `--no-tangents` only when deliberately omitting normal-map suppor
 not reconstruct tangents for tangent-free pages, so those pages use geometric normals. The local
 package grew from 473 to 508 pages (about 2.2 MiB more geometry storage).
 
-## Local Zorah reproduction
-
-`graphics/meshlet-zorah` loads the **entire dataset** from `zorah/scene.all.json`, including
-all 19 chunks and their entity/model transforms. Open
-`/iframe/graphics_meshlet-zorah.html?deviceType=webgpu` after creating the local link below.
-The camera starts at the manifest's position and orientation; WASD and mouse look fly through
-the scene, with Shift/Ctrl changing speed. Single-sample CameraFrame depth enables two-phase
-HZB occlusion. Reverse-Z preserves depth precision across the manifest's view distance.
-The Jungle bake's `jungle_sky.hdr` supplies the visible sky; its clamped
-`jungle_sky_env.hdr` generates the environment lighting atlas. Both files must be available
-under `assets/meshlets/jungle/`, as in the Jungle example.
-ACES tone mapping compresses HDR highlights without clipping them to white.
-The default directional light is disabled. The geometry pool budget is 16 GiB
-(`17179869184` bytes); this is a large scene and requires sufficient GPU memory.
-
-The tiles, streaming, groups and both impostor debug examples are hidden from development and
-production navigation, but remain available at their direct URLs.
-
-`graphics/meshlet-basic` loads a local Zorah chunk through an asset link; the dropdown's Zorah
-choice selects `chunk_003.streamed.glb`. The example opens on the Bunny; pick Zorah from the
-dropdown or open `/iframe/graphics_meshlet-basic.html?deviceType=webgpu&asset=zorah`.
-From the engine repository root, create the link with:
-
-```sh
-ln -s /Users/adrian.meredith/Documents/zorah_main_public.v2.gltf/final_streamed_meshlets_dagv2 examples/assets/meshlets/zorah
-```
-
-The local link should not be committed. It serves the GLB and its relative geometry sidecars
-through the examples server, including HTTP Range requests, without copying the multi-GB bake.
-Run `npm run dev` in `examples`, then open `graphics/meshlet-basic` in Chrome with WebGPU.
-The camera frames the chunk automatically; orbit, pan and zoom into surfaces. Occlusion culling
-is on by default; turn it off to isolate streaming gaps.
-The example uses CameraFrame with single-sample scene depth and a 2 GiB geometry budget.
-
-`final_streamed_meshlets_dagv2` is baked with the clusterlod-style DAG (group-boundary locks,
-uncapped simplification, terminal stuck groups): every primitive reduces to one or a few root
-meshlets, so the always-resident set is 4 pages. The previous bake
-(`final_streamed_meshlets`) stalled on foliage - its coarse placements needed hundreds of
-millions of indices, and most instances were deferred with a budget warning.
+The streaming and groups examples are hidden from development and production navigation, but
+remain available at their direct URLs.
 
 ## Mission ISS simplification comparison
 
@@ -124,59 +86,6 @@ with baked appearance and measured geometric/coverage error, rather than merely 
 group size or joining all geometry sharing a material. Validate one small region first:
 compare its silhouette, shading, distant coverage and selected counts across a camera sweep,
 then retain the detailed representation until its replacement satisfies the error threshold.
-
-## Isolated Zorah marble tiles
-
-`graphics/meshlet-tiles` displays the unchanged source geometry for the four marble floor
-pieces in chunk 003. Select A1–D1, switch between top and angled views, and orbit/zoom.
-It renders one ordinary mesh, without meshlet selection, so the shape can be identified
-before comparing proxy bakes. A neutral preview material makes relief visible; the extracted
-GLBs retain their original material records.
-
-```sh
-node examples/utils/extract-zorah-tiles.mjs \
-    ~/Documents/zorah_main_public.v2.gltf/zorah_main_public.v2.gltf \
-    /path/to/gltf-tools/node_modules/meshoptimizer
-```
-
-The extractor reads only the referenced ranges of the ~10 GB source binary, decodes meshopt
-compression, and writes the following under the ignored `assets/meshlets/zorah-tiles/` directory:
-
-| File | Source mesh | Chunk 003 mesh | Source triangles | Placements | Size |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `marble-a.glb` | 358 | 82 | 9,229,706 | 95 | 160.3 MiB |
-| `marble-b.glb` | 359 | 83 | 1,705,308 | 95 | 29.7 MiB |
-| `marble-c.glb` | 357 | 81 | 1,175,311 | 192 | 20.4 MiB |
-| `marble-d.glb` | 360 | 84 | 210,119 | 190 | 3.7 MiB |
-
-Each GLB contains a single tile in its unchanged local coordinates. Its corresponding
-`marble-*.placements.json` retains all original node names, source node indices and transforms,
-referencing mesh 0 in the extracted asset. `extraction.json` records provenance, counts and
-SHA-256 hashes of decoded buffer views. The source NVIDIA MIT license is copied alongside.
-Geometry is not welded, simplified or normal-generated by the extractor. This geometry-only
-Zorah export has POSITION and indices, but no authored normals, UVs or textures; the viewer
-generates normals on import.
-
-Tile A1 spans about 1.802 × 1.801 m with 29 mm of vertical relief. The existing streamed bake
-still has 2,470 roots / 140,881 triangles for each copy. It is a candidate for a low-poly relief
-surface with baked normals, with the tile outline and coverage retained. This is a different
-experiment from merely changing simplification group sizes.
-
-The captured overhead profile must not be attributed to these tiles without another measurement:
-its largest selected groups were mesh 77 (hedge, 129,974 selected records), mesh 67 (tree leaves,
-78,067) and mesh 1 (facade ornaments, 67,114). This extraction identifies the floor geometry;
-it does not establish that it caused the earlier dominant culling cost.
-
-Validation: all four GLBs rendered separately in Chrome/WebGPU without captured GPU validation
-errors; decoded buffer hashes, index bounds, triangle counts, material records and original
-placement transforms were checked after writing.
-
-## Deferred marble A1 proxy technique
-
-The relief-proxy experiment has been removed. Its bake method, measurements, limitations
-and proposed LOD transition are recorded locally in
-`~/Documents/Meshlet-Relief-Proxy-Notes.md`. The source tile extractor and inspector above
-remain available; there is no automatic proxy LOD integration.
 
 ## Caldera scene
 
