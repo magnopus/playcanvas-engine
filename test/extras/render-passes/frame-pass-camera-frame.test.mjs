@@ -133,6 +133,38 @@ describe('FramePassCameraFrame', function () {
         restore();
     });
 
+    it('leaves the meshlet passes it splices in to their owner when it rebuilds or is destroyed', function () {
+        // the meshlet director owns these and splices the same instances into every rebuilt chain
+        const before = new FramePass(app.graphicsDevice);
+        const middle = new FramePass(app.graphicsDevice);
+        const destroyBefore = spy(before, 'destroy');
+        const destroyMiddle = spy(middle, 'destroy');
+        app.renderer.meshletDirector = {
+            buildCameraFramePasses: () => ({ before: [before], middle: [middle] }),
+            wantsSceneDepth: () => false
+        };
+        try {
+            cameraFrame.update();
+            const passes = cameraFrame.renderPassCamera.beforePasses;
+            expect(passes).to.include(before);
+            expect(passes).to.include(middle);
+
+            // a rebuild, as when the director's views change
+            cameraFrame.renderPassCamera.layersDirty = true;
+            cameraFrame.update();
+            expect(cameraFrame.renderPassCamera.beforePasses).to.include(before);
+
+            cameraFrame.destroy();
+            expect(destroyBefore.called, 'borrowed phase-1 pass').to.equal(false);
+            expect(destroyMiddle.called, 'borrowed HZB / phase-2 pass').to.equal(false);
+        } finally {
+            app.renderer.meshletDirector = null;
+            cameraFrame = new CameraFrame(app, app.root.findByName('Camera').camera);
+            before.destroy();
+            middle.destroy();
+        }
+    });
+
     it('blurs the TAA output for the bloom and the high quality depth of field', function () {
         cameraFrame.dof.highQuality = true;
         cameraFrame.update();

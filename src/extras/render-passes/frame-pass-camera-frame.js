@@ -290,9 +290,13 @@ class FramePassCameraFrame extends FramePass {
             }
         }
 
+        // the meshlet passes are borrowed: the meshlet director owns them and splices the same
+        // instances into the next chain, so destroying them here would break the rebuilt frame
+        const borrowedPasses = new Set([...(this.meshletPasses?.before ?? []), ...(this.meshletPasses?.middle ?? [])]);
+
         // destroy all other passes we created
         this.beforePasses.forEach((pass) => {
-            if (!effectPasses.has(pass)) {
+            if (!effectPasses.has(pass) && !borrowedPasses.has(pass)) {
                 pass.destroy();
             }
         });
