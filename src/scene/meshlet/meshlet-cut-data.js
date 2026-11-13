@@ -110,7 +110,7 @@ function collectFloorPages(source, groups, pages) {
 /**
  * A Uint32Array that grows by doubling. The cut tables reach tens of millions of words on large
  * worlds; plain arrays of numbers take 8 bytes a word and copy themselves while growing, which
- * ran a 1.5M-instance world out of JS heap during a rebuild.
+ * can exhaust the JS heap while a large world rebuilds.
  *
  * @ignore
  */

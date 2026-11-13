@@ -13,7 +13,6 @@ import { Mesh } from '../mesh.js';
 import { MeshInstance } from '../mesh-instance.js';
 import { FramePassMeshletCompute } from './frame-pass-meshlet-compute.js';
 import { MeshletCuller } from './meshlet-culler.js';
-import { createMeshletImpostorMesh } from './meshlet-impostors.js';
 import { RenderPassMeshletDraw } from './render-pass-meshlet-draw.js';
 
 /**
@@ -47,6 +46,16 @@ const BYTES_PER_WORD = 4;
 // Initial cut queue entries (8 bytes each). It grows to the queued-task demand by readback; an
 // overflowing frame only leaves the dropped tasks' groups coarse.
 const CUT_QUEUE_INITIAL = 1 << 16;
+
+/**
+ * @param {ArrayLike<number>} values - Per-bucket values.
+ * @returns {number} Their sum over the draw buckets.
+ */
+const sumBuckets = (values) => {
+    let sum = 0;
+    for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) sum += values[b];
+    return sum;
+};
 
 /**
  * The per-camera half of the meshlet pipeline: everything that depends on one camera's cull
@@ -118,6 +127,20 @@ class MeshletView {
 
     /** @type {{ indices: number[], records: number, cutQueue: number }|null} */
     _pendingDemand = null;
+
+    /**
+     * The demand record each readback fills in place; {@link lastDemand} and _pendingDemand
+     * point at it once the first readback lands.
+     *
+     * @private
+     */
+    _demand = { indices: [0, 0, 0], records: 0, cutQueue: 0 };
+
+    /** @private */
+    _growTarget = [0, 0, 0];
+
+    /** @private */
+    _reslice = [0, 0, 0];
 
     /**
      * Last capacity demand of the complete selected cut plus attempted refinements, before
@@ -252,9 +275,8 @@ class MeshletView {
         this.claimBitsBuffer = sharedClaimBits ?? new StorageBuffer(device, claimWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         this._ownsClaimBits = !sharedClaimBits;
         // Records are demand-grown like the index buffer. Sizing them for the worst case (every
-        // meshlet of every instance drawn at once) is hopeless on scattered scenes - a jungle
-        // with 41k plant instances reaches 149M pairs, a 2.3 GB buffer - while a real frame's
-        // LOD cut emits a few hundred thousand. counters[MESHLET_COUNTER.RECORDS] counts unclamped
+        // meshlet of every instance drawn at once) reaches gigabytes on scattered scenes, while
+        // a real frame's LOD cut emits a few hundred thousand records. counters[MESHLET_COUNTER.RECORDS] counts unclamped
         // demand, so the buffer starts small and grows to what frames actually ask for.
         this.recordCapacity = Math.min(world.recordCapacity, world.initialRecords || world.recordCapacity);
         this.selectedMeshletsBuffer = new StorageBuffer(device, Math.max(this.recordCapacity * 8, 16), BUFFERUSAGE_COPY_DST);
@@ -268,7 +290,8 @@ class MeshletView {
         // phase-2 pass re-discovers the whole frustum and its page-demand burst evicts the hot
         // working set. A single-phase view never reads or writes them - only the phase 1/2
         // branches of the cull shader touch the binding - so it borrows the world's placeholder
-        // rather than allocating one bit per instance-meshlet pair (tens of MB on the jungle).
+        // rather than allocating one bit per instance-meshlet pair (tens of MB on a scattered
+        // scene).
         if (singlePhase) {
             this.visBitsBuffer = world.dummyBits;
             this._ownsVisBits = false;
@@ -323,7 +346,7 @@ class MeshletView {
         // the root classify fills. Shadow views draw none.
         if (world.impostorMaterial && !singlePhase) {
             this.impostorListBuffer = new StorageBuffer(device, Math.max(world.impostorCount, 1) * 2 * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
-            const mi = new MeshInstance(createMeshletImpostorMesh(device), world.impostorMaterial);
+            const mi = new MeshInstance(world.impostorMesh, world.impostorMaterial);
             mi.node = this._node;
             mi.cull = false;
             mi.castShadow = false;
@@ -382,6 +405,11 @@ class MeshletView {
     destroy() {
         this.culler?.destroy();
         this.culler = null;
+        this.drawPass1?.destroy();
+        this.drawPass2?.destroy();
+        this.hzbMipsPass?.destroy();
+        this.cullPhase2Pass?.destroy();
+        this.drawPass1 = this.drawPass2 = this.hzbMipsPass = this.cullPhase2Pass = null;
         if (this._ownsHzb) this.hzb?.destroy();
         this.hzb = null;
         this.readbackPool?.destroy();
@@ -486,13 +514,13 @@ class MeshletView {
     _resliceBuckets(demand) {
         const total = this.indexTotal();
         if (total < this._ceiling() * this.growAt) return false;
-        const next = [0, 0, 0];
+        const next = this._reslice;
         this._split(next, total, demand);
         let moved = 0;
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) moved += Math.abs(next[b] - this.indexCapacity[b]);
         // hysteresis: small demand swings leave the ranges alone
         if (moved < total * RESLICE_HYSTERESIS) return false;
-        this.indexCapacity = next;
+        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) this.indexCapacity[b] = next[b];
         return true;
     }
 
@@ -522,11 +550,11 @@ class MeshletView {
         if (!d) return 0;
         const ceiling = this.indexShare > 0 ? this.indexShare : this.world.indexCeiling;
         if (!(ceiling > 0) || !Number.isFinite(ceiling)) return 0;
-        const demand = d.indices.reduce((a, b) => a + b, 0);
+        const demand = sumBuckets(d.indices);
         // Coarsening cannot go below the roots, so measure only the refinement above them
-        // against the room above them. Counting the roots too pinned the controller at its
+        // against the room above them. Counting the roots too would pin the controller at its
         // maximum on scenes whose root floor alone passes indexStarvedAt of the share (a wide view
-        // of ~1M placements), coarsening everything without shrinking the demand at all.
+        // of very many placements), coarsening everything without shrinking the demand at all.
         const r = this.lastRoots;
         const roots = r ? r.admitted[0] + r.admitted[1] + r.admitted[2] + r.rejected[0] + r.rejected[1] + r.rejected[2] : 0;
         const pressure = Math.max(demand - roots, 0) / Math.max(ceiling - roots, 1);
@@ -538,7 +566,7 @@ class MeshletView {
 
     /** @returns {number} This view's total unclamped index demand, or 0 before the first readback. */
     indexDemand() {
-        return this.lastDemand ? this.lastDemand.indices.reduce((a, b) => a + b, 0) : 0;
+        return this.lastDemand ? sumBuckets(this.lastDemand.indices) : 0;
     }
 
     /** @returns {number} Total index capacity across the buckets. */
@@ -607,8 +635,8 @@ class MeshletView {
     /**
      * Releases index capacity a view has stopped using. Without this the buffer only ever
      * ratchets to the session's high-water mark: a camera that once looked at the dense part of
-     * a scene, or a rebuild that carried a grown capacity forward, holds that allocation for
-     * good - on the jungle, 357 MB against a cut wanting 43 MB.
+     * a scene, or a rebuild that carried a grown capacity forward, would hold that allocation
+     * for good.
      *
      * @param {number[]} demand - Per-bucket demand this frame (unclamped).
      * @param {number[]} target - Per-bucket demand * growTo, the size a fresh grow would pick.
@@ -617,7 +645,7 @@ class MeshletView {
     shrinkIndexBuffer(demand, target) {
         const world = this.world;
         const total = this.indexTotal();
-        const wanted = demand.reduce((a, b) => a + b, 0);
+        const wanted = sumBuckets(demand);
         if (total <= 0 || wanted > total * this.shrinkAt) {
             this._lowFrames = 0;
             return false;
@@ -659,17 +687,19 @@ class MeshletView {
         this.readbackPool.read(this.countersBuffer, 0, MESHLET_COUNTER_U32S * BYTES_PER_WORD, this._countersData).then((data) => {
             this._countersReadBusy = false;
             if (!this.culler) return; // destroyed while in flight
-            // Only RECORD the demand here. This callback resolves at an arbitrary point in
+            // Only record the demand here. This callback resolves at an arbitrary point in
             // the frame, and swapping a buffer mid-frame is a correctness bug: the cull chain
             // may already be encoded against the old buffer while the draw reads the new,
             // never-written one - which rasterises garbage indices as stretched degenerate
             // triangles. {@link applyPendingGrowth} does the swap before anything is encoded.
             // rejected roots count as demand on the GPU, so an initially small buffer grows to
             // the full visible root set within its budget
-            const indices = [];
-            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) indices.push(data[MESHLET_COUNTER.DEMAND_BASE + b]);
-            this._pendingDemand = { indices, records: data[MESHLET_COUNTER.RECORD_DEMAND], cutQueue: data[MESHLET_COUNTER.CUT_QUEUE_END] };
-            this.lastDemand = this._pendingDemand;
+            const demand = this._demand;
+            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) demand.indices[b] = data[MESHLET_COUNTER.DEMAND_BASE + b];
+            demand.records = data[MESHLET_COUNTER.RECORD_DEMAND];
+            demand.cutQueue = data[MESHLET_COUNTER.CUT_QUEUE_END];
+            this._pendingDemand = demand;
+            this.lastDemand = demand;
             const roots = this.lastRoots;
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
                 roots.admitted[b] = data[MESHLET_COUNTER.ROOT_ADMITTED_BASE + b];
@@ -700,10 +730,10 @@ class MeshletView {
         // phase 2 records as disocclusion, poisoning the visibility bits with a false
         // working set the streamer then fetches
         let wantsGrowth = false;
-        const target = [];
+        const target = this._growTarget;
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             if (d.indices[b] > this.indexCapacity[b] * this.growAt) wantsGrowth = true;
-            target.push(Math.ceil(d.indices[b] * this.growTo));
+            target[b] = Math.ceil(d.indices[b] * this.growTo);
         }
         if (wantsGrowth) {
             this._lowFrames = 0;

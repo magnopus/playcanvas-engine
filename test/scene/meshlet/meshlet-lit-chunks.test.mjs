@@ -1,5 +1,6 @@
 import { expect } from 'chai';
 
+import { Preprocessor } from '../../../src/core/preprocessor.js';
 import { CULLFACE_BACK, CULLFACE_NONE } from '../../../src/platform/graphics/constants.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import {
@@ -170,10 +171,30 @@ describe('buildMeshletLitChunks', function () {
         expect(custom.indexOf('if (meshletUnlit())')).to.be.below(custom.indexOf('#include "outputAlphaPS"'));
     });
 
+    it('compiles the anisotropic and texture-debug paths only when their defines are set', function () {
+        const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
+        const output = buildMeshletLitChunks(textured).outputPS;
+        const plain = Preprocessor.run(source);
+        expect(plain).to.not.include('meshletTexFootprint');
+        expect(plain).to.not.include('meshletTextureAnisotropy');
+        expect(plain).to.not.include('dMeshletTexDebug');
+        expect(Preprocessor.run(output).trim()).to.equal('');
+
+        const aniso = Preprocessor.run(`#define MESHLET_ANISOTROPY\n${source}`);
+        expect(aniso).to.include('fn meshletTexFootprint');
+        expect(aniso).to.include('uniform meshletTextureAnisotropy: f32');
+        expect(aniso).to.not.include('dMeshletTexDebug');
+
+        const debug = Preprocessor.run(`#define MESHLET_TEX_DEBUG\n${source}`);
+        expect(debug).to.include('dMeshletTexDebugBase = dMeshletTexDebug;');
+        expect(debug).to.not.include('meshletTexFootprint');
+        expect(Preprocessor.run(`#define MESHLET_TEX_DEBUG\n${output}`)).to.include('gammaCorrectOutput(dMeshletTexDebugBase)');
+    });
+
     it('bounds anisotropic taps by the runtime limit and the resident footprint', function () {
         const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
         expect(source).to.include('uniform meshletTextureAnisotropy: f32');
-        expect(source).to.include('uniform.meshletTextureAnisotropy <= 1.0');
+        expect(source).to.include('#ifndef MESHLET_ANISOTROPY');
         expect(source).to.include('max(max(minor, major / uniform.meshletTextureAnisotropy), exp2(minLod))');
         expect(source).to.include('clamp(ceil(major / filterWidth), 1.0, uniform.meshletTextureAnisotropy)');
         expect(source).to.include('sampleIndex < sampleCount');

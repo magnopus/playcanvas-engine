@@ -15,7 +15,7 @@ import {
  * vertex stage pulls geometry from the page pool via the frame's record + index buffers
  * (typed buffer views, decode and page layout in meshlet-page-wgsl.js), the fragment frontend
  * reads the material record (`materialTable[row].roughness`) instead of material_* uniforms, and - when the
- * world carries streamed textures - samples the per-family resident TAIL arrays through the
+ * world carries streamed textures - samples the per-family resident tail arrays through the
  * texResidency indirection (see textures/meshlet-textures.js). Everything else - clustered
  * lights, shadows, IBL, fog, tonemapping - is the engine's own lit backend.
  *
@@ -33,7 +33,7 @@ import {
  * - UV derivatives are cached in litEngineMainStartPS (uniform control flow) because sampling
  *   happens inside data-dependent branches where derivative builtins are illegal.
  *
- * The chunk set is BUILT per world ({@link buildMeshletLitChunks}) - texture sampling, UV
+ * The chunk set is built per world ({@link buildMeshletLitChunks}) - texture sampling, UV
  * varyings and tangent support are compiled in only when the world's resources carry them.
  *
  * @ignore
@@ -101,7 +101,15 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         }
 
         fn getNormalMatrix(modelMatrix: mat4x4f) -> mat3x3f {
-            return mat3x3f(modelMatrix[0].xyz, modelMatrix[1].xyz, modelMatrix[2].xyz);
+            // the cofactor matrix: the inverse transpose up to scale, so normals stay
+            // perpendicular under non-uniform scale; the determinant's sign keeps mirrored
+            // instances facing out
+            let m0 = modelMatrix[0].xyz;
+            let m1 = modelMatrix[1].xyz;
+            let m2 = modelMatrix[2].xyz;
+            let c0 = cross(m1, m2);
+            let s = select(1.0, -1.0, dot(m0, c0) < 0.0);
+            return mat3x3f(c0 * s, cross(m2, m0) * s, cross(m0, m1) * s);
         }
     `;
 
@@ -234,9 +242,15 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     // families bind placeholders and are unreachable thanks to the minLod sentinel.
     // The virtual mip chain per texture is [fine slot levels | tail levels], with the
     // texture's sizeBias (its level offset inside the family arrays) applied: lod is
-    // computed in SOURCE-mip space, clamped to the resident range, then dispatched to the
+    // computed in source-mip space, clamped to the resident range, then dispatched to the
     // fine slot pool when the texture holds a slot and the level lies above the tail.
     const famNames = ['Srgb', 'Srgba', 'Normal', 'Linear'];
+    // texture-state debug writes compile in only for the debug view (MESHLET_TEX_DEBUG)
+    const texDebug = expr => `
+                #ifdef MESHLET_TEX_DEBUG
+                dMeshletTexDebug = ${expr};
+                #endif
+                `;
     // the WGSL processor's resource regex matches one declaration per line
     const texDecls = textures ? famNames.map(n => [
         `var meshletTail${n}: texture_2d_array<f32>;`,
@@ -251,13 +265,15 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             fn meshletSample${n}(uv: vec2f, wanted: f32, minLod: f32, sizeBias: f32, tailStart: f32, slotLayer: u32, tailLayer: i32) -> vec4f {
                 let lod = clamp(wanted, minLod, 30.0);
                 let comb = lod + sizeBias;
+                #ifdef MESHLET_TEX_DEBUG
                 // debug view: magenta tint where the surface wants a finer mip than is resident
                 let starved = select(0.0, 0.6, wanted < minLod - 0.5);
+                #endif
                 let tailFloor = max(tailStart + sizeBias - ${slotLevels}, 0.0);
                 if (slotLayer != 0xFFFFu && lod < tailStart) {
                     let fineTop = tailStart + sizeBias - 1.0;
                     let fineLod = clamp(comb, minLod + sizeBias, fineTop);
-                    dMeshletTexDebug = mix(mix(vec3f(0.2, 1.0, 0.2), vec3f(0.0, 0.3, 0.0), comb / max(fineTop + 1.0, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
+                    ${texDebug('mix(mix(vec3f(0.2, 1.0, 0.2), vec3f(0.0, 0.3, 0.0), comb / max(fineTop + 1.0, 1.0)), vec3f(1.0, 0.0, 1.0), starved)')}
                     let fineColor = textureSampleLevel(meshletFine${n}, meshletFine${n}Sampler, uv, i32(slotLayer), fineLod);
                     let tailWeight = clamp(lod - (tailStart - 1.0), 0.0, 1.0);
                     // MESHLET_MATERIAL_LITE: no second sample across the fine/tail band
@@ -270,7 +286,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
                     return fineColor;
                 }
                 let tailLod = clamp(comb - ${slotLevels}, tailFloor, ${tailMaxLod});
-                dMeshletTexDebug = mix(mix(vec3f(0.2, 0.4, 1.0), vec3f(0.0, 0.0, 0.25), tailLod / max(${tailMaxLod}, 1.0)), vec3f(1.0, 0.0, 1.0), starved);
+                ${texDebug(`mix(mix(vec3f(0.2, 0.4, 1.0), vec3f(0.0, 0.0, 0.25), tailLod / max(${tailMaxLod}, 1.0)), vec3f(1.0, 0.0, 1.0), starved)`)}
                 return textureSampleLevel(meshletTail${n}, meshletTail${n}Sampler, uv, tailLayer, tailLod);
             }`;
     }).join('') : '';
@@ -279,9 +295,9 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             if (family == ${family}u) {
                 let srcSize = ${(familySizes[family] ?? 4).toFixed(1)} / exp2(sizeBias);
                 let isotropicLod = meshletTexLod(ddx, ddy, srcSize);
-                if (uniform.meshletTextureAnisotropy <= 1.0) {
-                    return meshletSample${name}(uv, isotropicLod, minLod, sizeBias, tailStart, slotLayer, tailLayer);
-                }
+                #ifndef MESHLET_ANISOTROPY
+                return meshletSample${name}(uv, isotropicLod, minLod, sizeBias, tailStart, slotLayer, tailLayer);
+                #else
                 let footprint = meshletTexFootprint(ddx, ddy);
                 let major = footprint.w * srcSize;
                 let minor = footprint.z * srcSize;
@@ -298,6 +314,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
                     color += meshletSample${name}(sampleUv, wanted, minLod, sizeBias, tailStart, slotLayer, tailLayer);
                 }
                 return color / f32(sampleCount);
+                #endif
             }`).join('') : '';
 
     const litEngineDeclarationPS = /* wgsl */ `
@@ -338,12 +355,17 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
 
         // texture-state debug view (MESHLET_COLOR_MODE.TEXTURES): every slot sample records
         // what it sampled, getAlbedo keeps the base-colour slot's record, outputPS shows it
-        uniform meshletTexDebug: u32;
-        uniform meshletTextureAnisotropy: f32;
+        #ifdef MESHLET_TEX_DEBUG
         var<private> dMeshletTexDebug: vec3f;
         var<private> dMeshletTexDebugBase: vec3f;
+        #endif
 
         ${texFunctions}
+
+        // software anisotropy: several isotropic samples along the footprint's major axis
+        // (MESHLET_ANISOTROPY, set while textureAnisotropy is above 1)
+        #ifdef MESHLET_ANISOTROPY
+        uniform meshletTextureAnisotropy: f32;
 
         fn meshletTexFootprint(ddx: vec2f, ddy: vec2f) -> vec4f {
             let covariance = vec3f(ddx.x * ddx.x + ddy.x * ddy.x,
@@ -364,6 +386,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             }
             return vec4f(axis, sqrt(max(minorSquared, 0.0)), sqrt(majorSquared));
         }
+        #endif
 
         fn meshletTexLod(ddx: vec2f, ddy: vec2f, size: f32) -> f32 {
             let dx = ddx * size;
@@ -373,7 +396,11 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
 
         // samples a texture whose residency entry the caller already has
         fn meshletSampleResident(resident: MeshletTexResidency, uv: vec2f, ddx: vec2f, ddy: vec2f, fallback: vec4f) -> vec4f {
-            if (meshletTexMinLod(resident) == ${MESHLET_TEX_NO_MINLOD}u) { dMeshletTexDebug = vec3f(1.0, 0.1, 0.1); return fallback; }  // nothing resident yet
+            // nothing resident yet
+            if (meshletTexMinLod(resident) == ${MESHLET_TEX_NO_MINLOD}u) {
+                ${texDebug('vec3f(1.0, 0.1, 0.1)')}
+                return fallback;
+            }
             let minLod = f32(meshletTexMinLod(resident));
             let family = meshletTexFamily(resident);
             let sizeBias = f32(meshletTexSizeBias(resident));
@@ -382,7 +409,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             let tailLayer = i32(meshletTexTailLayer(resident));
 
             ${texDispatch}
-            dMeshletTexDebug = vec3f(0.6, 0.6, 0.0);
+            ${texDebug('vec3f(0.6, 0.6, 0.0)')}
             return fallback;
         }
 
@@ -413,7 +440,10 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
 
         fn meshletSampleSlot(slot: u32, fallback: vec4f) -> vec4f {
             let desc = meshletSlotDesc[vMeshletMatRow * ${MATERIAL_TEXTURE_SLOTS}u + slot];
-            if ((desc.x & 0xFFFFu) == ${MATERIAL_SLOT_ABSENT}u) { dMeshletTexDebug = vec3f(0.15); return fallback; }
+            if ((desc.x & 0xFFFFu) == ${MATERIAL_SLOT_ABSENT}u) {
+                ${texDebug('vec3f(0.15)')}
+                return fallback;
+            }
             let uv = meshletSlotUv(slot, desc.x);
             return meshletSampleResident(MeshletTexResidency(desc.y, desc.z), uv[0], uv[1], uv[2], fallback);
         }
@@ -427,7 +457,9 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         fn meshletBaseTex() -> vec4f {
             if (!dMeshletBaseTexReady) {
                 dMeshletBaseTex = meshletSampleSlot(${MATERIAL_SLOT.BASE_COLOR}u, vec4f(1.0));
+                #ifdef MESHLET_TEX_DEBUG
                 dMeshletTexDebugBase = dMeshletTexDebug;
+                #endif
                 dMeshletBaseTexReady = true;
             }
             return dMeshletBaseTex;
@@ -446,7 +478,10 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         ${lightmapped ? /* wgsl */ `
         ${meshletTexResidencyWGSL}
         fn meshletSampleTexture(texIndex: u32, uv: vec2f, ddx: vec2f, ddy: vec2f, fallback: vec4f) -> vec4f {
-            if (texIndex == ${MATERIAL_SLOT_ABSENT}u) { dMeshletTexDebug = vec3f(0.15); return fallback; }
+            if (texIndex == ${MATERIAL_SLOT_ABSENT}u) {
+                ${texDebug('vec3f(0.15)')}
+                return fallback;
+            }
             return meshletSampleResident(texResidency[texIndex], uv, ddx, ddy, fallback);
         }
 
@@ -516,7 +551,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         }
     `;
 
-    // ORM: r occlusion (unused for now), g roughness, b metalness
+    // ORM: r occlusion (unused), g roughness, b metalness
     const metalnessPS = /* wgsl */ `
         fn getMetalness() {
             dMetalness = ${material}.metallic * ${sample(MATERIAL_SLOT.ORM, 'vec4f(1.0)')}.b;
@@ -583,9 +618,9 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
 
     // texture-state debug view: the base-colour sample's state replaces the shaded colour
     const outputPS = textures ? /* wgsl */ `
-        if (uniform.meshletTexDebug != 0u) {
-            output.color = vec4f(gammaCorrectOutput(dMeshletTexDebugBase), output.color.a);
-        }
+        #ifdef MESHLET_TEX_DEBUG
+        output.color = vec4f(gammaCorrectOutput(dMeshletTexDebugBase), output.color.a);
+        #endif
     ` : null;
 
     const chunks = {
@@ -626,6 +661,8 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         output.color = vec4f(meshletUnlitRgb, output.color.a);
     }`);
     if (lightmapped) {
+        Debug.assert(backend.includes('#ifdef LIT_LIGHTMAP') && backend.includes('#ifdef AREA_LIGHTS'),
+            'meshlet lit chunks: the forward backend lost its LIT_LIGHTMAP / AREA_LIGHTS hooks, baked lightmaps will not apply');
         backend = backend.replace('#ifdef LIT_LIGHTMAP', `
     if (meshletHasLightmap()) {
         dDiffuseLight = meshletLightmapIrradiance();

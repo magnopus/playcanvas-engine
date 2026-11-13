@@ -69,6 +69,13 @@ class RenderPassMeshletDraw extends RenderPass {
     layerRenderSteps = [{ layer: null, lightClusters: null }];
 
     /**
+     * The options handed to the forward layer render, reused every frame.
+     *
+     * @private
+     */
+    _forwardOptions = { meshInstances: null, lightLayer: null, lightClusters: undefined };
+
+    /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {ForwardRenderer} renderer - The forward renderer.
      * @param {string} name - Pass name for debugging.
@@ -166,11 +173,11 @@ class RenderPassMeshletDraw extends RenderPass {
         const step = this.layerRenderSteps[0];
         // Match the regular forward passes, including the camera's material debug views.
         const shaderPass = camera.shaderPassInfo?.index ?? SHADER_FORWARD;
-        this.renderer.renderForwardLayer(camera, this.renderTarget, null, false, shaderPass, {
-            meshInstances: this.meshInstances,
-            lightLayer: step.layer,
-            lightClusters: step.lightClusters ?? undefined
-        });
+        const options = this._forwardOptions;
+        options.meshInstances = this.meshInstances;
+        options.lightLayer = step.layer;
+        options.lightClusters = step.lightClusters ?? undefined;
+        this.renderer.renderForwardLayer(camera, this.renderTarget, null, false, shaderPass, options);
 
         if (this.gammaCorrection !== undefined) cameraComponent.gammaCorrection = originalGammaCorrection;
         if (this.toneMapping !== undefined) cameraComponent.toneMapping = originalToneMapping;

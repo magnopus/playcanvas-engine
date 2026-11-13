@@ -624,6 +624,24 @@ class ShadowRenderer {
         return light.enabled && light.castShadows && light.shadowUpdateMode !== SHADOWUPDATE_NONE && light.visibleThisFrame;
     }
 
+    /**
+     * Whether a directional light's cascade renders this frame for a camera: decided by the
+     * light's cascade update schedule when it has one, otherwise by its shadow update overrides.
+     *
+     * @param {Light} light - The directional light.
+     * @param {Camera} camera - The camera.
+     * @param {number} face - The cascade index.
+     * @param {number[]|null} [overrides] - The light's shadow update overrides.
+     * @returns {boolean} True when the cascade renders.
+     * @ignore
+     */
+    isCascadeRendering(light, camera, face, overrides = light.shadowUpdateOverrides) {
+        if (light.cascadeUpdateIntervals) {
+            return light.getRenderData(camera, face).cascadeRefresh;
+        }
+        return overrides?.[face] !== SHADOWUPDATE_NONE;
+    }
+
     getLightRenderData(light, camera, face) {
         // directional shadows are per camera, so get appropriate render data
         return light.getRenderData(light._type === LIGHTTYPE_DIRECTIONAL ? camera : null, face);

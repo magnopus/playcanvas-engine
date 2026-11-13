@@ -10,7 +10,7 @@ import { MeshletPageFetcher } from './meshlet-page-fetcher.js';
  */
 
 /**
- * Concurrent fetch runs. A soft cap: it gates ENTRY to the pump, which then issues every run the
+ * Concurrent fetch runs. A soft cap: it gates entry to the pump, which then issues every run the
  * queued pages coalesce into, so a burst can briefly exceed it; the next readback (one to two
  * frames) is when a backlog gets another look.
  */
@@ -334,11 +334,21 @@ class MeshletResidency {
     }
 
     _streamOf(globalPage) {
-        // streams are ordered by pageBase
-        for (let i = this._streams.length - 1; i >= 0; i--) {
-            if (globalPage >= this._streams[i].pageBase) return this._streams[i];
+        // streams are ordered by pageBase: the last one starting at or before the page
+        const streams = this._streams;
+        let lo = 0;
+        let hi = streams.length - 1;
+        let found = -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (streams[mid].pageBase <= globalPage) {
+                found = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
         }
-        return null;
+        return found >= 0 ? streams[found] : null;
     }
 
     /**
@@ -507,7 +517,7 @@ class MeshletResidency {
             return this.freeSlots.pop();
         }
         // Evict the least recently wanted non-pinned, non-protected slot. A queue built once is
-        // consumed over many installs (rescanning every slot per install made a full pool cost
+        // consumed over many installs (rescanning every slot per install would cost a full pool
         // milliseconds per streamed page); entries made stale since it was built are skipped.
         let best = -1;
         for (let rebuilt = false; ;) {
@@ -617,8 +627,8 @@ class MeshletResidency {
 
     _flushResidency() {
         if (this._residencyDirty) {
-            // only the span that changed: the table is a word per page of the whole world
-            // (~0.5 MB on Caldera), and most frames install a few dozen pages
+            // only the span that changed: the table is a word per page of the whole world, and
+            // most frames install a few dozen pages
             const first = this._dirtyMin;
             this.world.residencyBuffer.write(first * 4, this.world.residency, first, this._dirtyMax - first + 1);
             this._residencyDirty = false;
@@ -758,7 +768,7 @@ class MeshletResidency {
 
         // kick a request-marks readback when the previous one completed. The copy is recorded
         // on the current command encoder ahead of this frame's cull dispatch, so it captures
-        // LAST frame's marks; the buffer is then cleared in-encoder for the coming frame.
+        // last frame's marks; the buffer is then cleared in-encoder for the coming frame.
         if (!this._readbackBusy) {
             this._readbackBusy = true;
             // marks recorded before the roots landed say nothing about convergence: the GPU

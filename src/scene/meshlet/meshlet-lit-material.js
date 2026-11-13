@@ -17,7 +17,7 @@ import { MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE } from './constants.js';
  * One material per draw bucket - they differ only in the two pieces of pipeline state that
  * cannot vary within an indirect draw: backface culling, and whether the alpha-test discard is
  * compiled in. Keeping the discard out of the opaque buckets is what preserves early-Z, and
- * that is worth a bucket of its own: on the sample assets it is ~30% of the meshlet draw time.
+ * that is worth a bucket of its own: losing early-Z costs a large share of the meshlet draw time.
  *
  * @param {number} bucket - MESHLET_BUCKET_OPAQUE / _OPAQUE_TWO_SIDED / _MASKED.
  * @param {object} chunks - The chunk override map from buildMeshletLitChunks (shared per world).

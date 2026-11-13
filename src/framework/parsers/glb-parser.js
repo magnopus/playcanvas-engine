@@ -1189,8 +1189,8 @@ const createNodes = (gltf, options, nodeInstancingMap) => {
  * Whether the document is a pure streamed-meshlet bake: every mesh primitive is a meshlet
  * placeholder, and nothing (skins, animations, lights, cameras) needs the node hierarchy. Such a
  * document renders only through its meshlets, which carry their own placements, so building a
- * GraphNode per glTF node would only hold heap - 184k nodes for one Caldera district, about 1.5M
- * (several GB) for the island.
+ * GraphNode per glTF node would only hold heap (large scattered bakes carry millions of
+ * placement nodes).
  *
  * @param {object} gltf - The glTF document.
  * @returns {boolean} True when the node hierarchy can be skipped.

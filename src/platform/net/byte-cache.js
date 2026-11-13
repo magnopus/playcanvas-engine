@@ -116,7 +116,7 @@ class ByteCacheEntry {
  * page's lifetime. If the store fails to open, the cache disables itself and every lookup misses.
  *
  * Attach a cache to {@link ResourceLoader#byteCache} to cache asset downloads, and to
- * {@link MeshletDirector#byteCache} to cache streamed meshlet geometry and textures. One cache may
+ * {@link MeshletComponentSystem#byteCache} to cache streamed meshlet geometry and textures. One cache may
  * serve both.
  *
  * @category Asset
@@ -621,11 +621,13 @@ class ByteCache {
     }
 
     /**
-     * @param {any} err - The error a store write rejected with.
+     * @param {unknown} err - The error a store write rejected with.
      * @private
      */
     _onWriteError(err) {
-        if (err?.name === 'QuotaExceededError') {
+        // a DOMException, or whatever a custom store rejects with
+        const name = typeof err === 'object' && err !== null ? /** @type {{ name?: unknown }} */ (err).name : undefined;
+        if (name === 'QuotaExceededError') {
             // the quota is below the configured limit: settle under what actually fit
             this.maxBytes = Math.max(this.chunkSize, Math.floor(this._totalBytes * EVICT_TARGET));
             Debug.warnOnce(`ByteCache: storage quota reached, limiting the cache to ${this.maxBytes} bytes`);

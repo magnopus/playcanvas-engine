@@ -39,7 +39,7 @@ const RECORD_RELEASE_DELAY_MS = 5000;
  * Adding or removing meshlet components (or changing their assets) rebuilds the meshlet world
  * at the start of a following frame - once the changes go quiet for {@link rebuildQuietMs}, or
  * after {@link rebuildMaxWaitMs} at the latest, so a scene whose assets arrive over a few
- * seconds gets a handful of rebuilds rather than one per asset - and the rebuild RETAINS
+ * seconds gets a handful of rebuilds rather than one per asset - and the rebuild retains
  * streaming state for resources that persist across it, so unchanged assets do not re-download. Components sharing
  * one asset are deduplicated into a single set of streamed pages. Enabling/disabling a
  * component (or its entity) and entity transform changes are cheap per-frame updates with no
@@ -68,18 +68,34 @@ class MeshletComponentSystem extends ComponentSystem {
     static EVENT_PLAYABLE = 'playable';
 
     /**
-     * The meshlet pipeline - one director per world - or null on non-WebGPU devices.
+     * The meshlet pipeline, created on first use (see {@link group}).
+     *
+     * @type {MeshletDirectorGroup|null}
+     * @private
+     */
+    _group = null;
+
+    /** @private */
+    _initialized = false;
+
+    /**
+     * The meshlet pipeline - one director per world - or null on non-WebGPU devices. Created on
+     * first use: the first component added, or the first access to a pipeline setting, so an
+     * application without meshlets pays nothing for it.
      *
      * @type {MeshletDirectorGroup|null}
      * @ignore
      */
-    group = null;
+    get group() {
+        return this._initialized ? this._group : this._initialize();
+    }
 
     /**
      * The first world's meshlet director, or null on non-WebGPU devices. A scene within
      * {@link maxWorldMeshlets} has only this one; see {@link directors} for all of them.
      *
      * @type {MeshletDirector|null}
+     * @ignore
      */
     get director() {
         return this.group?.directors[0] ?? null;
@@ -89,6 +105,7 @@ class MeshletComponentSystem extends ComponentSystem {
      * Every world's meshlet director, empty on non-WebGPU devices.
      *
      * @type {MeshletDirector[]}
+     * @ignore
      */
     get directors() {
         return this.group?.directors ?? [];
@@ -225,21 +242,33 @@ class MeshletComponentSystem extends ComponentSystem {
         this.id = 'meshlet';
         this.ComponentType = MeshletComponent;
 
+        this.on('beforeremove', this.onBeforeRemove, this);
+    }
+
+    /**
+     * Creates the meshlet pipeline (WebGPU only) and starts the per-frame world sync.
+     *
+     * @returns {MeshletDirectorGroup|null} The pipeline, or null on non-WebGPU devices.
+     * @private
+     */
+    _initialize() {
+        this._initialized = true;
+        const app = this.app;
         if (app.graphicsDevice.isWebGPU) {
-            this.group = new MeshletDirectorGroup(app.graphicsDevice);
-            this._applyWorldSettings(this.group.directors[0].world, this._poolBytes, this._texturePoolBytes);
-            this.group.bindRenderer(app.renderer);
+            const group = new MeshletDirectorGroup(app.graphicsDevice);
+            this._applyWorldSettings(group.directors[0].world, this._poolBytes, this._texturePoolBytes);
+            group.bindRenderer(app.renderer);
             // streamed textures are KTX2; the scene layer cannot import the Basis handler, so
             // the transcoder is injected here (basisInitialize() decides the worker options)
-            this.group.transcode = basisTranscode;
+            group.transcode = basisTranscode;
+            this._group = group;
+
+            // rebuild the world and sync entity transforms after the app update, before rendering
+            app.on('framerender', this._onFrameRender, this);
         } else {
             Debug.warnOnce('MeshletComponentSystem: meshlet rendering requires WebGPU; meshlet components will not render.');
         }
-
-        this.on('beforeremove', this.onBeforeRemove, this);
-
-        // rebuild the world and sync entity transforms after the app update, before rendering
-        this.app.on('framerender', this._onFrameRender, this);
+        return this._group;
     }
 
     /**
@@ -253,7 +282,7 @@ class MeshletComponentSystem extends ComponentSystem {
     set poolBytes(value) {
         if (this._poolBytes !== value) {
             this._poolBytes = value;
-            if (this.group) this._markDirty();
+            if (this._group) this._markDirty();
         }
     }
 
@@ -272,7 +301,7 @@ class MeshletComponentSystem extends ComponentSystem {
     set texturePoolBytes(value) {
         if (this._texturePoolBytes !== value) {
             this._texturePoolBytes = value;
-            if (this.group) this._markDirty();
+            if (this._group) this._markDirty();
         }
     }
 
@@ -294,7 +323,7 @@ class MeshletComponentSystem extends ComponentSystem {
         value = Math.max(1, Math.floor(value));
         if (this._maxWorldMeshlets !== value) {
             this._maxWorldMeshlets = value;
-            if (this.group) this._markDirty();
+            if (this._group) this._markDirty();
         }
     }
 
@@ -314,11 +343,14 @@ class MeshletComponentSystem extends ComponentSystem {
      */
     set textureAnisotropy(value) {
         this._textureAnisotropy = value;
-        for (const director of this.directors) director.world.textureAnisotropy = value;
+        const directors = this._group?.directors;
+        if (directors) {
+            for (const director of directors) director.world.textureAnisotropy = value;
+        }
     }
 
     get textureAnisotropy() {
-        return this.director?.world.textureAnisotropy ?? 1;
+        return this._group?.directors[0].world.textureAnisotropy ?? 1;
     }
 
     /**
@@ -335,7 +367,10 @@ class MeshletComponentSystem extends ComponentSystem {
      */
     set liteMaterials(value) {
         this._liteMaterials = !!value;
-        for (const director of this.directors) director.world.liteMaterials = this._liteMaterials;
+        const directors = this._group?.directors;
+        if (directors) {
+            for (const director of directors) director.world.liteMaterials = this._liteMaterials;
+        }
     }
 
     get liteMaterials() {
@@ -353,7 +388,7 @@ class MeshletComponentSystem extends ComponentSystem {
     set maxFineTextureSize(value) {
         if (this._maxFineTextureSize !== value) {
             this._maxFineTextureSize = value;
-            if (this.group) this._markDirty();
+            if (this._group) this._markDirty();
         }
     }
 
@@ -372,7 +407,7 @@ class MeshletComponentSystem extends ComponentSystem {
     set maxDrawIndices(value) {
         if (this._maxDrawIndices !== value) {
             this._maxDrawIndices = value;
-            if (this.group) this._markDirty();
+            if (this._group) this._markDirty();
         }
     }
 
@@ -391,12 +426,12 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get maxConcurrentFetches() {
-        return this.group?.maxConcurrentFetches ?? 16;
+        return this._group?.maxConcurrentFetches ?? 16;
     }
 
     /**
      * Persistent cache for streamed geometry pages and texture regions, or null for none. See
-     * {@link MeshletDirector#byteCache}. The same cache can be shared with
+     * `MeshletDirector#byteCache`. The same cache can be shared with
      * {@link ResourceLoader#byteCache}.
      *
      * @type {ByteCache|null}
@@ -406,7 +441,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get byteCache() {
-        return this.group?.byteCache ?? null;
+        return this._group?.byteCache ?? null;
     }
 
     /**
@@ -420,7 +455,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get dagPixelThreshold() {
-        return this.group?.dagPixelThreshold ?? 2;
+        return this._group?.dagPixelThreshold ?? 2;
     }
 
     /**
@@ -434,7 +469,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get rootHysteresis() {
-        return this.group?.rootHysteresis ?? 0.75;
+        return this._group?.rootHysteresis ?? 0.75;
     }
 
     /**
@@ -453,7 +488,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get bucketThresholdScales() {
-        return this.group?.bucketThresholdScales ?? [4, 1, 1];
+        return this._group?.bucketThresholdScales ?? [4, 1, 1];
     }
 
     /**
@@ -467,7 +502,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get bucketRootMinScales() {
-        return this.group?.bucketRootMinScales ?? [1, 1, 1];
+        return this._group?.bucketRootMinScales ?? [1, 1, 1];
     }
 
     /**
@@ -482,7 +517,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get occlusion() {
-        return this.group?.occlusionEnabled ?? false;
+        return this._group?.occlusionEnabled ?? false;
     }
 
     /**
@@ -496,7 +531,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get camera() {
-        return this.group?.cameraComponent ?? null;
+        return this._group?.cameraComponent ?? null;
     }
 
     /**
@@ -512,7 +547,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get cameras() {
-        return this.group?.cameras ?? [];
+        return this._group?.cameras ?? [];
     }
 
     /**
@@ -527,7 +562,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get shadows() {
-        return this.group?.shadowsEnabled ?? false;
+        return this._group?.shadowsEnabled ?? false;
     }
 
     /**
@@ -541,7 +576,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get shadowThresholdScale() {
-        return this.group?.shadowThresholdScale ?? 4;
+        return this._group?.shadowThresholdScale ?? 4;
     }
 
     /**
@@ -558,7 +593,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get rootMinPixels() {
-        return this.group?.rootMinPixels ?? 3;
+        return this._group?.rootMinPixels ?? 3;
     }
 
     /**
@@ -574,7 +609,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get impostorPixels() {
-        return this.group?.impostorPixels ?? 0;
+        return this._group?.impostorPixels ?? 0;
     }
 
     /**
@@ -582,13 +617,14 @@ class MeshletComponentSystem extends ComponentSystem {
      * loaded assets. Set it before the assets load. See `MeshletImpostors`.
      *
      * @type {import('../../../scene/meshlet/meshlet-impostors.js').MeshletImpostors|null}
+     * @ignore
      */
     set impostors(value) {
         if (this.group) this.group.impostors = value;
     }
 
     get impostors() {
-        return this.group?.impostors ?? null;
+        return this._group?.impostors ?? null;
     }
 
     /**
@@ -605,7 +641,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get cssPixels() {
-        return this.group?.cssPixels ?? true;
+        return this._group?.cssPixels ?? true;
     }
 
     /**
@@ -621,10 +657,12 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get shadowRootMinPixels() {
-        return this.group?.shadowRootMinPixels ?? 2;
+        return this._group?.shadowRootMinPixels ?? 2;
     }
 
     initializeComponentData(component, data, properties) {
+        if (!this._initialized) this._initialize();
+
         for (let i = 0; i < _properties.length; i++) {
             if (data.hasOwnProperty(_properties[i])) {
                 component[_properties[i]] = data[_properties[i]];
@@ -691,7 +729,7 @@ class MeshletComponentSystem extends ComponentSystem {
      * Whether the meshlet content can be shown: no component is waiting for its asset to load,
      * no world rebuild is pending, and the streamed geometry and texture tails are resident down
      * to the playable floor - the coarsest LOD free of sloppy simplification (see
-     * {@link MeshletDirector#playable}). True when there is no meshlet content, or no WebGPU.
+     * `MeshletDirector#playable`). True when there is no meshlet content, or no WebGPU.
      *
      * @type {boolean}
      */
@@ -705,7 +743,7 @@ class MeshletComponentSystem extends ComponentSystem {
      * @private
      */
     _isPlayable(scanAssets) {
-        const group = this.group;
+        const group = this._group;
         if (!group) return true;
         if (this._dirty) return false;
         // a world with nothing in it is never finalized, and has nothing to stream
@@ -732,7 +770,7 @@ class MeshletComponentSystem extends ComponentSystem {
     /**
      * Load as fast as possible until {@link playable}, then stream at the smooth budgeted pace.
      * Frames may stutter while fast-loading, so cover it with a loading screen; set false to
-     * always stream smoothly. Defaults to true. See {@link MeshletDirector#fastLoad}.
+     * always stream smoothly. Defaults to true. See `MeshletDirector#fastLoad`.
      *
      * @type {boolean}
      */
@@ -741,7 +779,7 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     get fastLoad() {
-        return this.group?.fastLoad ?? true;
+        return this._group?.fastLoad ?? true;
     }
 
     /**
@@ -750,8 +788,8 @@ class MeshletComponentSystem extends ComponentSystem {
      * @ignore
      */
     _componentStatus(component) {
-        if (!this.group) return { playable: true, failed: false, progress: 1, totalBytes: 0, loadedBytes: 0 };
-        const director = this.group.directors[component._partition];
+        if (!this._group) return { playable: true, failed: false, progress: 1, totalBytes: 0, loadedBytes: 0 };
+        const director = this._group.directors[component._partition];
         const resource = component._effectiveResource;
         // not placed yet: the asset is loading, or the rebuild that adds it has not run
         if (!resource || !director || component._placementIndex < 0 || component._placedResource !== resource) {
@@ -817,18 +855,18 @@ class MeshletComponentSystem extends ComponentSystem {
      * Rebuilds the world now if changes are pending, regardless of the quiet window.
      */
     flushRebuild() {
-        if (this.group && this._dirty) this._rebuild();
+        if (this._group && this._dirty) this._rebuild();
     }
 
     /** @private */
     _onFrameRender() {
-        if (!this.group) return;
+        if (!this._group) return;
         if (this._dirty) {
             const now = performance.now();
             const quiet = now - this._dirtyLast >= this._rebuildQuietMs;
             const overdue = now - this._dirtySince >= this._rebuildMaxWaitMs;
             // a world with nothing built yet has nothing to show either way: build at once
-            const built = this.group.directors.some(d => d.world.finalized);
+            const built = this._group.directors.some(d => d.world.finalized);
             const waiting = built && this.deferRebuildWhileLoading && this._hasPendingAssets();
             if (!built || (!waiting && (quiet || overdue))) {
                 this._rebuild();
@@ -850,12 +888,15 @@ class MeshletComponentSystem extends ComponentSystem {
 
     /** @private */
     _rebuild() {
-        // group components by (resource, baseUrl): each unique resource is added ONCE, with a
+        // group components by (resource, baseUrl): each unique resource is added once, with a
         // merged instance list - N components share one set of pages, records and textures.
         // Disabled components are included (hidden via the per-instance hide bit) so a later
         // enable is a buffer write, not a rebuild.
         /** @type {Array<{ resource: object, baseUrl: string, fetchOptions: object, components: MeshletComponent[] }>} */
         const groups = [];
+        // resource -> baseUrl -> group
+        /** @type {Map<object, Map<string, object>>} */
+        const groupIndex = new Map();
         for (const guid in this.store) {
             const component = this.store[guid].entity.meshlet;
             if (!component) continue;
@@ -867,9 +908,15 @@ class MeshletComponentSystem extends ComponentSystem {
             }
             const resource = component._effectiveResource;
             const baseUrl = component._effectiveBaseUrl;
-            let group = groups.find(g => g.resource === resource && g.baseUrl === baseUrl);
+            let byUrl = groupIndex.get(resource);
+            if (!byUrl) {
+                byUrl = new Map();
+                groupIndex.set(resource, byUrl);
+            }
+            let group = byUrl.get(baseUrl);
             if (!group) {
                 group = { resource, baseUrl, fetchOptions: component._effectiveFetchOptions, components: [] };
+                byUrl.set(baseUrl, group);
                 groups.push(group);
             }
             group.components.push(component);
@@ -910,7 +957,7 @@ class MeshletComponentSystem extends ComponentSystem {
                 Math.floor(this._texturePoolBytes * partition.texturedMeshlets / Math.max(totalTextured, 1)) :
                 this._texturePoolBytes;
             const state = { groups: partition.groups.map(g => ({ ...g, components: g.components.slice() })), poolBytes, texturePoolBytes, settings: this._worldSettingsKey() };
-            const director = this.group.directors[pi];
+            const director = this._group.directors[pi];
             return { partition, state, keep: !!director && this._canKeepPartition(previous[pi], state, director) };
         });
         let restoring = false;
@@ -937,13 +984,13 @@ class MeshletComponentSystem extends ComponentSystem {
         const placed = new Set();
         const states = [];
         let rebuilt = 0;
-        this.group.resize(partitions.length);
+        this._group.resize(partitions.length);
         for (let pi = 0; pi < partitions.length; pi++) {
             // budgets are divided by meshlet count: the fixed per-meshlet tables dominate a
             // world's cost, and its page count follows its meshlets
             const { partition, state, keep } = plans[pi];
             const { poolBytes, texturePoolBytes } = state;
-            const director = this.group.directors[pi];
+            const director = this._group.directors[pi];
             if (keep) {
                 // unchanged content and budget: the world, its streaming and its placements stay
                 states.push(previous[pi]);
@@ -974,7 +1021,7 @@ class MeshletComponentSystem extends ComponentSystem {
                 component._placedResource = null;
             }
         }
-        this.group.assignInstanceOffsets();
+        this._group.assignInstanceOffsets();
         if (partitions.length > 1) {
             Debug.log(`MeshletComponentSystem: ${totalMeshlets} meshlets in ${partitions.length} worlds (limit ${limit} each), ${rebuilt} rebuilt.`);
         }
@@ -1084,7 +1131,9 @@ class MeshletComponentSystem extends ComponentSystem {
      * @private
      */
     _worldMeshletLimit() {
-        const limits = /** @type {any} */ (this.app.graphicsDevice).limits ?? {};
+        // WebGPU devices expose their adapter limits; others have none to clamp to
+        const device = /** @type {{ limits?: { maxBufferSize?: number, maxStorageBufferBindingSize?: number } }} */ (/** @type {unknown} */ (this.app.graphicsDevice));
+        const limits = device.limits ?? {};
         const bytes = Math.min(
             limits.maxBufferSize ?? Number.MAX_SAFE_INTEGER,
             limits.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER
@@ -1157,7 +1206,7 @@ class MeshletComponentSystem extends ComponentSystem {
 
     /** @private */
     _syncTransforms() {
-        const directors = this.group.directors;
+        const directors = this._group.directors;
         if (!directors.some(d => d.world.finalized)) return;
 
         const transforms = this._transformQueue;
@@ -1201,8 +1250,8 @@ class MeshletComponentSystem extends ComponentSystem {
     destroy() {
         super.destroy();
         this.app.off('framerender', this._onFrameRender, this);
-        this.group?.destroy();
-        this.group = null;
+        this._group?.destroy();
+        this._group = null;
     }
 }
 

@@ -23,15 +23,17 @@ class RenderPassShadowDirectional extends RenderPass {
         const { light, camera, shadowRenderer, allCascadesRendering } = this;
         const faceCount = light.numShadowFaces;
         const shadowUpdateOverrides = light.shadowUpdateOverrides;
+        // a cascade update schedule decides per camera and leaves the overrides alone
+        const scheduled = !!light.cascadeUpdateIntervals;
 
         // render all faces
         for (let face = 0; face < faceCount; face++) {
 
-            if (shadowUpdateOverrides?.[face] !== SHADOWUPDATE_NONE) {
+            if (shadowRenderer.isCascadeRendering(light, camera, face, shadowUpdateOverrides)) {
                 shadowRenderer.renderFace(light, camera, face, !allCascadesRendering);
             }
 
-            if (shadowUpdateOverrides?.[face] === SHADOWUPDATE_THISFRAME) {
+            if (!scheduled && shadowUpdateOverrides?.[face] === SHADOWUPDATE_THISFRAME) {
                 shadowUpdateOverrides[face] = SHADOWUPDATE_NONE;
             }
         }

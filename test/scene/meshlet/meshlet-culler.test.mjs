@@ -150,6 +150,7 @@ describe('MeshletCuller', function () {
         expect(culler.rootClassify.getParameter('rootList')).to.equal(view.workItemsBuffer);
         expect(culler.rootArgs.getParameter('counterIndex')).to.equal(MESHLET_COUNTER.ROOT_CANDIDATES);
 
+        device.gpuProfiler = { enabled: true, destroy() {} };
         culler.beginFrame(planes, camera, 640, viewProj, null);
         expect(log.dispatches[0].name).to.equal('MeshletCellCull');
         expect(log.dispatches[0].computes).to.deep.equal(['MeshletcellCull', 'MeshletdispatchArgs']);
@@ -255,9 +256,37 @@ describe('MeshletCuller', function () {
         culler.destroy();
     });
 
+    it('dispatches the whole phase-1 chain in one compute pass when the GPU profiler is off', function () {
+        const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
+        culler.passSuffix = 'Shadow0';
+        culler.beginFrame(planes, camera, 640, viewProj, null);
+        expect(log.dispatches.map(d => d.name)).to.deep.equal(['MeshletCullShadow0']);
+        expect(log.dispatches[0].computes).to.deep.equal([
+            'MeshletcellCull', 'MeshletdispatchArgs',
+            'MeshletrootClassify', 'MeshletdispatchArgs', 'MeshletrootBandArgs', 'MeshletrootScatter',
+            ...Array.from({ length: MESHLET_ROOT_BANDS }, (_, band) => `MeshletRootAdmit${band}`),
+            'MeshletcutQueueArgs', 'MeshletCutQueue0',
+            'MeshletinstanceCull', 'MeshletdispatchArgs',
+            'MeshletcompactMeshlets', 'MeshletdispatchArgs',
+            'MeshletmeshletCull', 'MeshletfinalizeArgs',
+            'MeshletindexWrite'
+        ]);
+        culler.destroy();
+    });
+
+    it('destroys every compute it owns, keeping the shared shaders', function () {
+        const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
+        const computes = [culler.cellCull, culler.rootClassify, ...culler.rootAdmit, culler.queueStages[0].args,
+            culler.queueStages[0].compute, culler.meshletCull, culler.meshletCullPhase2, culler.indexWritePhase2, culler.resetPhase2];
+        culler.destroy();
+        for (const compute of computes) expect(compute.impl).to.equal(null);
+        expect(shaders.cellCull, 'shared shaders survive').to.not.equal(null);
+    });
+
     it('clears the counters and claim bits in-encoder and dispatches the phase-1 chain in order', function () {
         const view = makeView();
         const culler = new MeshletCuller(device, makeWorld(), view, shaders);
+        device.gpuProfiler = { enabled: true, destroy() {} };
         culler.beginFrame(planes, camera, 640, viewProj, null);
 
         const base = claimPersistBase(1000, 130);
@@ -301,8 +330,8 @@ describe('MeshletCuller', function () {
         expect(Array.from(view.cullParamsBuffer.writes[0].data.subarray(CULL_PARAMS.LOD * 4 + 1, CULL_PARAMS.LOD * 4 + 4))).to.deep.equal([320, 200, 9]);
 
         culler.dispatchPhase2();
-        expect(log.dispatches[8].name).to.equal('MeshletCullPhase2');
-        expect(log.dispatches[8].computes[0], 'counters reset first').to.equal('MeshletresetPhase2');
+        expect(log.dispatches[1].name).to.equal('MeshletCullPhase2');
+        expect(log.dispatches[1].computes[0], 'counters reset first').to.equal('MeshletresetPhase2');
         expect(culler.meshletCullPhase2.getParameter('hzbTexture')).to.equal(hzb.texture);
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             expect(culler.finalizeArgsPhase2.getParameter(`drawSlot${b}`)).to.equal(MESHLET_BUCKET_COUNT + b);

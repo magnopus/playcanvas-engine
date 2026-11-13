@@ -44,6 +44,36 @@ const bindCapacities = (compute, view) => {
 // the band-sorted root list
 const ROOT_BANDS_WORDS = 3 * MESHLET_ROOT_BANDS;
 
+// offset of a CULL_PARAMS vec4 row in the packed float array
+const row = index => index * 4;
+
+/**
+ * The GPU pass names one culler encodes, with its suffix applied - built once per suffix rather
+ * than per frame.
+ *
+ * @param {string} suffix - The culler's pass suffix.
+ * @returns {Record<string, string>} The pass names by stage.
+ */
+const makePassNames = suffix => ({
+    cull: `MeshletCull${suffix}`,
+    cellCull: `MeshletCellCull${suffix}`,
+    rootClassify: `MeshletRootClassify${suffix}`,
+    rootAdmit: `MeshletRootAdmit${suffix}`,
+    cutArgs: `MeshletCutArgs${suffix}`,
+    residentCut: `MeshletResidentCut${suffix}`,
+    instanceCull: `MeshletInstanceCull${suffix}`,
+    compact: `MeshletCompact${suffix}`,
+    cullPhase1: `MeshletCullPhase1${suffix}`,
+    indexWrite: `MeshletIndexWrite${suffix}`,
+    compactA: `MeshletCompacta${suffix}`,
+    compactB: `MeshletCompactb${suffix}`,
+    cullPhase1B: `MeshletCullPhase1b${suffix}`,
+    cullPhase1C: `MeshletCullPhase1c${suffix}`,
+    cullPhase2: `MeshletCullPhase2${suffix}`,
+    cullPhase2A: `MeshletCullPhase2a${suffix}`,
+    cullPhase2B: `MeshletCullPhase2b${suffix}`
+});
+
 class MeshletCuller {
     /** @type {GraphicsDevice} */
     device;
@@ -132,7 +162,7 @@ class MeshletCuller {
     /**
      * Light-space texel rate for an orthographic view, or 0 for a perspective one. Selects the
      * distance-independent LOD projection in the resident-cut shader. Shadow
-     * cascades MUST set this: the directional shadow camera is pushed ~1e6 units back, which
+     * cascades must set this: the directional shadow camera is pushed ~1e6 units back, which
      * collapses the perspective projection to zero error and culls everything.
      *
      * @type {number}
@@ -190,13 +220,36 @@ class MeshletCuller {
      */
     forceSubmitBoundaries = false;
 
+    /** @private */
+    _passSuffix = '';
+
+    /** @private */
+    _passNames = makePassNames('');
+
+    /**
+     * Per-frame indirect draw slots, one per bucket per phase: [phase 1..., phase 2...].
+     *
+     * @type {number[]}
+     * @private
+     */
+    _drawSlots = [];
+
     /**
      * Appended to this culler's GPU pass names, so views sharing the chain (shadow faces)
      * profile apart.
      *
      * @type {string}
      */
-    passSuffix = '';
+    set passSuffix(value) {
+        if (this._passSuffix !== value) {
+            this._passSuffix = value;
+            this._passNames = makePassNames(value);
+        }
+    }
+
+    get passSuffix() {
+        return this._passSuffix;
+    }
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
@@ -339,7 +392,7 @@ class MeshletCuller {
         this.indexWrite = makeCompute('indexWrite');
         this.resetPhase2 = makeCompute('resetPhase2');
 
-        // the phase-2 chain uses its OWN compute instances (sharing the shaders): uniform writes
+        // the phase-2 chain uses its own compute instances (sharing the shaders): uniform writes
         // land on the queue before the whole frame's command buffer, so a single instance
         // dispatched twice per frame would give both dispatches the later uniform values
         this.meshletCullPhase2 = new Compute(device, this.meshletCull.shader, 'MeshletMeshletCullP2');
@@ -417,6 +470,61 @@ class MeshletCuller {
         }
 
         this.resetPhase2.setParameter('counters', view.countersBuffer);
+
+        this._buildChains();
+    }
+
+    /**
+     * Builds the compute lists each frame dispatches, once: the set of computes is fixed at
+     * construction.
+     *
+     * @private
+     */
+    _buildChains() {
+        const classify = [this.rootClassify];
+        if (this.impostorArgs) classify.push(this.impostorArgs);
+        classify.push(this.rootArgs, this.rootBandArgs);
+        const cut = [];
+        for (const { args, compute } of this.queueStages) cut.push(args, compute);
+
+        const cells = [this.cellCull, this.cellArgs];
+        const classifyScatter = [...classify, this.rootScatter];
+        const instance = [this.instanceCull, this.dispatchArgs];
+        const compact = [this.compactMeshlets, this.selectedArgs];
+        const cull = [this.meshletCull, this.finalizeArgs];
+        const write = [this.indexWrite];
+
+        this._chains = {
+            cells,
+            classifyScatter,
+            admit: this.rootAdmit,
+            cut,
+            instance,
+            compact,
+            cull,
+            write,
+            // the whole phase-1 chain in one compute pass
+            phase1: [...cells, ...classifyScatter, ...this.rootAdmit, ...cut, ...instance, ...compact, ...cull, ...write],
+            // forceSubmitBoundaries splits
+            classify,
+            scatterAdmit: [this.rootScatter, ...this.rootAdmit],
+            stageArgs: this.queueStages.map(({ args }) => [args]),
+            stageComputes: this.queueStages.map(({ compute }) => [compute]),
+            phase2: [this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2, this.indexWritePhase2],
+            phase2A: [this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2],
+            phase2B: [this.indexWritePhase2]
+        };
+    }
+
+    /**
+     * Every compute instance this culler owns.
+     *
+     * @returns {Compute[]} The computes.
+     * @private
+     */
+    _computes() {
+        const { phase1, phase2 } = this._chains;
+        return [...phase1, ...phase2];
     }
 
     /**
@@ -473,6 +581,12 @@ class MeshletCuller {
     }
 
     destroy() {
+        // each compute owns its uniform buffers and bind groups; the shaders are shared
+        if (this._chains) {
+            for (const compute of this._computes()) compute.destroy();
+            this._chains = null;
+        }
+
         // the shaders and the placeholder HZB are shared across cullers unless this one
         // compiled its own set
         if (this._ownsShaders) {
@@ -500,7 +614,6 @@ class MeshletCuller {
 
         // frame params, one vec4 row each (CULL_PARAMS.*)
         const params = this.cullParams;
-        const row = index => index * 4;
         params.set(frustumPlanes, row(CULL_PARAMS.PLANES));
         params[row(CULL_PARAMS.CAMERA) + 0] = cameraPos.x;
         params[row(CULL_PARAMS.CAMERA) + 1] = cameraPos.y;
@@ -549,7 +662,7 @@ class MeshletCuller {
         params[row(CULL_PARAMS.IMPOSTOR) + 1] = MESHLET_IMPOSTOR_FADE_BAND;
 
         // queue.writeBuffer executes before this frame's command buffer, so these clears land
-        // ahead of every dispatch below. The requests buffer is NOT cleared here - the residency
+        // ahead of every dispatch below. The requests buffer is not cleared here - the residency
         // manager clears it in-encoder after its readback copy, or the copy would see zeros.
         // The counters buffer clears in-encoder for the same reason: the director's index-demand
         // readback copy is encoded earlier this frame and must see last frame's values.
@@ -577,10 +690,11 @@ class MeshletCuller {
 
         // per-frame indirect slots
         // one draw slot per bucket per phase: [phase 1 buckets..., phase 2 buckets...]
-        this._drawSlots = [];
+        const drawSlots = this._drawSlots;
         const slotCount = (view.singlePhase ? 1 : 2) * MESHLET_BUCKET_COUNT;
+        drawSlots.length = slotCount;
         for (let i = 0; i < slotCount; i++) {
-            this._drawSlots.push(device.getIndirectDrawSlot());
+            drawSlots[i] = device.getIndirectDrawSlot();
         }
         this._dispatchSlotCells = device.getIndirectDispatchSlot();
         this._dispatchSlotStages = device.getIndirectDispatchSlot(Math.max(this.stageCount, 1));
@@ -603,12 +717,14 @@ class MeshletCuller {
         this.cellArgs.setParameter('dispatchSlot', this._dispatchSlotCells);
         this.cellArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
         this.rootClassify.setupIndirectDispatch(this._dispatchSlotCells);
-        this.queueStages.forEach(({ args, compute }, index) => {
+        const queueStages = this.queueStages;
+        for (let index = 0; index < queueStages.length; index++) {
+            const { args, compute } = queueStages[index];
             args.setParameter('dispatchSlot', this._dispatchSlotStages + index);
             args.setParameter('indirectDispatch', device.indirectDispatchBuffer);
             args.setupDispatch(1);
             compute.setupIndirectDispatch(this._dispatchSlotStages + index);
-        });
+        }
         this.instanceCull.setupIndirectDispatch(this._dispatchSlotCells);
 
         this.rootArgs.setParameter('dispatchSlot', this._dispatchSlotRoots);
@@ -641,42 +757,42 @@ class MeshletCuller {
         this.finalizeArgs.setupDispatch(1);
         this.indexWrite.setupIndirectDispatch(this._dispatchSlotWrite);
 
+        const chains = this._chains;
+        const names = this._passNames;
         if (this.forceSubmitBoundaries) {
-            device.computeDispatch([this.cellCull, this.cellArgs], `MeshletCellCull${this.passSuffix}`);
+            device.computeDispatch(chains.cells, names.cellCull);
             device.submit();
-            device.computeDispatch([this.rootClassify, ...(this.impostorArgs ? [this.impostorArgs] : []), this.rootArgs, this.rootBandArgs], `MeshletRootClassify${this.passSuffix}`);
+            device.computeDispatch(chains.classify, names.rootClassify);
             device.submit();
-            device.computeDispatch([this.rootScatter, ...this.rootAdmit], `MeshletRootAdmit${this.passSuffix}`);
-            for (const { args, compute } of this.queueStages) {
-                device.computeDispatch([args], `MeshletCutArgs${this.passSuffix}`);
+            device.computeDispatch(chains.scatterAdmit, names.rootAdmit);
+            for (let i = 0; i < queueStages.length; i++) {
+                device.computeDispatch(chains.stageArgs[i], names.cutArgs);
                 device.submit();
-                device.computeDispatch([compute], `MeshletResidentCut${this.passSuffix}`);
+                device.computeDispatch(chains.stageComputes[i], names.residentCut);
             }
+            device.computeDispatch(chains.instance, names.compactA);
+            device.submit();
+            device.computeDispatch(chains.compact, names.compactB);
+            device.submit();
+            device.computeDispatch(chains.cull, names.cullPhase1B);
+            device.submit();
+            device.computeDispatch(chains.write, names.cullPhase1C);
+        } else if (device.gpuProfiler?.enabled) {
+            // each stage in its own pass, so the profiler times them apart: classification
+            // scales with the instances in view, admission with the root pages it checks, and
+            // triangle emission apart from the cluster cull
+            device.computeDispatch(chains.cells, names.cellCull);
+            device.computeDispatch(chains.classifyScatter, names.rootClassify);
+            device.computeDispatch(chains.admit, names.rootAdmit);
+            if (chains.cut.length) device.computeDispatch(chains.cut, names.residentCut);
+            device.computeDispatch(chains.instance, names.instanceCull);
+            device.computeDispatch(chains.compact, names.compact);
+            device.computeDispatch(chains.cull, names.cullPhase1);
+            device.computeDispatch(chains.write, names.indexWrite);
         } else {
-            device.computeDispatch([this.cellCull, this.cellArgs], `MeshletCellCull${this.passSuffix}`);
-            // classification and the band admissions profile apart: the first scales with the
-            // instances in view, the second with the dispatch count and the root pages it checks
-            device.computeDispatch([this.rootClassify, ...(this.impostorArgs ? [this.impostorArgs] : []), this.rootArgs, this.rootBandArgs, this.rootScatter], `MeshletRootClassify${this.passSuffix}`);
-            device.computeDispatch(this.rootAdmit, `MeshletRootAdmit${this.passSuffix}`);
-            if (this.queueStages.length) {
-                device.computeDispatch(this.queueStages.flatMap(({ args, compute }) => [args, compute]), `MeshletResidentCut${this.passSuffix}`);
-            }
-        }
-
-        if (this.forceSubmitBoundaries) {
-            device.computeDispatch([this.instanceCull, this.dispatchArgs], `MeshletCompacta${this.passSuffix}`);
-            device.submit();
-            device.computeDispatch([this.compactMeshlets, this.selectedArgs], `MeshletCompactb${this.passSuffix}`);
-            device.submit();
-            device.computeDispatch([this.meshletCull, this.finalizeArgs], `MeshletCullPhase1b${this.passSuffix}`);
-            device.submit();
-            device.computeDispatch([this.indexWrite], `MeshletCullPhase1c${this.passSuffix}`);
-        } else {
-            device.computeDispatch([this.instanceCull, this.dispatchArgs], `MeshletInstanceCull${this.passSuffix}`);
-            device.computeDispatch([this.compactMeshlets, this.selectedArgs], `MeshletCompact${this.passSuffix}`);
-            device.computeDispatch([this.meshletCull, this.finalizeArgs], `MeshletCullPhase1${this.passSuffix}`);
-            // its own pass so the profiler separates triangle emission from the cluster cull
-            device.computeDispatch([this.indexWrite], `MeshletIndexWrite${this.passSuffix}`);
+            // one pass: every dispatch is its own usage scope, so the indirect arguments one
+            // writes are visible to the next without a pass boundary
+            device.computeDispatch(chains.phase1, names.cull);
         }
 
         for (let i = 0; i < view.meshInstances.length; i++) {
@@ -706,14 +822,14 @@ class MeshletCuller {
         this.finalizeArgsPhase2.setupDispatch(1);
         this.indexWritePhase2.setupIndirectDispatch(this._dispatchSlotWrite);
 
+        const chains = this._chains;
+        const names = this._passNames;
         if (this.forceSubmitBoundaries) {
-            device.computeDispatch([this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2], `MeshletCullPhase2a${this.passSuffix}`);
+            device.computeDispatch(chains.phase2A, names.cullPhase2A);
             device.submit();
-            device.computeDispatch([this.indexWritePhase2], `MeshletCullPhase2b${this.passSuffix}`);
+            device.computeDispatch(chains.phase2B, names.cullPhase2B);
         } else {
-            device.computeDispatch([
-                this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2, this.indexWritePhase2
-            ], `MeshletCullPhase2${this.passSuffix}`);
+            device.computeDispatch(chains.phase2, names.cullPhase2);
         }
     }
 }

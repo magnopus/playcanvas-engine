@@ -91,15 +91,35 @@ describe('WebgpuReadbackPool', function () {
         expect(log.destroyed).to.equal(2);
     });
 
-    it('destroys a staging buffer returned after the pool was destroyed', async function () {
-        const { device, log, storage } = makeDevice();
+    it('copies bytes into any view, including a DataView or an offset subarray', async function () {
+        const { device, storage } = makeDevice();
         const pool = new WebgpuReadbackPool(device);
-        const pending = pool.read(storage([1, 2, 3, 4]), 0, 4);
+        const view = new DataView(new ArrayBuffer(4));
+        await pool.read(storage([1, 2, 3, 4]), 0, 4, view);
+        expect(view.getUint8(3)).to.equal(4);
+        const backing = new Uint8Array(8);
+        await pool.read(storage([9, 8]), 0, 2, backing.subarray(5, 7));
+        expect(Array.from(backing)).to.deep.equal([0, 0, 0, 0, 0, 9, 8, 0]);
         pool.destroy();
-        expect(log.destroyed, 'nothing was free to destroy yet').to.equal(0);
-        await pending;
-        expect(log.destroyed, 'the in-flight buffer is not pooled').to.equal(1);
-        expect(pool._free.size).to.equal(0);
+    });
+
+    it('releases a deferred read\'s staging buffer without mapping when destroyed first', async function () {
+        const { device, log, storage } = makeDevice();
+        let maps = 0;
+        device.mapBufferAsync = () => {
+            maps++;
+            return Promise.resolve(true);
+        };
+        const pool = new WebgpuReadbackPool(device);
+        const promise = pool.read(storage([1, 2, 3, 4]), 0, 4);
+        pool.destroy();
+        let error = null;
+        await promise.catch((e) => {
+            error = e;
+        });
+        expect(error).to.be.an('error');
+        expect(maps).to.equal(0);
+        expect(log.destroyed).to.equal(log.created);
     });
 
     it('submits immediately when asked', async function () {

@@ -115,10 +115,11 @@ try {
     // cross-origin parent - this frame's own params only
 }
 
-// GPU timing: the panel reports whole-frame GPU cost, which is what the occlusion toggle is
-// supposed to move. ?timers=1 additionally logs the per-pass breakdown to the console.
-device.gpuProfiler.enabled = true;
+// GPU timing (whole-frame cost in the stats panel, per-pass breakdown in the console) only with
+// ?timers=1 or while MiniStats is open: profiling splits the meshlet cull into a compute pass per
+// stage, so leaving it on would measure a slower frame than production runs.
 if (params.get('timers') === '1') {
+    device.gpuProfiler.enabled = true;
     Tracing.set(TRACEID_GPU_TIMINGS, true);
 }
 

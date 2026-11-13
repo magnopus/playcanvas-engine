@@ -57,22 +57,33 @@ class WebgpuReadbackPool {
         return Math.ceil(Math.log2(Math.max(size, 256)));
     }
 
+    /**
+     * @param {number} size - Byte size needed.
+     * @returns {object} A staging buffer of at least that size, tagged with its size class.
+     * @private
+     */
     _borrow(size) {
         const cls = this._classOf(size);
         const list = this._free.get(cls);
         if (list?.length) {
-            return { stagingBuffer: list.pop(), cls };
+            return list.pop();
         }
         const stagingBuffer = this.device.createBufferImpl(BUFFERUSAGE_READ | BUFFERUSAGE_COPY_DST);
         stagingBuffer.allocate(this.device, 2 ** cls);
-        return { stagingBuffer, cls };
+        stagingBuffer.readbackSizeClass = cls;
+        return stagingBuffer;
     }
 
-    _return(stagingBuffer, cls) {
+    /**
+     * @param {object} stagingBuffer - A buffer from {@link _borrow}.
+     * @private
+     */
+    _return(stagingBuffer) {
         if (this._destroyed) {
             stagingBuffer.destroy(this.device);
             return;
         }
+        const cls = stagingBuffer.readbackSizeClass;
         let list = this._free.get(cls);
         if (!list) {
             list = [];
@@ -87,8 +98,8 @@ class WebgpuReadbackPool {
      * @param {StorageBuffer} storageBuffer - The storage buffer to read.
      * @param {number} offset - Byte offset of the range to read.
      * @param {number} size - Byte size of the range to read.
-     * @param {ArrayBufferView|null} [data] - Optional typed array to copy the data into; when
-     * omitted a new Uint8Array is allocated.
+     * @param {ArrayBufferView|null} [data] - Optional view to copy the data into, at least `size`
+     * bytes long; when omitted a new Uint8Array is allocated.
      * @param {boolean} [immediate] - When true, submits the command buffer immediately instead of
      * mapping on the next event cycle.
      * @returns {Promise<ArrayBufferView>} The data read.
@@ -97,7 +108,7 @@ class WebgpuReadbackPool {
         const device = this.device;
         Debug.assert(!this._destroyed, 'WebgpuReadbackPool used after destroy');
 
-        const { stagingBuffer, cls } = this._borrow(size);
+        const stagingBuffer = this._borrow(size);
 
         // The copy is recorded on the current encoder NOW, so the bytes read are the storage
         // buffer's contents at this point in the frame's command stream - a consumer that calls
@@ -108,6 +119,13 @@ class WebgpuReadbackPool {
 
         return new Promise((resolve, reject) => {
             const read = () => {
+                // destroyed before the deferred map started: release the buffer, map nothing
+                if (this._destroyed) {
+                    this._inFlight--;
+                    stagingBuffer.destroy(device);
+                    reject(new Error('WebgpuReadbackPool destroyed before the read completed.'));
+                    return;
+                }
                 device.mapBufferAsync(stagingBuffer.buffer, GPUMapMode.READ).then((mapped) => {
                     this._inFlight--;
                     if (!mapped) {
@@ -116,11 +134,11 @@ class WebgpuReadbackPool {
                         return;
                     }
                     data ??= new Uint8Array(size);
+                    // copy bytes, so any view type (or a view into a larger buffer) receives them as is
                     const copySrc = stagingBuffer.buffer.getMappedRange(0, size);
-                    const srcType = data.constructor;
-                    data.set(new srcType(copySrc));
+                    new Uint8Array(data.buffer, data.byteOffset, size).set(new Uint8Array(copySrc));
                     stagingBuffer.buffer.unmap();
-                    this._return(stagingBuffer, cls);
+                    this._return(stagingBuffer);
                     resolve(data);
                 });
             };

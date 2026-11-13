@@ -106,7 +106,7 @@ ${fields.map(([field, type, comment]) => `        ${field} : ${type},${comment ?
 
 /**
  * Every struct a typed buffer view names, plus the accessors that only need a struct value.
- * The engine's WGSL processor inserts each stage's storage declarations - the vertex AND the
+ * The engine's WGSL processor inserts each stage's storage declarations - the vertex and the
  * fragment stage's, merged - at that stage's first uniform or resource line, so a shader must
  * declare these structs before its first uniform: for the lit chunks that is the
  * litEngineDeclaration{VS,PS} slots, for a ShaderMaterial the top of both stages, for a

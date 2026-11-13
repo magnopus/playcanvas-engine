@@ -432,10 +432,21 @@ export const meshletCullWGSL = /* wgsl */ `
         // bucket order: opaque, opaque two-sided, masked (MESHLET_BUCKET_* in constants.js)
         let bucket = select(select(${MESHLET_BUCKET_OPAQUE}u, ${MESHLET_BUCKET_OPAQUE_TWO_SIDED}u, twoSided), ${MESHLET_BUCKET_MASKED}u, alphaMasked);
 
-        // cone backface culling - only sound when the bucket actually culls back faces
+        // cone backface culling - only sound when the bucket actually culls back faces, and
+        // only for instances whose transform keeps angles (rotation, uniform scale, mirroring):
+        // non-uniform scale or shear bends the normals, so the baked cone no longer bounds them
         if (bucket == ${MESHLET_BUCKET_OPAQUE}u) {
             let coneCutoff = meshletData[meshlet].coneCutoff;
-            if (coneCutoff < 1.0) {
+            let m0 = worldMatrix[0].xyz;
+            let m1 = worldMatrix[1].xyz;
+            let m2 = worldMatrix[2].xyz;
+            let l0 = dot(m0, m0);
+            let l1 = dot(m1, m1);
+            let l2 = dot(m2, m2);
+            let lMax = max(l0, max(l1, l2));
+            let conformal = lMax <= min(l0, min(l1, l2)) * 1.002 &&
+                            abs(dot(m0, m1)) + abs(dot(m1, m2)) + abs(dot(m2, m0)) <= lMax * 1e-3;
+            if (coneCutoff < 1.0 && conformal) {
                 let apex = (worldMatrix * vec4f(meshletData[meshlet].coneApex, 1.0)).xyz;
                 let axis = normalize((worldMatrix * vec4f(meshletConeAxis(meshlet), 0.0)).xyz);
                 // under ortho every ray is parallel, and apex - camPos would be a catastrophic
@@ -452,7 +463,7 @@ export const meshletCullWGSL = /* wgsl */ `
         // HZB built from phase 1's depth, draws only the newly visible remainder and updates the
         // bit. Phase 0 is the single-phase path with no occlusion.
         //
-        // The bit means "visible the last time this pair was TESTED", not "visible last frame":
+        // The bit means "visible the last time this pair was tested", not "visible last frame":
         // a pair that leaves the frustum or the LOD cut keeps its bit untouched, so it draws in
         // phase 1 the moment it comes back (no HZB round trip) at the cost of one possibly
         // occluded draw until phase 2 clears it again.
@@ -482,16 +493,16 @@ export const meshletCullWGSL = /* wgsl */ `
         // it to a desired source mip per texture. uvExtent 0 = no UVs; those
         // materials stay tail-only.
         // Suppressed for orthographic (shadow) views: screenPx below is a perspective texel
-        // rate, meaningless here, and the marks are atomicMax'd into the WORLD-SHARED requests
+        // rate, meaningless here, and the marks are atomicMax'd into the world-shared requests
         // buffer - a light-space rate would poison the camera's texture streaming. Page
         // residency marks below stay on, so off-screen casters still stream their geometry.
         let uvExtentWord = select(meshletData[meshlet].uvExtent, 0u, (cullFlags & ${CULL_FLAG_NO_TEXEL_RATE}u) != 0u);
         if (uvExtentWord != 0u) {
             let uvExtent = unpack2x16float(uvExtentWord);
             let uvSpan = max(max(uvExtent.x, uvExtent.y), 1e-4);
-            // measured from the cluster's NEAR edge, not its centre: a large cluster the camera
+            // measured from the cluster's near edge, not its centre: a large cluster the camera
             // stands at (a roof, a floor) is far larger on screen than its centre distance says,
-            // and rating it by the centre starved its texture right where it is looked at closest
+            // and rating it by the centre would starve its texture right where it is looked at closest
             let dist = max(distance(center, camPos) - radius, 0.05);
             let screenPx = 2.0 * radius * projScale / dist;
             // +1 so a mark of 0 means "not seen this frame"; 4095 caps the mark at 12 bits

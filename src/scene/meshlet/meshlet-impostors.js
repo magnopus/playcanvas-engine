@@ -27,8 +27,7 @@ import { meshletObjectDataWGSL, meshletStructsWGSL } from './shaders/meshlet-pag
  * prototype, one hemi-octahedral direction each (y up; frame (i, j) looks from
  * `hemiOctDecode(i / (grid - 1), j / (grid - 1))`, with up along +Y), each framed on the box
  * `half` and packed in a tile of layer width / grid by layer height / grid. The nearest view is
- * drawn as it is - there is no blending between views. examples/utils/jungle
- * (protos.py, bake_server.py and the meshlet-impostor-bake example) builds one.
+ * drawn as it is - there is no blending between views.
  *
  * @typedef {object} MeshletImpostors
  * @property {Texture} albedo - 2D texture array, one layer per prototype: sRGB colour, alpha is
@@ -90,7 +89,15 @@ function buildMeshletImpostorChunks({ grid, tilePixels }) {
         }
 
         fn getNormalMatrix(modelMatrix: mat4x4f) -> mat3x3f {
-            return mat3x3f(modelMatrix[0].xyz, modelMatrix[1].xyz, modelMatrix[2].xyz);
+            // the cofactor matrix: the inverse transpose up to scale, so normals stay
+            // perpendicular under non-uniform scale; the determinant's sign keeps mirrored
+            // instances facing out
+            let m0 = modelMatrix[0].xyz;
+            let m1 = modelMatrix[1].xyz;
+            let m2 = modelMatrix[2].xyz;
+            let c0 = cross(m1, m2);
+            let s = select(1.0, -1.0, dot(m0, c0) < 0.0);
+            return mat3x3f(c0 * s, cross(m2, m0) * s, cross(m0, m1) * s);
         }
     `;
 

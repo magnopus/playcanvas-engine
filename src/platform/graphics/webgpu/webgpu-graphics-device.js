@@ -1583,8 +1583,9 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
         Debug.assert(storageBuffer.buffer);
         Debug.assert(data);
         // Offsets and sizes are in elements for a typed array, in bytes otherwise.
-        const elementBytes = /** @type {any} */ (data).BYTES_PER_ELEMENT ?? 1;
-        const elements = size ?? ((elementBytes === 1 ? data.byteLength : /** @type {any} */ (data).length) - dataOffset);
+        const typed = ArrayBuffer.isView(data) && !(data instanceof DataView) ? /** @type {Uint8Array} */ (data) : null;
+        const elementBytes = typed ? typed.BYTES_PER_ELEMENT : 1;
+        const elements = size ?? ((typed ? typed.length : data.byteLength) - dataOffset);
         if (elements * elementBytes <= MAX_WRITE_BUFFER_BYTES) {
             this.wgpu.queue.writeBuffer(storageBuffer.buffer, bufferOffset, data, dataOffset, size);
             return;

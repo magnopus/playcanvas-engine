@@ -190,12 +190,25 @@ class MeshletHzb {
     }
 
     destroy() {
+        this._destroyReduces();
+        this._reduceShader?.destroy();
+        this._reduceShader = null;
+        // the mip 0 shaders live in the program library's cache, shared with other pyramids;
+        // clearing the pass shader frees only this pass's quad uniforms and bind group
+        if (this.mip0Pass) {
+            this.mip0Pass.shader = null;
+            this.mip0Pass = null;
+        }
         this._mip0Target?.destroy();
         this._mip0Target = null;
         this.texture?.destroy();
         this.texture = null;
-        this.mip0Pass = null;
-        this._reduces = [];
+    }
+
+    /** @private */
+    _destroyReduces() {
+        for (const compute of this._reduces) compute.destroy();
+        this._reduces.length = 0;
     }
 
     /**
@@ -299,7 +312,7 @@ class MeshletHzb {
         pass.colorOps.store = true;
 
         // mip reduce chain through per-mip views
-        this._reduces = [];
+        this._destroyReduces();
         for (let mip = 1; mip < this.mipCount; mip++) {
             const compute = new Compute(device, this._reduceShader, `MeshletHzbReduce${mip}`);
             compute.setParameter('srcMip', this.texture.getView(mip - 1));

@@ -19,6 +19,26 @@ describe('MeshletComponent', function () {
         jsdomTeardown();
     });
 
+    it('creates no pipeline and warns nothing until a meshlet component is added', function () {
+        const system = app.systems.meshlet;
+        const warn = console.warn;
+        const warnings = [];
+        console.warn = (...args) => warnings.push(args.join(' '));
+        try {
+            expect(system._initialized, 'nothing at app creation').to.equal(false);
+            expect(app.hasEvent('framerender') && app._callbacks.get('framerender')?.some(cb => cb.scope === system)).to.not.equal(true);
+            const e = new Entity();
+            e.addComponent('meshlet');
+            app.root.addChild(e);
+            expect(system._initialized).to.equal(true);
+            expect(system.group, 'null device: no pipeline').to.equal(null);
+            e.destroy();
+        } finally {
+            console.warn = warn;
+        }
+        expect(warnings.filter(w => w.includes('requires WebGPU'))).to.have.lengthOf.at.most(1);
+    });
+
     it('registers its system and stays inert without WebGPU', function () {
         expect(app.systems.meshlet).to.exist;
         expect(app.systems.meshlet.director, 'null device: no director').to.equal(null);

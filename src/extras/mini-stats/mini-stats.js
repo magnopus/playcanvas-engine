@@ -207,6 +207,8 @@ class MiniStats {
      * miniStats.destroy();
      */
     destroy() {
+        // stops the timers, which turns off the GPU profiler the GPU timer enabled
+        this.enabled = false;
         this.device.off('resizecanvas', this.updateDiv, this);
         this.device.off('losecontext', this.loseContext, this);
         this.app.off('postrender', this.postRender, this);

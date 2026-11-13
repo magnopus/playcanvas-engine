@@ -227,13 +227,13 @@ class GlbContainerResource {
                 // assign asset id without recreating mesh instances which are already set up with materials
                 entity.render.assignAsset(renderAsset);
 
-                // A blended or transmissive surface lets light through, but a shadow map can only
-                // record it as solid: such primitives do not cast. Glass-heavy scenes otherwise pay
-                // for it in every shadow face - 3,026 of the Bistro's 4,344 draw calls. Applied
-                // after the component, which sets every mesh instance from its own castShadows.
+                // A shadow map can only record a blended or transmissive surface as solid, so such
+                // primitives do not cast; alpha-tested (masked) surfaces still do. Applied after
+                // the component, which sets every mesh instance from its own castShadows.
                 for (let i = 0; i < attachedMi.length; i++) {
                     const material = attachedMi[i].material;
-                    if (material.blendType !== BLEND_NONE || material.refraction > 0) {
+                    const blended = material.blendType !== BLEND_NONE && !(material.alphaTest > 0);
+                    if (blended || material.refraction > 0) {
                         attachedMi[i].castShadow = false;
                     }
                 }

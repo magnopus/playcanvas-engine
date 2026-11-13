@@ -98,9 +98,9 @@ class MeshletBudgetManager {
         const fetchedDelta = residency.fetchedPages - this._lastFetched;
         this._lastFetched = residency.fetchedPages;
 
-        // A pool is only wedged when demand is outstanding AND nothing is moving: no
+        // A pool is only wedged when demand is outstanding and nothing is moving: no
         // evictions, nothing in flight, and no fetches landing. Without the fetch test a
-        // merely SLOW pool reads as wedged - a huge asset streams a few pages per frame, so
+        // merely slow pool reads as wedged - a huge asset streams a few pages per frame, so
         // most frames see zero evictions and an empty in-flight set between requests, and the
         // scale ratchets to maximum while the pool is in fact making steady progress.
         const missing = residency.lastMissingWanted ?? 0;
@@ -108,7 +108,7 @@ class MeshletBudgetManager {
             residency.inFlight.size === 0;
         // A real wedge is permanent; the same signature also appears for a frame or two in
         // the gap between demand readbacks, when a page is briefly outstanding with nothing
-        // in flight yet. Requiring the condition to PERSIST separates them - without this a
+        // in flight yet. Requiring the condition to persist separates them - without this a
         // single transient page ratchets the scale up 1.02 per frame against a 0.995 decay,
         // which drives quality to nothing on a pool that is half empty and evicting nothing.
         this._wedgeFrames = wedgedNow ? this._wedgeFrames + 1 : 0;

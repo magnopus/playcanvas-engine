@@ -31,9 +31,13 @@ const hasMeshletExtension = (primitive) => {
     return !!primitive?.extensions?.[gpuExtensionName];
 };
 
+const _nodePos = new Vec3();
+const _nodeRot = new Quat();
+const _nodeScale = new Vec3();
+
 /**
- * Computes the document-space transform of every glTF node, walking the default scene's
- * hierarchy (nodes outside it get their own subtree walked so nothing is left null).
+ * Computes the document-space transform of every glTF node in the default scene (every node
+ * when the document has no scene). Nodes outside it stay null: they are not placed.
  *
  * @param {object} gltf - The glTF document.
  * @returns {(Mat4|null)[]} One world matrix per node index.
@@ -42,34 +46,51 @@ const computeNodeWorldTransforms = (gltf) => {
     const nodes = gltf.nodes ?? [];
     const world = new Array(nodes.length).fill(null);
 
-    const local = (node) => {
-        const m = new Mat4();
-        if (node.matrix) {
-            m.set(node.matrix);
-        } else {
-            const t = node.translation ?? [0, 0, 0];
-            const r = node.rotation ?? [0, 0, 0, 1];
-            const s = node.scale ?? [1, 1, 1];
-            m.setTRS(new Vec3(t[0], t[1], t[2]), new Quat(r[0], r[1], r[2], r[3]), new Vec3(s[0], s[1], s[2]));
+    // iterative depth-first walk: bakes can nest deep enough to overflow a recursive one
+    const stack = [];
+    const walk = (root) => {
+        stack.push(root, -1);
+        while (stack.length) {
+            const parent = stack.pop();
+            const index = stack.pop();
+            const node = nodes[index];
+            if (!node) continue;
+            const m = new Mat4();
+            if (node.matrix) {
+                m.set(node.matrix);
+            } else {
+                const t = node.translation;
+                const r = node.rotation;
+                const sc = node.scale;
+                _nodePos.set(t?.[0] ?? 0, t?.[1] ?? 0, t?.[2] ?? 0);
+                _nodeRot.set(r?.[0] ?? 0, r?.[1] ?? 0, r?.[2] ?? 0, r?.[3] ?? 1);
+                _nodeScale.set(sc?.[0] ?? 1, sc?.[1] ?? 1, sc?.[2] ?? 1);
+                m.setTRS(_nodePos, _nodeRot, _nodeScale);
+            }
+            if (parent >= 0) m.mul2(world[parent], m);
+            world[index] = m;
+            const children = node.children;
+            if (children) {
+                for (let i = 0; i < children.length; i++) stack.push(children[i], index);
+            }
         }
-        return m;
-    };
-
-    const visit = (index, parent) => {
-        const node = nodes[index];
-        const m = local(node);
-        if (parent) m.mul2(parent, m);
-        world[index] = m;
-        node.children?.forEach(c => visit(c, m));
     };
 
     const sceneDef = gltf.scenes?.[gltf.scene ?? 0];
     if (sceneDef?.nodes) {
-        sceneDef.nodes.forEach(n => visit(n, null));
+        for (let i = 0; i < sceneDef.nodes.length; i++) walk(sceneDef.nodes[i]);
     } else {
-        nodes.forEach((n, i) => {
-            if (!world[i]) visit(i, null);
-        });
+        // no scene: walk from the roots, the nodes no other node lists as a child
+        const isChild = new Uint8Array(nodes.length);
+        for (let i = 0; i < nodes.length; i++) {
+            const children = nodes[i].children;
+            if (children) {
+                for (let c = 0; c < children.length; c++) isChild[children[c]] = 1;
+            }
+        }
+        for (let i = 0; i < nodes.length; i++) {
+            if (!isChild[i]) walk(i);
+        }
     }
     return world;
 };
@@ -110,7 +131,9 @@ const readU32Accessor = (index, accessors, bufferViews) => {
     if (!accessor) return null;
     const data = GltfAccessor.getData(accessor, bufferViews, true);
     if (!data) return null;
-    return data instanceof Uint32Array ? data : new Uint32Array(data.buffer, data.byteOffset, data.length);
+    // widen narrower component types element by element - a reinterpreting view would read
+    // their bytes as 32-bit words
+    return data instanceof Uint32Array ? data : Uint32Array.from(data);
 };
 
 /**

@@ -187,6 +187,36 @@ describe('MAG_meshlets extensions', function () {
             expect(translationOf(resource.instances[2].matrix)).to.deep.equal(SCATTER[1]);
         });
 
+        it('composes parent transforms and leaves nodes outside the default scene unplaced', function () {
+            const { gltf, bufferViews } = buildAsset();
+            // a parent (listed after its child) carrying the plain placement, and a stray node
+            gltf.nodes.push({ translation: [100, 0, 0], children: [0] }, { mesh: 0, translation: [5, 5, 5] });
+            gltf.scenes[0].nodes = [2, 1];
+            const resource = createMeshlets(null, gltf, bufferViews);
+            expect(resource.instances).to.have.lengthOf(1 + SCATTER.length);
+            expect(translationOf(resource.instances[0].matrix)).to.deep.equal([101, 2, 3]);
+        });
+
+        it('walks every root when the document has no scene', function () {
+            const { gltf, bufferViews } = buildAsset();
+            gltf.nodes.push({ translation: [100, 0, 0], children: [0] });
+            delete gltf.scenes;
+            delete gltf.scene;
+            const resource = createMeshlets(null, gltf, bufferViews);
+            expect(translationOf(resource.instances[0].matrix)).to.deep.equal([101, 2, 3]);
+        });
+
+        it('widens a page table stored with a narrower integer type', function () {
+            const { gltf, bufferViews } = buildAsset();
+            const values = new Uint16Array(PAGE_COUNT * PAGE_TABLE_FIELDS).map((_, i) => 1000 + i);
+            bufferViews.push(new Uint8Array(values.buffer));
+            gltf.bufferViews.push({ buffer: 0, byteOffset: 0, byteLength: values.byteLength });
+            gltf.accessors.push({ bufferView: bufferViews.length - 1, componentType: 5123, type: 'SCALAR', count: values.length });
+            gltf.extensions.MAG_meshlets_stream.pagesAccessor = gltf.accessors.length - 1;
+            const resource = createMeshlets(null, gltf, bufferViews);
+            expect(Array.from(resource.manifest.pageTable)).to.deep.equal(Array.from(values));
+        });
+
         it('rejects an unsupported manifest version', function () {
             const { gltf, bufferViews } = buildAsset({ version: 7 });
             const { result, messages } = silenced(() => createMeshlets(null, gltf, bufferViews));

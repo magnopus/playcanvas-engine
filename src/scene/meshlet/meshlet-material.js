@@ -7,7 +7,7 @@ import {
 } from './shaders/meshlet-page-wgsl.js';
 
 /**
- * The meshlet DEBUG material (colour modes: material baseColor / LOD tint / per-meshlet hash):
+ * The meshlet debug material (colour modes: material baseColor / LOD tint / per-meshlet hash):
  * a ShaderMaterial with the same page-pool vertex pull as the lit path (shared snippets in
  * shaders/meshlet-page-wgsl.js) but a flat lambert fragment. Normal shading uses the
  * engine-lit StandardMaterial (meshlet-lit-material.js); the world swaps between the two via
@@ -77,7 +77,13 @@ const vertexWGSL = /* wgsl */ `
 
         let worldMatrix = objectData[instance].worldMatrix;
         output.position = uniform.matrix_viewProjection * worldMatrix * vec4f(localPos, 1.0);
-        output.vNormal = normalize((worldMatrix * vec4f(meshletDecodeOct16(pagePool[pageLayout.normalBase + vertex]), 0.0)).xyz);
+        // cofactor of the upper 3x3, signed by its determinant: correct under non-uniform scale
+        let m0 = worldMatrix[0].xyz;
+        let m1 = worldMatrix[1].xyz;
+        let m2 = worldMatrix[2].xyz;
+        let c0 = cross(m1, m2);
+        let normalMatrix = mat3x3f(c0, cross(m2, m0), cross(m0, m1)) * select(1.0, -1.0, dot(m0, c0) < 0.0);
+        output.vNormal = normalize(normalMatrix * meshletDecodeOct16(pagePool[pageLayout.normalBase + vertex]));
 
         if (uniform.colorMode == ${MESHLET_COLOR_MODE.LOD_TIER}u) {
             output.vColor = lodTint(meshletData[meshlet].lodLevel);

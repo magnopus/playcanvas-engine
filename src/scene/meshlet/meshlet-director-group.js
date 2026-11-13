@@ -73,6 +73,10 @@ class MeshletGroupCamera {
 
     destroy() {
         this.hzb.destroy();
+        this.drawPass1.destroy();
+        this.drawPass2.destroy();
+        this.hzbMipsPass.destroy();
+        this.cullPhase2Pass.destroy();
         this.views = [];
     }
 

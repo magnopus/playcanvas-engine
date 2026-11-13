@@ -19,7 +19,7 @@ import { OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW,
     OBJECT_IMPOSTOR_LAYER_SHIFT, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
     RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S,
     MESHLET_COLOR_MODE, claimWordCount } from './constants.js';
-import { createMeshletImpostorMaterial } from './meshlet-impostors.js';
+import { createMeshletImpostorMaterial, createMeshletImpostorMesh } from './meshlet-impostors.js';
 import { createMeshletLitMaterial } from './meshlet-lit-material.js';
 import { createMeshletMaterial } from './meshlet-material.js';
 import { buildMeshletLitChunks } from './shaders/meshlet-lit-chunks-wgsl.js';
@@ -141,6 +141,14 @@ class MeshletWorld {
     /** @type {import('../materials/standard-material.js').StandardMaterial|null} */
     impostorMaterial = null;
 
+    /**
+     * The billboard quad every view's impostor draw shares. The world holds a reference, so the
+     * views' mesh instances never release it.
+     *
+     * @type {import('../mesh.js').Mesh|null}
+     */
+    impostorMesh = null;
+
     materialTableBuffer = null;
 
     /** @type {StorageBuffer|null} */
@@ -247,6 +255,11 @@ class MeshletWorld {
         this.impostorDummyBuffer?.destroy();
         this.impostorMaterial?.destroy();
         this.impostorMaterial = null;
+        if (this.impostorMesh) {
+            this.impostorMesh.decRefCount();
+            if (this.impostorMesh.refCount < 1) this.impostorMesh.destroy();
+            this.impostorMesh = null;
+        }
         this.materialTableBuffer?.destroy();
         this.lightmapBuffer?.destroy();
         // bucket materials are shared across the views' mesh instances - destroy each set once
@@ -264,8 +277,8 @@ class MeshletWorld {
      * page pool, the world tables (meshletData, objectData), and the per-view working set
      * (claim/visibility bit planes, work items, records, draw indices) - not just the page pool.
      *
-     * Budgeting only the pool is misleading: in one example, a 32 MB pool sat inside 1.3 GB of
-     * VRAM, because the buffers that actually dominate were demand-grown with no ceiling. The
+     * Budgeting only the pool is misleading: the demand-grown buffers can dominate it many
+     * times over when they have no ceiling. The
      * fixed and per-view costs are computed at finalize and subtracted; what remains is split
      * between the page pool and the draw index buffers by {@link indexBudgetFraction}, and the
      * index share becomes {@link maxIndices}, so growth is bounded by the budget rather than by
@@ -277,8 +290,8 @@ class MeshletWorld {
 
     /**
      * Share of the budget (after fixed and per-view costs) given to the demand-grown draw index
-     * buffers; the rest goes to the page pool. Indices are the working set of what is ON SCREEN,
-     * pages the working set of what is NEARBY, so the split trades detail-in-view against
+     * buffers; the rest goes to the page pool. Indices are the working set of what is on screen,
+     * pages the working set of what is nearby, so the split trades detail-in-view against
      * streaming headroom.
      *
      * @type {number}
@@ -295,11 +308,10 @@ class MeshletWorld {
     pagePoolBytes = 0;
 
     /**
-     * Total draw indices the budget allows ACROSS all views. This is a pool, not a per-view
+     * Total draw indices the budget allows across all views. This is a pool, not a per-view
      * allowance: the director hands each view a share proportional to what it is asking for.
-     * Splitting it equally starves whichever view happens to be the hungry one - on the Bistro
-     * a shadow cascade wanted 1.2x an equal share while the camera used 0.16x of its own, and
-     * the starved cascade then drove global LOD pressure to maximum for everything.
+     * Splitting it equally starves whichever view happens to be the hungry one, and a starved
+     * view drives LOD pressure up for everything.
      *
      * @type {number}
      */
@@ -359,7 +371,7 @@ class MeshletWorld {
 
     /**
      * Optional ceiling on the draw index buffer, in indices. 0 means "whatever the device can
-     * hold" - see {@link indexCeiling}, which is what actually bounds growth. NOT unbounded:
+     * hold" - see {@link indexCeiling}, which is what actually bounds growth. It is not unbounded:
      * the worst case on a scattered scene is billions of indices, and a request that large
      * throws mid-frame, taking the encoding down with it.
      *
@@ -444,15 +456,24 @@ class MeshletWorld {
     /**
      * Maximum shader samples for streamed texture anisotropy: 1, 2, 4 or 8. Values are
      * rounded down to a supported level and clamped; non-finite values select 1. Defaults
-     * to 1 (isotropic). Changes update material uniforms without rebuilding textures.
-     * Each sample remains clamped to resident mips. Higher values increase filtering cost.
+     * to 1 (isotropic), which compiles the anisotropic path out; switching between 1 and a
+     * higher level recompiles the lit materials, other changes only update a uniform. Textures
+     * are not rebuilt. Each sample remains clamped to resident mips. Higher values increase
+     * filtering cost.
      *
      * @type {number}
      */
     set textureAnisotropy(value) {
         const level = Number.isFinite(value) ? Math.min(8, 2 ** Math.floor(Math.log2(Math.max(value, 1)))) : 1;
+        const recompile = (level > 1) !== (this._textureAnisotropy > 1);
         this._textureAnisotropy = level;
-        this._litMaterials?.forEach(material => material.setParameter('meshletTextureAnisotropy', level));
+        this._litMaterials?.forEach((material) => {
+            material.setParameter('meshletTextureAnisotropy', level);
+            if (recompile) {
+                material.setDefine('MESHLET_ANISOTROPY', level > 1);
+                material.update();
+            }
+        });
     }
 
     get textureAnisotropy() {
@@ -466,8 +487,8 @@ class MeshletWorld {
      * Cheaper lit materials for mobile GPUs: roughness and metalness come from the material
      * factors alone (no ORM texture), and streamed textures take a single sample instead of
      * blending across the fine/tail mip boundary. Base colour, normal and emissive textures are
-     * kept. Measured at ~19% less GPU time on a Quest 3 in the Bistro, where the lit fragment
-     * shader dominates. Recompiles the lit materials when changed. Defaults to false.
+     * kept. Worthwhile where the lit fragment shader dominates GPU time. Recompiles the lit
+     * materials when changed. Defaults to false.
      *
      * @type {boolean}
      */
@@ -848,7 +869,7 @@ class MeshletWorld {
         // residency index), meshlets (global id), instances (objectData row = pick record),
         // material rows and flat texture indices. A resource's block starts where the previous
         // one ended, which is what lets MeshletDirector#rebuild carry a previous world's page
-        // pool, residency and visibility bits: only an UNCHANGED PREFIX of the add order keeps
+        // pool, residency and visibility bits: only an unchanged prefix of the add order keeps
         // its addresses, so anything after the first changed resource is rebuilt cold.
         let pageBase = 0;
         let meshletBase = 0;
@@ -866,7 +887,7 @@ class MeshletWorld {
         this.indexCapacity = [0, 0, 0];
         this.indexWorst = [0, 0, 0];
 
-        // One pick id PER INSTANCE, from one reserved block. An instance is one primitive at
+        // One pick id per instance, from one reserved block. An instance is one primitive at
         // one transform - which is exactly the granularity a glTF submesh has so, for example, picking a
         // table's top and its legs apart works the way it would with ordinary meshes. The ids
         // share the engine's picker space, so they never collide with mesh instance ids.
@@ -956,9 +977,15 @@ class MeshletWorld {
                             const recordBase = (materialBase + row) * MATERIAL_RECORD_U32S;
                             for (let slot = 0; slot < MATERIAL_TEXTURE_SLOTS; slot++) {
                                 const word = materialTable[recordBase + MATERIAL_RECORD.SLOT_WORDS + slot];
-                                if ((word & 0xFFFF) !== MATERIAL_SLOT_ABSENT) {
-                                    materialTable[recordBase + MATERIAL_RECORD.SLOT_WORDS + slot] = (word & 0xFFFF0000) | (((word & 0xFFFF) + textureBase) & 0xFFFF);
+                                if ((word & 0xFFFF) === MATERIAL_SLOT_ABSENT) continue;
+                                // texture indices are 16-bit, with the top value meaning absent:
+                                // a world past that drops the slot rather than wrap onto another
+                                // texture
+                                const rebased = (word & 0xFFFF) + textureBase;
+                                if (rebased >= MATERIAL_SLOT_ABSENT) {
+                                    Debug.errorOnce(`MeshletWorld: more than ${MATERIAL_SLOT_ABSENT} streamed textures in one world; textures past the limit are dropped.`);
                                 }
+                                materialTable[recordBase + MATERIAL_RECORD.SLOT_WORDS + slot] = (word & 0xFFFF0000) | Math.min(rebased, MATERIAL_SLOT_ABSENT);
                             }
                         }
                     }
@@ -991,7 +1018,7 @@ class MeshletWorld {
                     writeSynthRecord(materialBase + primIndex, prim.baseColorFactor);
                 }
 
-                // This primitive's draw bucket comes from its MATERIAL record, which keeps
+                // This primitive's draw bucket comes from its material record, which keeps
                 // alpha masking and two-sidedness apart (word 11) - and a primitive has exactly
                 // one material, so the bucket is a per-primitive property. Folding the two facts
                 // into one bit would put opaque geometry in the alpha-tested bucket and hand it a
@@ -1016,9 +1043,9 @@ class MeshletWorld {
                     (bucket === MESHLET_BUCKET_OPAQUE ? 0 : MESHLET_FLAG_TWO_SIDED);
 
                 // the bucket is stamped onto every meshlet as its records are copied (recordsOf);
-                // total the worst-case index count per bucket once per PRIMITIVE - the
+                // total the worst-case index count per bucket once per primitive - the
                 // per-instance loop below then just adds these, instead of re-walking every
-                // meshlet for each of (on the jungle) 41k instances
+                // meshlet for each instance
                 primRecords.set(primFirst, { prim, pageBase, bucketBits });
                 const primCorners = [0, 0, 0];
                 primCorners[bucket] = prim._indexCount;
@@ -1110,10 +1137,9 @@ class MeshletWorld {
                     this.indexCapacity[b] += primCorners[b];
                 }
 
-                // World bounds, from the baked AABB transformed by the instance matrix. Using
-                // the bounding SPHERE radius on all three axes instead - which this did - turns
-                // a flat 8 km landscape into an 8 km cube, and that inflated box then sets the
-                // depth range of every shadow cascade fitted around it.
+                // World bounds, from the baked AABB transformed by the instance matrix - not the
+                // bounding sphere radius on every axis, which turns a flat landscape into a cube
+                // and inflates the depth range of every shadow cascade fitted around it.
                 _tmpLocalBox.center.set(prim.aabbCenter[0], prim.aabbCenter[1], prim.aabbCenter[2]);
                 _tmpLocalBox.halfExtents.set(halfExtents[0], halfExtents[1], halfExtents[2]);
                 _tmpBox.setFromTransformedAabb(_tmpLocalBox, _tmpMat);
@@ -1171,7 +1197,7 @@ class MeshletWorld {
         const meshletDataBuffer = this.meshletDataBuffer;
         // Uploads are batched: primitives are mostly visited in meshlet order, so consecutive
         // ones gather in a staging array and go up in one write. A world of many small
-        // primitives (an island of props) would otherwise issue a write per primitive.
+        // primitives would otherwise issue a write per primitive.
         const staging = new Uint32Array(Math.min(totalMeshlets, RECORD_UPLOAD_BATCH) * MESHLET_DATA_U32S);
         let stagedFirst = 0;
         let stagedCount = 0;
@@ -1231,8 +1257,6 @@ class MeshletWorld {
         // run phase 0 - so they bind this 16-byte buffer instead of allocating one bit per
         // instance-meshlet pair, which is tens of MB on a scattered scene.
         this.dummyBits = new StorageBuffer(device, 16, BUFFERUSAGE_COPY_DST);
-        this._claimClear = new Uint32Array(Math.max(Math.ceil((this.totalPairs + this.instanceCount) / 32), 4));
-        this._requestClear = new Uint32Array(Math.max(totalPages, 4));
 
         // streamed textures: tails + residency exist before the materials bind them (an
         // adopted system is already finalized and possibly fully loaded)
@@ -1244,7 +1268,7 @@ class MeshletWorld {
         this.textures?.setMaterialSlots(materialTable, totalMaterialRows, MATERIAL_RECORD_U32S, MATERIAL_RECORD.SLOT_WORDS);
 
         // binds the world's storage buffers to a bucket material (lit or debug). The per-view
-        // records buffer is NOT bound here - each view's mesh instances carry it as an
+        // records buffer is not bound here - each view's mesh instances carry it as an
         // instance-level parameter override
         const bindWorldParams = (material) => {
             material.setParameter('meshletData', this.meshletDataBuffer);
@@ -1257,7 +1281,6 @@ class MeshletWorld {
         };
         const bindTextureParams = (material) => {
             if (!this.textures) return;
-            material.setParameter('meshletTexDebug', this._texDebug ? 1 : 0);
             material.setParameter('meshletTextureAnisotropy', this.textureAnisotropy);
             material.setParameter('texResidency', this.textures.residencyBuffer);
             material.setParameter('meshletSlotDesc', this.textures.slotDescBuffer);
@@ -1286,10 +1309,10 @@ class MeshletWorld {
         this._litMaterials = [];
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             const material = createMeshletLitMaterial(b, chunks);
-            if (this._liteMaterials) {
-                material.setDefine('MESHLET_MATERIAL_LITE', true);
-                material.update();
-            }
+            if (this._liteMaterials) material.setDefine('MESHLET_MATERIAL_LITE', true);
+            if (this._textureAnisotropy > 1) material.setDefine('MESHLET_ANISOTROPY', true);
+            if (this._texDebug) material.setDefine('MESHLET_TEX_DEBUG', true);
+            material.update();
             this._litMaterials.push(material);
         }
         this._litMaterials.forEach(bindWorldParams);
@@ -1306,6 +1329,8 @@ class MeshletWorld {
             this.impostorMaterial = createMeshletImpostorMaterial(this.impostors);
             this.impostorMaterial.setParameter('objectData', this.objectDataBuffer);
             this.impostorMaterial.setParameter('impostorProtos', this.impostorProtosBuffer);
+            this.impostorMesh = createMeshletImpostorMesh(device);
+            this.impostorMesh.incRefCount();
         }
         this._bindWorldParams = bindWorldParams;
 
@@ -1379,7 +1404,7 @@ class MeshletWorld {
     }
 
     /**
-     * One record per instance, for resolving a picked id. An instance is one PRIMITIVE at one
+     * One record per instance, for resolving a picked id. An instance is one primitive at one
      * transform, so this is submesh granularity - a table baked with its top and legs as
      * separate glTF primitives picks apart exactly as it would have unbaked.
      *
@@ -1439,8 +1464,13 @@ class MeshletWorld {
             this._debugMaterials.forEach(this._bindWorldParams);
         }
         this._colorMode = mode;
-        this._texDebug = texDebug;
-        this._litMaterials?.forEach(m => m.setParameter('meshletTexDebug', texDebug ? 1 : 0));
+        if (this._texDebug !== texDebug) {
+            this._texDebug = texDebug;
+            this._litMaterials?.forEach((m) => {
+                m.setDefine('MESHLET_TEX_DEBUG', texDebug);
+                m.update();
+            });
+        }
         if (mode > 0 && !texDebug) this._debugMaterials.forEach(m => m.setParameter('colorMode', mode));
     }
 
@@ -1477,7 +1507,7 @@ class MeshletWorld {
 
     /**
      * Hides or shows a range of a placement's instances without a rebuild - the instance cull
-     * pass skips hidden rows (objectData word 23 bit 0), so hidden geometry stops drawing AND
+     * pass skips hidden rows (objectData word 23 bit 0), so hidden geometry stops drawing and
      * stops marking pages/textures, letting the LRU drain its residency naturally.
      *
      * @param {number} index - The placement index (resource add order).

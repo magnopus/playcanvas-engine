@@ -1262,7 +1262,9 @@ class LightComponent extends Component {
      * cascades every frame, the third every second frame and the fourth every fourth frame, offset
      * so they do not land on the same frame. A cascade is refreshed early when the camera moves or
      * turns far enough to leave the area it was fitted to, or when the light turns. While set,
-     * this manages {@link LightComponent#shadowUpdateOverrides}.
+     * it decides which cascades render, and {@link LightComponent#shadowUpdateOverrides} is
+     * ignored. Cameras share the light's shadow map, so with several cameras rendering the light
+     * each refreshes every cascade.
      *
      * @type {number[]|null}
      * @example
@@ -1270,10 +1272,6 @@ class LightComponent extends Component {
      */
     set cascadeUpdateIntervals(values) {
         this._light.cascadeUpdateIntervals = values;
-        if (!values) {
-            // hand the cascades back: whatever the schedule skipped last would stay frozen
-            this._light.shadowUpdateOverrides = null;
-        }
     }
 
     /**

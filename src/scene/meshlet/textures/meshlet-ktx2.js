@@ -2,7 +2,7 @@
  * Promise wrapper over a Basis-style transcoder for standalone KTX2 payloads (the per-mip
  * files inside a MAG_texture_streaming container). Two rules:
  *
- * - The transcode queue dedups jobs BY URL and would hand every caller the first job's pixels;
+ * - The transcode queue dedups jobs by URL and would hand every caller the first job's pixels;
  *   each call gets a unique synthetic key.
  * - The job's buffer is transferred to the worker, which detaches it; callers keep slices of a
  *   shared region buffer, so the buffer passed in must already be a private copy (the texture
@@ -46,7 +46,7 @@ function transcodeKtx2(transcode, device, bytes) {
         }
         const key = `meshlet-ktx2-${_jobId++}`;
         const found = transcode(device, key, bytes, (err, result) => {
-            // the worker can report failure with err set OR with a silent null result
+            // the worker can report failure with err set or with a silent null result
             if (err || !result) {
                 reject(new Error(err || 'MeshletKtx2: transcode returned no data'));
             } else {

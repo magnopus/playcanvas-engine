@@ -60,6 +60,44 @@ const BYTES_PER_MB = 1024 * 1024;
 // a frame - one per root admission band - so the device default of 256 runs out at a dozen views.
 const MIN_INDIRECT_DISPATCH_SLOTS = 1024;
 
+/** @type {never[]} */
+const _noViews = [];
+
+/**
+ * Fills a view's phase-1 draw list in place: its bucket mesh instances, then its billboards.
+ *
+ * @param {MeshletView} view - The view.
+ */
+const fillPhase1Draws = (view) => {
+    const mis = view.meshInstances;
+    const out = view.drawPass1.meshInstances;
+    out.length = 0;
+    for (let i = 0; i < MESHLET_BUCKET_COUNT; i++) out.push(mis[i]);
+    if (view.impostorInstance) out.push(view.impostorInstance);
+};
+
+/**
+ * Fills a view's phase-2 draw list in place: its phase-2 bucket mesh instances.
+ *
+ * @param {MeshletView} view - The view.
+ */
+const fillPhase2Draws = (view) => {
+    const mis = view.meshInstances;
+    const out = view.drawPass2.meshInstances;
+    out.length = 0;
+    for (let i = MESHLET_BUCKET_COUNT; i < MESHLET_BUCKET_COUNT * 2; i++) out.push(mis[i]);
+};
+
+/**
+ * A view's index-budget want: its demand at the given target occupancy, above the share floor.
+ *
+ * @param {{ indexDemand: () => number }} view - A camera or shadow view.
+ * @param {number} floor - The share floor every view gets.
+ * @param {number} occupancy - Target occupancy of the share (1 = the demand itself).
+ * @returns {number} The want, in indices.
+ */
+const viewWant = (view, floor, occupancy) => Math.max(view.indexDemand() / occupancy - floor, 0);
+
 /**
  * Orchestrates the GPU-driven meshlet pipeline: per-frame culling compute (encoded ahead of the
  * frame graph), the meshlet draw passes inserted after the camera's main scene pass, and - when
@@ -174,8 +212,8 @@ class MeshletDirector {
     /**
      * Projected size on screen, in pixels, below which an instance is not drawn at all. Every
      * drawn instance costs at least its coarsest level, so a wide view of a world with very many
-     * small placements is bound by that floor however coarse the cut gets - on a 1.5M-instance
-     * island seen from above, 1.15M instances are under a pixel. An instance already drawn stays
+     * small placements is bound by that floor however coarse the cut gets, and seen from afar
+     * most such placements are under a pixel. An instance already drawn stays
      * until it shrinks to {@link rootHysteresis} of this size, so the cut does not pop while the
      * camera moves. 0 draws every visible instance.
      *
@@ -690,7 +728,7 @@ class MeshletDirector {
 
     /**
      * Tears down the current world and rebuilds it - the component system's add/remove path.
-     * Streaming state is RETAINED where possible: when the leading resources of the new build
+     * Streaming state is retained where possible: when the leading resources of the new build
      * match the previous one (same resource, base URL and order) and the pool geometry is
      * unchanged, the GPU page pool, its resident pages, the slot/LRU state and pinned roots
      * carry over - only genuinely new resources re-stream. The streamed texture system carries
@@ -765,14 +803,13 @@ class MeshletDirector {
         // roughly with the pair count, and starting under-sized clamps draws for the frames
         // the demand readback is in flight (with occlusion on, the missing draws punch HZB
         // holes phase 2 reads as disocclusion - a page-demand burst). The margin applies
-        // ONLY when the scene grew - a flat multiplier would compound across same-size
-        // rebuilds (budget sliders) into unbounded buffers. Shrunk scenes scale down
+        // only when the scene grew - a flat multiplier would compound across same-size
+        // rebuilds (a budget change, say) into unbounded buffers. Shrunk scenes scale down
         // proportionally (the view floors at the world's initial target).
-        // Bounded, because index demand does NOT scale with the scene. It is screen-bound: the
-        // DAG cut coarsens with distance and the frustum limits what is in view, so multiplying
-        // the instance count by 100 moved measured demand by ~3.5x. Scaling the carry by the
-        // raw pair ratio turned one slider drag into a 476 MB index buffer for a cut that
-        // wanted 17 MB - and successive drags compound it.
+        // Bounded, because index demand does not scale with the scene: it is screen-bound (the
+        // DAG cut coarsens with distance and the frustum limits what is in view). Scaling the
+        // carry by the raw pair ratio would over-allocate by orders of magnitude, compounding
+        // across successive rebuilds.
         const pairRatio = this.world.totalPairs / prevPairs;
         const pairScale = pairRatio > 1 ? Math.min(pairRatio * CARRY_GROWTH_MARGIN, this.maxCarryScale) : pairRatio;
         const scaleCarry = (/** @type {number[]} */ c) => {
@@ -841,7 +878,7 @@ class MeshletDirector {
         let newTotalPages = 0;
         for (const { resource } of pending) newTotalPages += resource.manifest.pageCount;
         // predict the new pool's slot count the way finalize will: the budget covers more
-        // than the pool, so the previous world's RESOLVED page-pool size is the comparable
+        // than the pool, so the previous world's resolved page-pool size is the comparable
         // figure when the budget itself is unchanged
         const newPagePoolBytes = poolBytes === prevWorld.poolBytes ? prevWorld.pagePoolBytes : poolBytes;
         let newPoolSlots = newPagePoolBytes > 0 ?
@@ -877,7 +914,7 @@ class MeshletDirector {
 
         // the texture budget compares against what the live system was built with
         // (prevWorld.texturePoolBytes may already hold the caller's new value)
-        // the system carries when its textured resources are an unchanged PREFIX of the new
+        // the system carries when its textured resources are an unchanged prefix of the new
         // build's and every resource after that prefix fits its family arrays as sized: those
         // are appended in place, so a scene whose assets arrive one by one keeps every tail
         // it has already loaded instead of re-downloading them all per arrival
@@ -1015,14 +1052,14 @@ class MeshletDirector {
         // same packed layout the cull shaders read: normal xyz, distance, per plane
         planes.set(_frustum.planeData);
 
-        // With a CameraFrame the camera's own renderTarget is the OUTPUT (often the backbuffer);
+        // With a CameraFrame the camera's own renderTarget is the output (often the backbuffer);
         // the scene is rendered into the frame pass's internal target, which is also where the
         // depth the HZB needs lives - and, with a render scale, the resolution the cut should
         // be measured against.
         const rt = cameraComponent.framePasses?.[0]?.rt ?? cameraComponent.renderTarget;
         const viewportHeight = rt?.height ?? this.device.height;
         const viewportWidth = rt?.width ?? this.device.width;
-        // the projection scale wants the VERTICAL field of view; a camera set up with a
+        // the projection scale wants the vertical field of view; a camera set up with a
         // horizontal one (the wide-screen convention) reports that in `fov`, which would
         // under-rate every cluster's screen size - and with it the LOD cut and the texture
         // demand - by up to the aspect ratio
@@ -1128,10 +1165,10 @@ class MeshletDirector {
      *
      * Every view keeps a growth floor. Camera views are then budgeted for their demand at
      * CAMERA_SHARE_OCCUPANCY, and shadow views split what is left in proportion to their
-     * demand. A plain proportional split let far cascades - which cover most of the world, so
-     * their root floor alone can exceed the camera's demand - take most of the budget, and
-     * because index pressure feeds the camera's LOD controller, the shadows coarsened and
-     * dropped what the camera sees. Shadow views report to their own controller instead
+     * demand. A plain proportional split would let far cascades - which cover most of the world,
+     * so their root floor alone can exceed the camera's demand - take most of the budget, and
+     * because index pressure feeds the camera's LOD controller, the shadows would coarsen and
+     * drop what the camera sees. Shadow views report to their own controller instead
      * ({@link shadowPressureScale}).
      *
      * @returns {number} Highest demand/share ratio across camera views.
@@ -1142,44 +1179,41 @@ class MeshletDirector {
         const ceiling = this.world.indexCeiling;
         if (!(ceiling > 0) || !Number.isFinite(ceiling)) return 0;
 
-        const cameras = [];
-        this.views.forEach(v => cameras.push(v));
-        const shadows = this.shadowRenderer ? this.shadowRenderer.views : [];
-        const count = cameras.length + shadows.length;
+        const cameras = this.views;
+        const shadows = this.shadowRenderer ? this.shadowRenderer.views : _noViews;
+        const count = cameras.size + shadows.length;
         if (!count) return 0;
 
         // Draw capacity belongs to the active working set, not all scene roots. Charge
         // the growth floor before distributing the rest so shares stay inside the budget.
         const floor = Math.floor((ceiling / count) * SHARE_FLOOR_FRACTION);
         const remaining = ceiling - floor * count;
-        const want = v => Math.max(v.indexDemand() - floor, 0);
         // A camera is budgeted for its whole demand at the target occupancy, so it always has
-        // headroom - budgeting only the part above the floor left a coarsened camera whose
-        // demand had fallen under the floor at ~0.8 occupancy, where the controller holds and
-        // never restores quality.
+        // headroom. Budgeting only the part above the floor would strand a coarsened camera
+        // whose demand has fallen under the floor at ~0.8 occupancy, where the controller holds
+        // and never restores quality.
         // (Without shadow views nothing competes, and cameras split by demand above the floor.)
-        const cameraWantOf = shadows.length ?
-            v => Math.max(v.indexDemand() / CAMERA_SHARE_OCCUPANCY - floor, 0) :
-            want;
+        const cameraOccupancy = shadows.length ? CAMERA_SHARE_OCCUPANCY : 1;
 
         let cameraWant = 0;
-        for (const v of cameras) cameraWant += cameraWantOf(v);
-        // without shadow views the cameras keep the whole budget, as before
+        for (const v of cameras.values()) cameraWant += viewWant(v, floor, cameraOccupancy);
+        // without shadow views the cameras keep the whole budget
         const cameraGive = shadows.length ? Math.min(cameraWant, remaining) : remaining;
         let shadowWant = 0;
-        for (const v of shadows) shadowWant += want(v);
+        for (let i = 0; i < shadows.length; i++) shadowWant += viewWant(shadows[i], floor, 1);
         const shadowGive = remaining - cameraGive;
 
         let worst = 0;
-        for (const v of cameras) {
+        for (const v of cameras.values()) {
             v.indexShare = floor + (cameraWant > 0 ?
-                Math.floor(cameraGive * cameraWantOf(v) / cameraWant) :
-                Math.floor(cameraGive / cameras.length));
+                Math.floor(cameraGive * viewWant(v, floor, cameraOccupancy) / cameraWant) :
+                Math.floor(cameraGive / cameras.size));
             worst = Math.max(worst, v.indexPressure());
         }
-        for (const v of shadows) {
+        for (let i = 0; i < shadows.length; i++) {
+            const v = shadows[i];
             v.indexShare = floor + (shadowWant > 0 ?
-                Math.floor(shadowGive * want(v) / shadowWant) :
+                Math.floor(shadowGive * viewWant(v, floor, 1) / shadowWant) :
                 Math.floor(shadowGive / shadows.length));
             // a face never gets more than its shadow map can resolve: what is left of a large
             // memory budget is not a reason to draw triangles far below a texel
@@ -1216,7 +1250,9 @@ class MeshletDirector {
      */
     _updateShadowPressure() {
         let worst = 1;
-        for (const view of this.shadowRenderer?.views ?? []) {
+        const shadows = this.shadowRenderer ? this.shadowRenderer.views : _noViews;
+        for (let i = 0; i < shadows.length; i++) {
+            const view = shadows[i];
             view.pressureScale = this._stepShadowPressure(view.pressureScale, view.indexPressure());
             worst = Math.max(worst, view.pressureScale);
         }
@@ -1235,9 +1271,9 @@ class MeshletDirector {
     _stepShadowPressure(scale, ratio) {
         const budget = this.budget;
         // Proportional and rate-limited, unlike the camera's: the scale moves every shadow
-        // caster's cut at once, and a fast ramp (x1.05 a frame) overshot by tens of times on
-        // demand that lags the change by a readback or two, then decayed back over seconds - a
-        // whole-island shadow LOD sawtooth that showed as popping and lurching frame times.
+        // caster's cut at once, and demand lags a change by a readback or two, so a fast ramp
+        // overshoots and then decays back - a shadow LOD sawtooth seen as popping and uneven
+        // frame times.
         let step = 1;
         if (ratio > budget.indexStarvedAt) {
             step = Math.min((ratio / budget.indexStarvedAt) ** SHADOW_PRESSURE_GAIN, SHADOW_PRESSURE_MAX_RAISE);
@@ -1283,7 +1319,6 @@ class MeshletDirector {
             totalPages: world.totalPages
         };
         const message = `MeshletDirector: the geometry budget (${(world.poolBytes / BYTES_PER_MB).toFixed(0)} MB) cannot render this scene even at the coarsest LOD - ${pagesShort} page(s) short, index demand ${indexRatio.toFixed(2)}x the share. The configured budget remains unchanged; cheaper coarse geometry or a smaller active working set is required.`;
-        Debug.warnOnce(message);
         // a configuration problem the application must act on, so it is reported in every
         // build (the Debug channel is stripped from release builds), once per budget value
         if (this._budgetWarnedAt !== world.poolBytes) {
@@ -1368,7 +1403,7 @@ class MeshletDirector {
      * ({@link MeshletWorld#setInstancesOutlined}); the outline variant of the vertex shader
      * collapses unselected instances to a degenerate triangle.
      *
-     * The layer MUST NOT be one the scene camera renders, or the main camera will draw the
+     * The layer must not be one the scene camera renders, or the main camera will draw the
      * entire meshlet world a second time. `OutlineRenderer` takes such a layer as its first
      * constructor argument.
      *
@@ -1422,7 +1457,7 @@ class MeshletDirector {
      *
      * Use this rather than {@link MeshletWorld#setInstancesOutlined} directly: it also adds and
      * removes the geometry from the outline layer, so an empty selection - the usual state in an
-     * editor - costs nothing at all. Leaving it registered is NOT free: the outline camera runs
+     * editor - costs nothing at all. Leaving it registered is not free: the outline camera runs
      * the meshlet vertex shader over every visible index, and that shader pulls from the page
      * pool and dequantises, so on a dense scene it is several milliseconds of work that draws no
      * pixels.
@@ -1497,7 +1532,7 @@ class MeshletDirector {
      * and the same answer: hand the picker the instances directly, plus the id mapping it will
      * resolve a picked pixel through.
      *
-     * The id is per INSTANCE - one primitive at one transform, which is what a glTF submesh
+     * The id is per instance - one primitive at one transform, which is what a glTF submesh
      * becomes here, so a table's top and legs pick apart as they would unbaked. It cannot be the
      * picker's per-mesh-instance uniform: one indirect draw covers the whole world. Instead it
      * travels in objectData and the fragment shader emits it (PICK_CUSTOM_ID in the chunk set).
@@ -1598,18 +1633,17 @@ class MeshletDirector {
         }
 
         const camera = cameraComponent.camera;
-        const mis = view.meshInstances;
         view.drawPass1.setup(cameraComponent, renderTarget, this._lightLayer, {
             clearColor: clears && camera.clearColorBuffer,
             clearDepth: clears && camera.clearDepthBuffer,
             clearStencil: clears && camera.clearStencilBuffer
         });
-        view.drawPass1.meshInstances = view.impostorInstance ? [...mis.slice(0, MESHLET_BUCKET_COUNT), view.impostorInstance] : mis.slice(0, MESHLET_BUCKET_COUNT);
+        fillPhase1Draws(view);
 
         const middle = [];
         if (view.useOcclusion) {
             view.drawPass2.setup(cameraComponent, renderTarget, this._lightLayer);
-            view.drawPass2.meshInstances = mis.slice(MESHLET_BUCKET_COUNT, MESHLET_BUCKET_COUNT * 2);
+            fillPhase2Draws(view);
             middle.push(view.hzb.mip0Pass, view.hzbMipsPass, view.cullPhase2Pass, view.drawPass2);
         }
 
@@ -1652,7 +1686,6 @@ class MeshletDirector {
 
         const renderActions = layerComposition._renderActions;
         const renderer = this.renderer;
-        const mis = view.meshInstances;
 
         // meshlet P1 draws first and owns the camera clear; the scene passes load on top
         const firstAction = renderActions[startIndex];
@@ -1661,7 +1694,7 @@ class MeshletDirector {
             clearDepth: firstAction.clearDepth,
             clearStencil: firstAction.clearStencil
         });
-        view.drawPass1.meshInstances = view.impostorInstance ? [...mis.slice(0, MESHLET_BUCKET_COUNT), view.impostorInstance] : mis.slice(0, MESHLET_BUCKET_COUNT);
+        fillPhase1Draws(view);
         frameGraph.addRenderPass(view.drawPass1);
 
         // split the block at its first transparent render action
@@ -1685,7 +1718,7 @@ class MeshletDirector {
             frameGraph.addRenderPass(view.hzbMipsPass);
             frameGraph.addRenderPass(view.cullPhase2Pass);
             view.drawPass2.setup(cameraComponent, renderTarget, this._lightLayer);
-            view.drawPass2.meshInstances = mis.slice(MESHLET_BUCKET_COUNT, MESHLET_BUCKET_COUNT * 2);
+            fillPhase2Draws(view);
             frameGraph.addRenderPass(view.drawPass2);
         }
 

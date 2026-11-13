@@ -221,12 +221,12 @@ class MeshletShadowRenderer {
 
     /**
      * One claim-bits plane shared by every shadow view. Claim bits are one bit per
-     * instance-meshlet pair - ~18.6 MB on the jungle - and a per-cascade copy of that is the
+     * instance-meshlet pair - tens of MB on a scattered scene - and a per-cascade copy is the
      * single largest cost of adding shadows. Sharing is safe because every cascade's cull chain
      * is encoded back to back inside {@link cull}, each preceded by its own in-encoder clear, so
      * no two cascades' claim state is ever live at the same point in the command stream.
      *
-     * Deliberately NOT shared with the camera views: their phase-2 cull is encoded later, during
+     * Deliberately not shared with the camera views: their phase-2 cull is encoded later, during
      * the frame graph, and still reads the claim state phase 1 left behind.
      *
      * @type {StorageBuffer|null}
@@ -238,9 +238,8 @@ class MeshletShadowRenderer {
     shareClaimBits = true;
 
     /**
-     * Include spot and omni lights. An omni costs SIX views - one cull chain per cube face - so
-     * a scene with many shadowed point lights is expensive until the single-pass multi-view cull
-     * lands. Set false to keep meshlet shadows to directional lights only.
+     * Include spot and omni lights. An omni costs six views - one cull chain per cube face - so
+     * a scene with many shadowed point lights is expensive. Set false to keep meshlet shadows to directional lights only.
      *
      * @type {boolean}
      */
@@ -286,11 +285,37 @@ class MeshletShadowRenderer {
         this._workItems = null;
     }
 
-    /** @type {MeshletShadowView[]} - every live shadow view, flattened. */
+    /**
+     * Every live shadow view, flattened; rebuilt only when an entry is created or destroyed.
+     *
+     * @type {MeshletShadowView[]}
+     * @private
+     */
+    _views = [];
+
+    /** @private */
+    _viewsDirty = false;
+
+    /** @private */
+    _viewsEntryCount = 0;
+
+    /**
+     * Every live shadow view, flattened. The array is reused: do not hold it across frames.
+     *
+     * @type {MeshletShadowView[]}
+     */
     get views() {
-        const out = [];
-        this.entries.forEach(entry => out.push(...entry.views));
-        return out;
+        // the size check also catches entries changed without going through _createEntry
+        if (this._viewsDirty || this._viewsEntryCount !== this.entries.size) {
+            this._viewsDirty = false;
+            this._viewsEntryCount = this.entries.size;
+            const out = this._views;
+            out.length = 0;
+            for (const entry of this.entries.values()) {
+                for (let i = 0; i < entry.views.length; i++) out.push(entry.views[i]);
+            }
+        }
+        return this._views;
     }
 
     /**
@@ -318,8 +343,8 @@ class MeshletShadowRenderer {
         // The engine's own selection, so meshlet casters appear for exactly the lights that get
         // a shadow pass - keyed by scene camera, because directional shadow render data is per
         // (light, camera) and a cascade's shadow camera only exists for the camera it was fitted
-        // for. Only the first camera's lights are served; a second camera would need its own set
-        // of views (see the multi-camera note in the README).
+        // for. Only one camera's lights are served (chosen below); a second camera would need its
+        // own set of views.
         const desired = this._desired;
         desired.clear();
         const byCamera = director.renderer?.culler?.cameraDirShadowLights;
@@ -385,8 +410,8 @@ class MeshletShadowRenderer {
         this.entries.forEach((entry) => {
             entry.views.forEach(view => view.setCasterBounds(this._casterBounds(entry, view)));
             // A light with a static shadow map renders it once and then only on request. Its
-            // request came before any page was resident, so meshlets would never cast into it:
-            // ask for a re-render whenever the streamed content changed since the last one.
+            // first request can come before any page is resident, so meshlets would never cast
+            // into it: ask for a re-render whenever the streamed content changed since the last one.
             const world = director.world;
             if (entry.contentWorld !== world || entry.contentVersion !== world.contentVersion) {
                 entry.contentWorld = world;
@@ -400,10 +425,10 @@ class MeshletShadowRenderer {
 
     /**
      * The AABB reported for one cascade's casters. The engine derives each cascade's shadow
-     * DEPTH RANGE from the union of its visible casters' bounds, so handing every cascade the
-     * whole world is not the harmless conservative choice it looks like: on an 8 km landscape it
-     * stretches a 19 m cascade's depth range to ~9.5 km, at which point the depth comparison
-     * cannot resolve anything and NOTHING is ever in shadow - silently, again.
+     * depth range from the union of its visible casters' bounds, so reporting the whole world
+     * is not a safe conservative choice: on a large landscape it stretches a near cascade's
+     * depth range by orders of magnitude, beyond what the depth comparison can resolve, and
+     * nothing is in shadow.
      *
      * So each cascade reports the volume it actually covers: the cascade's own frustum-slice
      * sphere, grown horizontally by how far a caster at the top of the world can reach into it
@@ -499,13 +524,16 @@ class MeshletShadowRenderer {
         this.entries.forEach((entry) => {
             // A cached shadow map (SHADOWUPDATE_NONE) is not re-rendered this frame, so its cull
             // chains would be pure cost: root admission alone scales with the casters inside each
-            // cascade, ~10 ms for four far cascades over a ~1M-instance world. The mode is read
+            // cascade, which over a large world is milliseconds per far cascade. The mode is read
             // before the renderer consumes SHADOWUPDATE_THISFRAME, so a requested update still culls.
             const { light } = entry;
             if (light.shadowUpdateMode === SHADOWUPDATE_NONE) return;
             const overrides = light.shadowUpdateOverrides;
+            const scheduled = light._type === LIGHTTYPE_DIRECTIONAL && light.cascadeUpdateIntervals;
             for (let c = 0; c < entry.views.length; c++) {
-                if (overrides?.[c] === SHADOWUPDATE_NONE) continue;
+                // a cascade update schedule records its per-camera decision on the render data
+                const skip = scheduled ? !light.getRenderData(entry.camera, c).cascadeRefresh : overrides?.[c] === SHADOWUPDATE_NONE;
+                if (skip) continue;
                 this._cullView(entry, entry.views[c], director);
             }
         });
@@ -523,7 +551,7 @@ class MeshletShadowRenderer {
 
         const node = shadowCam._node;
 
-        // Build the frustum from the FINAL shadow camera state rather than reading
+        // Build the frustum from the final shadow camera state rather than reading
         // shadowCam.frustum: the directional cull's last updateFrustum() happens in its pass 1,
         // before pass 2 translates the camera along its forward axis and rewrites farClip to
         // tighten the depth range. Culling against the stale frustum would clip casters that the
@@ -544,7 +572,7 @@ class MeshletShadowRenderer {
         culler.twoPhase = false;
         culler.orthoScale = projection.orthoScale;
         // no texture-mip feedback from a light: the marks are a perspective texel rate
-        // atomicMax'd into the WORLD-SHARED requests buffer, so a light-space rate would poison
+        // atomicMax'd into the world-shared requests buffer, so a light-space rate would poison
         // the camera's texture streaming. Page-residency marks stay on, so off-screen casters
         // stream in.
         culler.cullFlags = CULL_FLAG_NO_TEXEL_RATE | CULL_FLAG_SHADOW_VIEW;
@@ -795,6 +823,7 @@ class MeshletShadowRenderer {
             this._workItems = new StorageBuffer(this.device,
                 Math.max(director.world.workItemCapacity * WORK_ITEM_U32S * BYTES_PER_WORD, 16), BUFFERUSAGE_COPY_DST);
         }
+        this._viewsDirty = true;
         const views = [];
         for (let c = 0; c < faces; c++) {
             const view = new MeshletShadowView(
@@ -818,6 +847,7 @@ class MeshletShadowRenderer {
      * @private
      */
     _destroyEntry(entry) {
+        this._viewsDirty = true;
         entry.views.forEach((view) => {
             entry.layer.removeShadowCasters(view.meshInstances);
             view.destroy();

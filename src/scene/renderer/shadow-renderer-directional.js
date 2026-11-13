@@ -4,7 +4,7 @@ import { Vec3 } from '../../core/math/vec3.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { BoundingBox } from '../../core/shape/bounding-box.js';
 import {
-    LIGHTTYPE_DIRECTIONAL, SHADOWUPDATE_NONE, SHADOWUPDATE_REALTIME, SHADOWUPDATE_THISFRAME
+    LIGHTTYPE_DIRECTIONAL, SHADOWUPDATE_NONE
 } from '../constants.js';
 import { ShadowMap } from './shadow-map.js';
 import { RenderPassShadowDirectional } from './render-pass-shadow-directional.js';
@@ -110,16 +110,16 @@ class ShadowRendererDirectional {
         const nearDist = camera._nearClip;
         this.generateSplitDistances(light, nearDist, Math.min(camera._farClip, light.shadowDistance));
 
-        // a cascade update schedule owns the overrides: it decides per cascade, per frame
+        // A cascade update schedule decides per cascade, per frame and per camera, recording the
+        // decision on the camera's render data (cameras cull before any of them render, so a
+        // light-wide flag would be overwritten by the next camera's cull).
         const intervals = light.cascadeUpdateIntervals;
-        let shadowUpdateOverrides = light.shadowUpdateOverrides;
-        if (intervals && (!shadowUpdateOverrides || shadowUpdateOverrides.length < light.numCascades)) {
-            shadowUpdateOverrides = light.shadowUpdateOverrides = new Array(light.numCascades).fill(SHADOWUPDATE_REALTIME);
-        }
+        const shadowUpdateOverrides = light.shadowUpdateOverrides;
         _lightDir.copy(light._node.forward);
-        // the schedule's clock: cascade c on interval n refreshes when (frame + c) % n == 0, so
-        // cascades sharing an interval take turns instead of landing on the same frame
-        const scheduleFrame = intervals ? light._cascadeScheduleFrame++ : 0;
+        // the camera's schedule clock: cascade c on interval n refreshes when (frame + c) % n == 0,
+        // so cascades sharing an interval take turns instead of landing on the same frame
+        const scheduleFrame = intervals ? light.getRenderData(camera, 0).scheduleFrame++ : 0;
+        const mapCamera = light._cascadeMapCamera;
         let numActiveCascades = 0;
 
         // PASS 1: per-cascade culling + per-cascade visible-caster AABB building. Defers the depth-range
@@ -156,16 +156,20 @@ class ShadowRendererDirectional {
 
             if (intervals) {
                 const interval = Math.max(1, intervals[cascade] | 0);
-                if (!this._cascadeDue(lightRenderData, interval, (scheduleFrame + cascade) % interval === 0, radius)) {
+                // the map region must hold this camera's fit to be reused: another camera
+                // rendering the same light last overwrote it
+                const due = mapCamera[cascade] !== camera ||
+                    this._cascadeDue(lightRenderData, interval, (scheduleFrame + cascade) % interval === 0, radius);
+                lightRenderData.cascadeRefresh = due;
+                if (!due) {
                     // keep the cached map: its shadow camera, and so its matrix, stay as fitted
-                    shadowUpdateOverrides[cascade] = SHADOWUPDATE_NONE;
                     continue;
                 }
+                mapCamera[cascade] = camera;
                 lightRenderData.fitValid = true;
                 lightRenderData.fitCenter.copy(center);
                 lightRenderData.fitRadius = radius;
                 lightRenderData.fitLightDir.copy(_lightDir);
-                shadowUpdateOverrides[cascade] = interval > 1 ? SHADOWUPDATE_THISFRAME : SHADOWUPDATE_REALTIME;
             } else if (shadowUpdateOverrides?.[cascade] === SHADOWUPDATE_NONE) {
                 // manually controlled, and the cascade does not render this frame
                 continue;
@@ -247,6 +251,10 @@ class ShadowRendererDirectional {
             }
 
             _cascadeAabbValid[cascade] = numVisibleCasters > 0;
+            if (intervals) {
+                lightRenderData.fitCasterAabbValid = numVisibleCasters > 0;
+                if (numVisibleCasters) lightRenderData.fitCasterAabb.copy(cascadeAabb);
+            }
             _cascadeRadii[cascade] = radius;
             _cascadeActive[cascade] = true;
             numActiveCascades++;
@@ -258,15 +266,24 @@ class ShadowRendererDirectional {
         // cascade against the union eliminates the binning-driven jumps. Non-PCSS shadow types
         // skip this — they don't use depthRange in the shader and benefit from per-cascade
         // tightening for depth precision.
+        // A cascade the schedule skipped contributes the casters of its last refresh, so the
+        // union does not change size each time the far cascades skip a frame.
         let useUnion = false;
         if (light._isPcss && numActiveCascades) {
             for (let cascade = 0; cascade < light.numCascades; cascade++) {
-                if (!_cascadeAabbValid[cascade]) continue;
+                let aabb = null;
+                if (_cascadeActive[cascade]) {
+                    if (_cascadeAabbValid[cascade]) aabb = _cascadeAabbs[cascade];
+                } else if (intervals) {
+                    const data = light.getRenderData(camera, cascade);
+                    if (data.fitValid && data.fitCasterAabbValid) aabb = data.fitCasterAabb;
+                }
+                if (!aabb) continue;
                 if (!useUnion) {
-                    _unionSceneAabb.copy(_cascadeAabbs[cascade]);
+                    _unionSceneAabb.copy(aabb);
                     useUnion = true;
                 } else {
-                    _unionSceneAabb.add(_cascadeAabbs[cascade]);
+                    _unionSceneAabb.add(aabb);
                 }
             }
         }
@@ -358,8 +375,10 @@ class ShadowRendererDirectional {
             const faceCount = light.numShadowFaces;
             const shadowUpdateOverrides = light.shadowUpdateOverrides;
 
-            // prepare render targets / cameras for rendering
-            let allCascadesRendering = true;
+            // prepare render targets / cameras for rendering. A cascade update schedule decides
+            // during cull, which can run after this pass is created, so a scheduled light always
+            // clears per cascade: a whole-target clear would wipe the cascades it skips.
+            let allCascadesRendering = !light.cascadeUpdateIntervals;
             let shadowCamera;
             for (let face = 0; face < faceCount; face++) {
 

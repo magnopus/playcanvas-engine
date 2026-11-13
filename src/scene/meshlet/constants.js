@@ -202,8 +202,8 @@ export const MESHLET_INDEX_WRITE_WORKGROUP = 64;
  * Records (meshlets) expanded per index-write workgroup, each by WORKGROUP / RECORDS threads.
  * One record per workgroup leaves the pass bound by each group's chain of dependent loads
  * (record, meshlet, object, page) rather than by the writes; several records per group keep
- * several chains in flight and cut the group count. Measured on a Quest 3 (Adreno 740), Bistro,
- * 18k records: 1 per group 4.0ms, 4 1.8ms, 8 0.8ms, 16 0.9ms.
+ * several chains in flight and cut the group count. 8 is the sweet spot on mobile GPUs:
+ * several times faster than 1, with 16 no faster.
  *
  * @type {number}
  */
@@ -397,7 +397,7 @@ export const OBJECT_BUCKET_SHIFT = 4;
 export const OBJECT_FLAG_OUTLINED = 1 << 8;
 
 /**
- * objectData flags word (23), bit 9: draw this instance in the outline pass in the HOVER colour.
+ * objectData flags word (23), bit 9: draw this instance in the outline pass in the hover colour.
  * Separate from {@link OBJECT_FLAG_OUTLINED} so a hovered instance reads differently from a
  * selected one, and a selected instance can be hovered without losing its colour.
  *
@@ -628,7 +628,7 @@ export const MESHLET_CULL_SLICE = 64;
  * surviving instance, and one compaction workgroup of MESHLET_CULL_SLICE lanes serves
  * MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE items. A distant instance keeps only a few coarse
  * meshlets after its finer levels are skipped, so a whole 64-lane workgroup per instance would
- * leave most lanes idle; with ~1M visible instances that floor dominated the pass.
+ * leave most lanes idle, and with very many visible instances that floor would dominate the pass.
  *
  * @ignore
  */

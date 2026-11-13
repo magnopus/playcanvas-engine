@@ -18,11 +18,11 @@ import { MeshletTextureSource } from './meshlet-texture-source.js';
  *
  * Two tiers per texture family (srgb / srgba / normal / linear - a family is one transcode
  * format):
- * - The always-resident TAIL: every texture gets one layer holding its manifest tail mips
+ * - The always-resident tail: every texture gets one layer holding its manifest tail mips
  *   (<= 256 px). One HTTP range request per source array loads it; it is the terminal
  *   fallback, so no pinning is ever needed.
- * - The demand-streamed FINE pool: one slot-pool array per family, sized to the family's
- *   largest source resolution and holding only the mips ABOVE the tail. The cull pass feeds
+ * - The demand-streamed fine pool: one slot-pool array per family, sized to the family's
+ *   largest source resolution and holding only the mips above the tail. The cull pass feeds
  *   back per-material texel rates (texelRateMarks); {@link processMarks} converts them to desired
  *   source mips, acquires LRU slots and fetches exactly the (layer, mip) byte ranges needed.
  *   VRAM is bounded by {@link poolBytes} - under pressure {@link mipBias} rises, pushing more
@@ -33,7 +33,7 @@ import { MeshletTextureSource } from './meshlet-texture-source.js';
  *   (sizeBias = log2(familySlotSize / srcSize) - the level offset of a smaller texture
  *   inside its family arrays; tailStart = the texture's own fine/tail boundary in source
  *   mips, since its tail top may sit below the family's tail size)
- * - word1: minLod:16 (finest resident mip in SOURCE-mip space; 0x7FFF = nothing resident
+ * - word1: minLod:16 (finest resident mip in source-mip space; 0x7FFF = nothing resident
  *   yet - the shader falls back to material factors) | tailLayer:16
  *
  * The virtual mip chain the shader walks is [fine slot levels | tail levels] with the
@@ -122,10 +122,10 @@ class MeshletTextures {
     onFamilyTexturesReady = null;
 
     /**
-     * Total texture VRAM budget in bytes - the always-resident tail arrays AND the demand-
+     * Total texture VRAM budget in bytes - the always-resident tail arrays and the demand-
      * streamed fine slot pool, not the pool alone. Budgeting only the pool understates what is
-     * held: the tails are typically the same size again, so a "96 MB" pool sat inside ~186 MB
-     * of texture VRAM. The tails are sized by the asset and cannot be traded away, so they come
+     * held: the tails are typically the same size again, so a pool-only budget would cover
+     * about half the texture VRAM actually in use. The tails are sized by the asset and cannot be traded away, so they come
      * off the top and the fine pool gets what remains, split across families by demand.
      *
      * @type {number}
@@ -277,7 +277,7 @@ class MeshletTextures {
     /**
      * Provides the material-row - texture-slot map (rows x 4 flat texture indices, -1 =
      * absent), used to turn per-material feedback marks into per-texture demand, plus a
-     * per-slot tiling bias: 16 * log2 of the slot's KHR_texture_transform scale, SUBTRACTED
+     * per-slot tiling bias: 16 * log2 of the slot's KHR_texture_transform scale, subtracted
      * from that slot's mark. The cull measures texel rate in mesh UV space, but a tiled
      * texture repeats across that span, so the sampler lands on coarser mips than the mark
      * suggests - without the correction the streamer fetches mips nothing samples.
@@ -776,7 +776,7 @@ class MeshletTextures {
         this.wantedAboveTail = wantedAboveTail;
         this.slotDenials = denials;
 
-        // pressure: eviction CHURN means the hot set exceeds the pool and slots ping-pong -
+        // pressure: eviction churn means the hot set exceeds the pool and slots ping-pong -
         // bias mips coarser (fast) until the churn stops, then decay slowly (hysteresis).
         // Steady denials at full occupancy without churn are the expected saturated state:
         // the held slots keep full sharpness and the rest stay on their tails.
@@ -816,7 +816,7 @@ class MeshletTextures {
         for (let s = 0; s < fam.slotCount; s++) {
             const holder = fam.slotTex[s];
             // a slot with no holder that is not on the free list was evicted earlier this frame
-            // and sits in pendingFree: handing it out now AND from the free list next frame
+            // and sits in pendingFree: handing it out now and from the free list next frame
             // would give two textures the same slot, each uploading over the other's mips
             if (holder < 0) continue;
             if (desiredTexelRate[holder] > 0) continue; // wanted this frame
@@ -840,7 +840,7 @@ class MeshletTextures {
             this._dirty = true;
             this.fineEvictions++;
             fam.slotTex[best] = -1;
-            // The slot is reused only NEXT frame, after the residency rewrite reached the GPU:
+            // The slot is reused only next frame, after the residency rewrite reached the GPU:
             // it goes through pendingFree, and this frame's requester is denied. Handing it out
             // now would leave it queued in pendingFree as well, and the next frame would give
             // the same slot to a second texture.
