@@ -44,8 +44,8 @@ describe('meshlet cull shaders', function () {
         expect(meshletCullWGSL).to.include(`@workgroup_size(${MESHLET_CULL_SLICE})`);
         // compaction items start at the cut's finest level, not at meshlet 0, and pack
         // MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE to a workgroup
-        expect(instanceCullWGSL).to.include(`(meshletCount - start + ${MESHLET_COMPACT_SLICE - 1}u) / ${MESHLET_COMPACT_SLICE}u`);
-        expect(instanceCullWGSL).to.include(`workItems[item] = MeshletWorkItem(instance, start + slice * ${MESHLET_COMPACT_SLICE}u);`);
+        expect(instanceCullWGSL).to.include(`(meshletCount - *start + ${MESHLET_COMPACT_SLICE - 1}u) / ${MESHLET_COMPACT_SLICE}u`);
+        expect(instanceCullWGSL).to.include(`workItems[item] = MeshletWorkItem(laneInstance[lo], laneStart[lo] + slice * ${MESHLET_COMPACT_SLICE}u);`);
         expect(compactMeshletsWGSL).to.include(`* ${MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE}u + lane.x / ${MESHLET_COMPACT_SLICE}u`);
         expect(compactMeshletsWGSL).to.include(`sliceStart + lane.x % ${MESHLET_COMPACT_SLICE}u`);
     });

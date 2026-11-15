@@ -20,6 +20,7 @@ import { Vec4 } from '../../core/math/vec4.js';
  * @import { CameraFrame } from './camera-frame.js'
  * @import { CameraFrameEffect, CameraFrameEffectContext, CameraFrameEffectDepth, CameraFrameEffectPasses, CameraFrameEffectResources, CameraFrameEffectScene } from './camera-frame-effect.js'
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
+ * @import { RenderPass } from '../../platform/graphics/render-pass.js'
  */
 
 /**
@@ -67,6 +68,20 @@ class CameraFrameOptions {
 
 // the formats the scene depth can be rendered to, in the order of preference
 const _sceneDepthFormats = [PIXELFORMAT_R32F, PIXELFORMAT_R16F];
+
+/**
+ * Sets the scale a pass resizes its render target by, when it resizes it.
+ *
+ * @param {RenderPass|null} pass - The pass.
+ * @param {number} scaleX - The horizontal scale.
+ * @param {number} scaleY - The vertical scale.
+ */
+const setPassScale = (pass, scaleX, scaleY) => {
+    if (pass?.options) {
+        pass.scaleX = scaleX;
+        pass.scaleY = scaleY;
+    }
+};
 
 /**
  * Render pass implementation of a common camera frame rendering with integrated post-processing
@@ -495,16 +510,7 @@ class FramePassCameraFrame extends FramePass {
 
     set renderTargetScale(value) {
         this._renderTargetScale = value;
-        if (this.scenePass) {
-            this.scenePass.scaleX = value;
-            this.scenePass.scaleY = value;
-        }
-
-        // the prepass renders at the size of the scene pass
-        if (this.prePass) {
-            this.prePass.scaleX = value;
-            this.prePass.scaleY = value;
-        }
+        this.updateSceneScale();
     }
 
     get renderTargetScale() {
@@ -516,14 +522,25 @@ class FramePassCameraFrame extends FramePass {
      * The passes rendering the scene render to the whole of it, ignoring the camera's viewport,
      * and the passes after them follow its size.
      *
+     * Every pass resizing the scene render target gets the same scale. The passes copy the options
+     * they are initialized with, so one left on an earlier scale would resize the shared render
+     * target back each frame.
+     *
      * @private
      */
     updateSceneScale() {
         const options = this.sceneOptions;
         if (options) {
             const rect = this.cameraComponent.camera.rect;
-            options.scaleX = this._renderTargetScale * rect.z;
-            options.scaleY = this._renderTargetScale * rect.w;
+            const scaleX = this._renderTargetScale * rect.z;
+            const scaleY = this._renderTargetScale * rect.w;
+            options.scaleX = scaleX;
+            options.scaleY = scaleY;
+
+            // the prepass renders at the size of the scene pass
+            setPassScale(this.prePass, scaleX, scaleY);
+            setPassScale(this.scenePass, scaleX, scaleY);
+            setPassScale(this.scenePassAfterMeshlets, scaleX, scaleY);
         }
     }
 

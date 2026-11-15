@@ -82,6 +82,15 @@ export function Controls({ observer }) {
                     link={{ observer, path: 'data.taa' }}
                 />
             </LabelGroup>
+            <LabelGroup text='Render scale'>
+                <SliderInput
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.renderScale' }}
+                    min={0.25}
+                    max={1}
+                    precision={2}
+                />
+            </LabelGroup>
             <LabelGroup text='Occlusion'>
                 <BooleanInput
                     type='toggle'

@@ -114,8 +114,13 @@ export const meshletVisibleCellWGSL = /* wgsl */ `
 
 /**
  * Instance culling: one workgroup per visible cell, one thread per instance of it. World-sphere
- * frustum test, then fan the instance's meshlets out into fixed-size slice work items with a
- * single atomicAdd.
+ * frustum test, then fan the instance's meshlets out into fixed-size slice work items.
+ *
+ * The fan-out is shared by the whole workgroup: an instance can own hundreds of thousands of
+ * meshlets (Zorah's carved panels reach 700k), and a lane writing its own slices serially left
+ * one lane looping ~90k times while the pass waited on it. Instead the lanes prefix-sum their
+ * slice counts, reserve the cell's items with one atomicAdd, and stride over them together,
+ * each finding the instance that owns an item by binary search over the prefix sums.
  */
 export const instanceCullWGSL = /* wgsl */ `
     ${meshletCullVolumeWGSL}
@@ -138,39 +143,35 @@ export const instanceCullWGSL = /* wgsl */ `
     // instance ids in cell order
     var<storage, read> cellInstances : array<u32>;
 
+    // per lane: inclusive prefix sum of the slice counts, and the lane's instance and first meshlet
+    var<workgroup> slicePrefix : array<u32, ${MESHLET_CELL_SIZE}>;
+    var<workgroup> laneInstance : array<u32, ${MESHLET_CELL_SIZE}>;
+    var<workgroup> laneStart : array<u32, ${MESHLET_CELL_SIZE}>;
+    var<workgroup> itemBase : u32;
+
     ${meshletVisibleCellWGSL}
 
-    @compute @workgroup_size(${MESHLET_CELL_SIZE})
-    fn main(@builtin(workgroup_id) group : vec3u, @builtin(local_invocation_id) lane : vec3u) {
-        let cell = meshletVisibleCell(group);
-        if (cell == 0xFFFFFFFFu) {
-            return;
-        }
-        let position = cell * ${MESHLET_CELL_SIZE}u + lane.x;
-        if (position >= uniform.instanceCount) {
-            return;
-        }
-        let instance = cellInstances[position];
+    // the work-item slices of an instance, 0 when it is culled; sets the first meshlet they cover
+    fn instanceSlices(instance : u32, start : ptr<function, u32>) -> u32 {
         let admission = uniform.totalPairs + instance;
         if ((admittedBits[admission >> 5u] & (1u << (admission & 31u))) == 0u) {
-            return;
+            return 0u;
         }
         if ((objectData[instance].flags & ${OBJECT_FLAG_HIDDEN}u) != 0u) {
-            return;
+            return 0u;
         }
         // per-instance shadow casting: a shadow view drops the instances that opted out
         let shadowView = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_SHADOW_VIEW}u) != 0u;
         if (shadowView && (objectData[instance].flags & ${OBJECT_FLAG_NO_SHADOW}u) != 0u) {
-            return;
+            return 0u;
         }
 
         let worldMatrix = objectData[instance].worldMatrix;
         let localSphere = objectData[instance].sphere;
         let radius = localSphere.w * objectData[instance].maxScale;
         let center = (worldMatrix * vec4f(localSphere.xyz, 1.0)).xyz;
-
         if (!meshletInCullVolume(center, radius)) {
-            return;
+            return 0u;
         }
 
         // Selected meshlets lie no finer than the cut's finest refined level (the cut records it
@@ -181,14 +182,60 @@ export const instanceCullWGSL = /* wgsl */ `
         var level = levelStarts[firstMeshlet];
         let finest = admittedBits[uniform.levelBase + instance];
         if (finest != 0u) { level = min(level, ${MESHLET_LEVEL_BIAS}u - finest); }
-        let start = select(levelStarts[firstMeshlet + level], 0u, level == 0u);
-        let sliceCount = (meshletCount - start + ${MESHLET_COMPACT_SLICE - 1}u) / ${MESHLET_COMPACT_SLICE}u;
-        let firstItem = atomicAdd(&counters[${MESHLET_COUNTER.WORK_ITEMS}u], sliceCount);
-        for (var slice = 0u; slice < sliceCount; slice++) {
-            let item = firstItem + slice;
-            if (item < uniform.workItemCapacity) {
-                workItems[item] = MeshletWorkItem(instance, start + slice * ${MESHLET_COMPACT_SLICE}u);
+        *start = select(levelStarts[firstMeshlet + level], 0u, level == 0u);
+        return (meshletCount - *start + ${MESHLET_COMPACT_SLICE - 1}u) / ${MESHLET_COMPACT_SLICE}u;
+    }
+
+    @compute @workgroup_size(${MESHLET_CELL_SIZE})
+    fn main(@builtin(workgroup_id) group : vec3u, @builtin(local_invocation_id) lane : vec3u) {
+        // every lane reaches every barrier, so nothing returns early
+        let cell = meshletVisibleCell(group);
+        let position = cell * ${MESHLET_CELL_SIZE}u + lane.x;
+        var instance = 0u;
+        var start = 0u;
+        var slices = 0u;
+        if (cell != 0xFFFFFFFFu && position < uniform.instanceCount) {
+            instance = cellInstances[position];
+            slices = instanceSlices(instance, &start);
+        }
+        laneInstance[lane.x] = instance;
+        laneStart[lane.x] = start;
+
+        // inclusive prefix sum of the slice counts (Hillis-Steele)
+        var sum = slices;
+        slicePrefix[lane.x] = sum;
+        workgroupBarrier();
+        for (var offset = 1u; offset < ${MESHLET_CELL_SIZE}u; offset <<= 1u) {
+            var add = 0u;
+            if (lane.x >= offset) { add = slicePrefix[lane.x - offset]; }
+            workgroupBarrier();
+            sum += add;
+            slicePrefix[lane.x] = sum;
+            workgroupBarrier();
+        }
+
+        let total = slicePrefix[${MESHLET_CELL_SIZE - 1}u];
+        if (lane.x == 0u && total != 0u) {
+            itemBase = atomicAdd(&counters[${MESHLET_COUNTER.WORK_ITEMS}u], total);
+        }
+        let base = workgroupUniformLoad(&itemBase);
+
+        for (var i = lane.x; i < total; i += ${MESHLET_CELL_SIZE}u) {
+            let item = base + i;
+            if (item >= uniform.workItemCapacity) {
+                break;
             }
+            // the owner is the first lane whose inclusive prefix passes i
+            var lo = 0u;
+            var hi = ${MESHLET_CELL_SIZE - 1}u;
+            while (lo < hi) {
+                let mid = (lo + hi) >> 1u;
+                if (slicePrefix[mid] > i) { hi = mid; } else { lo = mid + 1u; }
+            }
+            var first = 0u;
+            if (lo > 0u) { first = slicePrefix[lo - 1u]; }
+            let slice = i - first;
+            workItems[item] = MeshletWorkItem(laneInstance[lo], laneStart[lo] + slice * ${MESHLET_COMPACT_SLICE}u);
         }
     }
 `;

@@ -13,6 +13,7 @@
 //   ?tint=0                leave the materials as baked (white)
 //   ?mountains=A,B,E|none  which background terrain pieces to keep (default all but the F1 sheets)
 //   ?view=start            begin at the manifest's start pose instead of the hero view
+//   ?scale=<0.25..1>       scene render scale, TAA upscales to the output (default 0.6)
 //
 // @flag WEBGL_DISABLED
 // @flag WEBGPU_BARE_DISABLED
@@ -371,6 +372,13 @@ cameraFrame.rendering.samples = 1;
 cameraFrame.rendering.toneMapping = device.isHdr ? TONEMAP_NONE : TONEMAP_ACES2;
 cameraFrame.bloom.enabled = false;
 cameraFrame.taa.enabled = true;
+// The scene renders at a fraction of the output and TAA accumulates the jittered frames back to full
+// resolution, so the meshlet raster, the lit shading and the HZB all run on fewer pixels (the DAG
+// cut measures against the scaled scene target too). ?scale=1 renders at full resolution.
+const renderScale = math.clamp(parseFloat(params.get('scale') ?? '0.6') || 0.6, 0.25, 1);
+cameraFrame.rendering.renderTargetScale = renderScale;
+cameraFrame.taa.upscale = renderScale < 1;
+cameraFrame.rendering.sharpness = renderScale < 1 ? 0.5 : 0;
 // contact shadows in the corners and under ledges, from the depth the meshlets write
 // off by default: at the export's coarse LODs and without textures it reads as dark smudges around
 // carved detail. ?ssao=1 starts with it on
@@ -429,6 +437,7 @@ data.set('data', {
     staticShadows: true,
     ssao: ssaoOn,
     taa: true,
+    renderScale,
     occlusion: true,
     occlusionAdmission: true,
     teleport: 'hero',
@@ -469,10 +478,18 @@ data.on('data.ssao:set', (/** @type {boolean} */ value) => {
     cameraFrame.ssao.type = value ? SSAOTYPE_COMBINE : SSAOTYPE_NONE;
     cameraFrame.update();
 });
-data.on('data.taa:set', (/** @type {boolean} */ value) => {
-    cameraFrame.taa.enabled = value;
+// upscaling is part of the TAA resolve, so without TAA a reduced scale is a bilinear stretch
+const applyResolution = () => {
+    const taa = data.get('data.taa');
+    const scale = data.get('data.renderScale');
+    cameraFrame.taa.enabled = taa;
+    cameraFrame.taa.upscale = taa && scale < 1;
+    cameraFrame.rendering.renderTargetScale = scale;
+    cameraFrame.rendering.sharpness = scale < 1 ? 0.5 : 0;
     cameraFrame.update();
-});
+};
+data.on('data.taa:set', applyResolution);
+data.on('data.renderScale:set', applyResolution);
 data.on('data.occlusion:set', (/** @type {boolean} */ value) => {
     app.systems.meshlet.occlusion = value;
 });
@@ -560,8 +577,10 @@ app.on('update', () => {
             drawn: view.renderedMeshlets ?? 0
         });
     }
-    // for reading from the console: window.__zorahBudget
+    // for reading from the console and profiling scripts: window.__zorahBudget / __zorahData
     window.__zorahBudget = budget;
+    window.__zorahData = data;
+    window.__zorahCameraFrame = cameraFrame;
     const threshold = app.systems.meshlet.dagPixelThreshold;
     data.set('data.statsRoots', `admitted ${count(budget.admitted)} idx, rejected ${count(budget.rejected)} idx ` +
         `(${budget.rejectedInstances} instances missing), unready ${budget.unready}, skipped as occluded ${budget.occluded}`);

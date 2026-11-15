@@ -165,6 +165,48 @@ describe('FramePassCameraFrame', function () {
         }
     });
 
+    it('resizes the scene render target when the render target scale changes after the passes are created', function () {
+        // the meshlet passes split the scene into a pass before and one after them, both resizing
+        // the one scene render target - one left on the old scale would size it back every frame
+        const before = new FramePass(app.graphicsDevice);
+        const middle = new FramePass(app.graphicsDevice);
+        app.renderer.meshletDirector = {
+            buildCameraFramePasses: () => ({ before: [before], middle: [middle] }),
+            wantsSceneDepth: () => false
+        };
+        try {
+            cameraFrame.update();
+            const framePass = cameraFrame.renderPassCamera;
+            // a frame settles the passes, as one which is not rebuilt keeps the scale it was made with
+            framePass.frameUpdate();
+            const { scenePassAfterMeshlets } = framePass;
+            expect(scenePassAfterMeshlets, 'pass after the meshlets').to.not.equal(null);
+
+            cameraFrame.rendering.renderTargetScale = 0.5;
+            cameraFrame.update();
+            expect(framePass.scenePassAfterMeshlets, 'not rebuilt').to.equal(scenePassAfterMeshlets);
+            const resizing = framePass.collectPasses().filter(pass => pass?.renderTarget === framePass.rt && pass.options);
+            expect(resizing.length).to.be.above(1);
+            for (const pass of resizing) {
+                expect([pass.scaleX, pass.scaleY], pass.name).to.deep.equal([0.5, 0.5]);
+            }
+
+            // the frame graph updates the passes in order, each resizing what it renders to
+            framePass.frameUpdate();
+            for (const pass of resizing) {
+                pass.frameUpdate();
+            }
+            const { backBuffer } = app.graphicsDevice;
+            expect([framePass.rt.width, framePass.rt.height]).to.deep.equal([Math.floor(backBuffer.width * 0.5), Math.floor(backBuffer.height * 0.5)]);
+        } finally {
+            app.renderer.meshletDirector = null;
+            cameraFrame.destroy();
+            cameraFrame = new CameraFrame(app, app.root.findByName('Camera').camera);
+            before.destroy();
+            middle.destroy();
+        }
+    });
+
     it('blurs the TAA output for the bloom and the high quality depth of field', function () {
         cameraFrame.dof.highQuality = true;
         cameraFrame.update();
