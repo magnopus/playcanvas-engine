@@ -191,6 +191,22 @@ describe('MeshletView', function () {
         view.destroy();
     });
 
+    it('keeps the buffer at the ceiling when demand over it only shifts between buckets', function () {
+        const view = makeView({}, makeWorld(device, { indexCeiling: 195 }));
+        view.lastDemand = { indices: [900, 300, 100], records: 0, cutQueue: 0 };
+        // the first growth takes the buffer to the ceiling
+        view.indexCapacity = [100, 20, 10];
+        expect(view.growIndexBuffer([900, 300, 100])).to.equal(true);
+        expect(view.indexTotal()).to.equal(195);
+        const atCeiling = view.indexBuffer;
+        // demand still over the ceiling, split differently: the same total needs no new buffer
+        view.lastDemand = { indices: [100, 900, 300], records: 0, cutQueue: 0 };
+        expect(view.growIndexBuffer([100, 900, 300])).to.equal(false);
+        expect(view.indexBuffer, 'not reallocated').to.equal(atCeiling);
+        expect(view.indexTotal()).to.equal(195);
+        view.destroy();
+    });
+
     it('shrinks only after a sustained low, never below the initial allocation', function () {
         const view = makeView();
         view.growIndexBuffer([3000, 600, 300]);
@@ -232,13 +248,32 @@ describe('MeshletView', function () {
         expect(view.indexPressure()).to.be.closeTo(270 / 100000, 1e-9);
 
         view.applyPendingGrowth();
-        expect(view.indexCapacity, 'bucket 0 above growAt: grows to demand * growTo').to.deep.equal([400, 60, 30]);
+        // bucket 0 above growAt wants demand * growTo (400), and the buffer grows by at least
+        // INDEX_GROW_STEP of its 390 total, so creeping demand does not reallocate every frame
+        expect(view.indexCapacity, 'bucket 0 above growAt: grows by the step').to.deep.equal([542, 60, 30]);
         expect(bound.index).to.equal(1);
         expect(view.recordCapacity, 'records above growAt too').to.equal(144);
         expect(view.selectedMeshletsBuffer.byteSize).to.equal(144 * 8);
         expect(bound.record).to.equal(1);
         view.applyPendingGrowth();
         expect(bound.index, 'demand consumed').to.equal(1);
+        view.destroy();
+    });
+
+    it('moves capacity between the buckets in place when the buffer already holds every target', async function () {
+        const view = makeView();
+        let bound = 0;
+        view.culler.bindIndexState = () => bound++;
+        // 390 indices as [300, 60, 30]; bucket 2 fills up while bucket 0 is nearly idle
+        view.readbackPool.read = () => Promise.resolve(counters([20, 10, 150], 0));
+        view.monitorIndexDemand();
+        await Promise.resolve();
+        const before = view.indexBuffer;
+        view.applyPendingGrowth();
+        expect(view.indexBuffer, 'same buffer').to.equal(before);
+        expect(view.indexTotal()).to.be.at.most(390);
+        expect(view.indexCapacity[2], 'bucket 2 holds its demand * growTo').to.be.at.least(240);
+        expect(bound).to.be.at.least(1);
         view.destroy();
     });
 
@@ -270,7 +305,7 @@ describe('MeshletView', function () {
         view.monitorIndexDemand();
         await Promise.resolve();
         expect(view.lastRoots).to.deep.equal({
-            admitted: [300, 0, 0], rejected: [0, 0, 40], candidates: 9, rejectedInstances: 2, unready: 3, subpixel: 4, occluded: 5
+            admitted: [300, 0, 0], rejected: [0, 0, 40], candidates: 9, rejectedInstances: 2, unready: 3, subpixel: 4, occluded: 5, waiting: 0
         });
         view.destroy();
     });

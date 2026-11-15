@@ -12,7 +12,7 @@ import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shad
 import {
     compactMeshletsWGSL, dispatchArgsWGSL, finalizeArgsWGSL, indexWriteWGSL, instanceCullWGSL, meshletCullWGSL, resetPhase2WGSL
 } from '../../../src/scene/meshlet/shaders/meshlet-cull-wgsl.js';
-import { meshletCutQueueWGSL } from '../../../src/scene/meshlet/shaders/meshlet-cut-wgsl.js';
+import { meshletCutEmitWGSL, meshletCutQueueWGSL } from '../../../src/scene/meshlet/shaders/meshlet-cut-wgsl.js';
 import * as pageWGSL from '../../../src/scene/meshlet/shaders/meshlet-page-wgsl.js';
 import { meshletRootAdmitWGSL, meshletRootClassifyWGSL, meshletRootScatterWGSL } from '../../../src/scene/meshlet/shaders/meshlet-root-admit-wgsl.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
@@ -23,7 +23,7 @@ import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 // geometry.
 describe('meshlet cull shaders', function () {
 
-    const shaders = { meshletCutQueueWGSL, instanceCullWGSL, compactMeshletsWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL };
+    const shaders = { meshletCutQueueWGSL, meshletCutEmitWGSL, instanceCullWGSL, compactMeshletsWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL };
     const count = (text, re) => (text.match(re) ?? []).length;
 
     it('interpolate every constant', function () {
@@ -38,6 +38,7 @@ describe('meshlet cull shaders', function () {
         expect(count(meshletCullWGSL, /var<storage/g)).to.be.at.most(10);
         expect(count(compactMeshletsWGSL, /var<storage/g)).to.be.at.most(10);
         expect(count(meshletCutQueueWGSL, /var<storage/g)).to.be.at.most(10);
+        expect(count(meshletCutEmitWGSL, /var<storage/g)).to.be.at.most(10);
     });
 
     it('size the cull workgroup to the work-item slice and round the fan-out up', function () {

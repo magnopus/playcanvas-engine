@@ -1,4 +1,4 @@
-import { meshletCutQueueArgsWGSL, meshletCutQueueWGSL } from './shaders/meshlet-cut-wgsl.js';
+import { meshletCutEmitWGSL, meshletCutQueueArgsWGSL, meshletCutQueueWGSL } from './shaders/meshlet-cut-wgsl.js';
 import {
     meshletRootAdmitWGSL, meshletRootBandArgsWGSL, meshletRootClassifyWGSL, meshletRootScatterWGSL
 } from './shaders/meshlet-root-admit-wgsl.js';
@@ -34,6 +34,7 @@ class MeshletCullShaders {
         this.cellCull = make('CellCull', cellCullWGSL);
         this.cutQueue = make('CutQueue', meshletCutQueueWGSL);
         this.cutQueueArgs = make('CutQueueArgs', meshletCutQueueArgsWGSL);
+        this.cutEmit = make('CutEmit', meshletCutEmitWGSL);
         this.rootClassify = make('RootClassify', meshletRootClassifyWGSL);
         this.rootBandArgs = make('RootBandArgs', meshletRootBandArgsWGSL);
         this.rootScatter = make('RootScatter', meshletRootScatterWGSL);
@@ -56,6 +57,7 @@ class MeshletCullShaders {
         this.cellCull?.destroy();
         this.cutQueue?.destroy();
         this.cutQueueArgs?.destroy();
+        this.cutEmit?.destroy();
         this.rootClassify?.destroy();
         this.rootBandArgs?.destroy();
         this.rootScatter?.destroy();

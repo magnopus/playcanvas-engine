@@ -290,6 +290,56 @@ describe('MeshletShadowRenderer', function () {
         expect(sun.shadowUpdateMode).to.equal(SHADOWUPDATE_THISFRAME);
     });
 
+    it('re-renders a cached shadow map for new content only when its last render was incomplete', function () {
+        const sun = makeLight({ faces: 1 });
+        sun.shadowUpdateMode = SHADOWUPDATE_NONE;
+        director.renderer.culler.cameraDirShadowLights.set(sceneCamera, [sun]);
+        world.contentVersion = 0;
+        renderer.staticSettleMs = 0;
+        renderer.staticMaxWaitMs = 0;
+        renderer.syncLights(comp);
+        sun.shadowUpdateMode = SHADOWUPDATE_NONE;
+        const [view] = renderer.entries.get(sun).views;
+        const roots = { admitted: [10, 0, 0], rejected: [0, 0, 0], candidates: 1, rejectedInstances: 0, unready: 0, subpixel: 0, occluded: 0, waiting: 0 };
+        view.lastDemand = { indices: [10, 0, 0], records: 1, cutQueue: 0 };
+        view.lastRoots = roots;
+        const changed = () => {
+            world.contentVersion++;
+            renderer.syncLights(comp);
+            const mode = sun.shadowUpdateMode;
+            sun.shadowUpdateMode = SHADOWUPDATE_NONE;
+            return mode;
+        };
+
+        expect(changed(), 'a complete cut renders the same casters again').to.equal(SHADOWUPDATE_NONE);
+        roots.waiting = 3;
+        expect(changed(), 'groups waited on pages').to.equal(SHADOWUPDATE_THISFRAME);
+        roots.waiting = 0;
+        roots.unready = 2;
+        expect(changed(), 'roots were not resident').to.equal(SHADOWUPDATE_THISFRAME);
+        roots.unready = 0;
+
+        // casters dropped for capacity are worth another render only while the buffer can grow
+        roots.rejectedInstances = 5;
+        view.canGrowIndices = () => true;
+        expect(changed()).to.equal(SHADOWUPDATE_THISFRAME);
+        view.canGrowIndices = () => false;
+        expect(changed(), 'at the ceiling').to.equal(SHADOWUPDATE_NONE);
+
+        roots.rejectedInstances = 0;
+        roots.candidates = 0;
+        expect(changed(), 'an empty cut, rendered before anything could be admitted').to.equal(SHADOWUPDATE_THISFRAME);
+        roots.candidates = 1;
+
+        // the counters of the last render still on their way: decided once they arrive
+        roots.waiting = 1;
+        view._countersReadBusy = true;
+        expect(changed()).to.equal(SHADOWUPDATE_NONE);
+        view._countersReadBusy = false;
+        renderer.syncLights(comp);
+        expect(sun.shadowUpdateMode).to.equal(SHADOWUPDATE_THISFRAME);
+    });
+
     it('serves a light with shadow bounds one camera-independent view fitted to the bounds', function () {
         const sun = makeLight({ faces: 1, renderData: { 0: { shadowCamera: { _node: { forward: new Vec3(0, -1, 0) } } } } });
         sun._shadowBounds = new BoundingBox(new Vec3(10, 5, -20), new Vec3(30, 5, 15));

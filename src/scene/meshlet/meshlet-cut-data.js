@@ -1,7 +1,7 @@
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import {
-    MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT,
+    MESHLET_CUT_ROOT_CHUNK, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT,
     MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_SLOPPY, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA as O, OBJECT_DATA_U32S
 } from './constants.js';
 
@@ -253,7 +253,7 @@ class MeshletCutData {
                 let cursor = words.length;
                 for (const row of rows) {
                     row.offset = cursor;
-                    cursor += 8 + row.parents.size * 3 + row.pages.size + 1 + row.owned.length;
+                    cursor += 8 + row.parents.size * 3 + row.pages.size + 1 + row.owned.length + 1 + row.group.children.length;
                 }
                 const rootOwned = rootOwnedRows.map(row => row.offset);
                 for (const row of rows) {
@@ -266,14 +266,18 @@ class MeshletCutData {
                     // Each parent also carries the coarse cost it contributed: an off-frustum
                     // parent refines without charging its children, so a replacement must not
                     // subtract those uncharged members from its own charge. After the pages:
-                    // the count, then the task offsets, of the tasks this group owns.
+                    // the count, then the task offsets, of the tasks this group owns. Last, the count
+                    // and primitive-local indices of its children, which the emit pass draws when
+                    // the group refines and their own group does not.
                     words.push(first + group.start, parents.size, offset + 8 + parents.size * 3, pages.size,
                         fineCost[0], coarseCost[0], fineCost[1], coarseCost[1]);
                     for (const [parent, members] of parents) words.push(parent, ...costs(members));
                     for (const page of pages) words.push(page);
                     words.push(owned.length);
                     for (const task of owned) words.push(task);
-                    if (words.length !== offset + 8 + parents.size * 3 + pages.size + 1 + owned.length) {
+                    words.push(group.children.length);
+                    for (const child of group.children) words.push(child);
+                    if (words.length !== offset + 8 + parents.size * 3 + pages.size + 1 + owned.length + 1 + group.children.length) {
                         throw new Error('MeshletCutData: task row layout mismatch.');
                     }
                 }
@@ -285,11 +289,19 @@ class MeshletCutData {
                 const rootOffset = words.length;
                 // root header: word 5 carries the draw bucket (there is no coarser cost to hold),
                 // so the root admission needs no meshlet record. After the pages: the tasks that
-                // depend on the roots alone, which the admission enqueues.
+                // depend on the roots alone, which the admission enqueues. Last, the roots in
+                // lists of MESHLET_CUT_ROOT_CHUNK (the chunk count, then each list's count and
+                // primitive-local indices), which the admission queues for the emit pass.
                 words.push(first, 0, rootOffset + 8, pages.size, rootCost[0], bucket, rootCost[1], 0);
                 for (const page of pages) words.push(page);
                 words.push(rootOwned.length);
                 for (const task of rootOwned) words.push(task);
+                words.push(Math.ceil(roots.length / MESHLET_CUT_ROOT_CHUNK));
+                for (let r = 0; r < roots.length; r += MESHLET_CUT_ROOT_CHUNK) {
+                    const chunk = roots.slice(r, r + MESHLET_CUT_ROOT_CHUNK);
+                    words.push(chunk.length);
+                    for (const root of chunk) words.push(root);
+                }
                 for (let m = 0; m < count; m++) {
                     topology[(first + m) * 2] = source[m * MESHLET_DATA_U32S + M.PARENT];
                     topology[(first + m) * 2 + 1] = source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP];

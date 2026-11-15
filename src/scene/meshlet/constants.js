@@ -307,7 +307,8 @@ export const MESHLET_COUNTER = {
     CUT_QUEUE_END: 25,            // cut tasks appended to the queue (unclamped - the queue's demand)
     CUT_STAGE_BEGIN: 26,          // the current cut stage's range of the queue
     CUT_STAGE_END: 27,
-    ROOT_OCCLUDED: 28             // instances hidden behind last frame's depth, not admitted
+    ROOT_OCCLUDED: 28,            // instances hidden behind last frame's depth, not admitted
+    CUT_WAITING: 29               // cut groups that would refine but wait for pages to stream in
 };
 
 /**
@@ -342,6 +343,34 @@ export const MATERIAL_FLAG_UNLIT = 1 << 2;
 
 /** @type {number} */
 export const MESHLET_NO_PARENT = 0xFFFFFFFF;
+
+/**
+ * Roots per root-emit entry of the cut queue. Root admission queues an admitted instance's roots
+ * in lists of this many, so the emit pass spreads a primitive with thousands of roots across
+ * threads (see meshletCutEmitWGSL).
+ *
+ * @type {number}
+ * @ignore
+ */
+export const MESHLET_CUT_ROOT_CHUNK = 64;
+
+/**
+ * Set in the instance word of a cut queue entry that lists roots to emit rather than a group to
+ * decide (see MESHLET_CUT_ROOT_CHUNK). Instance ids stay below it.
+ *
+ * @type {number}
+ * @ignore
+ */
+export const MESHLET_CUT_ROOT_FLAG = 0x80000000;
+
+/**
+ * The instance word of a cut queue entry left behind when a stage carries its task forward to a
+ * later slot, so the emit pass visits each task once.
+ *
+ * @type {number}
+ * @ignore
+ */
+export const MESHLET_CUT_INVALID = 0xFFFFFFFF;
 
 /**
  * Fixed-point scale of the cull pass's texture feedback: a texel-rate mark is

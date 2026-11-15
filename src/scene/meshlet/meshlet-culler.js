@@ -64,6 +64,7 @@ const makePassNames = suffix => ({
     residentCut: `MeshletResidentCut${suffix}`,
     instanceCull: `MeshletInstanceCull${suffix}`,
     compact: `MeshletCompact${suffix}`,
+    cutEmit: `MeshletCutEmit${suffix}`,
     cullPhase1: `MeshletCullPhase1${suffix}`,
     indexWrite: `MeshletIndexWrite${suffix}`,
     cullPhase2: `MeshletCullPhase2${suffix}`
@@ -185,6 +186,28 @@ class MeshletCuller {
 
     /** @type {boolean} - two-phase occlusion (requires an HZB). */
     twoPhase = false;
+
+    /**
+     * Emit the selected cut straight from the cut queue (one pass sized by the cut), rather than
+     * by the instance fan-out and compaction, which scan every DAG level of each admitted
+     * instance from its finest refined level up. Both select the same meshlets; the compaction
+     * path stays for comparison.
+     *
+     * @type {boolean}
+     * @private
+     */
+    _directEmit = true;
+
+    set directEmit(value) {
+        if (this._directEmit !== value) {
+            this._directEmit = value;
+            this._buildChains();
+        }
+    }
+
+    get directEmit() {
+        return this._directEmit;
+    }
 
     /**
      * Whether root admission skips instances hidden behind last frame's HZB (two-phase views
@@ -369,6 +392,23 @@ class MeshletCuller {
             compute.setParameter('sortedBase', world.instanceCount);
             this.rootAdmit.push(compute);
         }
+
+        // direct emit: one thread per cut queue entry, after the last stage
+        this.cutEmit = makeCompute('cutEmit');
+        this.cutEmit.setParameter('totalPairs', world.totalPairs);
+        this.cutEmit.setParameter('freeBase', world.totalPairs + world.instanceCount);
+        this.cutEmit.setParameter('recordCapacity', view.recordCapacity);
+        this.cutEmit.setParameter('cutGroups', world.cut.groups);
+        this.cutEmit.setParameter('objectData', world.objectDataBuffer);
+        this.cutEmit.setParameter('meshletData', world.meshletDataBuffer);
+        this.cutEmit.setParameter('claimBits', view.claimBitsBuffer);
+        this.cutEmit.setParameter('selectionTopology', world.cut.selectionTopology);
+        this.cutEmit.setParameter('counters', view.countersBuffer);
+        this.cutEmit.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
+        this.cutEmitArgs = makeCompute('dispatchArgs');
+        this.cutEmitArgs.setParameter('counterIndex', MESHLET_COUNTER.CUT_QUEUE_END);
+        this.cutEmitArgs.setParameter('groupSize', 64);
+        this.cutEmitArgs.setParameter('counters', view.countersBuffer);
         this.bindQueueState(view);
 
         this.instanceCull = makeCompute('instanceCull');
@@ -474,8 +514,10 @@ class MeshletCuller {
 
         const cells = [this.cellCull, this.cellArgs];
         const classifyScatter = [this.rootClassify, this.rootArgs, this.rootBandArgs, this.rootScatter];
-        const instance = [this.instanceCull, this.dispatchArgs];
-        const compact = [this.compactMeshlets, this.selectedArgs];
+        // the selected cut, emitted from the queue or compacted from every admitted DAG level
+        const select = this._directEmit ?
+            [this.cutEmitArgs, this.cutEmit, this.selectedArgs] :
+            [this.instanceCull, this.dispatchArgs, this.compactMeshlets, this.selectedArgs];
         const cull = [this.meshletCull, this.finalizeArgs];
         const write = [this.indexWrite];
 
@@ -484,12 +526,11 @@ class MeshletCuller {
             classifyScatter,
             admit: this.rootAdmit,
             cut,
-            instance,
-            compact,
+            select,
             cull,
             write,
             // the whole phase-1 chain in one compute pass
-            phase1: [...cells, ...classifyScatter, ...this.rootAdmit, ...cut, ...instance, ...compact, ...cull, ...write],
+            phase1: [...cells, ...classifyScatter, ...this.rootAdmit, ...cut, ...select, ...cull, ...write],
             phase2: [this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2, this.indexWritePhase2]
         };
     }
@@ -502,7 +543,9 @@ class MeshletCuller {
      */
     _computes() {
         const { phase1, phase2 } = this._chains;
-        return [...phase1, ...phase2];
+        // both selection paths, whichever the chain holds
+        const select = [this.cutEmitArgs, this.cutEmit, this.instanceCull, this.dispatchArgs, this.compactMeshlets];
+        return [...new Set([...phase1, ...phase2, ...select])];
     }
 
     /**
@@ -529,6 +572,8 @@ class MeshletCuller {
     bindRecordState(view) {
         this.compactMeshlets.setParameter('recordCapacity', view.recordCapacity);
         this.compactMeshlets.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
+        this.cutEmit.setParameter('recordCapacity', view.recordCapacity);
+        this.cutEmit.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
         this.selectedArgs.setParameter('workItemCapacity', view.recordCapacity);
         for (const compute of [this.meshletCull, this.meshletCullPhase2]) {
             compute.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
@@ -556,6 +601,9 @@ class MeshletCuller {
         for (const { args } of this.queueStages) {
             args.setParameter('queueCapacity', view.cutQueueCapacity);
         }
+        this.cutEmit.setParameter('cutQueue', view.cutQueueBuffer);
+        this.cutEmit.setParameter('queueCapacity', view.cutQueueCapacity);
+        this.cutEmitArgs.setParameter('workItemCapacity', view.cutQueueCapacity);
     }
 
     destroy() {
@@ -745,6 +793,10 @@ class MeshletCuller {
             this.finalizeArgs.setParameter(`drawSlot${b}`, this._drawSlots[b]);
         }
 
+        this.cutEmitArgs.setParameter('dispatchSlot', this._dispatchSlotCull);
+        this.cutEmitArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
+        this.cutEmitArgs.setupDispatch(1);
+        this.cutEmit.setupIndirectDispatch(this._dispatchSlotCull);
         this.dispatchArgs.setupDispatch(1);
         this.compactMeshlets.setupIndirectDispatch(this._dispatchSlotCull);
         this.selectedArgs.setupDispatch(1);
@@ -763,8 +815,12 @@ class MeshletCuller {
             device.computeDispatch(chains.classifyScatter, names.rootClassify);
             device.computeDispatch(chains.admit, names.rootAdmit);
             if (chains.cut.length) device.computeDispatch(chains.cut, names.residentCut);
-            device.computeDispatch(chains.instance, names.instanceCull);
-            device.computeDispatch(chains.compact, names.compact);
+            if (this._directEmit) {
+                device.computeDispatch(chains.select, names.cutEmit);
+            } else {
+                device.computeDispatch(chains.select.slice(0, 2), names.instanceCull);
+                device.computeDispatch(chains.select.slice(2), names.compact);
+            }
             device.computeDispatch(chains.cull, names.cullPhase1);
             device.computeDispatch(chains.write, names.indexWrite);
         } else {

@@ -1,6 +1,6 @@
 import {
-    CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED,
-    MESHLET_FLAG_TWO_SIDED, PAGE_NOT_RESIDENT, PAGE_REQUEST, MESHLET_LEVEL_BIAS
+    CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_COUNTER, MESHLET_CUT_INVALID, MESHLET_CUT_ROOT_FLAG, MESHLET_DISPATCH_WIDTH,
+    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_NO_PARENT, PAGE_NOT_RESIDENT, PAGE_REQUEST, MESHLET_LEVEL_BIAS
 } from '../constants.js';
 import { meshletCullVolumeWGSL } from './meshlet-cull-wgsl.js';
 import { meshletStructsWGSL, meshletDataWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
@@ -117,7 +117,10 @@ const cutShader = entry => /* wgsl */ `
             if (atomicLoad(&requests[page]) < mark) { atomicMax(&requests[page], mark); }
             ready = ready && resident;
         }
-        if (!ready) { return false; }
+        if (!ready) {
+            atomicAdd(&counters[${MESHLET_COUNTER.CUT_WAITING}u], 1u);
+            return false;
+        }
         let fineIndices = cutGroups[offset + 4u];
         let coarseIndices = cutGroups[offset + 5u] - unchargedIndices;
         let fineRecords = cutGroups[offset + 6u];
@@ -197,10 +200,14 @@ export const meshletCutQueueWGSL = cutShader(/* wgsl */ `
         let index = begin + (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * 64u + lane.x;
         if (index >= atomicLoad(&counters[${MESHLET_COUNTER.CUT_STAGE_END}u])) { return; }
         let task = cutQueue[index];
+        // root lists ride the queue for the emit pass only
+        if ((task.x & ${MESHLET_CUT_ROOT_FLAG}u) != 0u) { return; }
         let offset = task.y;
         if (meshletData[cutGroups[offset]].lodLevel < uniform.stageLevel) {
             let slot = atomicAdd(&counters[${MESHLET_COUNTER.CUT_QUEUE_END}u], 1u);
             if (slot < uniform.queueCapacity) { cutQueue[slot] = task; }
+            // the emit pass visits the task where it is decided, not where it waited
+            cutQueue[index] = vec2u(${MESHLET_CUT_INVALID}u, 0u);
             return;
         }
         if (cutTask(task)) {
@@ -235,5 +242,84 @@ export const meshletCutQueueArgsWGSL = /* wgsl */ `
         indirectDispatch[base + 0u] = min(groups, ${MESHLET_DISPATCH_WIDTH}u);
         indirectDispatch[base + 1u] = (groups + ${MESHLET_DISPATCH_WIDTH - 1}u) / ${MESHLET_DISPATCH_WIDTH}u;
         indirectDispatch[base + 2u] = 1u;
+    }
+`;
+
+/**
+ * Emits the selected cut straight from the cut queue, one thread per queue entry, after the last
+ * stage. A meshlet is drawn when the group it replaces (its parent) refined on-frustum and the
+ * group it belongs to (its birth group) did not. Every group that refined was decided from the
+ * queue, and every admitted instance queued its roots there, so the queue lists each candidate
+ * once: a refined group's children, and the roots. This costs the size of the cut, where
+ * compaction (instanceCullWGSL + compactMeshletsWGSL) scanned every DAG level of every admitted
+ * instance from its finest refined level up.
+ *
+ * @ignore
+ */
+export const meshletCutEmitWGSL = /* wgsl */ `
+    ${meshletStructsWGSL}
+    uniform totalPairs: u32;
+    // bit base of the off-frustum refinement flags, after the pair and admission bits
+    uniform freeBase: u32;
+    uniform recordCapacity: u32;
+    uniform queueCapacity: u32;
+    ${meshletDataWGSL}
+    ${meshletObjectDataWGSL}
+    var<storage, read> cutGroups: array<u32>;
+    var<storage, read> cutQueue: array<vec2u>;
+    var<storage, read> claimBits: array<u32>;
+    var<storage, read> selectionTopology: array<vec2u>;
+    var<storage, read_write> counters: array<atomic<u32>>;
+    var<storage, read_write> selectedMeshlets: array<vec2u>;
+
+    fn bitSet(bit: u32) -> bool {
+        return (claimBits[bit >> 5u] & (1u << (bit & 31u))) != 0u;
+    }
+
+    // drawn unless its own group refined, and only when it has triangles (legacy empty roots)
+    fn emits(instance: u32, local: u32, pairBase: u32) -> bool {
+        let meshlet = objectData[instance].firstMeshlet + local;
+        let birth = selectionTopology[meshlet].y;
+        if (birth != ${MESHLET_NO_PARENT}u && bitSet(pairBase + birth)) { return false; }
+        return meshletData[meshlet].triangleCount != 0u;
+    }
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+        let index = (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * 64u + lane.x;
+        if (index >= min(atomicLoad(&counters[${MESHLET_COUNTER.CUT_QUEUE_END}u]), uniform.queueCapacity)) { return; }
+        let entry = cutQueue[index];
+        if (entry.x == ${MESHLET_CUT_INVALID}u) { return; }
+
+        // the list of candidates: a root list, or a refined group's children
+        var instance = entry.x & ${~MESHLET_CUT_ROOT_FLAG >>> 0}u;
+        var list = entry.y;
+        let pairBase = objectData[instance].firstPairBit;
+        if ((entry.x & ${MESHLET_CUT_ROOT_FLAG}u) == 0u) {
+            let offset = entry.y;
+            let groupBit = pairBase + cutGroups[offset] - objectData[instance].firstMeshlet;
+            // undecided, or refined off-frustum only to unblock its dependants
+            if (!bitSet(groupBit) || bitSet(uniform.freeBase + groupBit)) { return; }
+            // the children follow the owned task list, which follows the page list
+            let owned = cutGroups[offset + 2u] + cutGroups[offset + 3u];
+            list = owned + 1u + cutGroups[owned];
+        }
+
+        let count = cutGroups[list];
+        var emitted = 0u;
+        for (var k = 0u; k < count; k++) {
+            if (emits(instance, cutGroups[list + 1u + k], pairBase)) { emitted++; }
+        }
+        if (emitted == 0u) { return; }
+        var slot = atomicAdd(&counters[${MESHLET_COUNTER.SELECTED}u], emitted);
+        for (var k = 0u; k < count; k++) {
+            let local = cutGroups[list + 1u + k];
+            if (emits(instance, local, pairBase)) {
+                if (slot < uniform.recordCapacity) {
+                    selectedMeshlets[slot] = vec2u(instance, local);
+                }
+                slot++;
+            }
+        }
     }
 `;

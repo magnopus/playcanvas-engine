@@ -449,10 +449,44 @@ class MeshletShadowRenderer {
                 entry.contentDirtyAt = undefined;
             } else if (entry.contentDirtyAt !== undefined &&
                 (time - entry.contentChangedAt >= this.staticSettleMs || time - entry.contentDirtyAt >= this.staticMaxWaitMs)) {
-                entry.light.shadowUpdateMode = SHADOWUPDATE_THISFRAME;
-                entry.contentDirtyAt = undefined;
+                const wanted = this._staticNeedsContent(entry);
+                // undefined: the last render's counters are still on their way back
+                if (wanted !== undefined) {
+                    if (wanted) entry.light.shadowUpdateMode = SHADOWUPDATE_THISFRAME;
+                    entry.contentDirtyAt = undefined;
+                }
             }
         });
+    }
+
+    /**
+     * Whether a cached shadow map would come out different now that the streamed content has
+     * changed: only when its last render was incomplete in a way new pages or more capacity can
+     * fix. The content version moves with every page the camera streams in or evicts, and a
+     * shadow cut that waited on none of them renders the same casters again - yet the
+     * re-render costs a whole shadow pass and cuts at whatever LOD pressure the face has at that
+     * moment, which is what reads as the shadows flashing.
+     *
+     * @param {ShadowLightEntry} entry - The light entry.
+     * @returns {boolean|undefined} True to re-render, false to keep the map, undefined while the
+     * last render's counters have not been read back yet.
+     * @private
+     */
+    _staticNeedsContent(entry) {
+        for (let i = 0; i < entry.views.length; i++) {
+            const view = entry.views[i];
+            if (view._countersReadBusy) return undefined;
+            if (!view.lastDemand) return true;
+            const roots = view.lastRoots;
+            // nothing admitted: the render ran before any caster could be (the first request
+            // can come before the world, its cells or the camera's priority are ready)
+            if (roots.candidates === 0) return true;
+            // casters short of their pages: roots not resident, or groups held coarse
+            if (roots.unready > 0 || roots.waiting > 0) return true;
+            // casters dropped for capacity, which the next render can still grow into
+            if (roots.rejectedInstances > 0 && view.canGrowIndices()) return true;
+        }
+        return false;
     }
 
     /**

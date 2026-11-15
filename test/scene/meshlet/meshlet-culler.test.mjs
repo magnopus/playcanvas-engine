@@ -308,11 +308,24 @@ describe('MeshletCuller', function () {
             'MeshletrootClassify', 'MeshletdispatchArgs', 'MeshletrootBandArgs', 'MeshletrootScatter',
             ...Array.from({ length: MESHLET_ROOT_BANDS }, (_, band) => `MeshletRootAdmit${band}`),
             'MeshletcutQueueArgs', 'MeshletCutQueue0',
-            'MeshletinstanceCull', 'MeshletdispatchArgs',
-            'MeshletcompactMeshlets', 'MeshletdispatchArgs',
+            'MeshletdispatchArgs', 'MeshletcutEmit', 'MeshletdispatchArgs',
             'MeshletmeshletCull', 'MeshletfinalizeArgs',
             'MeshletindexWrite'
         ]);
+        culler.destroy();
+    });
+
+    it('selects the cut by compaction instead when direct emit is off', function () {
+        const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
+        culler.directEmit = false;
+        device.gpuProfiler = { enabled: true, passDetail: true, destroy() {} };
+        culler.beginFrame(planes, camera, 640, viewProj, null);
+        expect(log.dispatches.map(d => d.name)).to.deep.equal([
+            'MeshletCellCull', 'MeshletRootClassify', 'MeshletRootAdmit', 'MeshletResidentCut',
+            'MeshletInstanceCull', 'MeshletCompact', 'MeshletCullPhase1', 'MeshletIndexWrite'
+        ]);
+        expect(log.dispatches[4].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs']);
+        expect(log.dispatches[5].computes).to.deep.equal(['MeshletcompactMeshlets', 'MeshletdispatchArgs']);
         culler.destroy();
     });
 
@@ -345,15 +358,15 @@ describe('MeshletCuller', function () {
         // each stage profiles as its own pass
         expect(log.dispatches.map(d => d.name)).to.deep.equal([
             'MeshletCellCull', 'MeshletRootClassify', 'MeshletRootAdmit', 'MeshletResidentCut',
-            'MeshletInstanceCull', 'MeshletCompact', 'MeshletCullPhase1', 'MeshletIndexWrite'
+            'MeshletCutEmit', 'MeshletCullPhase1', 'MeshletIndexWrite'
         ]);
         // the queued cut: per stage, an args pass sizing it from the queue, then the stage
         expect(log.dispatches[0].computes).to.deep.equal(['MeshletcellCull', 'MeshletdispatchArgs']);
         expect(log.dispatches[3].computes).to.deep.equal(['MeshletcutQueueArgs', 'MeshletCutQueue0']);
-        expect(log.dispatches[4].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs']);
-        expect(log.dispatches[5].computes).to.deep.equal(['MeshletcompactMeshlets', 'MeshletdispatchArgs']);
-        expect(log.dispatches[6].computes).to.deep.equal(['MeshletmeshletCull', 'MeshletfinalizeArgs']);
-        expect(log.dispatches[7].computes).to.deep.equal(['MeshletindexWrite']);
+        // the selected cut straight from the queue, one thread per entry
+        expect(log.dispatches[4].computes).to.deep.equal(['MeshletdispatchArgs', 'MeshletcutEmit', 'MeshletdispatchArgs']);
+        expect(log.dispatches[5].computes).to.deep.equal(['MeshletmeshletCull', 'MeshletfinalizeArgs']);
+        expect(log.dispatches[6].computes).to.deep.equal(['MeshletindexWrite']);
         expect(culler.cellCull.countX, 'one thread per cell').to.equal(1);
         expect(culler.meshletCull.getParameter('phase'), 'no HZB: single phase').to.equal(0);
         expect(culler.meshletCull.getParameter('hzbTexture')).to.equal(shaders.dummyHzb);

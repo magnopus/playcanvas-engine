@@ -35,6 +35,9 @@ const RESLICE_FLOOR = 0.02;
 // fraction of the capacity that must move before the bucket ranges are re-divided
 const RESLICE_HYSTERESIS = 0.1;
 
+// The least an index buffer grows by when it must reallocate, as a multiple of its total.
+const INDEX_GROW_STEP = 1.5;
+
 // LOD pressure reported while roots are rejected: between the budget controller's ease and
 // starve thresholds, so it holds its current error scale
 const ROOT_REJECTED_PRESSURE = 0.7;
@@ -149,11 +152,12 @@ class MeshletView {
     /**
      * Root admission counters from the last readback: root indices admitted and rejected per
      * bucket, candidate instances (visible, above the sub-pixel cut), instances rejected for
-     * capacity, instances whose root pages were not resident, and instances cut as sub-pixel.
+     * capacity, instances whose root pages were not resident, instances cut as sub-pixel, and
+     * cut groups that would have refined but waited for their pages.
      *
-     * @type {{admitted: number[], rejected: number[], candidates: number, rejectedInstances: number, unready: number, subpixel: number, occluded: number}}
+     * @type {{admitted: number[], rejected: number[], candidates: number, rejectedInstances: number, unready: number, subpixel: number, occluded: number, waiting: number}}
      */
-    lastRoots = { admitted: [0, 0, 0], rejected: [0, 0, 0], candidates: 0, rejectedInstances: 0, unready: 0, subpixel: 0, occluded: 0 };
+    lastRoots = { admitted: [0, 0, 0], rejected: [0, 0, 0], candidates: 0, rejectedInstances: 0, unready: 0, subpixel: 0, occluded: 0, waiting: 0 };
 
     /** @type {number} - Rendered meshlets across both phases from the last completed readback. */
     renderedMeshlets = 0;
@@ -184,11 +188,13 @@ class MeshletView {
      * Consecutive frames demand must stay under {@link shrinkAt} before shrinking. Growth lets the cut refine
      * sooner, while shrinking waits long
      * enough that a camera turning away from the dense part of a scene does not cost a
-     * reallocation it will immediately undo.
+     * reallocation it will immediately undo: ~10 s at 60 fps. Looking around a dense scene swings
+     * demand several-fold between directions, and at ~3 s buffers of hundreds of MB were released
+     * and reallocated as the camera turned back.
      *
      * @type {number}
      */
-    shrinkFrames = 180;
+    shrinkFrames = 600;
 
     _lowFrames = 0;
 
@@ -453,6 +459,14 @@ class MeshletView {
         return true;
     }
 
+    /**
+     * @returns {boolean} True while the index buffer can still grow before it reaches its ceiling.
+     * @ignore
+     */
+    canGrowIndices() {
+        return this.indexTotal() < this._ceiling() * this.growAt;
+    }
+
     /** @returns {number} This view's index ceiling. @private */
     _ceiling() {
         return this.indexShare > 0 ? this.indexShare : this.world.indexCeiling;
@@ -578,11 +592,14 @@ class MeshletView {
             next[b] = Math.min(next[b], world.indexWorst[b]);
         }
         this._clampToCeiling(next);
-        let grew = false;
-        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
-            if (next[b] > this.indexCapacity[b]) grew = true;
-        }
-        if (!grew) {
+        // Only a larger total needs a new buffer. At the ceiling the clamp re-splits the same
+        // total, so a bucket can look grown while the buffer would not be: reallocating then
+        // replaces a buffer the size of the whole budget every time demand is read back - GBs a
+        // second at a high budget, which stalls the GPU process. Moving capacity between the
+        // buckets at a fixed total is _resliceBuckets' job, and needs no new buffer.
+        let total = 0;
+        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) total += next[b];
+        if (total <= this.indexTotal()) {
             return false;
         }
         const previous = this.indexCapacity.slice();
@@ -688,6 +705,7 @@ class MeshletView {
             roots.unready = data[MESHLET_COUNTER.ROOT_UNREADY_INSTANCES];
             roots.subpixel = data[MESHLET_COUNTER.ROOT_SUBPIXEL];
             roots.occluded = data[MESHLET_COUNTER.ROOT_OCCLUDED];
+            roots.waiting = data[MESHLET_COUNTER.CUT_WAITING];
             this.renderedMeshlets = data[MESHLET_COUNTER.RENDERED];
         }).catch(() => {
             this._countersReadBusy = false;
@@ -716,8 +734,23 @@ class MeshletView {
         }
         if (wantsGrowth) {
             this._lowFrames = 0;
-            if (this.growIndexBuffer(target)) {
+            let needed = 0;
+            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) needed += target[b];
+            const total = this.indexTotal();
+            if (needed <= total) {
+                // The buffer already holds every bucket's target: only the ranges move. A bucket
+                // filling up (foliage streaming in) while another has room would otherwise
+                // replace the whole buffer for a few thousand indices, readback after readback.
+                this._split(this.indexCapacity, total, target);
                 this.culler.bindIndexState(this);
+            } else {
+                // grow by a step, so demand that keeps climbing does not reallocate every time it
+                // is read back
+                const scale = Math.max(1, total * INDEX_GROW_STEP / needed);
+                for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) target[b] = Math.ceil(target[b] * scale);
+                if (this.growIndexBuffer(target)) {
+                    this.culler.bindIndexState(this);
+                }
             }
         } else if (this.shrinkIndexBuffer(d.indices, target)) {
             this.culler.bindIndexState(this);

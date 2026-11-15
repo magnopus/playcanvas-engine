@@ -1,5 +1,6 @@
 import {
-    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH,
+    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_CUT_ROOT_CHUNK,
+    MESHLET_CUT_ROOT_FLAG, MESHLET_DISPATCH_WIDTH,
     MESHLET_ROOT_BANDS, OBJECT_FLAG_HIDDEN,
     OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
@@ -233,6 +234,20 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         atomicOr(&claimBits[admission >> 5u], 1u << (admission & 31u));
         atomicOr(&claimBits[uniform.nextBase + (instance >> 5u)], 1u << (instance & 31u));
         // the root-owned task list follows the root page list
-        cutEnqueue(instance, pageStart + pageCount);
+        let ownedStart = pageStart + pageCount;
+        cutEnqueue(instance, ownedStart);
+        // then the root lists, queued for the emit pass (see meshletCutEmitWGSL). They land in
+        // the queue ahead of every stage's tasks, so a full queue drops tasks (which stay
+        // coarse) before it drops roots.
+        let chunkStart = ownedStart + 1u + cutGroups[ownedStart];
+        let chunkCount = cutGroups[chunkStart];
+        if (chunkCount != 0u) {
+            let base = atomicAdd(&counters[${MESHLET_COUNTER.CUT_QUEUE_END}u], chunkCount);
+            for (var k = 0u; k < chunkCount; k++) {
+                if (base + k < uniform.queueCapacity) {
+                    cutQueue[base + k] = vec2u(instance | ${MESHLET_CUT_ROOT_FLAG}u, chunkStart + 1u + k * ${MESHLET_CUT_ROOT_CHUNK + 1}u);
+                }
+            }
+        }
     }
 `;

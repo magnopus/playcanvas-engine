@@ -2,7 +2,7 @@ import { expect } from 'chai';
 
 import { createCutFixture } from './meshlet-cut-fixture.mjs';
 import {
-    MESHLET_CELL_SIZE, OBJECT_DATA as O, OBJECT_DATA_U32S
+    MESHLET_CELL_SIZE, MESHLET_CUT_ROOT_CHUNK, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT, OBJECT_DATA as O, OBJECT_DATA_U32S
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCells } from '../../../src/scene/meshlet/meshlet-cells.js';
 import { MeshletCutData } from '../../../src/scene/meshlet/meshlet-cut-data.js';
@@ -119,7 +119,9 @@ describe('MeshletCutData queue ownership', function () {
                 rowOf.set(words[offset] - objects[O.FIRST_MESHLET], offset);
                 groupTasks.push(offset);
                 const ownedStart = words[offset + 2] + words[offset + 3];
-                offset = ownedStart + 1 + words[ownedStart];
+                // the children list follows the owned task list
+                const childStart = ownedStart + 1 + words[ownedStart];
+                offset = childStart + 1 + words[childStart];
             }
             expect(groupTasks.length).to.be.above(1);
             const owners = new Map();
@@ -139,6 +141,45 @@ describe('MeshletCutData queue ownership', function () {
                     expect(owner, 'owned by its first parent').to.equal(rowOf.get(words[offset + 8]));
                 }
             });
+        } finally {
+            cut.destroy();
+        }
+    });
+
+    it('lists each group\'s children and the roots in chunks, for the emit pass', function () {
+        const { meshlets, objects } = createCutFixture();
+        const device = createDevice();
+        const cut = new MeshletCutData(device, meshlets, objects);
+        try {
+            const words = cut.groups.impl.words;
+            const rootOffset = words[0];
+            const first = objects[O.FIRST_MESHLET];
+            const parentOf = m => meshlets[m * MESHLET_DATA_U32S + M.PARENT];
+            const listAfterOwned = (offset) => {
+                const ownedStart = words[offset + 2] + words[offset + 3];
+                return ownedStart + 1 + words[ownedStart];
+            };
+            const seen = [];
+            for (let offset = 1; offset < rootOffset;) {
+                const childStart = listAfterOwned(offset);
+                const children = Array.from(words.subarray(childStart + 1, childStart + 1 + words[childStart]));
+                const representative = words[offset] - first;
+                expect(children.length).to.be.above(0);
+                children.forEach(child => expect(parentOf(child), `child ${child}`).to.equal(representative));
+                seen.push(...children);
+                offset = childStart + 1 + words[childStart];
+            }
+            // the roots: chunk count, then each chunk's count and members
+            const chunkStart = listAfterOwned(rootOffset);
+            const roots = [];
+            for (let k = 0; k < words[chunkStart]; k++) {
+                const chunk = chunkStart + 1 + k * (MESHLET_CUT_ROOT_CHUNK + 1);
+                roots.push(...words.subarray(chunk + 1, chunk + 1 + words[chunk]));
+            }
+            roots.forEach(root => expect(parentOf(root)).to.equal(MESHLET_NO_PARENT));
+            // every meshlet is a candidate exactly once: as one group's child, or as a root
+            const all = [...seen, ...roots].sort((a, b) => a - b);
+            expect(all).to.deep.equal(Array.from({ length: meshlets.length / MESHLET_DATA_U32S }, (_, m) => m));
         } finally {
             cut.destroy();
         }
