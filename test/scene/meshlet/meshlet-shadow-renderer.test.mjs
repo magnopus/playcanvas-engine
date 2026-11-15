@@ -257,6 +257,65 @@ describe('MeshletShadowRenderer', function () {
         expect(box.getMax().z).to.be.closeTo(-40 + radius + 100, 1e-6);
     });
 
+    it('holds a cached shadow map\'s re-render while streamed content keeps changing', function () {
+        const sun = makeLight({ faces: 1 });
+        sun.shadowUpdateMode = SHADOWUPDATE_NONE;
+        director.renderer.culler.cameraDirShadowLights.set(sceneCamera, [sun]);
+        world.contentVersion = 0;
+        renderer.staticSettleMs = Infinity;
+        renderer.staticMaxWaitMs = Infinity;
+
+        renderer.syncLights(comp);
+        world.contentVersion++;
+        renderer.syncLights(comp);
+        expect(sun.shadowUpdateMode, 'content changed but has not settled').to.equal(SHADOWUPDATE_NONE);
+
+        // once it has been still long enough, one re-render is requested
+        renderer.staticSettleMs = 0;
+        renderer.syncLights(comp);
+        expect(sun.shadowUpdateMode).to.equal(SHADOWUPDATE_THISFRAME);
+
+        // and nothing more is requested until the content changes again
+        sun.shadowUpdateMode = SHADOWUPDATE_NONE;
+        renderer.syncLights(comp);
+        expect(sun.shadowUpdateMode).to.equal(SHADOWUPDATE_NONE);
+
+        // content that never settles still re-renders after the maximum wait
+        renderer.staticSettleMs = Infinity;
+        world.contentVersion++;
+        renderer.syncLights(comp);
+        expect(sun.shadowUpdateMode).to.equal(SHADOWUPDATE_NONE);
+        renderer.staticMaxWaitMs = 0;
+        renderer.syncLights(comp);
+        expect(sun.shadowUpdateMode).to.equal(SHADOWUPDATE_THISFRAME);
+    });
+
+    it('serves a light with shadow bounds one camera-independent view fitted to the bounds', function () {
+        const sun = makeLight({ faces: 1, renderData: { 0: { shadowCamera: { _node: { forward: new Vec3(0, -1, 0) } } } } });
+        sun._shadowBounds = new BoundingBox(new Vec3(10, 5, -20), new Vec3(30, 5, 15));
+        director.renderer.culler.cameraDirShadowLights.set(sceneCamera, [sun]);
+        renderer.syncLights(comp);
+
+        const entry = renderer.entries.get(sun);
+        expect(entry.camera, 'the shadow is shared by all cameras').to.equal(null);
+        expect(entry.views).to.have.lengthOf(1);
+        expect(entry.views[0].sceneCamera).to.equal(null);
+
+        // the bounds stand in for the camera's slice: padded by their radius, the full world height
+        const radius = Math.hypot(30, 5, 15);
+        const box = renderer._casterBounds({ light: sun, camera: null }, entry.views[0]);
+        expect(box.center.x).to.be.closeTo(10, 1e-6);
+        expect(box.center.z).to.be.closeTo(-20, 1e-6);
+        expect(box.halfExtents.x).to.be.closeTo(radius, 1e-6);
+        expect([box.center.y, box.halfExtents.y]).to.deep.equal([50, 50]);
+
+        // dropping the bounds returns the light to per-camera cascades
+        sun._shadowBounds = null;
+        sun.numShadowFaces = 3;
+        renderer.syncLights(comp);
+        expect(renderer.entries.get(sun).camera).to.equal(sceneCamera);
+    });
+
     it('keeps casters whose shadow can reach a receiver in the cascade slice', function () {
         // cascade 0 of the scene camera covers x, y in [-10, 10], z in [-20, -0.5]
         const sun = makeLight({ cascades: [20] });

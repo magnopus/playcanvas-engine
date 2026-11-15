@@ -265,11 +265,12 @@ describe('MeshletView', function () {
         data[MESHLET_COUNTER.ROOT_REJECTED_INSTANCES] = 2;
         data[MESHLET_COUNTER.ROOT_UNREADY_INSTANCES] = 3;
         data[MESHLET_COUNTER.ROOT_SUBPIXEL] = 4;
+        data[MESHLET_COUNTER.ROOT_OCCLUDED] = 5;
         view.readbackPool.read = () => Promise.resolve(data);
         view.monitorIndexDemand();
         await Promise.resolve();
         expect(view.lastRoots).to.deep.equal({
-            admitted: [300, 0, 0], rejected: [0, 0, 40], candidates: 9, rejectedInstances: 2, unready: 3, subpixel: 4
+            admitted: [300, 0, 0], rejected: [0, 0, 40], candidates: 9, rejectedInstances: 2, unready: 3, subpixel: 4, occluded: 5
         });
         view.destroy();
     });

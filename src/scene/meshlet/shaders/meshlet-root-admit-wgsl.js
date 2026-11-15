@@ -3,7 +3,7 @@ import {
     MESHLET_ROOT_BANDS, OBJECT_FLAG_HIDDEN,
     OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
-import { meshletCullVolumeWGSL, meshletVisibleCellWGSL } from './meshlet-cull-wgsl.js';
+import { meshletCullVolumeWGSL, meshletHzbVisibleWGSL, meshletVisibleCellWGSL } from './meshlet-cull-wgsl.js';
 import { meshletCutEnqueueWGSL } from './meshlet-cut-wgsl.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
@@ -15,7 +15,10 @@ const INSTANCE_MASK = (1 << BAND_SHIFT) - 1;
  * Root classification, one workgroup per visible cell and one thread per instance of it: drops
  * hidden (and, in a shadow view, non-casting) instances and those outside the frustum, ranks the
  * rest by projected size - the LOD metric - into priority bands, and appends them to the root
- * list for admission. An instance admitted last frame is promoted one band (hysteresis), so
+ * list for admission. When last frame's HZB is valid, instances wholly behind it are dropped
+ * too: admission reserves index and record capacity for every root it takes, before any
+ * cluster is tested for occlusion, so a hidden instance would otherwise spend the budget a
+ * visible one needs to refine. An instance that stops being hidden is admitted a frame later. An instance admitted last frame is promoted one band (hysteresis), so
  * admission does not flicker at the budget's edge.
  *
  * @ignore
@@ -36,6 +39,10 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
     var<storage, read_write> rootBands: array<atomic<u32>>;
     // instance ids in cell order
     var<storage, read> cellInstances: array<u32>;
+    // last frame's pyramid (a placeholder when it is not valid - see PREV_CAMERA.w)
+    var hzbTexture: texture_2d<f32>;
+
+    ${meshletHzbVisibleWGSL}
 
     ${meshletVisibleCellWGSL}
     ${meshletCullVolumeWGSL}
@@ -71,6 +78,17 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
         if (pixels < select(rootMin, rootMin * bucketRoot.w, incumbent)) {
             atomicAdd(&counters[${MESHLET_COUNTER.ROOT_SUBPIXEL}u], 1u);
             return;
+        }
+        // wholly behind what last frame drew, as seen from last frame's camera
+        let prevCamera = cullParams[${CULL_PARAMS.PREV_CAMERA}u];
+        if (prevCamera.w != 0.0) {
+            let prevViewProj = mat4x4f(
+                cullParams[${CULL_PARAMS.PREV_VIEW_PROJ}u], cullParams[${CULL_PARAMS.PREV_VIEW_PROJ + 1}u],
+                cullParams[${CULL_PARAMS.PREV_VIEW_PROJ + 2}u], cullParams[${CULL_PARAMS.PREV_VIEW_PROJ + 3}u]);
+            if (!hzbVisibleFrom(prevViewProj, prevCamera.xyz, cullParams[${CULL_PARAMS.PREV_VIEW_DIR}u].xyz, center, radius)) {
+                atomicAdd(&counters[${MESHLET_COUNTER.ROOT_OCCLUDED}u], 1u);
+                return;
+            }
         }
         let bandCount = u32(bands.z);
         var band = u32(clamp(floor(log2(bands.x / max(pixels, 1e-6)) * bands.y), 0.0, f32(bandCount - 1u)));

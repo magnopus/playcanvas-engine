@@ -134,11 +134,17 @@ export const CULL_PARAMS = {
     BUCKET_LOD: 28,
     // per draw bucket, the root admission size cut (px) in xyz; w = the fraction of it an
     // instance admitted last frame may shrink to before it is dropped (hysteresis)
-    BUCKET_ROOT: 29
+    BUCKET_ROOT: 29,
+    // last frame's view-projection (4 rows), then its camera position (xyz; w = 1 when last
+    // frame's HZB is valid to test against, 0 when not) and view direction: root admission tests
+    // instances against the pyramid last frame built, so it needs the camera that built it
+    PREV_VIEW_PROJ: 30,
+    PREV_CAMERA: 34,
+    PREV_VIEW_DIR: 35
 };
 
 /** vec4 rows in the cull parameter buffer. @type {number} */
-export const CULL_PARAMS_VEC4S = 30;
+export const CULL_PARAMS_VEC4S = 36;
 
 /**
  * Priority bands of GPU root admission. Instances are ranked by projected size - the quantity
@@ -269,11 +275,12 @@ export const MESHLET_BUCKET_MASKED = 2;
  * Counter buffer words: [0] workItemCount, [1] recordCount, then three MESHLET_BUCKET_COUNT
  * blocks - index cursors, committed ends, unclamped index demand - then the frame's rendered
  * meshlet count across both phases and peak per-phase record demand, the root admission
- * counters, the visible cell count and the cut queue's cursor and current stage range.
+ * counters, the visible cell count, the cut queue's cursor and current stage range and the
+ * instances root admission skipped as occluded, padded to a multiple of 4 words.
  *
  * @type {number}
  */
-export const MESHLET_COUNTER_U32S = 28;
+export const MESHLET_COUNTER_U32S = 32;
 
 /**
  * Word offsets into the counter buffer; the three per-bucket blocks are indexed as
@@ -299,7 +306,8 @@ export const MESHLET_COUNTER = {
     VISIBLE_CELLS: 24,            // cells the cell cull appended to the visible list
     CUT_QUEUE_END: 25,            // cut tasks appended to the queue (unclamped - the queue's demand)
     CUT_STAGE_BEGIN: 26,          // the current cut stage's range of the queue
-    CUT_STAGE_END: 27
+    CUT_STAGE_END: 27,
+    ROOT_OCCLUDED: 28             // instances hidden behind last frame's depth, not admitted
 };
 
 /**

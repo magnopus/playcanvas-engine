@@ -1083,6 +1083,7 @@ class MeshletDirector {
             this._invalidateCameraFrame(cameraComponent);
         }
         view.culler.twoPhase = useOcclusion;
+        view.culler.occlusionAdmission = this.occlusionAdmission;
         view.culler.hzbLinear = hzbLinear;
         // the linear occlusion test measures depth along the view direction, as the scene depth does
         view.culler.viewDir = cameraComponent.entity.forward;
@@ -1550,6 +1551,18 @@ class MeshletDirector {
     get occlusionEnabled() {
         return this._occlusionEnabled;
     }
+
+    /**
+     * Whether root admission skips instances wholly hidden behind last frame's depth, so they
+     * spend none of the view's index and record budget (see
+     * {@link meshletRootClassifyWGSL}). Occlusion culling alone only skips drawing them: their
+     * roots are admitted, and their cut counted as demand, before any cluster is tested. Only
+     * applies while occlusion culling is running. An instance that stops being hidden is
+     * admitted a frame later. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    occlusionAdmission = true;
 
     /**
      * Whether a camera's CameraFrame should render the scene depth for the meshlet HZB: occlusion

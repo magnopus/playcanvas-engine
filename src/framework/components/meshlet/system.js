@@ -189,6 +189,9 @@ class MeshletComponentSystem extends ComponentSystem {
     _stateQueue = [];
 
     /** @private */
+    _suspended = false;
+
+    /** @private */
     _poolBytes = 256 * 1024 * 1024;
 
     /** @private */
@@ -280,6 +283,26 @@ class MeshletComponentSystem extends ComponentSystem {
             Debug.warnOnce('MeshletComponentSystem: meshlet rendering requires WebGPU; meshlet components will not render.');
         }
         return this._group;
+    }
+
+    /**
+     * Sets whether the system skips building and syncing meshlet worlds. Components still load
+     * their assets, and every resource keeps its meshlet records resident (nothing is released,
+     * no pool is allocated, nothing streams or draws), so the content can be read on the CPU
+     * alone - an offline bake, for one, can then take the whole memory budget. Defaults to false.
+     * Set it before the first world is built: clearing it builds the worlds as usual.
+     *
+     * @type {boolean}
+     */
+    set suspended(value) {
+        value = !!value;
+        if (this._suspended === value) return;
+        this._suspended = value;
+        if (!value && this._group) this._markDirty();
+    }
+
+    get suspended() {
+        return this._suspended;
     }
 
     /**
@@ -483,6 +506,23 @@ class MeshletComponentSystem extends ComponentSystem {
 
     get occlusion() {
         return this._group?.occlusionEnabled ?? false;
+    }
+
+    /**
+     * Sets whether root admission skips instances wholly hidden behind last frame's depth, so
+     * they spend none of the index and record budget. Occlusion culling alone only saves draw
+     * work: without this a dense scene seen from inside spends its budget on roots behind the
+     * walls. Only applies while {@link occlusion} is on. An instance that stops being hidden
+     * appears a frame later. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    set occlusionAdmission(value) {
+        if (this.group) this.group.occlusionAdmission = value;
+    }
+
+    get occlusionAdmission() {
+        return this._group?.occlusionAdmission ?? true;
     }
 
     /**
@@ -789,12 +829,12 @@ class MeshletComponentSystem extends ComponentSystem {
      * Rebuilds the world now if changes are pending, regardless of the quiet window.
      */
     flushRebuild() {
-        if (this._group && this._dirty) this._rebuild();
+        if (this._group && this._dirty && !this._suspended) this._rebuild();
     }
 
     /** @private */
     _onFrameRender() {
-        if (!this._group) return;
+        if (!this._group || this._suspended) return;
         if (this._dirty) {
             const now = performance.now();
             const quiet = now - this._dirtyLast >= this._rebuildQuietMs;
@@ -1032,6 +1072,39 @@ class MeshletComponentSystem extends ComponentSystem {
         if (!url || !group.resource.recordsResident) return;
         this._recordSources.set(group.resource, { url, credentials: component._effectiveFetchOptions?.credentials ?? null });
         group.resource.releaseRecords();
+    }
+
+    /**
+     * Runs `callback` with every placed resource's CPU meshlet records in memory. A scene split
+     * across several worlds releases the records of all but the last world once it settles (see
+     * {@link _releaseSettledRecords}), and a reader of them - a ray tracer building a scene from
+     * the meshlets - would find them null. The released records are fetched back first, and
+     * dropped again afterwards, with no world rebuild in between: only the records this call
+     * restored are released, so a build that needed them in the meantime is not disturbed.
+     *
+     * Holds the whole scene's records at once while it runs (128 bytes per meshlet).
+     *
+     * @template T
+     * @param {() => (T|Promise<T>)} callback - Reads the records.
+     * @returns {Promise<T>} What the callback returns.
+     */
+    async withMeshletRecords(callback) {
+        const restored = [];
+        const pending = [];
+        for (const [resource, source] of this._recordSources) {
+            if (resource.recordsResident || resource.primitives.length === 0) continue;
+            restored.push(resource);
+            pending.push(restoreMeshletRecords(source.url, resource, source.credentials));
+        }
+        try {
+            await Promise.all(pending);
+            return await callback();
+        } finally {
+            for (const resource of restored) {
+                // a rebuild that fetched them itself may have taken them over
+                if (!this._restoring.has(resource)) resource.releaseRecords();
+            }
+        }
     }
 
     /**

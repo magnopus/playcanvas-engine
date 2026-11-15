@@ -151,9 +151,9 @@ class MeshletView {
      * bucket, candidate instances (visible, above the sub-pixel cut), instances rejected for
      * capacity, instances whose root pages were not resident, and instances cut as sub-pixel.
      *
-     * @type {{admitted: number[], rejected: number[], candidates: number, rejectedInstances: number, unready: number, subpixel: number}}
+     * @type {{admitted: number[], rejected: number[], candidates: number, rejectedInstances: number, unready: number, subpixel: number, occluded: number}}
      */
-    lastRoots = { admitted: [0, 0, 0], rejected: [0, 0, 0], candidates: 0, rejectedInstances: 0, unready: 0, subpixel: 0 };
+    lastRoots = { admitted: [0, 0, 0], rejected: [0, 0, 0], candidates: 0, rejectedInstances: 0, unready: 0, subpixel: 0, occluded: 0 };
 
     /** @type {number} - Rendered meshlets across both phases from the last completed readback. */
     renderedMeshlets = 0;
@@ -687,6 +687,7 @@ class MeshletView {
             roots.rejectedInstances = data[MESHLET_COUNTER.ROOT_REJECTED_INSTANCES];
             roots.unready = data[MESHLET_COUNTER.ROOT_UNREADY_INSTANCES];
             roots.subpixel = data[MESHLET_COUNTER.ROOT_SUBPIXEL];
+            roots.occluded = data[MESHLET_COUNTER.ROOT_OCCLUDED];
             this.renderedMeshlets = data[MESHLET_COUNTER.RENDERED];
         }).catch(() => {
             this._countersReadBusy = false;

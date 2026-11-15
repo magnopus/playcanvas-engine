@@ -1,4 +1,5 @@
 import { Debug } from '../../core/debug.js';
+import { now } from '../../core/time.js';
 import { SHADOWUPDATE_NONE, SHADOWUPDATE_THISFRAME, LAYERID_WORLD, LIGHTTYPE_DIRECTIONAL } from '../constants.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
@@ -180,6 +181,10 @@ const sweptBoxPlanes = (min, max, dir, out) => {
  * (directional shadow data is per camera; null for local lights).
  * @property {Layer} layer - The layer the casters are registered on.
  * @property {MeshletShadowView[]} views - One view per shadow face (cascade, or cube face).
+ * @property {number} [contentChangedAt] - When the streamed content last changed, in ms.
+ * @property {number} [contentDirtyAt] - When it first changed after the last re-render request, in ms.
+ * @property {object} [contentWorld] - The world the content was last compared against.
+ * @property {number} [contentVersion] - The world content version last compared against.
  */
 
 /**
@@ -215,6 +220,22 @@ class MeshletShadowRenderer {
      * @type {number}
      */
     maxShadowViews = 8;
+
+    /**
+     * How long streamed content must be unchanged, in milliseconds, before a cached shadow map
+     * (SHADOWUPDATE_NONE) is re-rendered for it.
+     *
+     * @type {number}
+     */
+    staticSettleMs = 400;
+
+    /**
+     * The longest a cached shadow map waits for a re-render, in milliseconds, while the streamed
+     * content keeps changing.
+     *
+     * @type {number}
+     */
+    staticMaxWaitMs = 3000;
 
     /** @type {Set<Light>} - scratch, rebuilt every syncLights to diff against entries. */
     _desired = new Set();
@@ -384,7 +405,7 @@ class MeshletShadowRenderer {
 
         // retire entries whose light went away, stopped casting, or changed face count
         this.entries.forEach((entry, light) => {
-            const camera = light._type === LIGHTTYPE_DIRECTIONAL ? sceneCamera : null;
+            const camera = light._type === LIGHTTYPE_DIRECTIONAL && !light._shadowBounds ? sceneCamera : null;
             if (!desired.has(light) || entry.camera !== camera ||
                 entry.views.length !== light.numShadowFaces) {
                 this._destroyEntry(entry);
@@ -403,7 +424,7 @@ class MeshletShadowRenderer {
                 return;
             }
             viewCount += faces;
-            const camera = light._type === LIGHTTYPE_DIRECTIONAL ? sceneCamera : null;
+            const camera = light._type === LIGHTTYPE_DIRECTIONAL && !light._shadowBounds ? sceneCamera : null;
             this.entries.set(light, this._createEntry(light, camera, layer));
         });
 
@@ -411,14 +432,25 @@ class MeshletShadowRenderer {
             entry.views.forEach(view => view.setCasterBounds(this._casterBounds(entry, view)));
             // A light with a static shadow map renders it once and then only on request. Its
             // first request can come before any page is resident, so meshlets would never cast
-            // into it: ask for a re-render whenever the streamed content changed since the last one.
+            // into it: ask for a re-render when the streamed content changed since the last one.
+            // Every page install or eviction changes it, so while the view streams the request is
+            // held until the content has been still for a moment (or has waited too long): a
+            // re-render per page would cost a shadow pass each frame, and cut the casters at a
+            // different LOD each time, which reads as the shadows flickering.
             const world = director.world;
+            const time = now();
             if (entry.contentWorld !== world || entry.contentVersion !== world.contentVersion) {
                 entry.contentWorld = world;
                 entry.contentVersion = world.contentVersion;
-                if (entry.light.shadowUpdateMode === SHADOWUPDATE_NONE) {
-                    entry.light.shadowUpdateMode = SHADOWUPDATE_THISFRAME;
-                }
+                entry.contentChangedAt = time;
+                entry.contentDirtyAt ??= time;
+            }
+            if (entry.contentDirtyAt !== undefined && entry.light.shadowUpdateMode !== SHADOWUPDATE_NONE) {
+                entry.contentDirtyAt = undefined;
+            } else if (entry.contentDirtyAt !== undefined &&
+                (time - entry.contentChangedAt >= this.staticSettleMs || time - entry.contentDirtyAt >= this.staticMaxWaitMs)) {
+                entry.light.shadowUpdateMode = SHADOWUPDATE_THISFRAME;
+                entry.contentDirtyAt = undefined;
             }
         });
     }
@@ -468,28 +500,36 @@ class MeshletShadowRenderer {
             return _casterBox;
         }
 
-        const dists = light._shadowCascadeDistances;
-        const cascade = view.face;
-        const far = dists?.[cascade] ?? 0;
-        const near = cascade === 0 ? camera._nearClip : (dists?.[cascade - 1] ?? 0);
         const node = view.shadowCamera?._node;
-        if (!(far > near) || !node) {
-            return world;
-        }
-
-        // the cascade's frustum slice, as a world-space sphere (the same construction the engine
-        // uses to fit the cascade itself)
-        const pts = camera.getFrustumCorners(near, far);
-        const camWorld = camera.node.getWorldTransform();
-        _center.set(0, 0, 0);
-        for (let i = 0; i < 8; i++) {
-            camWorld.transformPoint(pts[i], pts[i]);
-            _center.add(pts[i]);
-        }
-        _center.mulScalar(1 / 8);
         let radius = 0;
-        for (let i = 0; i < 8; i++) {
-            radius = Math.max(radius, _tmp.sub2(pts[i], _center).length());
+        if (light._shadowBounds) {
+            // shadow bounds: one camera-independent map covering a fixed box, which stands in for
+            // the cascade's slice
+            if (!node) return world;
+            _center.copy(light._shadowBounds.center);
+            radius = light._shadowBounds.halfExtents.length();
+        } else {
+            const dists = light._shadowCascadeDistances;
+            const cascade = view.face;
+            const far = dists?.[cascade] ?? 0;
+            const near = cascade === 0 ? camera._nearClip : (dists?.[cascade - 1] ?? 0);
+            if (!(far > near) || !node) {
+                return world;
+            }
+
+            // the cascade's frustum slice, as a world-space sphere (the same construction the engine
+            // uses to fit the cascade itself)
+            const pts = camera.getFrustumCorners(near, far);
+            const camWorld = camera.node.getWorldTransform();
+            _center.set(0, 0, 0);
+            for (let i = 0; i < 8; i++) {
+                camWorld.transformPoint(pts[i], pts[i]);
+                _center.add(pts[i]);
+            }
+            _center.mulScalar(1 / 8);
+            for (let i = 0; i < 8; i++) {
+                radius = Math.max(radius, _tmp.sub2(pts[i], _center).length());
+            }
         }
 
         // A caster h above the cascade shadows into it from h / tan(elevation) away

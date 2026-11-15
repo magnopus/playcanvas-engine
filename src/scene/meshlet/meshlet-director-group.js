@@ -172,6 +172,7 @@ class MeshletDirectorGroup {
     _settings = {
         dagPixelThreshold: 2,
         occlusionEnabled: true,
+        occlusionAdmission: true,
         cameras: /** @type {CameraComponent[]} */ ([]),
         shadowsEnabled: false,
         shadowThresholdScale: 4,
@@ -244,6 +245,7 @@ class MeshletDirectorGroup {
         const s = this._settings;
         director.dagPixelThreshold = s.dagPixelThreshold;
         director.occlusionEnabled = s.occlusionEnabled;
+        director.occlusionAdmission = s.occlusionAdmission;
         director.cameras = s.cameras;
         director.shadowsEnabled = s.shadowsEnabled;
         director.shadowThresholdScale = s.shadowThresholdScale;
@@ -284,6 +286,15 @@ class MeshletDirectorGroup {
 
     get occlusionEnabled() {
         return this._settings.occlusionEnabled;
+    }
+
+    /** @type {boolean} */
+    set occlusionAdmission(value) {
+        this._set('occlusionAdmission', !!value);
+    }
+
+    get occlusionAdmission() {
+        return this._settings.occlusionAdmission;
     }
 
     /** @type {CameraComponent[]} */

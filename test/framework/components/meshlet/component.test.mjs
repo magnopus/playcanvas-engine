@@ -137,4 +137,67 @@ describe('MeshletComponent', function () {
         expect(e.meshlet).to.not.exist;
         e.destroy();
     });
+
+    describe('#suspended', function () {
+
+        it('defaults to false and round-trips', function () {
+            const system = app.systems.meshlet;
+            expect(system.suspended).to.equal(false);
+            system.suspended = true;
+            expect(system.suspended).to.equal(true);
+            system.suspended = false;
+            expect(system.suspended).to.equal(false);
+        });
+
+        it('does not rebuild worlds while set', function () {
+            const system = app.systems.meshlet;
+            let rebuilds = 0;
+            const rebuild = system._rebuild;
+            system._rebuild = function (...args) {
+                rebuilds++;
+                return rebuild.apply(this, args);
+            };
+            system._group = system._group ?? {};
+            const group = system._group;
+            const wasDirty = system._dirty;
+            system.suspended = true;
+            system._dirty = true;
+            system._onFrameRender();
+            system.flushRebuild();
+            system._dirty = wasDirty;
+            system.suspended = false;
+            system._rebuild = rebuild;
+            if (group === system._group && !group.directors) system._group = null;
+            expect(rebuilds).to.equal(0);
+        });
+    });
+
+    describe('#withMeshletRecords', function () {
+
+        it('returns what the callback returns and leaves resident records alone', async function () {
+            const system = app.systems.meshlet;
+            const resident = {
+                recordsResident: true,
+                primitives: [{}],
+                releaseRecords() {
+                    throw new Error('released a resource it did not restore');
+                }
+            };
+            system._recordSources.set(resident, { url: 'a.glb', credentials: null });
+            expect(await system.withMeshletRecords(() => 42)).to.equal(42);
+            expect(await system.withMeshletRecords(() => Promise.resolve('later'))).to.equal('later');
+        });
+
+        it('lets the callback\'s error through', async function () {
+            let thrown = null;
+            try {
+                await app.systems.meshlet.withMeshletRecords(() => {
+                    throw new Error('read failed');
+                });
+            } catch (e) {
+                thrown = e;
+            }
+            expect(thrown?.message).to.equal('read failed');
+        });
+    });
 });

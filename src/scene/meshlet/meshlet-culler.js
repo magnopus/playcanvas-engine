@@ -187,6 +187,26 @@ class MeshletCuller {
     twoPhase = false;
 
     /**
+     * Whether root admission skips instances hidden behind last frame's HZB (two-phase views
+     * only).
+     *
+     * @type {boolean}
+     */
+    occlusionAdmission = true;
+
+    /** @type {Float32Array} - last frame's view-projection, for root admission's HZB test. @private */
+    _prevViewProj = new Float32Array(16);
+
+    /** @type {number[]} - last frame's camera position and view direction. @private */
+    _prevCamera = [0, 0, 0, 0, 0, 1];
+
+    /** @type {object|null} - the HZB texture last frame's pyramid was built into. @private */
+    _prevHzbTexture = null;
+
+    /** @type {string} - the pyramid's size and depth encoding last frame. @private */
+    _prevHzbKey = '';
+
+    /**
      * True when the HZB holds linear view depth (built from a CameraFrame's scene depth) rather
      * than NDC depth from a depth texture - the occlusion test then compares along viewDir.
      *
@@ -315,6 +335,7 @@ class MeshletCuller {
         this.rootClassify.setParameter('rootBands', this.rootBandsBuffer);
         this.rootClassify.setParameter('cellInstances', cells.instancesBuffer);
         bindCells(this.rootClassify);
+        this.rootClassify.setParameter('hzbTexture', this.dummyHzb);
         this.rootArgs = makeCompute('dispatchArgs');
         this.rootArgs.setParameter('counterIndex', MESHLET_COUNTER.ROOT_CANDIDATES);
         this.rootArgs.setParameter('groupSize', 64);
@@ -581,6 +602,29 @@ class MeshletCuller {
         params[row(CULL_PARAMS.LOD) + 2] = hzb?.height ?? 1;
         params[row(CULL_PARAMS.LOD) + 3] = hzb?.mipCount ?? 1;
         params.set(viewProj, row(CULL_PARAMS.VIEW_PROJ));
+        // Root admission reads last frame's pyramid, so it is only valid against the camera that
+        // built it and only while that pyramid is the same texture at the same size.
+        const hzbKey = twoPhase ? `${hzb.width}x${hzb.height}x${hzb.mipCount}${this.hzbLinear}` : '';
+        const prevValid = this.occlusionAdmission && twoPhase && this._prevHzbTexture === hzb.texture && this._prevHzbKey === hzbKey;
+        params.set(this._prevViewProj, row(CULL_PARAMS.PREV_VIEW_PROJ));
+        const prevCamera = this._prevCamera;
+        params[row(CULL_PARAMS.PREV_CAMERA) + 0] = prevCamera[0];
+        params[row(CULL_PARAMS.PREV_CAMERA) + 1] = prevCamera[1];
+        params[row(CULL_PARAMS.PREV_CAMERA) + 2] = prevCamera[2];
+        params[row(CULL_PARAMS.PREV_CAMERA) + 3] = prevValid ? 1 : 0;
+        params[row(CULL_PARAMS.PREV_VIEW_DIR) + 0] = prevCamera[3];
+        params[row(CULL_PARAMS.PREV_VIEW_DIR) + 1] = prevCamera[4];
+        params[row(CULL_PARAMS.PREV_VIEW_DIR) + 2] = prevCamera[5];
+        // this frame's camera and pyramid are what the next frame's admission tests against
+        this._prevViewProj.set(viewProj);
+        prevCamera[0] = cameraPos.x;
+        prevCamera[1] = cameraPos.y;
+        prevCamera[2] = cameraPos.z;
+        prevCamera[3] = this.viewDir?.x ?? 0;
+        prevCamera[4] = this.viewDir?.y ?? 0;
+        prevCamera[5] = this.viewDir?.z ?? 1;
+        this._prevHzbTexture = twoPhase ? hzb.texture : null;
+        this._prevHzbKey = hzbKey;
         // base of the texture-mip feedback marks inside the requests buffer (= page count)
         params[row(CULL_PARAMS.STREAMING) + 0] = world.totalPages;
         params[row(CULL_PARAMS.STREAMING) + 1] = this.orthoScale;
@@ -661,6 +705,8 @@ class MeshletCuller {
 
         this._hzbTexture = twoPhase ? hzb.texture : null;
         this.meshletCull.setParameter('hzbTexture', this._hzbTexture ?? this.dummyHzb);
+        // last frame's pyramid: the texture this frame's HZB passes overwrite later, after admission
+        this.rootClassify.setParameter('hzbTexture', this._hzbTexture ?? this.dummyHzb);
 
         // the per-cell passes all run one workgroup per visible cell, from the one argument slot
         this.cellArgs.setParameter('dispatchSlot', this._dispatchSlotCells);

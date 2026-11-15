@@ -256,6 +256,48 @@ describe('MeshletCuller', function () {
         culler.destroy();
     });
 
+    it('arms root admission\'s occlusion test only against the pyramid and camera of the frame before', function () {
+        const view = makeView();
+        const culler = new MeshletCuller(device, makeWorld(), view, shaders);
+        const row = index => index * 4;
+        const hzb = { texture: {}, width: 256, height: 128, mipCount: 8 };
+        culler.twoPhase = true;
+        culler.viewDir = { x: 0, y: 0, z: -1 };
+        const armed = (frame) => {
+            const params = view.cullParamsBuffer.writes[frame].data;
+            return params[row(CULL_PARAMS.PREV_CAMERA) + 3];
+        };
+
+        culler.beginFrame(planes, camera, 640, viewProj, hzb);
+        expect(armed(0), 'no frame before this one').to.equal(0);
+
+        culler.viewDir = { x: 1, y: 0, z: 0 };
+        const next = new Float32Array(viewProj).fill(2);
+        culler.beginFrame(planes, { x: 4, y: 5, z: 6 }, 640, next, hzb);
+        expect(armed(1), 'the same pyramid one frame on').to.equal(1);
+        const params = view.cullParamsBuffer.writes[1].data;
+        expect(Array.from(params.subarray(row(CULL_PARAMS.PREV_VIEW_PROJ), row(CULL_PARAMS.PREV_VIEW_PROJ) + 16))).to.deep.equal(Array.from(viewProj));
+        expect(Array.from(params.subarray(row(CULL_PARAMS.PREV_CAMERA), row(CULL_PARAMS.PREV_CAMERA) + 3)), 'the camera that built it').to.deep.equal([camera.x, camera.y, camera.z]);
+        expect(Array.from(params.subarray(row(CULL_PARAMS.PREV_VIEW_DIR), row(CULL_PARAMS.PREV_VIEW_DIR) + 3))).to.deep.equal([0, 0, -1]);
+
+        // the frame after sees the second frame's camera
+        culler.beginFrame(planes, camera, 640, viewProj, hzb);
+        expect(Array.from(view.cullParamsBuffer.writes[2].data.subarray(row(CULL_PARAMS.PREV_CAMERA), row(CULL_PARAMS.PREV_CAMERA) + 3))).to.deep.equal([4, 5, 6]);
+
+        // a reallocated or resized pyramid holds nothing to test against
+        culler.beginFrame(planes, camera, 640, viewProj, { ...hzb, texture: {} });
+        expect(armed(3), 'a new texture').to.equal(0);
+        culler.beginFrame(planes, camera, 640, viewProj, { ...hzb, texture: hzb.texture, width: 512 });
+        expect(armed(4), 'the texture changed back, and the size').to.equal(0);
+
+        culler.beginFrame(planes, camera, 640, viewProj, { ...hzb, texture: hzb.texture, width: 512 });
+        expect(armed(5), 'a resized pyramid, once a frame has built it').to.equal(1);
+        culler.occlusionAdmission = false;
+        culler.beginFrame(planes, camera, 640, viewProj, { ...hzb, texture: hzb.texture, width: 512 });
+        expect(armed(6), 'switched off').to.equal(0);
+        culler.destroy();
+    });
+
     it('dispatches the whole phase-1 chain in one compute pass when the GPU profiler is off', function () {
         const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
         culler.passSuffix = 'Shadow0';
