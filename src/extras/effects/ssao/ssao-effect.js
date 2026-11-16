@@ -2,9 +2,10 @@ import glslComposeSsaoPS from './glsl/compose-ps.js';
 import wgslComposeSsaoPS from './wgsl/compose-ps.js';
 import { CameraFrameEffect } from '../../render-passes/camera-frame-effect.js';
 import {
-    COMPOSESLOT_HDR, FRAMERESOURCE_DEPTH, FRAMERESOURCE_PREPASSDEPTH, SSAOTYPE_LIGHTING, SSAOTYPE_NONE
+    COMPOSESLOT_HDR, FRAMERESOURCE_DEPTH, FRAMERESOURCE_PREPASSDEPTH, FRAMERESOURCE_SCENETARGET, SSAOTYPE_LIGHTING, SSAOTYPE_NONE
 } from '../../render-passes/constants.js';
 import { RenderPassSsao } from './passes/render-pass-ssao.js';
+import { RenderPassSsaoCombine } from './passes/render-pass-ssao-combine.js';
 
 /**
  * @import { CameraFrameEffectPasses, CameraFrameEffectResources } from '../../render-passes/camera-frame-effect.js'
@@ -12,8 +13,9 @@ import { RenderPassSsao } from './passes/render-pass-ssao.js';
  */
 
 // the frame resources the occlusion needs: the scene depth, which in the lighting mode has to exist
-// before the scene renders, and so is rendered by a prepass
-const combineRequires = [FRAMERESOURCE_DEPTH];
+// before the scene renders, and so is rendered by a prepass. The combine mode also renders into the
+// scene target, multiplying it by the occlusion before the scene is resolved
+const combineRequires = [FRAMERESOURCE_DEPTH, FRAMERESOURCE_SCENETARGET];
 const lightingRequires = [FRAMERESOURCE_PREPASSDEPTH];
 
 /**
@@ -109,6 +111,14 @@ class SsaoEffect extends CameraFrameEffect {
     _pass = null;
 
     /**
+     * The pass multiplying the scene by the occlusion, in the combine mode.
+     *
+     * @type {RenderPassSsaoCombine|null}
+     * @private
+     */
+    _combinePass = null;
+
+    /**
      * Whether the existing pass generates the occlusion for the lit materials to apply.
      *
      * @type {boolean}
@@ -179,7 +189,12 @@ class SsaoEffect extends CameraFrameEffect {
             cameraComponent.shaderParams.ssaoEnabled = true;
             passes.preScene.push(this._pass);
         } else {
+            // applied to the scene before it is resolved, so the temporal anti-aliasing accumulates
+            // the occlusion with the rest of the image (see RenderPassSsaoCombine)
             passes.postScene.push(this._pass);
+            this._combinePass = new RenderPassSsaoCombine(this.device, this._pass);
+            this._combinePass.init(resources.sceneTarget);
+            passes.postScene.push(this._combinePass);
         }
     }
 
@@ -189,6 +204,8 @@ class SsaoEffect extends CameraFrameEffect {
     destroyPasses() {
         this._pass?.destroy();
         this._pass = null;
+        this._combinePass?.destroy();
+        this._combinePass = null;
         this._lighting = false;
     }
 
@@ -202,10 +219,8 @@ class SsaoEffect extends CameraFrameEffect {
         pass.scale = this.scale;
         pass.randomize = this.randomize;
 
-        // the composition applies the occlusion in the combine mode only, and displays it in the
-        // debug view in both
+        // the composition only displays the occlusion, in the debug view
         this.setUniform('ssaoTexture', pass.ssaoTexture);
-        this.setDefine('SSAO_LIGHTING', this._lighting);
     }
 }
 

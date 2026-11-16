@@ -326,6 +326,9 @@ class FramePassCameraFrame extends FramePass {
         this.meshletPasses = null;
         this.colorGrabPass = null;
         this.composePass = null;
+        // the compose pass is recreated with default (clearing) ops, so the partial-viewport state
+        // that configured them on the previous pass is stale and must be re-applied
+        this._outputViewportPartial = null;
         this.afterPass = null;
         this.scenePassHalf = null;
     }

@@ -110,8 +110,11 @@ class RenderPassMeshletDraw extends RenderPass {
         // without a render pass having been started.
         renderTarget ??= null;
 
+        // No resize options: the pass draws into a target the scene passes own and size. Options
+        // would resize it to the back buffer each frame, against a scaled scene pass resizing it
+        // back, recreating its textures twice a frame (and leaving aliases of them destroyed).
         if (this.renderTarget !== renderTarget) {
-            this.init(renderTarget, {});
+            this.init(renderTarget);
             this.colorOps.store = true;
             this.depthStencilOps.storeDepth = true;
         }

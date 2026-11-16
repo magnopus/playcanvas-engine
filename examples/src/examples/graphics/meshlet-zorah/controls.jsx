@@ -48,9 +48,9 @@ export function Controls({ observer }) {
             <LabelGroup text='Sky'>
                 <SliderInput
                     binding={new BindingTwoWay()}
-                    link={{ observer, path: 'data.skyLuminance' }}
+                    link={{ observer, path: 'data.skyIntensity' }}
                     min={0.05}
-                    max={1.5}
+                    max={3}
                     precision={2}
                 />
             </LabelGroup>
@@ -73,6 +73,33 @@ export function Controls({ observer }) {
                     type='toggle'
                     binding={new BindingTwoWay()}
                     link={{ observer, path: 'data.ssao' }}
+                />
+            </LabelGroup>
+            <LabelGroup text='SSAO radius'>
+                <SliderInput
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.ssaoRadius' }}
+                    min={0.05}
+                    max={5}
+                    precision={2}
+                />
+            </LabelGroup>
+            <LabelGroup text='SSAO intensity'>
+                <SliderInput
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.ssaoIntensity' }}
+                    min={0}
+                    max={1}
+                    precision={2}
+                />
+            </LabelGroup>
+            <LabelGroup text='SSAO power'>
+                <SliderInput
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.ssaoPower' }}
+                    min={0.5}
+                    max={8}
+                    precision={1}
                 />
             </LabelGroup>
             <LabelGroup text='TAA'>

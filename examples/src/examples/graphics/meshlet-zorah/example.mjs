@@ -2,7 +2,7 @@
 //
 // The Zorah courtyard (NVIDIA RTX Kit sample geometry), streamed through the GPU-driven meshlet
 // pipeline. The export carries geometry only, no textures, so the look comes from the lighting: a
-// low warm sun with four cascaded shadows, a procedural sky for ambient light, contact ambient
+// sun with four cascaded shadows, an HDRI sky for ambient light, contact ambient
 // occlusion, and a stone / foliage / metal palette picked from the material names. See
 // assets/meshlets/README.md for the local dataset setup.
 //
@@ -11,15 +11,19 @@
 //                          5-chunk scene.json, for machines with less memory)
 //   ?pool=<MiB>            geometry budget override
 //   ?tint=0                leave the materials as baked (white)
-//   ?mountains=A,B,E|none  which background terrain pieces to keep (default all but the F1 sheets)
+//   ?mountains=A,B,E|all   background terrain pieces to keep (default none: the 13 km tiles flicker
+//                          as the geometry pool evicts them; `all` keeps all but the F1 sheets)
 //   ?view=start            begin at the manifest's start pose instead of the hero view
 //   ?scale=<0.25..1>       scene render scale, TAA upscales to the output (default 0.6)
+//   ?ssao=0                start with SSAO off
 //
 // @flag WEBGL_DISABLED
 // @flag WEBGPU_BARE_DISABLED
 // @flag HIDDEN
 
 import {
+    ADDRESS_CLAMP_TO_EDGE,
+    ADDRESS_REPEAT,
     AppBase,
     AppOptions,
     Asset,
@@ -29,12 +33,15 @@ import {
     CameraFrame,
     Color,
     ContainerHandler,
+    EnvLighting,
     Entity,
     FILLMODE_FILL_WINDOW,
+    FILTER_NEAREST,
     Keyboard,
     LightComponentSystem,
     MeshletComponentSystem,
     Mouse,
+    PIXELFORMAT_RGBA8,
     Picker,
     RenderComponentSystem,
     RESOLUTION_AUTO,
@@ -44,15 +51,18 @@ import {
     SHADOWUPDATE_THISFRAME,
     SSAOTYPE_NONE,
     ScriptComponentSystem,
+    TEXTURELOCK_READ,
+    TEXTURETYPE_RGBE,
     TONEMAP_ACES2,
     TONEMAP_NONE,
+    Texture,
+    TextureHandler,
     TouchDevice,
     Vec3,
     createGraphicsDevice,
     math
 } from 'playcanvas';
 import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
-import { ProceduralSky } from 'playcanvas/scripts/esm/sky/procedural-sky.mjs';
 
 import { data, deviceType } from 'examples/context';
 
@@ -72,10 +82,13 @@ if (scene.version !== 1 || !scene.entities?.length) {
     throw new Error('Invalid Zorah scene manifest.');
 }
 
-// The NVIDIA sample's own camera and sun (zorah_main_public.v2.cfg): a view down the courtyard
-// into the low warm light
+// The NVIDIA sample's own camera (zorah_main_public.v2.cfg): a view down the courtyard into the low
+// warm light
 const HERO = { position: [55.34, 6.45, 0.32], target: [46.38, 5.8, 0.53] };
-const SUN = { toSun: new Vec3(0.6, 0.7, 0.36).normalize(), color: new Color(1, 0.8, 0.5) };
+
+// The sky and ambient light come from the Rhodes Memorial HDRI (Poly Haven, CC0), and the sun light
+// from its sun disk (see splitSun). The intensity scales the sky, and the sun light with it.
+const HDRI = { url: './assets/hdri/rhodes_memorial_4k.hdr', intensity: 1.2, sunLuminance: 20 };
 
 const device = await createGraphicsDevice(canvas, {
     deviceTypes: [deviceType],
@@ -96,7 +109,7 @@ options.componentSystems = [
     ScriptComponentSystem,
     MeshletComponentSystem
 ];
-options.resourceHandlers = [ContainerHandler];
+options.resourceHandlers = [ContainerHandler, TextureHandler];
 
 const app = new AppBase(canvas);
 app.init(options);
@@ -125,11 +138,104 @@ for (const entry of scene.entities) {
         }
     }
 }
+const hdriAsset = new Asset('hdri', 'texture', { url: HDRI.url }, { mipmaps: false });
 await new Promise((resolve, reject) => {
-    new AssetListLoader([...assets.values()], app.assets).load((error) => {
+    new AssetListLoader([...assets.values(), hdriAsset], app.assets).load((error) => {
         if (error) reject(error);
         else resolve();
     });
+});
+
+/**
+ * Splits an RGBE equirect into the sky and its sun: a copy with every texel's luminance clamped,
+ * which takes the sun disk out of it, and the direction, colour and irradiance of the light the
+ * clamp removed. The directional light supplies the sun, so in the env-atlas the disk would light
+ * everything a second time (three quarters of this HDRI's energy is in it).
+ *
+ * @param {Texture} source - The RGBE equirect.
+ * @param {number} maxLuminance - The luminance to clamp to.
+ * @returns {{ sky: Texture, toSun: Vec3, color: Color, irradiance: number }} The clamped copy, and
+ * the removed light: its direction, its colour normalized to a maximum of 1, and its irradiance.
+ */
+const splitSun = (source, maxLuminance) => {
+    const src = source.lock({ mode: TEXTURELOCK_READ });
+    source.unlock();
+    const dst = new Uint8Array(src);
+    const { width, height } = source;
+    const removed = [0, 0, 0];
+    const toSun = new Vec3();
+    for (let y = 0; y < height; y++) {
+        // texel rows run from straight up to straight down, columns around atan(x, z)
+        const elevation = (0.5 - (y + 0.5) / height) * Math.PI;
+        const solidAngle = Math.cos(elevation) * (Math.PI / height) * (2 * Math.PI / width);
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            const e = dst[i + 3];
+            if (!e) continue;
+            const f = 2 ** (e - 136);
+            const lum = (0.2126 * dst[i] + 0.7152 * dst[i + 1] + 0.0722 * dst[i + 2]) * f;
+            if (lum <= maxLuminance) continue;
+
+            // the light above the clamp, weighted by the texel's solid angle
+            const cut = (1 - maxLuminance / lum) * f * solidAngle;
+            removed[0] += dst[i] * cut;
+            removed[1] += dst[i + 1] * cut;
+            removed[2] += dst[i + 2] * cut;
+            const azimuth = ((x + 0.5) / width * 2 - 1) * Math.PI;
+            const weight = (lum - maxLuminance) * solidAngle;
+            toSun.x += Math.cos(elevation) * Math.sin(azimuth) * weight;
+            toSun.y += Math.sin(elevation) * weight;
+            toSun.z += Math.cos(elevation) * Math.cos(azimuth) * weight;
+
+            const k = maxLuminance / lum * f;
+            const r = dst[i] * k, g = dst[i + 1] * k, b = dst[i + 2] * k;
+            const exponent = Math.floor(Math.log2(Math.max(r, g, b))) + 1;
+            const scale = 256 / 2 ** exponent;
+            dst[i] = r * scale;
+            dst[i + 1] = g * scale;
+            dst[i + 2] = b * scale;
+            dst[i + 3] = exponent + 128;
+        }
+    }
+    // the skybox and the env-atlas look the equirect up with x mirrored
+    toSun.x = -toSun.x;
+    const peak = Math.max(...removed);
+    return {
+        sky: new Texture(device, {
+            name: 'hdri-sky',
+            width,
+            height,
+            format: PIXELFORMAT_RGBA8,
+            type: TEXTURETYPE_RGBE,
+            addressU: ADDRESS_REPEAT,
+            addressV: ADDRESS_CLAMP_TO_EDGE,
+            minFilter: FILTER_NEAREST,
+            magFilter: FILTER_NEAREST,
+            mipmaps: false,
+            levels: [dst]
+        }),
+        toSun: toSun.normalize(),
+        color: new Color(removed[0] / peak, removed[1] / peak, removed[2] / peak),
+        irradiance: 0.2126 * removed[0] + 0.7152 * removed[1] + 0.0722 * removed[2]
+    };
+};
+
+// The HDRI is the visible sky, sun disk included, and lights the scene through its env-atlas in
+// place of a flat ambient, without its sun. The sun light replaces that, in the disk's direction
+// and colour. A surface lit by the disk would receive albedo * irradiance / pi, and the light gives
+// albedo * intensity, so its intensity is the irradiance / pi, at the sky's scale.
+const hdri = hdriAsset.resource;
+const SUN = splitSun(hdri, HDRI.sunLuminance);
+app.scene.skybox = EnvLighting.generateSkyboxCubemap(hdri);
+const lightingSource = EnvLighting.generateLightingSource(SUN.sky);
+app.scene.envAtlas = EnvLighting.generateAtlas(lightingSource);
+lightingSource.destroy();
+SUN.sky.destroy();
+app.scene.skyboxIntensity = HDRI.intensity;
+app.scene.ambientLight = new Color(0, 0, 0);
+app.on('destroy', () => {
+    app.scene.skybox?.destroy();
+    app.scene.envAtlas?.destroy();
 });
 
 /**
@@ -204,10 +310,13 @@ const tintMaterials = (resource) => {
         f32[record + 9] = roughness;
     }
 };
-// The background terrain pieces (MI_Mountains_Background_<L>1) are 13 km tiles. The two F1 tiles are
-// thin sheets whose surface cuts through the courtyard, burying its floor and the lower walls, so
-// they are dropped. ?mountains=A,B,E keeps only those letters, ?mountains=none drops them all
-const keepMountains = new Set((params.get('mountains') ?? 'A,B,C,D,E,G').toUpperCase().split(','));
+// The background terrain pieces (MI_Mountains_Background_<L>1) are 13 km tiles, dropped by default:
+// their geometry does not fit the pool next to the courtyard, so they flicker as it is evicted and
+// streamed back, and the HDRI supplies the horizon instead. ?mountains=all keeps all but the two F1
+// tiles, thin sheets whose surface cuts through the courtyard, burying its floor and the lower
+// walls. ?mountains=A,B,E keeps only those letters
+const mountainParam = (params.get('mountains') ?? 'none').toUpperCase();
+const keepMountains = new Set((mountainParam === 'ALL' ? 'A,B,C,D,E,G' : mountainParam).split(','));
 for (const asset of assets.values()) {
     const resource = asset.resource.meshlets?.[0];
     const materials = asset.resource.data?.materials;
@@ -311,7 +420,7 @@ for (const entry of scene.entities) {
     anyBounds = true;
 }
 
-// The sun: a low warm key light. Its shadows carry most of the look on untextured geometry. By
+// The sun: the key light. Its shadows carry most of the look on untextured geometry. By
 // default they are one 8k map fitted to the scene bounds and rendered once, then again only when
 // streaming changes what the meshlets cast (see MeshletShadowRenderer): nothing about it follows
 // the camera, so there is nothing to swim or flicker as it moves. The realtime alternative is four
@@ -320,7 +429,7 @@ const sun = new Entity('Sun');
 sun.addComponent('light', {
     type: 'directional',
     color: SUN.color,
-    intensity: 1.7,
+    intensity: SUN.irradiance / Math.PI * HDRI.intensity,
     castShadows: true,
     numCascades: 1,
     shadowResolution: 8192,
@@ -379,30 +488,23 @@ const renderScale = math.clamp(parseFloat(params.get('scale') ?? '0.6') || 0.6, 
 cameraFrame.rendering.renderTargetScale = renderScale;
 cameraFrame.taa.upscale = renderScale < 1;
 cameraFrame.rendering.sharpness = renderScale < 1 ? 0.5 : 0;
-// contact shadows in the corners and under ledges, from the depth the meshlets write
-// off by default: at the export's coarse LODs and without textures it reads as dark smudges around
-// carved detail. ?ssao=1 starts with it on
-const ssaoOn = params.get('ssao') === '1';
+// contact shadows in the corners, under ledges and in the carving, from the depth the meshlets
+// write. Combine mode: the meshlet material does not sample the AO texture the 'lighting' mode
+// relies on. The default power of 6 crushes the carving's creases to black. ?ssao=0 starts off
+const ssaoOn = params.get('ssao') !== '0';
+const SSAO = { radius: 0.6, intensity: 0.6, power: 1.5 };
 Object.assign(cameraFrame.ssao, {
     type: ssaoOn ? SSAOTYPE_COMBINE : SSAOTYPE_NONE,
-    radius: 0.6,
-    intensity: 0.45,
+    ...SSAO,
+    // a new sampling pattern each frame, which TAA averages away: the fixed per-pixel noise
+    // otherwise survives the blur as a pattern on the carving
+    randomize: true,
     samples: 16,
     scale: 1
 });
 cameraFrame.update();
 app.on('destroy', () => cameraFrame.destroy());
 
-// A procedural sky lights the scene through its env-atlas, in place of a flat ambient, and puts
-// the sun disk where the light shines from.
-const sky = new Entity('ProceduralSky');
-sky.addComponent('script');
-const skyScript = /** @type {ProceduralSky} */ (sky.script.create(ProceduralSky));
-skyScript.elevation = Math.asin(SUN.toSun.y) * math.RAD_TO_DEG;
-skyScript.azimuth = Math.atan2(SUN.toSun.x, SUN.toSun.z) * math.RAD_TO_DEG;
-skyScript.luminance = 0.2;
-app.root.addChild(sky);
-app.scene.ambientLight = new Color(0, 0, 0);
 
 // orbit pivot: the world point under the screen centre, picked once when an orbit drag starts.
 // The pick runs from postrender, as meshlet draw args are cleared at the end of each frame.
@@ -432,10 +534,13 @@ app.on('postrender', () => {
 data.set('data', {
     threshold: 4,
     sunIntensity: sun.light.intensity,
-    skyLuminance: skyScript.luminance,
+    skyIntensity: app.scene.skyboxIntensity,
     shadows: true,
     staticShadows: true,
     ssao: ssaoOn,
+    ssaoRadius: SSAO.radius,
+    ssaoIntensity: SSAO.intensity,
+    ssaoPower: SSAO.power,
     taa: true,
     renderScale,
     occlusion: true,
@@ -455,8 +560,8 @@ data.on('data.threshold:set', (/** @type {number} */ value) => {
 data.on('data.sunIntensity:set', (/** @type {number} */ value) => {
     sun.light.intensity = value;
 });
-data.on('data.skyLuminance:set', (/** @type {number} */ value) => {
-    skyScript.luminance = value;
+data.on('data.skyIntensity:set', (/** @type {number} */ value) => {
+    app.scene.skyboxIntensity = value;
 });
 // Static: one 8k map fitted to the scene, cached. Realtime: four cascades fitted to the camera,
 // the far two on alternate frames.
@@ -478,11 +583,18 @@ data.on('data.ssao:set', (/** @type {boolean} */ value) => {
     cameraFrame.ssao.type = value ? SSAOTYPE_COMBINE : SSAOTYPE_NONE;
     cameraFrame.update();
 });
+for (const key of ['Radius', 'Intensity', 'Power']) {
+    data.on(`data.ssao${key}:set`, (/** @type {number} */ value) => {
+        cameraFrame.ssao[key.toLowerCase()] = value;
+        cameraFrame.update();
+    });
+}
 // upscaling is part of the TAA resolve, so without TAA a reduced scale is a bilinear stretch
 const applyResolution = () => {
     const taa = data.get('data.taa');
     const scale = data.get('data.renderScale');
     cameraFrame.taa.enabled = taa;
+    cameraFrame.ssao.randomize = taa;
     cameraFrame.taa.upscale = taa && scale < 1;
     cameraFrame.rendering.renderTargetScale = scale;
     cameraFrame.rendering.sharpness = scale < 1 ? 0.5 : 0;
@@ -581,6 +693,8 @@ app.on('update', () => {
     window.__zorahBudget = budget;
     window.__zorahData = data;
     window.__zorahCameraFrame = cameraFrame;
+    window.__zorahSun = SUN;
+    window.__zorahLookFrom = lookFrom;
     const threshold = app.systems.meshlet.dagPixelThreshold;
     data.set('data.statsRoots', `admitted ${count(budget.admitted)} idx, rejected ${count(budget.rejected)} idx ` +
         `(${budget.rejectedInstances} instances missing), unready ${budget.unready}, skipped as occluded ${budget.occluded}`);
