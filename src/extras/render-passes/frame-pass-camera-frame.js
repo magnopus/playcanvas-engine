@@ -292,6 +292,10 @@ class FramePassCameraFrame extends FramePass {
         this.composePass = null;
         this.afterPass = null;
         this.scenePassHalf = null;
+
+        // the compose pass is recreated with default (clearing) ops, so the partial-viewport state
+        // that configured them on the previous pass is stale and must be re-applied
+        this._outputViewportPartial = null;
     }
 
     sanitizeOptions(options) {
@@ -469,16 +473,7 @@ class FramePassCameraFrame extends FramePass {
 
     set renderTargetScale(value) {
         this._renderTargetScale = value;
-        if (this.scenePass) {
-            this.scenePass.scaleX = value;
-            this.scenePass.scaleY = value;
-        }
-
-        // the prepass renders at the size of the scene pass
-        if (this.prePass) {
-            this.prePass.scaleX = value;
-            this.prePass.scaleY = value;
-        }
+        this.updateSceneScale();
     }
 
     get renderTargetScale() {
@@ -493,11 +488,24 @@ class FramePassCameraFrame extends FramePass {
      * @private
      */
     updateSceneScale() {
+        const rect = this.cameraComponent.camera.rect;
+        const scaleX = this._renderTargetScale * rect.z;
+        const scaleY = this._renderTargetScale * rect.w;
+
+        // used when the passes are created
         const options = this.sceneOptions;
         if (options) {
-            const rect = this.cameraComponent.camera.rect;
-            options.scaleX = this._renderTargetScale * rect.z;
-            options.scaleY = this._renderTargetScale * rect.w;
+            options.scaleX = scaleX;
+            options.scaleY = scaleY;
+        }
+
+        // the passes copy their options when they are initialized, so the ones already created are
+        // updated directly. The prepass renders at the size of the scene pass.
+        for (const pass of [this.scenePass, this.prePass]) {
+            if (pass) {
+                pass.scaleX = scaleX;
+                pass.scaleY = scaleY;
+            }
         }
     }
 
