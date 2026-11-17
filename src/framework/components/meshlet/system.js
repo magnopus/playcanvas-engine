@@ -1039,22 +1039,22 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
-     * Once a split scene has settled - no asset loading, no rebuild pending, none for
+     * Once the scene has settled - no asset loading, no rebuild pending, none for
      * RECORD_RELEASE_DELAY_MS - drops the resources' own copies of their meshlet records (nearly
-     * all of each GLB) for every world but the last: each world has uploaded its own. The last
-     * world takes newly added resources, so it keeps them for the rebuilds that brings. Releasing
-     * earlier, while assets still arrive, only has them fetched straight back when a world's
-     * budget share moves.
+     * all of each GLB) for every world: each world has uploaded its own. A later rebuild of a
+     * world (a resource added to it, its budget share moved) fetches its records back first (see
+     * _restoreRecords). Releasing earlier, while assets still arrive, only has them fetched
+     * straight back.
      *
      * @private
      */
     _releaseSettledRecords() {
         const states = this._partitionStates;
-        if (states.length < 2 || this._dirty || this._restoring.size) return;
+        if (!states.length || this._dirty || this._restoring.size) return;
         if (performance.now() - this._lastRebuild < RECORD_RELEASE_DELAY_MS) return;
         if (this._recordsReleasedAt === this._lastRebuild || this._hasPendingAssets()) return;
         this._recordsReleasedAt = this._lastRebuild;
-        for (let pi = 0; pi < states.length - 1; pi++) {
+        for (let pi = 0; pi < states.length; pi++) {
             for (const group of states[pi].groups) this._releaseRecords(group);
         }
     }
@@ -1075,8 +1075,8 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
-     * Runs `callback` with every placed resource's CPU meshlet records in memory. A scene split
-     * across several worlds releases the records of all but the last world once it settles (see
+     * Runs `callback` with every placed resource's CPU meshlet records in memory. A scene
+     * releases its records once it settles (see
      * {@link _releaseSettledRecords}), and a reader of them - a ray tracer building a scene from
      * the meshlets - would find them null. The released records are fetched back first, and
      * dropped again afterwards, with no world rebuild in between: only the records this call

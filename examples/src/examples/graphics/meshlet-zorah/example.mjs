@@ -693,8 +693,6 @@ app.on('update', () => {
     window.__zorahBudget = budget;
     window.__zorahData = data;
     window.__zorahCameraFrame = cameraFrame;
-    window.__zorahSun = SUN;
-    window.__zorahLookFrom = lookFrom;
     const threshold = app.systems.meshlet.dagPixelThreshold;
     data.set('data.statsRoots', `admitted ${count(budget.admitted)} idx, rejected ${count(budget.rejected)} idx ` +
         `(${budget.rejectedInstances} instances missing), unready ${budget.unready}, skipped as occluded ${budget.occluded}`);

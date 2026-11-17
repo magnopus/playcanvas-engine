@@ -467,6 +467,13 @@ const createMesh = (device, gltfMesh, accessors, bufferViews, vertexBufferDict, 
                         indices = new Uint16Array(indices);
                     }
 
+                    // the accessor data can be a view into the whole GLB binary, and the index
+                    // buffer keeps its data by reference as CPU storage: copy it, so the buffer
+                    // does not keep the entire file alive after the container drops it
+                    if (indices.byteLength !== indices.buffer.byteLength) {
+                        indices = indices.slice();
+                    }
+
                     const indexBuffer = new IndexBuffer(device, indexFormat, indices.length, BUFFER_STATIC, indices);
                     mesh.indexBuffer[0] = indexBuffer;
                     mesh.primitive[0].count = indices.length;

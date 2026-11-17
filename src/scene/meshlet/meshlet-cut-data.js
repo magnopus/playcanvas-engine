@@ -330,7 +330,11 @@ class MeshletCutData {
         if (topology.length) this.selectionTopology.write(0, topology);
         this.levelStarts = new StorageBuffer(device, Math.max(levelStarts.byteLength, 16), BUFFERUSAGE_COPY_DST);
         if (levelStarts.length) this.levelStarts.write(0, levelStarts);
+        // #if _DEBUG
+        // for inspection and tests only: 4 bytes per meshlet of the world, hundreds of MB in a
+        // large scene, so release builds keep only the GPU copy
         this.levelStartsCpu = levelStarts;
+        // #endif
         this.rootPages = Array.from(rootPages).sort((a, b) => a - b);
         /**
          * Global pages of the playable floor (see {@link collectFloorPages}), roots included,
