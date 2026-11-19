@@ -50,6 +50,10 @@ const BYTES_PER_WORD = 4;
 // overflowing frame only leaves the dropped tasks' groups coarse.
 const CUT_QUEUE_INITIAL = 1 << 16;
 
+// words of a view's cut budget: used indices per bucket, used records, rejected record demand,
+// then the cut queue entries admitted roots claimed
+const CUT_BUDGET_U32S = 6;
+
 /**
  * @param {ArrayLike<number>} values - Per-bucket values.
  * @returns {number} Their sum over the draw buckets.
@@ -117,6 +121,15 @@ class MeshletView {
 
     /** @type {boolean} - false when workItemsBuffer is borrowed from a sibling-view pool. */
     _ownsWorkItems = true;
+
+    /**
+     * Work items {@link workItemsBuffer} holds. The default selection (direct emit from the cut
+     * queue) uses the buffer only as the root list, one entry per instance; the compaction path
+     * needs the world's worst case and grows it with {@link ensureWorkItems}.
+     *
+     * @type {number}
+     */
+    workItemCapacity = 0;
 
     _countersData = new Uint32Array(MESHLET_COUNTER_U32S);
 
@@ -268,8 +281,10 @@ class MeshletView {
         // demand readbacks go through a pooled staging buffer, the same way the residency's
         // request-marks readback does, rather than allocating a staging buffer per read
         this.readbackPool = new WebgpuReadbackPool(device);
+        this.workItemCapacity = sharedWorkItems ?
+            Math.floor(sharedWorkItems.byteSize / (WORK_ITEM_U32S * BYTES_PER_WORD)) : world.rootListItems;
         this.workItemsBuffer = sharedWorkItems ??
-            new StorageBuffer(device, Math.max(world.workItemCapacity * WORK_ITEM_U32S * BYTES_PER_WORD, 16), BUFFERUSAGE_COPY_DST);
+            new StorageBuffer(device, this.workItemCapacity * WORK_ITEM_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         this._ownsWorkItems = !sharedWorkItems;
         this.recordsBuffer = null; // allocated below, once recordCapacity is known
         this.claimBitsBuffer = sharedClaimBits ?? new StorageBuffer(device, claimWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
@@ -277,13 +292,16 @@ class MeshletView {
         // Records are demand-grown like the index buffer. Sizing them for the worst case (every
         // meshlet of every instance drawn at once) reaches gigabytes on scattered scenes, while
         // a real frame's LOD cut emits a few hundred thousand records. counters[MESHLET_COUNTER.RECORDS] counts unclamped
-        // demand, so the buffer starts small and grows to what frames actually ask for.
-        this.recordCapacity = Math.min(world.recordCapacity, world.initialRecords || world.recordCapacity);
+        // demand, so the buffer starts small and grows to what frames actually ask for - up to
+        // the budget's ceiling, when there is one.
+        const recordCeiling = this.recordCeiling;
+        this.recordCapacity = Math.min(recordCeiling, world.initialRecords || recordCeiling);
         this.selectedMeshletsBuffer = new StorageBuffer(device, Math.max(this.recordCapacity * 8, 16), BUFFERUSAGE_COPY_DST);
-        this.cutBudgetBuffer = new StorageBuffer(device, 20, BUFFERUSAGE_COPY_DST);
-        this.cutBudgetInitial = new Uint32Array(5);
+        // used indices per bucket, used records, rejected record demand, admitted roots' queue entries
+        this.cutBudgetBuffer = new StorageBuffer(device, CUT_BUDGET_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
+        this.cutBudgetInitial = new Uint32Array(CUT_BUDGET_U32S);
         // the queued cut's task queue (see MeshletCuller#queueCut), demand-grown like the records
-        this.cutQueueCapacity = CUT_QUEUE_INITIAL;
+        this.cutQueueCapacity = Math.min(CUT_QUEUE_INITIAL, this.cutQueueCeiling);
         this.cutQueueBuffer = new StorageBuffer(device, this.cutQueueCapacity * 8, BUFFERUSAGE_COPY_DST);
         // persistent visibility bits for two-phase occlusion (never cleared - phase 2 maintains
         // them); carried across a rebuild for the unchanged-placement prefix, or the first
@@ -354,6 +372,34 @@ class MeshletView {
         }
     }
 
+    /** @type {number} - most records this view may grow to: the budget's ceiling, or the worst case. */
+    get recordCeiling() {
+        const ceiling = this.singlePhase ? this.world.shadowRecordCeiling : this.world.recordCeiling;
+        return ceiling > 0 ? Math.min(ceiling, this.world.recordCapacity) : this.world.recordCapacity;
+    }
+
+    /** @type {number} - most cut queue entries this view may grow to: the budget's ceiling, or unbounded. */
+    get cutQueueCeiling() {
+        const ceiling = this.singlePhase ? this.world.shadowCutQueueCeiling : this.world.cutQueueCeiling;
+        return ceiling > 0 ? ceiling : Infinity;
+    }
+
+    /**
+     * Grows the work-item buffer to at least `capacity` items, into a buffer this view owns
+     * (a borrowed one is left to its owner). Contents are rewritten every frame.
+     *
+     * @param {number} capacity - Work items wanted.
+     * @returns {boolean} True when the buffer was replaced.
+     */
+    ensureWorkItems(capacity) {
+        if (capacity <= this.workItemCapacity) return false;
+        if (this._ownsWorkItems) this.workItemsBuffer?.destroy();
+        this.workItemCapacity = capacity;
+        this.workItemsBuffer = new StorageBuffer(this.device, capacity * WORK_ITEM_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
+        this._ownsWorkItems = true;
+        return true;
+    }
+
     /**
      * Reallocates this view's cut queue to the observed demand. Written and consumed within
      * each frame, so nothing copies.
@@ -362,7 +408,7 @@ class MeshletView {
      * @returns {boolean} True when the buffer was replaced.
      */
     growCutQueue(wanted) {
-        const target = Math.ceil(wanted * this.growTo);
+        const target = Math.min(Math.ceil(wanted * this.growTo), this.cutQueueCeiling);
         if (target <= this.cutQueueCapacity) return false;
         this.cutQueueCapacity = target;
         this.cutQueueBuffer.destroy();
@@ -378,7 +424,7 @@ class MeshletView {
      * @returns {boolean} True when the buffer was replaced.
      */
     growRecordsBuffer(wanted) {
-        const target = Math.min(Math.ceil(wanted * this.growTo), this.world.recordCapacity);
+        const target = Math.min(Math.ceil(wanted * this.growTo), this.recordCeiling);
         if (target <= this.recordCapacity) return false;
         this.recordCapacity = target;
         this.selectedMeshletsBuffer.destroy();
@@ -692,7 +738,9 @@ class MeshletView {
             const demand = this._demand;
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) demand.indices[b] = data[MESHLET_COUNTER.DEMAND_BASE + b];
             demand.records = data[MESHLET_COUNTER.RECORD_DEMAND];
-            demand.cutQueue = data[MESHLET_COUNTER.CUT_QUEUE_END];
+            // what root admission could not reserve is demand too, or a queue too small for the
+            // roots would never grow
+            demand.cutQueue = data[MESHLET_COUNTER.CUT_QUEUE_END] + data[MESHLET_COUNTER.CUT_QUEUE_REJECTED];
             this._pendingDemand = demand;
             this.lastDemand = demand;
             const roots = this.lastRoots;

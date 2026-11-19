@@ -210,8 +210,8 @@ describe('buildMeshletLitChunks', function () {
         expect(chunks.alphaTestPS).to.include('materialTable[vMeshletMatRow].alphaCutoff');
         expect(chunks.litEngineDeclarationPS).to.include('struct MeshletMaterial');
         expect(chunks.litEngineDeclarationVS, 'both stages declare the structs').to.include('struct MeshletMaterial');
-        expect(chunks.litEngineMainStartVS).to.include('objectData[meshletInstance].worldMatrix');
-        expect(chunks.litEngineMainStartVS).to.include('meshletObjectGridOrigin(meshletInstance)');
+        expect(chunks.litEngineMainStartVS).to.include('meshletInstanceMatrix(meshletInstance)');
+        expect(chunks.litEngineMainStartVS).to.include('let meshletGridOrigin = meshletPrimitive.gridOrigin;');
         expect(chunks.diffusePS, 'no texture sampling without textures').to.not.include('meshletSampleSlot');
     });
 
@@ -287,6 +287,7 @@ describe('buildMeshletLitChunks', function () {
     it('routes the pick id through objectData and collapses unselected instances in the outline pass', function () {
         const chunks = buildMeshletLitChunks();
         expect(chunks.litEngineDeclarationPS).to.include('encodePickOutput(vMeshletPickId)');
+        expect(chunks.litEngineMainStartVS).to.include('dMeshletPickId = meshletPrimitive.pickIdBase + meshletInstance;');
         expect(chunks.litEngineMainStartVS).to.include('#ifdef PCOUTLINE_PASS');
         expect(chunks.litEngineMainStartVS).to.include('vertex_position = vec4f(meshletGridOrigin, 1.0);');
         expect(chunks.outlineOutputPS).to.include('pcOutlineColorHover');

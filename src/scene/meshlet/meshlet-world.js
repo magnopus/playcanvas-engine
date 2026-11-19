@@ -1,5 +1,6 @@
 import { MeshletCells } from './meshlet-cells.js';
 import { MeshletCutData } from './meshlet-cut-data.js';
+import { MeshletInstanceList } from './meshlet-instance-list.js';
 import { meshletBakeStamp } from './streaming/meshlet-bake-stamp.js';
 import { Debug } from '../../core/debug.js';
 import { PickerId } from '../picker-id.js';
@@ -15,6 +16,7 @@ import { OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COMPACT_SLICE, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
     MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, MESHLET_NO_PARENT, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
+    PRIMITIVE_DATA,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED,
     PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
     RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S,
@@ -46,7 +48,53 @@ const KNOWN_LAYOUT_KEYS = new Set(['positions', 'normals', 'tangents', 'uvCompon
 // meshlet records (128 bytes each) gathered per upload while building a world: 16 MB
 const RECORD_UPLOAD_BATCH = 128 * 1024;
 
+// Least the draw index budget is resolved to, whatever the geometry budget leaves for it: 4M
+// indices. Root admission takes instances nearest first, so any real capacity draws the closest
+// ones; a budget that leaves the indices nothing would admit no instance at all and draw an
+// empty scene.
+const MIN_INDEX_BUDGET_BYTES = 16 * 1024 * 1024;
+
+// Bytes per record a view holds: the record itself and its selected-meshlet entry.
+const RECORD_BYTES = RECORD_U32S * 4 + 8;
+
+// Bytes per cut queue entry: an (instance, group row) pair.
+const CUT_QUEUE_ENTRY_BYTES = 8;
+
+// Least each view's records and cut queue are resolved to under a budget: enough for a few
+// thousand instances' roots and their first refinements.
+const MIN_VIEW_RECORDS = 16 * 1024;
+const MIN_VIEW_CUT_QUEUE = 16 * 1024;
+
+// Shares of the draw working set given to all views' records and cut queues, the rest going to
+// the indices. A drawn meshlet costs hundreds of indices (four bytes each) against one 24-byte
+// record and a cut task for its group, so these are small.
+const RECORD_BUDGET_SHARE = 0.05;
+const CUT_QUEUE_BUDGET_SHARE = 0.03;
+
+// A shadow view's weight against a camera view's in that split. A cascade cuts far coarser
+// than the camera it shadows, and an even split hands a scene with a dozen shadow views a
+// camera share too small to refine anything near.
+const SHADOW_VIEW_DRAW_WEIGHT = 0.25;
+
+/**
+ * Root list entries a view holds: one per instance. Admission ranks every instance in view, so
+ * this scales with the scene, not the budget. It lives in the work-item buffer, which the
+ * default (direct emit) selection uses for nothing else.
+ *
+ * @param {number} instanceCount - The world's instances.
+ * @returns {number} Work items.
+ * @ignore
+ */
+const rootListItems = instanceCount => Math.max(instanceCount, 4);
+
+// objectData instance rows generated per upload (64 bytes each): 4 MB. Rows are generated from
+// the placements on demand rather than mirrored, so this is all the CPU holds of them.
+const OBJECT_ROW_BATCH = 64 * 1024;
+
 const _tmpMat = new Mat4();
+
+/** @type {{ placement: object, run: number, index: number }} - see MeshletWorld#_locate. */
+const _located = { placement: null, run: 0, index: 0 };
 const _tmpBox = new BoundingBox();
 const _tmpLocalBox = new BoundingBox();
 
@@ -58,6 +106,38 @@ const maxAxisScale = m => Math.max(Math.hypot(m[0], m[1], m[2]), Math.hypot(m[4]
 const _familyName = family => `${MESHLET_TEX_FAMILIES[family].charAt(0).toUpperCase()}${MESHLET_TEX_FAMILIES[family].slice(1)}`;
 const _tailBindName = family => `meshletTail${_familyName(family)}`;
 const _fineBindName = family => `meshletFine${_familyName(family)}`;
+
+/**
+ * What a picked meshlet id resolves to: one instance, a primitive at one transform.
+ *
+ * @ignore
+ */
+class MeshletPickRecord {
+    /**
+     * @param {number} pickId - The picker id.
+     * @param {object} placement - The world placement holding the instance.
+     * @param {number} instanceIndex - Global instance index (see MeshletWorld#instanceOffset).
+     * @param {number} primIndex - The resource primitive.
+     * @param {number} listIndex - The instance's position in the placement's list.
+     */
+    constructor(pickId, placement, instanceIndex, primIndex, listIndex) {
+        this.pickId = pickId;
+        this.placement = placement;
+        this.instanceIndex = instanceIndex;
+        this.primIndex = primIndex;
+        this._listIndex = listIndex;
+    }
+
+    /** @type {MeshletResource} */
+    get resource() {
+        return this.placement.resource;
+    }
+
+    /** @type {Float32Array} - the instance's document-space matrix, before its root transform. */
+    get matrix() {
+        return this.placement.instances.get(this._listIndex).matrix;
+    }
+}
 
 /**
  * The GPU residency and instance state of a set of streamed meshlet assets: page pool, resident
@@ -118,7 +198,23 @@ class MeshletWorld {
     cells = null;
 
 
+    /** @type {StorageBuffer|null} - instance rows, then primitive rows (see OBJECT_DATA_U32S). */
     objectDataBuffer = null;
+
+    /**
+     * Per instance, its objectData flags word (OBJECT_FLAG_* and the draw bucket). The only
+     * per-instance state the CPU keeps: the rest of a row is derived from the placements when
+     * it is uploaded.
+     *
+     * @type {Uint32Array}
+     */
+    instanceFlags = new Uint32Array(0);
+
+    /** @type {Uint32Array} - the primitive rows of objectData, as uploaded after the instance rows. */
+    primitiveRows = new Uint32Array(0);
+
+    /** @type {number} - index of the placement {@link _placementOf} found last. */
+    _placementCursor = 0;
 
     materialTableBuffer = null;
 
@@ -164,22 +260,16 @@ class MeshletWorld {
     get worldBounds() {
         if (this._worldBoundsDirty) {
             let initialized = false;
-            for (const placement of this.placements) {
-                for (let index = 0; index < placement.instanceCount; index++) {
-                    const prim = placement.resource.primitives[placement.instances[index].primIndex];
-                    const row = (placement.instanceBase + index) * OBJECT_DATA_U32S + OBJECT_DATA.MATRIX;
-                    for (let element = 0; element < 16; element++) {
-                        _tmpMat.data[element] = this.objectDataCpuF[row + element];
-                    }
-                    _tmpLocalBox.center.set(prim.aabbCenter[0], prim.aabbCenter[1], prim.aabbCenter[2]);
-                    _tmpLocalBox.halfExtents.set(prim.aabbHalfExtents[0], prim.aabbHalfExtents[1], prim.aabbHalfExtents[2]);
-                    _tmpBox.setFromTransformedAabb(_tmpLocalBox, _tmpMat);
-                    if (initialized) {
-                        this._worldBounds.add(_tmpBox);
-                    } else {
-                        this._worldBounds.copy(_tmpBox);
-                        initialized = true;
-                    }
+            for (let instance = 0; instance < this.instanceCount; instance++) {
+                const prim = this._instanceMatrix(instance, _tmpMat);
+                _tmpLocalBox.center.set(prim.aabbCenter[0], prim.aabbCenter[1], prim.aabbCenter[2]);
+                _tmpLocalBox.halfExtents.set(prim.aabbHalfExtents[0], prim.aabbHalfExtents[1], prim.aabbHalfExtents[2]);
+                _tmpBox.setFromTransformedAabb(_tmpLocalBox, _tmpMat);
+                if (initialized) {
+                    this._worldBounds.add(_tmpBox);
+                } else {
+                    this._worldBounds.copy(_tmpBox);
+                    initialized = true;
                 }
             }
             this._worldBoundsDirty = false;
@@ -260,6 +350,44 @@ class MeshletWorld {
      */
     indexBudgetFraction = 0.35;
 
+    /**
+     * Share of each view's index, record and cut-queue capacity root admission may give to
+     * instances' coarsest levels under a budget; the rest is kept for the cut to refine what
+     * was admitted. Admission takes instances largest on screen first, so a lower share drops
+     * more of the far tail and keeps the near instances sharper; 1 lets the roots of everything
+     * in view take the whole budget, leaving nothing to refine. Unbudgeted worlds ignore it.
+     *
+     * @type {number}
+     */
+    rootBudgetFraction = 0.5;
+
+    /**
+     * Records each camera view may grow to under a budget, resolved at finalize (0 =
+     * unbudgeted: bounded by the worst case only). Shadow views get {@link shadowRecordCeiling}.
+     *
+     * @type {number}
+     */
+    recordCeiling = 0;
+
+    /**
+     * Cut queue entries each view may grow to under a budget, resolved at finalize (0 =
+     * unbudgeted).
+     *
+     * @type {number}
+     */
+    cutQueueCeiling = 0;
+
+    /** @type {number} - {@link recordCeiling} for a shadow view. */
+    shadowRecordCeiling = 0;
+
+    /** @type {number} - {@link cutQueueCeiling} for a shadow view. */
+    shadowCutQueueCeiling = 0;
+
+    /** @type {number} - work items a view allocates for its root list (see rootListItems). */
+    get rootListItems() {
+        return rootListItems(this.instanceCount);
+    }
+
     /** @type {number} - camera views to budget the per-view working set for. */
     budgetCameraViews = 1;
 
@@ -287,7 +415,7 @@ class MeshletWorld {
      */
     indexOverrun = 0;
 
-    /** @type {{ budget: number, fixed: number, perView: number, pagePool: number, indices: number }|null} */
+    /** @type {{ budget: number, fixed: number, perView: number, pagePool: number, indices: number, records: number, cutQueue: number, rootPages: number }|null} */
     budgetBreakdown = null;
 
     /** @type {number} - fine-texture slot-pool byte budget (see MeshletTextures#poolBytes). */
@@ -368,11 +496,15 @@ class MeshletWorld {
 
     /**
      * Per added-resource placement info, in add order. `instances` is the effective placement
-     * list (the add-time override or the resource's own); `instanceBase`/`instanceCount` are the
-     * objectData row range for {@link setPlacementTransform}.
+     * list (the add-time override or the resource's own), repeated `repeat` times: once per
+     * root transform in `roots`, which a merged placement (several components of one resource)
+     * holds one of per member. `instanceBase`/`instanceCount` are the objectData row range,
+     * `primitiveRow` the objectData row of the resource's first primitive, and pair bits of
+     * instance `run * instances.count + i` start at `pairBase + run * runPairs + pairOffsets[i]`.
      *
-     * @type {Array<{ resource: MeshletResource, instances: Array<object>, instanceBase: number,
-     *     instanceCount: number }>}
+     * @type {Array<{ resource: MeshletResource, instances: MeshletInstanceList, repeat: number,
+     *     roots: Array<Mat4|null>, instanceBase: number, instanceCount: number, primitiveRow: number,
+     *     pairBase: number, pairCount: number, runPairs: number, pairOffsets: Uint32Array }>}
      */
     placements = [];
 
@@ -428,7 +560,7 @@ class MeshletWorld {
      * @param {MeshletResource} resource - The parsed asset.
      * @param {Mat4|null} transform - Root transform applied to the asset's placements.
      * @param {ArrayBuffer[]} shardBuffers - The asset's shard blobs, in manifest order.
-     * @param {Array<{ primIndex: number, matrix: Float32Array }>|null} [instances] - Optional
+     * @param {MeshletInstanceList|Array<{ primIndex: number, matrix: Float32Array }>|null} [instances] - Optional
      * placement list replacing the resource's own - many instances share one set of pages.
      */
     addResource(resource, transform, shardBuffers, instances = null) {
@@ -441,9 +573,10 @@ class MeshletWorld {
      *
      * @param {MeshletResource} resource - The parsed asset.
      * @param {Mat4|Mat4[]|null} transform - Root transform applied to the asset's placements, or
-     * one per run of the resource's instance list when `instances` repeats it (a merged placement).
+     * an array of them: the placement list is then repeated once per transform (a merged
+     * placement, one run per component).
      * @param {string} baseUrl - URL directory the manifest's blob URIs are relative to.
-     * @param {Array<{ primIndex: number, matrix: Float32Array }>|null} [instances] - Optional
+     * @param {MeshletInstanceList|Array<{ primIndex: number, matrix: Float32Array }>|null} [instances] - Optional
      * placement list replacing the resource's own - many instances share one set of pages.
      * @param {MeshletFetchOptions|null} [fetchOptions] - How the resource's sidecars (geometry
      * shards, texture containers) are fetched. `resolveUrl` maps a manifest URI to the URL it is
@@ -476,20 +609,27 @@ class MeshletWorld {
     }
 
     /**
-     * Splits {@link poolBytes} into a page-pool size and an index ceiling.
+     * Splits {@link poolBytes} into the page pool and the draw working set: the shared index
+     * pool and each view's record and cut-queue ceilings. Nothing a view allocates later grows
+     * past these, so the budget bounds the pipeline's memory rather than its starting point -
+     * what does not fit is not drawn, farthest first (see {@link rootBudgetFraction}).
      *
-     * The fixed costs (world tables) and the per-view working set are exactly computable from
-     * the scene's counts, so they come off the top; what remains is divided between the page
-     * pool and the draw index buffers. A shadow view costs far less than a camera one - it
-     * borrows the claim plane and work items from its siblings and binds a placeholder for the
-     * visibility bits it never touches - so the two are counted separately.
+     * The world tables and each view's scene-sized state (claim and visibility bits, one per
+     * instance-meshlet pair, and the root list, one entry per instance) are exactly computable
+     * from the scene's counts and come off the top. A shadow view costs far less than a camera
+     * one - it borrows the claim plane and root list from its siblings and binds a placeholder
+     * for the visibility bits it never touches - so the two are counted separately.
      *
      * @param {object} counts - Scene totals.
      * @returns {number} Bytes for the page pool (0 = unbudgeted, size to every page).
      * @private
      */
     _resolveBudget(counts) {
-        const { totalPages, totalMeshlets, totalInstances, totalMaterialRows, pairs, workItems, lightmapBytes = 0, rootPages = 0 } = counts;
+        const { totalPages, totalMeshlets, totalInstances, totalPrimitiveRows = 0, totalMaterialRows, pairs, lightmapBytes = 0, rootPages = 0 } = counts;
+        this.recordCeiling = 0;
+        this.cutQueueCeiling = 0;
+        this.shadowRecordCeiling = 0;
+        this.shadowCutQueueCeiling = 0;
         if (!(this.poolBytes > 0)) {
             this.budgetBreakdown = null;
             this.maxIndices = 0;
@@ -502,51 +642,86 @@ class MeshletWorld {
         // and cell tables.
         const cutBytes = totalMeshlets * (56 + 8) + totalInstances * 44;
         const fixed = cutBytes + lightmapBytes + totalMeshlets * MESHLET_DATA_U32S * 4 +      // meshletData
-            totalInstances * OBJECT_DATA_U32S * 4 +                // objectData
+            (totalInstances + totalPrimitiveRows) * OBJECT_DATA_U32S * 4 +  // objectData
             totalPages * 4 +                                       // residency
             (totalPages + totalMaterialRows) * 4 +                 // requests + texel-rate marks
             totalMaterialRows * MATERIAL_RECORD_U32S * 4;          // material table
-        const workItemBytes = Math.max(workItems * WORK_ITEM_U32S * 4, 16);
-        const recordBytes = Math.min(this.initialRecords || pairs, pairs) * (RECORD_U32S * 4 + 8);
-        // camera view: own claim plane, own visibility bits, own work items, own records
-        const perCamera = (claimWords + pairWords) * 4 + workItemBytes + recordBytes;
-        // shadow view: claim plane and work items are shared across cascades, visibility bits
-        // are a 16-byte placeholder
-        const perShadow = recordBytes;
-        const shared = this.budgetShadowViews > 0 ? claimWords * 4 + workItemBytes : 0;
+        const rootListBytes = rootListItems(totalInstances) * WORK_ITEM_U32S * 4;
+        // camera view: own claim plane, own visibility bits, own root list
+        const perCamera = (claimWords + pairWords) * 4 + rootListBytes;
+        // shadow views: one claim plane and root list shared by every cascade
+        const shadows = this.budgetShadowViews;
+        const shared = shadows > 0 ? claimWords * 4 + rootListBytes : 0;
 
         const views = Math.max(this.budgetCameraViews, 1);
-        const reserved = fixed + perCamera * views + perShadow * this.budgetShadowViews + shared;
+        const reserved = fixed + perCamera * views + shared;
         let available = this.poolBytes - reserved;
 
-        // The pool must hold every resource's pinned root pages plus a demand reserve - without
-        // the roots nothing draws. A budget that cannot even hold the fixed cost is not a
-        // budget: keep going with that minimum pool rather than allocating nothing, and say so.
+        // The pool must hold every resource's pinned root pages plus a demand reserve, and the
+        // draw working set enough for the nearest instances' roots - without either nothing
+        // draws. A budget that cannot even hold the fixed cost is not a budget: keep going with
+        // those minimums rather than allocating nothing, and say so.
+        const viewCount = views + shadows;
+        const minRecordBytes = MIN_VIEW_RECORDS * RECORD_BYTES;
+        const minQueueBytes = MIN_VIEW_CUT_QUEUE * CUT_QUEUE_ENTRY_BYTES;
+        const minDraw = MIN_INDEX_BUDGET_BYTES + viewCount * (minRecordBytes + minQueueBytes);
         const minPool = Math.min(totalPages, rootPages + Math.min(64, Math.max(totalPages - rootPages, 0))) * this.pageSizeBytes;
-        if (available < minPool) {
-            Debug.warnOnce(`MeshletWorld: geometry budget ${(this.poolBytes / 1048576).toFixed(0)} MB is below the ${((reserved + minPool) / 1048576).toFixed(0)} MB this scene needs for its fixed and per-view buffers and its ${rootPages} root pages; falling back to that minimum page pool.`);
-            available = minPool;
+        const minimum = minPool + minDraw;
+        if (available < minimum) {
+            Debug.warnOnce(`MeshletWorld: geometry budget ${(this.poolBytes / 1048576).toFixed(0)} MB is below the ${((reserved + minimum) / 1048576).toFixed(0)} MB this scene needs for its fixed and per-view buffers, its ${rootPages} root pages and a minimal draw working set; falling back to those minimums, so only the nearest instances draw.`);
+            available = minimum;
         }
 
-        let indexBytes = Math.floor(available * this.indexBudgetFraction);
-        let pagePool = available - indexBytes;
+        let drawBytes = Math.floor(available * this.indexBudgetFraction);
+        let pagePool = available - drawBytes;
         if (pagePool < minPool) {
-            // the roots come before the index budget
-            indexBytes -= minPool - pagePool;
+            // the roots come before the draw working set
+            drawBytes -= minPool - pagePool;
             pagePool = minPool;
         }
+        if (drawBytes < minDraw) {
+            // and the minimal draw working set before the rest of the page pool
+            const take = Math.min(minDraw - drawBytes, pagePool - minPool);
+            pagePool -= take;
+            drawBytes = Math.max(drawBytes + take, minDraw);
+        }
         // The pool never allocates more slots than the scene has pages (many instances of a
-        // small asset fit whole): hand the rest to the index buffer instead of leaving it unused.
+        // small asset fit whole): hand the rest to the draw working set instead of leaving it
+        // unused.
         const allPages = totalPages * this.pageSizeBytes;
         if (allPages > 0 && pagePool > allPages) {
-            indexBytes += pagePool - allPages;
+            drawBytes += pagePool - allPages;
             pagePool = allPages;
         }
-        // one pool shared across every view; the director distributes it by demand
+
+        // Each view's records and cut queue take a small share of the draw working set; the
+        // indices, by far the largest per drawn meshlet, take the rest as one pool the director
+        // shares between the views by demand.
+        const weights = views + shadows * SHADOW_VIEW_DRAW_WEIGHT;
+        const recordBytes = Math.max(Math.floor(drawBytes * RECORD_BUDGET_SHARE / weights), minRecordBytes);
+        const queueBytes = Math.max(Math.floor(drawBytes * CUT_QUEUE_BUDGET_SHARE / weights), minQueueBytes);
+        const shadowRecordBytes = Math.max(Math.floor(recordBytes * SHADOW_VIEW_DRAW_WEIGHT), minRecordBytes);
+        const shadowQueueBytes = Math.max(Math.floor(queueBytes * SHADOW_VIEW_DRAW_WEIGHT), minQueueBytes);
+        const records = recordBytes * views + shadowRecordBytes * shadows;
+        const cutQueue = queueBytes * views + shadowQueueBytes * shadows;
+        const indexBytes = Math.max(drawBytes - records - cutQueue, MIN_INDEX_BUDGET_BYTES);
+        this.recordCeiling = Math.floor(recordBytes / RECORD_BYTES);
+        this.cutQueueCeiling = Math.floor(queueBytes / CUT_QUEUE_ENTRY_BYTES);
+        this.shadowRecordCeiling = Math.floor(shadowRecordBytes / RECORD_BYTES);
+        this.shadowCutQueueCeiling = Math.floor(shadowQueueBytes / CUT_QUEUE_ENTRY_BYTES);
         this.indexBudgetTotal = Math.max(Math.floor(indexBytes / 4), 3);
         this.indexOverrun = 0;
         this.maxIndices = 0;
-        this.budgetBreakdown = { budget: this.poolBytes, fixed, perView: reserved - fixed, pagePool, indices: indexBytes, rootPages };
+        this.budgetBreakdown = {
+            budget: this.poolBytes,
+            fixed,
+            perView: reserved - fixed,
+            pagePool,
+            indices: indexBytes,
+            records,
+            cutQueue,
+            rootPages
+        };
         return pagePool;
     }
 
@@ -589,17 +764,23 @@ class MeshletWorld {
         let totalPages = 0;
         let totalMeshlets = 0;
         let totalInstances = 0;
+        let totalPrimitiveRows = 0;
         let anyLightmaps = false;
         let totalMaterialRows = 0;
         let anyTextures = false;
         let uvChannels = 0;
         let anyTangents = false;
         let anyColors = false;
-        for (const { resource, instances } of pending) {
+        for (const entry of pending) {
+            const { resource, instances, transform } = entry;
+            // the effective placement list, repeated once per root transform
+            entry.list = MeshletInstanceList.from(instances ?? resource.instances);
+            entry.repeat = Array.isArray(transform) ? transform.length : 1;
             totalPages += resource.manifest.pageCount;
             totalMeshlets += resource.totalMeshlets;
-            totalInstances += (instances ?? resource.instances).length;
-            anyLightmaps ||= (instances ?? resource.instances).some(instance => !!instance.lightmap);
+            totalPrimitiveRows += resource.primitives.length;
+            totalInstances += entry.list.count * entry.repeat;
+            anyLightmaps ||= !!entry.list.lightmaps?.some(lightmap => !!lightmap);
             if (resource.materialTable) {
                 const unassigned = resource.primitives.some(p => p.materialIndex < 0) ? 1 : 0;
                 totalMaterialRows += resource.materialCount + unassigned;
@@ -640,19 +821,17 @@ class MeshletWorld {
         // sized from the (instance, meshlet) pair count, so count the pairs up front - the main
         // loop below recomputes them as it writes the tables.
         let budgetPairs = 0;
-        let budgetWorkItems = 0;
         // unique root pages per resource (the pages of meshlets without a parent): pinned for
         // the resource's lifetime, so the pool is sized to hold them before anything else
         const rootPagesOf = new Map();
         const rootScanned = new Set();
-        for (const { resource, instances } of pending) {
+        for (const { resource, list, repeat } of pending) {
             let roots = rootPagesOf.get(resource);
             if (!roots) rootPagesOf.set(resource, roots = new Set());
-            for (const inst of (instances ?? resource.instances)) {
-                const prim = resource.primitives[inst.primIndex];
+            for (let i = 0; i < list.count; i++) {
+                const prim = resource.primitives[list.primIndex[i]];
                 const n = prim.meshletCount;
-                budgetPairs += n;
-                budgetWorkItems += Math.ceil(n / MESHLET_COMPACT_SLICE);
+                budgetPairs += n * repeat;
                 if (!rootScanned.has(prim)) {
                     rootScanned.add(prim);
                     if (!prim._rootPages) {
@@ -676,10 +855,10 @@ class MeshletWorld {
             totalPages,
             totalMeshlets,
             totalInstances,
+            totalPrimitiveRows,
             totalMaterialRows,
             lightmapBytes: anyLightmaps ? totalInstances * 64 : 0,
             pairs: budgetPairs,
-            workItems: budgetWorkItems,
             rootPages: rootPageCount
         });
 
@@ -751,8 +930,11 @@ class MeshletWorld {
         // place (see recordsOf below). This keeps, per global first meshlet, how to rebuild them.
         /** @type {Map<number, { prim: object, pageBase: number, bucketBits: number }>} */
         const primRecords = new Map();
-        const objectData = new Uint32Array(totalInstances * OBJECT_DATA_U32S);
-        const objectDataF = new Float32Array(objectData.buffer);
+        const instanceFlags = new Uint32Array(totalInstances);
+        const primitiveRows = new Uint32Array(totalPrimitiveRows * OBJECT_DATA_U32S);
+        const primitiveRowsF = new Float32Array(primitiveRows.buffer);
+        // per instance, its primitive row - only while the cut tables are built
+        const instancePrimitive = new Uint32Array(totalInstances);
         const lightmapData = anyLightmaps ? new Float32Array(totalInstances * 16) : null;
         const lightmapSlots = [];
         const materialTable = new Uint32Array(Math.max(totalMaterialRows, 1) * MATERIAL_RECORD_U32S);
@@ -780,6 +962,7 @@ class MeshletWorld {
         let pageBase = 0;
         let meshletBase = 0;
         let instanceBase = 0;
+        let primitiveRow = 0;
         let materialBase = 0;
         let runningTexBase = 0;
         this._worldBoundsDirty = false;
@@ -788,6 +971,9 @@ class MeshletWorld {
         let boundsInit = false;
 
         this.instanceCount = totalInstances;
+        this.instanceFlags = instanceFlags;
+        this.primitiveRows = primitiveRows;
+        this._placementCursor = 0;
         this.workItemCapacity = 0;
         this.recordCapacity = 0;
         this.indexCapacity = [0, 0, 0];
@@ -800,7 +986,7 @@ class MeshletWorld {
         this.pickIdBase = PickerId.reserve(totalInstances);
         this._pickRecords = null;
 
-        for (const { resource, transform, shardBuffers, baseUrl, instances, fetchOptions: options } of pending) {
+        for (const { resource, transform, shardBuffers, baseUrl, instances, list, repeat, fetchOptions: options } of pending) {
             // the bake stamp versions every sidecar's cache key, so a rebake over the same URLs
             // can never be served the previous bake's cached pages or texture regions
             const fetchOptions = { ...options, cacheVersion: meshletBakeStamp(resource) };
@@ -809,22 +995,36 @@ class MeshletWorld {
             const uvFloats = (manifest.attributeLayout.uvComponents ?? 0) * 2;
             const hasTangents = manifest.attributeLayout.tangents ? 1 : 0;
             const hasColors = manifest.attributeLayout.colors ? 1 : 0;
-            const instList = instances ?? resource.instances;
             const resourceTextureBase = runningTexBase;
-            this.placements.push({
+            // the world keeps its own copy of each root: rows are regenerated from them later,
+            // and the caller's matrices (an entity's world transform) keep changing
+            const ownRoot = (root) => {
+                if (!root) return null;
+                const own = new Mat4();
+                own.data.set(root.data);
+                return own;
+            };
+            const placement = {
                 resource,
-                instances: instList,
+                instances: list,
+                repeat,
+                roots: Array.isArray(transform) ? transform.map(ownRoot) : [ownRoot(transform)],
                 instanceBase,
-                instanceCount: instList.length,
+                instanceCount: list.count * repeat,
+                primitiveRow,
                 pairBase: this.totalPairs,
-                pairCount: 0
-            });
+                pairCount: 0,
+                runPairs: 0,
+                pairOffsets: new Uint32Array(list.count)
+            };
+            this.placements.push(placement);
             this.buildEntries.push({
                 resource,
                 baseUrl: baseUrl ?? null,
                 streamed: !shardBuffers,
                 pageCount: manifest.pageCount,
-                instances: instList
+                instances: instances ?? resource.instances,
+                repeat
             });
 
             if (shardBuffers) {
@@ -899,12 +1099,11 @@ class MeshletWorld {
             }
 
             // meshletData with page rebasing; per-prim bases + material rows, index budgets
-            const primBases = [];
             const primMatRows = [];
             const primBucketCorners = [];
+            const primFlags = [];
             for (let primIndex = 0; primIndex < resource.primitives.length; primIndex++) {
                 const prim = resource.primitives[primIndex];
-                primBases.push(meshletBase);
                 // what the build needs of the records besides the copy recordsOf makes, kept on
                 // the primitive so a resource whose records were released can still be laid out
                 if (prim._indexCount === undefined) {
@@ -956,99 +1155,106 @@ class MeshletWorld {
                 const primCorners = [0, 0, 0];
                 primCorners[bucket] = prim._indexCount;
                 primBucketCorners.push(primCorners);
-            }
+                primFlags.push((hasTangents ? OBJECT_FLAG_HAS_TANGENTS : 0) | (hasColors ? OBJECT_FLAG_HAS_COLORS : 0) |
+                    (bucket << OBJECT_BUCKET_SHIFT));
 
-            // instances. A transform list holds one root transform per run of the resource's own
-            // instance list (a merged placement repeats it, once per member).
-            const per = resource.instances.length || 1;
-            for (let i = 0; i < instList.length; i++) {
-                const inst = instList[i];
-                const prim = resource.primitives[inst.primIndex];
-                const root = Array.isArray(transform) ? transform[Math.floor(i / per)] : transform;
-                _tmpMat.set(inst.matrix);
-                if (root) _tmpMat.mul2(root, _tmpMat);
-                const matrix = _tmpMat.data;
-
-                // the objectData row (OBJECT_DATA.* words; the shaders read it as MeshletObjectData)
-                const row = instanceBase * OBJECT_DATA_U32S;
-                for (let k = 0; k < 16; k++) objectDataF[row + OBJECT_DATA.MATRIX + k] = matrix[k];
-
+                // the primitive row, shared by every instance of the primitive
+                const row = (primitiveRow + primIndex) * OBJECT_DATA_U32S;
                 const halfExtents = prim.aabbHalfExtents;
-                for (let c = 0; c < 3; c++) objectDataF[row + OBJECT_DATA.SPHERE + c] = prim.aabbCenter[c];
-                objectDataF[row + OBJECT_DATA.SPHERE + 3] = Math.hypot(halfExtents[0], halfExtents[1], halfExtents[2]);
-                objectData[row + OBJECT_DATA.FIRST_MESHLET] = primBases[inst.primIndex];
-                objectData[row + OBJECT_DATA.MESHLET_COUNT] = prim.meshletCount;
-                objectData[row + OBJECT_DATA.MATERIAL] = materialBase + primMatRows[inst.primIndex];
-                const lightmap = inst.lightmap;
-                if (lightmapData && lightmap && baseUrl) {
-                    const reference = lightmap.texture;
-                    const arrays = resource.textureManifest?.arrays ?? [];
-                    let textureIndex = resourceTextureBase;
-                    let textureArray = null;
-                    for (const array of arrays) {
-                        if (array.containerVersion !== 2) continue;
-                        if (array.id === reference.arrayId) {
-                            textureArray = array;
-                            break;
+                for (let c = 0; c < 3; c++) {
+                    primitiveRowsF[row + PRIMITIVE_DATA.SPHERE + c] = prim.aabbCenter[c];
+                    primitiveRowsF[row + PRIMITIVE_DATA.GRID_ORIGIN + c] = grid.origin[c];
+                }
+                primitiveRowsF[row + PRIMITIVE_DATA.SPHERE + 3] = Math.hypot(halfExtents[0], halfExtents[1], halfExtents[2]);
+                primitiveRowsF[row + PRIMITIVE_DATA.GRID_STEP] = grid.step;
+                primitiveRows[row + PRIMITIVE_DATA.FIRST_MESHLET] = primFirst;
+                primitiveRows[row + PRIMITIVE_DATA.MESHLET_COUNT] = prim.meshletCount;
+                primitiveRows[row + PRIMITIVE_DATA.MATERIAL] = materialBase + primMatRows[primIndex];
+                primitiveRows[row + PRIMITIVE_DATA.UV_FLOATS_PER_VERTEX] = uvFloats;
+                primitiveRows[row + PRIMITIVE_DATA.PICK_ID_BASE] = this.pickIdBase;
+            }
+
+            // One run of the placement list: where each instance's pair bits start within it, and
+            // the run's worst-case capacities (every meshlet of every instance drawn).
+            let runPairs = 0;
+            let runWorkItems = 0;
+            const runCorners = [0, 0, 0];
+            for (let i = 0; i < list.count; i++) {
+                const p = list.primIndex[i];
+                const meshletCount = resource.primitives[p].meshletCount;
+                placement.pairOffsets[i] = runPairs;
+                runPairs += meshletCount;
+                runWorkItems += Math.ceil(meshletCount / MESHLET_COMPACT_SLICE);
+                for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) runCorners[b] += primBucketCorners[p][b];
+            }
+            placement.runPairs = runPairs;
+            placement.pairCount = runPairs * repeat;
+            this.totalPairs += placement.pairCount;
+            this.workItemCapacity += runWorkItems * repeat;
+            this.recordCapacity += placement.pairCount;
+            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) this.indexCapacity[b] += runCorners[b] * repeat;
+
+            // instances, run by run: one run of the list per root transform
+            for (let run = 0; run < repeat; run++) {
+                const root = placement.roots[run];
+                for (let i = 0; i < list.count; i++) {
+                    const instance = instanceBase++;
+                    const p = list.primIndex[i];
+                    const prim = resource.primitives[p];
+                    instanceFlags[instance] = primFlags[p];
+                    instancePrimitive[instance] = primitiveRow + p;
+                    list.getMatrix(i, _tmpMat);
+                    if (root) _tmpMat.mul2(root, _tmpMat);
+
+                    const lightmap = list.getLightmap(i);
+                    if (lightmapData && lightmap && baseUrl) {
+                        const reference = lightmap.texture;
+                        const arrays = resource.textureManifest?.arrays ?? [];
+                        let textureIndex = resourceTextureBase;
+                        let textureArray = null;
+                        for (const array of arrays) {
+                            if (array.containerVersion !== 2) continue;
+                            if (array.id === reference.arrayId) {
+                                textureArray = array;
+                                break;
+                            }
+                            textureIndex += array.layers.length;
                         }
-                        textureIndex += array.layers.length;
+                        const channel = reference.texCoord ?? 0;
+                        const coefficients = [lightmap.coordinateScaleBias, lightmap.lightmapScale, lightmap.lightmapAdd];
+                        if (textureArray && Number.isInteger(reference.layer) && reference.layer >= 0 && reference.layer < textureArray.layers.length &&
+                            Number.isInteger(channel) && channel >= 0 && channel < MESHLET_MAX_UV_CHANNELS && (prim.uvChannelMask & (1 << channel)) &&
+                            coefficients.every(values => values?.length === 4 && values.every(Number.isFinite))) {
+                            textureIndex += reference.layer;
+                            const lightmapRow = instance * 16;
+                            lightmapData.set(lightmap.coordinateScaleBias, lightmapRow);
+                            lightmapData.set(lightmap.lightmapScale, lightmapRow + 4);
+                            lightmapData.set(lightmap.lightmapAdd, lightmapRow + 8);
+                            lightmapData.set([textureIndex, channel, 1, 0], lightmapRow + 12);
+                            const scale = Math.max(Math.abs(lightmap.coordinateScaleBias[0]), Math.abs(lightmap.coordinateScaleBias[1]) * 0.5, 1e-8);
+                            lightmapSlots.push(materialBase + primMatRows[p], textureIndex, Math.round(TEXEL_RATE_PER_MIP * Math.log2(scale)));
+                        } else {
+                            Debug.warnOnce('MeshletWorld: invalid streamed EPIC lightmap reference, coefficients or UV channel; lightmap ignored.');
+                        }
                     }
-                    const channel = reference.texCoord ?? 0;
-                    const coefficients = [lightmap.coordinateScaleBias, lightmap.lightmapScale, lightmap.lightmapAdd];
-                    if (textureArray && Number.isInteger(reference.layer) && reference.layer >= 0 && reference.layer < textureArray.layers.length &&
-                        Number.isInteger(channel) && channel >= 0 && channel < MESHLET_MAX_UV_CHANNELS && (prim.uvChannelMask & (1 << channel)) &&
-                        coefficients.every(values => values?.length === 4 && values.every(Number.isFinite))) {
-                        textureIndex += reference.layer;
-                        const lightmapRow = instanceBase * 16;
-                        lightmapData.set(lightmap.coordinateScaleBias, lightmapRow);
-                        lightmapData.set(lightmap.lightmapScale, lightmapRow + 4);
-                        lightmapData.set(lightmap.lightmapAdd, lightmapRow + 8);
-                        lightmapData.set([textureIndex, channel, 1, 0], lightmapRow + 12);
-                        const scale = Math.max(Math.abs(lightmap.coordinateScaleBias[0]), Math.abs(lightmap.coordinateScaleBias[1]) * 0.5, 1e-8);
-                        lightmapSlots.push(objectData[row + OBJECT_DATA.MATERIAL], textureIndex, Math.round(TEXEL_RATE_PER_MIP * Math.log2(scale)));
+
+                    // World bounds, from the baked AABB transformed by the instance matrix - not the
+                    // bounding sphere radius on every axis, which turns a flat landscape into a cube
+                    // and inflates the depth range of every shadow cascade fitted around it.
+                    const halfExtents = prim.aabbHalfExtents;
+                    _tmpLocalBox.center.set(prim.aabbCenter[0], prim.aabbCenter[1], prim.aabbCenter[2]);
+                    _tmpLocalBox.halfExtents.set(halfExtents[0], halfExtents[1], halfExtents[2]);
+                    _tmpBox.setFromTransformedAabb(_tmpLocalBox, _tmpMat);
+                    if (!boundsInit) {
+                        this.worldBounds.copy(_tmpBox);
+                        boundsInit = true;
                     } else {
-                        Debug.warnOnce('MeshletWorld: invalid streamed EPIC lightmap reference, coefficients or UV channel; lightmap ignored.');
+                        this.worldBounds.add(_tmpBox);
                     }
-                }
-                const bucketBits = primRecords.get(objectData[row + OBJECT_DATA.FIRST_MESHLET])?.bucketBits ?? 0;
-                const bucket = (bucketBits & MESHLET_FLAG_ALPHA_MASKED) ? MESHLET_BUCKET_MASKED :
-                    ((bucketBits & MESHLET_FLAG_TWO_SIDED) ? MESHLET_BUCKET_OPAQUE_TWO_SIDED : MESHLET_BUCKET_OPAQUE);
-                objectData[row + OBJECT_DATA.FLAGS] = (hasTangents ? OBJECT_FLAG_HAS_TANGENTS : 0) | (hasColors ? OBJECT_FLAG_HAS_COLORS : 0) |
-                    (bucket << OBJECT_BUCKET_SHIFT);
-                objectDataF[row + OBJECT_DATA.MAX_SCALE] = maxAxisScale(matrix);
-                objectData[row + OBJECT_DATA.FIRST_PAIR_BIT] = this.totalPairs;
-                for (let c = 0; c < 3; c++) objectDataF[row + OBJECT_DATA.GRID_ORIGIN + c] = grid.origin[c];
-                objectDataF[row + OBJECT_DATA.GRID_STEP] = grid.step;
-                objectData[row + OBJECT_DATA.UV_FLOATS_PER_VERTEX] = uvFloats;
-                objectData[row + OBJECT_DATA.PICK_ID] = this.pickIdBase + instanceBase;
-                this.totalPairs += prim.meshletCount;
-                instanceBase++;
-
-                // capacities: worst case is every meshlet of the instance drawn
-                this.workItemCapacity += Math.ceil(prim.meshletCount / MESHLET_COMPACT_SLICE);
-                this.recordCapacity += prim.meshletCount;
-                const primCorners = primBucketCorners[inst.primIndex];
-                for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
-                    this.indexCapacity[b] += primCorners[b];
-                }
-
-                // World bounds, from the baked AABB transformed by the instance matrix - not the
-                // bounding sphere radius on every axis, which turns a flat landscape into a cube
-                // and inflates the depth range of every shadow cascade fitted around it.
-                _tmpLocalBox.center.set(prim.aabbCenter[0], prim.aabbCenter[1], prim.aabbCenter[2]);
-                _tmpLocalBox.halfExtents.set(halfExtents[0], halfExtents[1], halfExtents[2]);
-                _tmpBox.setFromTransformedAabb(_tmpLocalBox, _tmpMat);
-                if (!boundsInit) {
-                    this.worldBounds.copy(_tmpBox);
-                    boundsInit = true;
-                } else {
-                    this.worldBounds.add(_tmpBox);
                 }
             }
 
-            const placement = this.placements[this.placements.length - 1];
-            placement.pairCount = this.totalPairs - placement.pairBase;
-
+            primitiveRow += resource.primitives.length;
             pageBase += manifest.pageCount;
             materialBase += resourceRows;
         }
@@ -1073,7 +1279,7 @@ class MeshletWorld {
             this.indexCapacity = this.indexCapacity.map(c => Math.floor(c * s));
         }
 
-        this.cells = new MeshletCells(device, objectDataF, this.instanceCount);
+        this.cells = new MeshletCells(device, this.instanceCount, (instance, out, offset) => this._instanceSphere(instance, out, offset));
         const recordBytes = MESHLET_DATA_U32S * 4;
         this.meshletDataBuffer = new StorageBuffer(device, Math.max(totalMeshlets * recordBytes, 16), BUFFERUSAGE_COPY_DST);
         // One primitive's records at a time: a copy of the resource's (which stay untouched for
@@ -1117,13 +1323,16 @@ class MeshletWorld {
                 stagedCount += count;
             }
         };
-        this.cut = new MeshletCutData(device, recordsOf, objectData);
+        const primitiveWord = (instance, word) => primitiveRows[instancePrimitive[instance] * OBJECT_DATA_U32S + word];
+        this.cut = new MeshletCutData(device, recordsOf, {
+            count: totalInstances,
+            first: instance => primitiveWord(instance, PRIMITIVE_DATA.FIRST_MESHLET),
+            meshletCount: instance => primitiveWord(instance, PRIMITIVE_DATA.MESHLET_COUNT)
+        });
         flush();
-        this.objectDataBuffer = new StorageBuffer(device, objectData.byteLength, BUFFERUSAGE_COPY_DST);
-        this.objectDataBuffer.write(0, objectData);
-        // CPU mirror kept for per-placement transform updates
-        this.objectDataCpu = objectData;
-        this.objectDataCpuF = objectDataF;
+        this.objectDataBuffer = new StorageBuffer(device, Math.max((totalInstances + totalPrimitiveRows) * OBJECT_DATA_U32S * 4, 16), BUFFERUSAGE_COPY_DST);
+        this._writeObjectRows(0, totalInstances);
+        if (primitiveRows.length) this.objectDataBuffer.write(totalInstances * OBJECT_DATA_U32S * 4, primitiveRows);
         this.materialTableBuffer = new StorageBuffer(device, materialTable.byteLength, BUFFERUSAGE_COPY_DST);
         this.materialTableBuffer.write(0, materialTable);
         if (lightmapData) {
@@ -1284,23 +1493,22 @@ class MeshletWorld {
      * are what the picker's id map needs distinct values of (it de-duplicates by identity, so
      * handing it one shared object per placement would collapse every instance into one hit).
      *
-     * @type {Array<{ pickId: number, placement: object, resource: object, instanceIndex: number, primIndex: number, matrix: Float32Array }>}
+     * @type {MeshletPickRecord[]}
      */
     get pickRecords() {
         if (this._pickRecords) return this._pickRecords;
         const records = [];
         for (const placement of this.placements) {
-            const instances = placement.instances;
-            for (let i = 0; i < instances.length; i++) {
-                const inst = instances[i];
-                records.push({
-                    pickId: this.pickIdBase + placement.instanceBase + i,
+            const list = placement.instances;
+            for (let i = 0; i < placement.instanceCount; i++) {
+                const index = i % list.count;
+                records.push(new MeshletPickRecord(
+                    this.pickIdBase + placement.instanceBase + i,
                     placement,
-                    resource: placement.resource,
-                    instanceIndex: this.instanceOffset + placement.instanceBase + i,
-                    primIndex: inst.primIndex,
-                    matrix: inst.matrix
-                });
+                    this.instanceOffset + placement.instanceBase + i,
+                    list.primIndex[index],
+                    index
+                ));
             }
         }
         this._pickRecords = records;
@@ -1351,36 +1559,46 @@ class MeshletWorld {
      * Only the transform-derived fields change; culling uses the new matrix next frame.
      * Invalidates {@link worldBounds}, which is refreshed on its next access.
      *
+     * A placement holds one root transform per run of its instance list (see
+     * {@link placements}), so the range is widened to the whole runs it touches.
+     *
      * @param {number} index - The placement index (resource add order).
      * @param {Mat4|null} transform - New root transform applied to the resource's placements.
+     * @param {number} [subBase] - First instance within the placement (default 0).
+     * @param {number} [subCount] - Instance count (default: the rest of the placement).
      */
     setPlacementTransform(index, transform, subBase = 0, subCount = -1) {
         Debug.assert(this.finalized && this.placements[index], 'MeshletWorld: invalid placement');
-        const { instances, instanceBase, instanceCount } = this.placements[index];
+        const placement = this.placements[index];
+        const { instanceBase, instanceCount } = placement;
         const start = Math.min(subBase, instanceCount);
         const count = subCount < 0 ? instanceCount - start : Math.min(subCount, instanceCount - start);
         if (count === 0) return;
 
-        const objectDataF = this.objectDataCpuF;
-        for (let i = start; i < start + count; i++) {
-            const inst = instances[i];
-            _tmpMat.set(inst.matrix);
-            if (transform) _tmpMat.mul2(transform, _tmpMat);
-            const matrix = _tmpMat.data;
-            const row = (instanceBase + i) * OBJECT_DATA_U32S;
-            for (let k = 0; k < 16; k++) objectDataF[row + OBJECT_DATA.MATRIX + k] = matrix[k];
-            objectDataF[row + OBJECT_DATA.MAX_SCALE] = maxAxisScale(matrix);
+        const per = placement.instances.count;
+        const firstRun = Math.floor(start / per);
+        const lastRun = Math.floor((start + count - 1) / per);
+        Debug.assert(start % per === 0 && count % per === 0, 'MeshletWorld: a placement transform applies to whole runs of its instance list');
+        for (let run = firstRun; run <= lastRun; run++) {
+            if (transform) {
+                const root = placement.roots[run] ?? (placement.roots[run] = new Mat4());
+                root.data.set(transform.data);
+            } else {
+                placement.roots[run] = null;
+            }
         }
+        const first = instanceBase + firstRun * per;
+        const rows = (lastRun - firstRun + 1) * per;
         this._worldBoundsDirty = true;
         this.objectVersion++;
-        this.cells?.refit(objectDataF, instanceBase + start, count);
-        this._uploadObjectRows(instanceBase + start, count);
+        this.cells?.refit(first, rows);
+        this._uploadObjectRows(first, rows);
     }
 
     /**
      * Hides or shows a range of a placement's instances without a rebuild - the instance cull
-     * pass skips hidden rows (objectData word 23 bit 0), so hidden geometry stops drawing and
-     * stops marking pages/textures, letting the LRU drain its residency naturally.
+     * pass skips hidden rows (OBJECT_FLAG_HIDDEN), so hidden geometry stops drawing and stops
+     * marking pages/textures, letting the LRU drain its residency naturally.
      *
      * @param {number} index - The placement index (resource add order).
      * @param {boolean} hidden - True to hide the instances.
@@ -1388,19 +1606,7 @@ class MeshletWorld {
      * @param {number} [subCount] - Instance count (default: the rest of the placement).
      */
     setPlacementHidden(index, hidden, subBase = 0, subCount = -1) {
-        Debug.assert(this.finalized && this.placements[index], 'MeshletWorld: invalid placement');
-        const { instanceBase, instanceCount } = this.placements[index];
-        const start = Math.min(subBase, instanceCount);
-        const count = subCount < 0 ? instanceCount - start : Math.min(subCount, instanceCount - start);
-        if (count === 0) return;
-
-        const objectData = this.objectDataCpu;
-        for (let i = start; i < start + count; i++) {
-            const flagsWord = (instanceBase + i) * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS;
-            objectData[flagsWord] = hidden ? (objectData[flagsWord] | OBJECT_FLAG_HIDDEN) : (objectData[flagsWord] & ~OBJECT_FLAG_HIDDEN);
-        }
-        this.objectVersion++;
-        this._uploadObjectRows(instanceBase + start, count);
+        this._setPlacementFlag(index, OBJECT_FLAG_HIDDEN, hidden, subBase, subCount);
     }
 
     /**
@@ -1413,16 +1619,29 @@ class MeshletWorld {
      * @param {number} [subCount] - Instance count (default: the rest of the placement).
      */
     setPlacementCastShadows(index, casts, subBase = 0, subCount = -1) {
+        this._setPlacementFlag(index, OBJECT_FLAG_NO_SHADOW, !casts, subBase, subCount);
+    }
+
+    /**
+     * Sets or clears a flag on a range of a placement's instances and uploads their rows.
+     *
+     * @param {number} index - Placement index.
+     * @param {number} flag - The OBJECT_FLAG_* bit.
+     * @param {boolean} set - True to set it.
+     * @param {number} subBase - First instance of the placement to affect.
+     * @param {number} subCount - Instance count (negative: the rest of the placement).
+     * @private
+     */
+    _setPlacementFlag(index, flag, set, subBase, subCount) {
         Debug.assert(this.finalized && this.placements[index], 'MeshletWorld: invalid placement');
         const { instanceBase, instanceCount } = this.placements[index];
         const start = Math.min(subBase, instanceCount);
         const count = subCount < 0 ? instanceCount - start : Math.min(subCount, instanceCount - start);
         if (count === 0) return;
 
-        const objectData = this.objectDataCpu;
-        for (let i = start; i < start + count; i++) {
-            const flagsWord = (instanceBase + i) * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS;
-            objectData[flagsWord] = casts ? (objectData[flagsWord] & ~OBJECT_FLAG_NO_SHADOW) : (objectData[flagsWord] | OBJECT_FLAG_NO_SHADOW);
+        const flags = this.instanceFlags;
+        for (let i = instanceBase + start; i < instanceBase + start + count; i++) {
+            flags[i] = set ? (flags[i] | flag) : (flags[i] & ~flag);
         }
         this.objectVersion++;
         this._uploadObjectRows(instanceBase + start, count);
@@ -1439,19 +1658,19 @@ class MeshletWorld {
      *
      * @param {number[]|Set<number>} instanceIndices - Global instance indices to outline.
      * @param {boolean} [outlined] - True to add, false to remove. Defaults to true.
+     * @param {boolean} [hover] - Set the hover flag rather than the selection flag.
      */
     setInstancesOutlined(instanceIndices, outlined = true, hover = false) {
         Debug.assert(this.finalized, 'MeshletWorld: setInstancesOutlined before finalize');
         const flag = hover ? OBJECT_FLAG_HOVERED : OBJECT_FLAG_OUTLINED;
         const set = hover ? this._hovered : this._outlined;
-        const objectData = this.objectDataCpu;
+        const flags = this.instanceFlags;
         let lo = Infinity;
         let hi = -Infinity;
         for (const globalIndex of instanceIndices) {
             const index = globalIndex - this.instanceOffset;
             if (index < 0 || index >= this.instanceCount) continue;
-            const flagsWord = index * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS;
-            objectData[flagsWord] = outlined ? (objectData[flagsWord] | flag) : (objectData[flagsWord] & ~flag);
+            flags[index] = outlined ? (flags[index] | flag) : (flags[index] & ~flag);
             if (outlined) set.add(index); else set.delete(index);
             lo = Math.min(lo, index);
             hi = Math.max(hi, index);
@@ -1472,14 +1691,20 @@ class MeshletWorld {
         const flag = hover ? OBJECT_FLAG_HOVERED : OBJECT_FLAG_OUTLINED;
         const set = hover ? this._hovered : this._outlined;
         if (set.size === 0) return;
-        const objectData = this.objectDataCpu;
-        for (const index of set) objectData[index * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS] &= ~flag;
+        const flags = this.instanceFlags;
+        let lo = Infinity;
+        let hi = -Infinity;
+        for (const index of set) {
+            flags[index] &= ~flag;
+            lo = Math.min(lo, index);
+            hi = Math.max(hi, index);
+        }
         set.clear();
-        this.objectDataBuffer.write(0, objectData);
+        this._uploadObjectRows(lo, hi - lo + 1);
     }
 
     /**
-     * Uploads a contiguous range of objectData rows from the CPU mirror.
+     * Regenerates and uploads a contiguous range of instance rows.
      *
      * @param {number} first - First instance index.
      * @param {number} count - Row count.
@@ -1487,9 +1712,118 @@ class MeshletWorld {
      */
     _uploadObjectRows(first, count) {
         this.contentVersion++;
-        const rowBytes = OBJECT_DATA_U32S * 4;
-        this.objectDataBuffer.write(first * rowBytes,
-            this.objectDataCpu.subarray(first * OBJECT_DATA_U32S, (first + count) * OBJECT_DATA_U32S));
+        this._writeObjectRows(first, count);
+    }
+
+    /**
+     * Generates a contiguous range of objectData instance rows from the placements and writes
+     * them to the GPU, a batch at a time - the CPU keeps no copy of the rows.
+     *
+     * @param {number} first - First instance index.
+     * @param {number} count - Row count.
+     * @private
+     */
+    _writeObjectRows(first, count) {
+        if (count <= 0) return;
+        const batch = Math.min(count, OBJECT_ROW_BATCH);
+        const u32 = new Uint32Array(batch * OBJECT_DATA_U32S);
+        const f32 = new Float32Array(u32.buffer);
+        const flags = this.instanceFlags;
+        const primitiveBase = this.instanceCount;
+        for (let start = first; start < first + count; start += batch) {
+            const rows = Math.min(batch, first + count - start);
+            for (let k = 0; k < rows; k++) {
+                const instance = start + k;
+                const { placement, run, index } = this._locate(instance);
+                const list = placement.instances;
+                list.getMatrix(index, _tmpMat);
+                const root = placement.roots[run];
+                if (root) _tmpMat.mul2(root, _tmpMat);
+                const m = _tmpMat.data;
+                const row = k * OBJECT_DATA_U32S;
+                const r = row + OBJECT_DATA.MATRIX_ROWS;
+                // rows of the column-major matrix
+                f32[r] = m[0]; f32[r + 1] = m[4]; f32[r + 2] = m[8]; f32[r + 3] = m[12];
+                f32[r + 4] = m[1]; f32[r + 5] = m[5]; f32[r + 6] = m[9]; f32[r + 7] = m[13];
+                f32[r + 8] = m[2]; f32[r + 9] = m[6]; f32[r + 10] = m[10]; f32[r + 11] = m[14];
+                u32[row + OBJECT_DATA.PRIMITIVE] = primitiveBase + placement.primitiveRow + list.primIndex[index];
+                u32[row + OBJECT_DATA.FLAGS] = flags[instance];
+                f32[row + OBJECT_DATA.MAX_SCALE] = maxAxisScale(m);
+                u32[row + OBJECT_DATA.FIRST_PAIR_BIT] = placement.pairBase + run * placement.runPairs + placement.pairOffsets[index];
+            }
+            this.objectDataBuffer.write(start * OBJECT_DATA_U32S * 4, u32, 0, rows * OBJECT_DATA_U32S);
+        }
+    }
+
+    /**
+     * Finds the placement holding an instance, and the instance's run and position in the
+     * placement's list. Consecutive instances hit the cached placement.
+     *
+     * @param {number} instance - The instance index.
+     * @returns {{ placement: object, run: number, index: number }} Shared scratch - read before
+     * the next call.
+     * @private
+     */
+    _locate(instance) {
+        const placements = this.placements;
+        let placement = placements[this._placementCursor];
+        if (!placement || instance < placement.instanceBase || instance >= placement.instanceBase + placement.instanceCount) {
+            // the last placement starting at or before the instance: an empty placement shares
+            // its start with the next one, which comes later and wins
+            let lo = 0;
+            let hi = placements.length - 1;
+            while (lo < hi) {
+                const mid = (lo + hi + 1) >> 1;
+                if (placements[mid].instanceBase <= instance) lo = mid; else hi = mid - 1;
+            }
+            this._placementCursor = lo;
+            placement = placements[lo];
+        }
+        const per = placement.instances.count;
+        const local = instance - placement.instanceBase;
+        const run = Math.floor(local / per);
+        _located.placement = placement;
+        _located.run = run;
+        _located.index = local - run * per;
+        return _located;
+    }
+
+    /**
+     * Writes an instance's world matrix.
+     *
+     * @param {number} instance - The instance index.
+     * @param {Mat4} out - Receives the matrix.
+     * @returns {import('./meshlet-resource.js').MeshletPrimitive} The instance's primitive.
+     * @private
+     */
+    _instanceMatrix(instance, out) {
+        const { placement, run, index } = this._locate(instance);
+        const list = placement.instances;
+        list.getMatrix(index, out);
+        const root = placement.roots[run];
+        if (root) out.mul2(root, out);
+        return placement.resource.primitives[list.primIndex[index]];
+    }
+
+    /**
+     * World-space bounding sphere of one instance, as the cull shaders compute it: the
+     * primitive's local sphere through the instance matrix, its radius scaled by the largest
+     * axis scale.
+     *
+     * @param {number} instance - The instance index.
+     * @param {Float32Array} out - Destination (x, y, z, radius).
+     * @param {number} offset - Destination offset.
+     * @private
+     */
+    _instanceSphere(instance, out, offset) {
+        const prim = this._instanceMatrix(instance, _tmpMat);
+        const m = _tmpMat.data;
+        const [x, y, z] = prim.aabbCenter;
+        const h = prim.aabbHalfExtents;
+        out[offset] = m[0] * x + m[4] * y + m[8] * z + m[12];
+        out[offset + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+        out[offset + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+        out[offset + 3] = Math.fround(Math.hypot(h[0], h[1], h[2])) * Math.fround(maxAxisScale(m));
     }
 
     /** @type {number} - instances flagged for the outline pass, selected or hovered. */

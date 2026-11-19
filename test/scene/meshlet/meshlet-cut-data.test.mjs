@@ -6,7 +6,7 @@ import { buildMeshletGroups, collectFloorPages, MeshletCutData } from '../../../
 
 describe('meshlet replacement groups', function () {
     it('checks each shared page and parent representative once per replacement', function () {
-        const { meshlets, objects } = createCutFixture();
+        const { meshlets, instances } = createCutFixture();
         // Every meshlet shares a page, and the two coarse members share one parent.
         for (let m = 0; m < 10; m++) meshlets[m * MESHLET_DATA_U32S + M.PAGE] = 0;
         meshlets[5 * MESHLET_DATA_U32S + M.PARENT] = 8;
@@ -21,7 +21,7 @@ describe('meshlet replacement groups', function () {
                 }
             })
         };
-        const cut = new MeshletCutData(device, meshlets, objects);
+        const cut = new MeshletCutData(device, meshlets, instances);
         try {
             const words = cut.groups.impl.words;
             const group0 = 1;
@@ -50,8 +50,8 @@ describe('meshlet replacement groups', function () {
             createBufferImpl: () => ({ allocate() {}, destroy() {}, write() {} })
         };
         // fixture: level 0 = meshlets 0-3, level 1 = 4-7, level 2 = 8-9 (the roots)
-        let { meshlets, objects } = createCutFixture();
-        let cut = new MeshletCutData(device, meshlets, objects);
+        let { meshlets, instances } = createCutFixture();
+        let cut = new MeshletCutData(device, meshlets, instances);
         try {
             expect(cut.levelStarts.byteSize).to.equal(10 * 4);
             expect(Array.from(cut.levelStartsCpu.subarray(0, 3)), '[lowest root level, level 1 start, level 2 start]').to.deep.equal([2, 4, 8]);
@@ -59,9 +59,9 @@ describe('meshlet replacement groups', function () {
             cut.destroy();
         }
         // a terminal group leaves a root at level 1: compaction must never start above it
-        ({ meshlets, objects } = createCutFixture());
+        ({ meshlets, instances } = createCutFixture());
         meshlets[5 * MESHLET_DATA_U32S + M.PARENT] = MESHLET_NO_PARENT;
-        cut = new MeshletCutData(device, meshlets, objects);
+        cut = new MeshletCutData(device, meshlets, instances);
         try {
             expect(cut.levelStartsCpu[0]).to.equal(1);
         } finally {
@@ -70,7 +70,7 @@ describe('meshlet replacement groups', function () {
     });
 
     it('stores the coarse cost each parent contributes to a replacement', function () {
-        const { meshlets, objects } = createCutFixture();
+        const { meshlets, instances } = createCutFixture();
         const device = {
             buffers: new Set(),
             _vram: { sb: 0 },
@@ -82,7 +82,7 @@ describe('meshlet replacement groups', function () {
                 }
             })
         };
-        const cut = new MeshletCutData(device, meshlets, objects);
+        const cut = new MeshletCutData(device, meshlets, instances);
         try {
             // Word 0 is the instance's root offset; group 4 starts at word 1 and replaces
             // coarse members 4 (under root 8) and 5 (under root 9) with 0 and 1.

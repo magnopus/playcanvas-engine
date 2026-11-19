@@ -53,6 +53,7 @@ const cutShader = entry => /* wgsl */ `
         if (!bitSet(admissionBit)) { return false; }
         let offset = task.y;
         let object = objectData[instance];
+        let firstMeshlet = meshletPrimitiveData(instance).firstMeshlet;
         var unchargedIndices = 0u;
         var unchargedRecords = 0u;
         let first = cutGroups[offset];
@@ -75,7 +76,7 @@ const cutShader = entry => /* wgsl */ `
             let groupBucket = select(select(0u, 1u, (group.flags & ${MESHLET_FLAG_TWO_SIDED}u) != 0u), 2u, (group.flags & ${MESHLET_FLAG_ALPHA_MASKED}u) != 0u);
             // this bucket's threshold, and its ratio to the base one for the camera LOD test
             let bucketLod = cullParams[${CULL_PARAMS.BUCKET_LOD}u][groupBucket];
-            let center = (object.worldMatrix * vec4f(group.groupSphere.xyz, 1.0)).xyz;
+            let center = (meshletInstanceMatrix(instance) * vec4f(group.groupSphere.xyz, 1.0)).xyz;
             let radius = group.groupSphere.w * object.maxScale;
             let ortho = cullParams[${CULL_PARAMS.STREAMING}u].y;
             let distanceToGroup = max(distance(center, cullParams[${CULL_PARAMS.CAMERA}u].xyz) - radius, 1e-5);
@@ -104,8 +105,8 @@ const cutShader = entry => /* wgsl */ `
                 atomicSub(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + groupBucket], refundIndices);
                 atomicSub(&cutBudget[groupBucket], refundIndices);
                 atomicSub(&cutBudget[3u], refundRecords);
-                markBit(object.firstPairBit + first - object.firstMeshlet);
-                markBit(uniform.freeBase + object.firstPairBit + first - object.firstMeshlet);
+                markBit(object.firstPairBit + first - firstMeshlet);
+                markBit(uniform.freeBase + object.firstPairBit + first - firstMeshlet);
                 return true;
             }
         }
@@ -144,7 +145,7 @@ const cutShader = entry => /* wgsl */ `
             atomicAdd(&cutBudget[4u], recordNeed);
             return false;
         }
-        markBit(object.firstPairBit + first - object.firstMeshlet);
+        markBit(object.firstPairBit + first - firstMeshlet);
         // this group's children (one level finer) are now selectable: compaction starts the
         // instance no finer than the finest such level (see instanceCullWGSL)
         let childLevel = meshletData[first].lodLevel - 1u;
@@ -278,7 +279,7 @@ export const meshletCutEmitWGSL = /* wgsl */ `
 
     // drawn unless its own group refined, and only when it has triangles (legacy empty roots)
     fn emits(instance: u32, local: u32, pairBase: u32) -> bool {
-        let meshlet = objectData[instance].firstMeshlet + local;
+        let meshlet = meshletPrimitiveData(instance).firstMeshlet + local;
         let birth = selectionTopology[meshlet].y;
         if (birth != ${MESHLET_NO_PARENT}u && bitSet(pairBase + birth)) { return false; }
         return meshletData[meshlet].triangleCount != 0u;
@@ -297,7 +298,7 @@ export const meshletCutEmitWGSL = /* wgsl */ `
         let pairBase = objectData[instance].firstPairBit;
         if ((entry.x & ${MESHLET_CUT_ROOT_FLAG}u) == 0u) {
             let offset = entry.y;
-            let groupBit = pairBase + cutGroups[offset] - objectData[instance].firstMeshlet;
+            let groupBit = pairBase + cutGroups[offset] - meshletPrimitiveData(instance).firstMeshlet;
             // undecided, or refined off-frustum only to unblock its dependants
             if (!bitSet(groupBit) || bitSet(uniform.freeBase + groupBit)) { return; }
             // the children follow the owned task list, which follows the page list

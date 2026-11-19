@@ -119,9 +119,9 @@ describe('meshlet EPIC lightmap metadata', function () {
         gltf.nodes[1].extensions.EPIC_lightmap_textures = { lightmap: 0 };
         gltf.nodes[1].extensions.MAG_texture_streaming = { lightmapTexture: { arrayId: 3, layer: 1, texCoord: 1 } };
         const resource = createMeshlets({}, gltf, bufferViews);
-        expect(resource.instances[0].lightmap).to.equal(null);
-        for (const instance of resource.instances.slice(1)) {
-            expect(instance.lightmap).to.deep.equal({ ...definition, texture: { arrayId: 3, layer: 1, texCoord: 1 } });
+        expect(resource.instances.getLightmap(0)).to.equal(null);
+        for (let i = 1; i < resource.instances.count; i++) {
+            expect(resource.instances.getLightmap(i)).to.deep.equal({ ...definition, texture: { arrayId: 3, layer: 1, texCoord: 1 } });
         }
     });
 });
@@ -181,10 +181,10 @@ describe('MAG_meshlets extensions', function () {
             const resource = createMeshlets(null, gltf, bufferViews);
 
             expect(resource.instances).to.have.lengthOf(1 + SCATTER.length);
-            resource.instances.forEach(inst => expect(inst.primIndex).to.equal(0));
-            expect(translationOf(resource.instances[0].matrix)).to.deep.equal([1, 2, 3]);
-            expect(translationOf(resource.instances[1].matrix)).to.deep.equal(SCATTER[0]);
-            expect(translationOf(resource.instances[2].matrix)).to.deep.equal(SCATTER[1]);
+            expect(Array.from(resource.instances.primIndex)).to.deep.equal(new Array(1 + SCATTER.length).fill(0));
+            expect(translationOf(resource.instances.get(0).matrix)).to.deep.equal([1, 2, 3]);
+            expect(translationOf(resource.instances.get(1).matrix)).to.deep.equal(SCATTER[0]);
+            expect(translationOf(resource.instances.get(2).matrix)).to.deep.equal(SCATTER[1]);
         });
 
         it('composes parent transforms and leaves nodes outside the default scene unplaced', function () {
@@ -194,7 +194,7 @@ describe('MAG_meshlets extensions', function () {
             gltf.scenes[0].nodes = [2, 1];
             const resource = createMeshlets(null, gltf, bufferViews);
             expect(resource.instances).to.have.lengthOf(1 + SCATTER.length);
-            expect(translationOf(resource.instances[0].matrix)).to.deep.equal([101, 2, 3]);
+            expect(translationOf(resource.instances.get(0).matrix)).to.deep.equal([101, 2, 3]);
         });
 
         it('walks every root when the document has no scene', function () {
@@ -203,7 +203,7 @@ describe('MAG_meshlets extensions', function () {
             delete gltf.scenes;
             delete gltf.scene;
             const resource = createMeshlets(null, gltf, bufferViews);
-            expect(translationOf(resource.instances[0].matrix)).to.deep.equal([101, 2, 3]);
+            expect(translationOf(resource.instances.get(0).matrix)).to.deep.equal([101, 2, 3]);
         });
 
         it('widens a page table stored with a narrower integer type', function () {

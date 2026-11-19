@@ -1,12 +1,11 @@
 // @config
-//
-// The Caldera points of interest and the simplified terrain, each baked to its own streamed meshlet
-// asset and loaded into one meshlet world. Collision soups are ordinary glTF meshes, loaded on
-// demand and drawn as translucent overlays. See assets/meshlets/README.md for building the assets.
-//
 // @flag WEBGL_DISABLED
 // @flag WEBGPU_BARE_DISABLED
 // @flag HIDDEN
+
+// The Caldera points of interest and the simplified terrain, each baked to its own streamed meshlet
+// asset and loaded into one meshlet world. Collision soups are ordinary glTF meshes, loaded on
+// demand and drawn as translucent overlays. See assets/meshlets/README.md for building the assets.
 
 import {
     AppBase,

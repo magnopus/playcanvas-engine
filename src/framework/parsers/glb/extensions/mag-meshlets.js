@@ -4,6 +4,7 @@ import { Quat } from '../../../../core/math/quat.js';
 import { Vec3 } from '../../../../core/math/vec3.js';
 import { PAGE_SIZE_BYTES } from '../../../../scene/meshlet/constants.js';
 import { MeshletResource, MeshletPrimitive } from '../../../../scene/meshlet/meshlet-resource.js';
+import { MeshletInstanceListBuilder } from '../../../../scene/meshlet/meshlet-instance-list.js';
 import { GltfAccessor } from '../gltf-accessor.js';
 
 // MAG_meshlets_gpu + MAG_meshlets_stream: streamed Nanite-style meshlet DAG assets
@@ -248,7 +249,8 @@ const createMeshlets = (device, gltf, bufferViews) => {
         }
         list.push(i);
     });
-    const instances = [];
+    // one transform per node or scatter entry, shared by the primitives of its mesh
+    const instances = new MeshletInstanceListBuilder();
     gltf.nodes?.forEach((node, nodeIndex) => {
         if (node.mesh === undefined || !nodeWorld[nodeIndex]) return;
         const list = primsByMesh.get(node.mesh);
@@ -285,16 +287,14 @@ const createMeshlets = (device, gltf, bufferViews) => {
                 _scatterScale.set(s ? s[i * 3] : 1, s ? s[i * 3 + 1] : 1, s ? s[i * 3 + 2] : 1);
                 _scatterMat.setTRS(_scatterPos, _scatterRot, _scatterScale);
                 _scatterMat.mul2(nodeWorld[nodeIndex], _scatterMat);
-                for (const primIndex of list) {
-                    instances.push({ primIndex, matrix: new Float32Array(_scatterMat.data), lightmap });
-                }
+                const transform = instances.addTransform(_scatterMat.data, lightmap);
+                for (const primIndex of list) instances.add(primIndex, transform);
             }
             if (count > 0) return;
         }
 
-        for (const primIndex of list) {
-            instances.push({ primIndex, matrix: new Float32Array(nodeWorld[nodeIndex].data), lightmap });
-        }
+        const transform = instances.addTransform(nodeWorld[nodeIndex].data, lightmap);
+        for (const primIndex of list) instances.add(primIndex, transform);
     });
 
     const resource = new MeshletResource(device, primitives, manifest, instances);

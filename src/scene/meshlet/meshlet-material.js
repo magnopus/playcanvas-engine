@@ -58,18 +58,19 @@ const vertexWGSL = /* wgsl */ `
         let instance = records[record].instance;
         let meshlet = records[record].meshlet;
 
-        // per-instance page attribute layout (resources may differ)
-        let uvFloatsPerVertex = objectData[instance].uvFloatsPerVertex;
+        // per-primitive page attribute layout (resources may differ)
+        let primitive = meshletPrimitiveData(instance);
+        let uvFloatsPerVertex = primitive.uvFloatsPerVertex;
         let hasTangents = (objectData[instance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
         let hasColors = (objectData[instance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
 
         let pageLayout = meshletPageLayout(residency[meshletData[meshlet].page] * uniform.pageSizeWords, hasTangents, uvFloatsPerVertex, hasColors);
         let vertex = pagePool[pageLayout.meshletVertexBase + meshletData[meshlet].verticesOffset + localVert];
 
-        // per-instance position grid (resources may be baked on different grids)
-        let localPos = meshletPagePosition(pageLayout, vertex, meshletObjectGridOrigin(instance), objectData[instance].gridStep);
+        // per-primitive position grid (resources may be baked on different grids)
+        let localPos = meshletPagePosition(pageLayout, vertex, primitive.gridOrigin, primitive.gridStep);
 
-        let worldMatrix = objectData[instance].worldMatrix;
+        let worldMatrix = meshletInstanceMatrix(instance);
         output.position = uniform.matrix_viewProjection * worldMatrix * vec4f(localPos, 1.0);
         // cofactor of the upper 3x3, signed by its determinant: correct under non-uniform scale
         let m0 = worldMatrix[0].xyz;
@@ -82,7 +83,7 @@ const vertexWGSL = /* wgsl */ `
         if (uniform.colorMode == ${MESHLET_COLOR_MODE.MESHLET}u) {
             output.vColor = meshletColor(meshlet);
         } else {
-            output.vColor = materialTable[objectData[instance].material].baseColor.rgb;
+            output.vColor = materialTable[primitive.material].baseColor.rgb;
         }
 
         return output;

@@ -1,9 +1,20 @@
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
-import { MESHLET_CELL_SIZE, OBJECT_DATA, OBJECT_DATA_U32S } from './constants.js';
+import { MESHLET_CELL_SIZE } from './constants.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
+ */
+
+/**
+ * Writes an instance's world-space bounding sphere (x, y, z, radius) at `out[offset]`, as the
+ * cull shaders compute it.
+ *
+ * @callback MeshletInstanceSphere
+ * @param {number} instance - The instance.
+ * @param {Float32Array} out - Destination.
+ * @param {number} offset - Destination offset.
+ * @returns {void}
  */
 
 // Morton bits per axis. 8 bits order a few-km world at ~10 m resolution, plenty for grouping
@@ -84,18 +95,23 @@ class MeshletCells {
     /** @type {StorageBuffer|null} - {@link spheres} on the GPU. */
     boundsBuffer = null;
 
+    /** @type {MeshletInstanceSphere} */
+    sphereOf;
+
     /**
      * @param {GraphicsDevice} device - The graphics device.
-     * @param {Float32Array} objectDataF - The world's objectData rows, as floats.
      * @param {number} instanceCount - The instance count.
+     * @param {MeshletInstanceSphere} sphereOf - Computes an instance's world sphere; kept for
+     * {@link refit}.
      */
-    constructor(device, objectDataF, instanceCount) {
+    constructor(device, instanceCount, sphereOf) {
         this.device = device;
+        this.sphereOf = sphereOf;
         this.cellCount = Math.ceil(instanceCount / MESHLET_CELL_SIZE);
 
         const centers = new Float32Array(instanceCount * 4);
         for (let i = 0; i < instanceCount; i++) {
-            MeshletCells._instanceSphere(objectDataF, i, centers, i * 4);
+            sphereOf(i, centers, i * 4);
         }
 
         this.instanceOrder = MeshletCells._order(centers, instanceCount);
@@ -132,11 +148,10 @@ class MeshletCells {
      * is kept - an instance that moves far just loosens its cell - so the cut task layout stays
      * valid without a rebuild.
      *
-     * @param {Float32Array} objectDataF - The world's objectData rows, as floats.
-     * @param {number} first - First instance whose row changed.
+     * @param {number} first - First instance whose transform changed.
      * @param {number} count - Number of instances.
      */
-    refit(objectDataF, first, count) {
+    refit(first, count) {
         if (count <= 0) return;
         let lo = Infinity;
         let hi = -1;
@@ -149,7 +164,7 @@ class MeshletCells {
             const start = cell * MESHLET_CELL_SIZE;
             const end = Math.min(start + MESHLET_CELL_SIZE, this.instanceOrder.length);
             for (let p = start; p < end; p++) {
-                MeshletCells._instanceSphere(objectDataF, this.instanceOrder[p], centers, (p - start) * 4);
+                this.sphereOf(this.instanceOrder[p], centers, (p - start) * 4);
             }
             this._fitSphere(cell, centers, end - start);
             lo = Math.min(lo, cell);
@@ -211,26 +226,6 @@ class MeshletCells {
         this.spheres[o + 2] = cz;
         // a hair of slack against float drift between this fit and the shader's own transform
         this.spheres[o + 3] = radius * 1.001 + 1e-3;
-    }
-
-    /**
-     * World-space bounding sphere of one instance, as the cull shaders compute it.
-     *
-     * @param {Float32Array} objectDataF - The objectData rows, as floats.
-     * @param {number} instance - The instance.
-     * @param {Float32Array} out - Destination.
-     * @param {number} offset - Destination offset.
-     * @private
-     */
-    static _instanceSphere(objectDataF, instance, out, offset) {
-        const row = instance * OBJECT_DATA_U32S;
-        const m = OBJECT_DATA.MATRIX + row;
-        const s = OBJECT_DATA.SPHERE + row;
-        const x = objectDataF[s], y = objectDataF[s + 1], z = objectDataF[s + 2], r = objectDataF[s + 3];
-        out[offset] = objectDataF[m] * x + objectDataF[m + 4] * y + objectDataF[m + 8] * z + objectDataF[m + 12];
-        out[offset + 1] = objectDataF[m + 1] * x + objectDataF[m + 5] * y + objectDataF[m + 9] * z + objectDataF[m + 13];
-        out[offset + 2] = objectDataF[m + 2] * x + objectDataF[m + 6] * y + objectDataF[m + 10] * z + objectDataF[m + 14];
-        out[offset + 3] = r * objectDataF[row + OBJECT_DATA.MAX_SCALE];
     }
 
     /**

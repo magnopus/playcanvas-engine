@@ -37,6 +37,7 @@ const makeWorld = () => {
         finalized: true,
         totalPairs: PAIRS,
         workItemCapacity: 50,
+        rootListItems: 7,
         cut: { rootIndices: [0, 0, 0], rootRecords: 0, stageLevels: [] },
         cells: { cellCount: 1, boundsBuffer: {}, instancesBuffer: {} },
         recordCapacity: 4000,
@@ -166,7 +167,7 @@ describe('MeshletShadowRenderer', function () {
         expect(entry.views.every(v => v.claimBitsBuffer === claim && v.workItemsBuffer === renderer._workItems)).to.equal(true);
         // pair bits, admission bits, then one off-frustum refinement flag per pair
         expect(claim.byteSize).to.equal((Math.ceil((PAIRS * 2 + 7) / 32) + 7 + 2 * Math.ceil(7 / 32)) * 4, 'transient bits, then two persistent admission regions');
-        expect(renderer._workItems.byteSize).to.equal(50 * WORK_ITEM_U32S * 4);
+        expect(renderer._workItems.byteSize, 'the shared root list').to.equal(7 * WORK_ITEM_U32S * 4);
         expect(renderer.views).to.have.lengthOf(3);
     });
 

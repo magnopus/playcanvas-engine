@@ -5,7 +5,6 @@ import {
     OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
 import { meshletCullVolumeWGSL, meshletHzbVisibleWGSL, meshletVisibleCellWGSL } from './meshlet-cull-wgsl.js';
-import { meshletCutEnqueueWGSL } from './meshlet-cut-wgsl.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
 // band index in the top bits of a root list entry, instance id below
@@ -65,8 +64,9 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
         let bucketRoot = cullParams[${CULL_PARAMS.BUCKET_ROOT}u];
         let rootMin = bucketRoot[min((object.flags >> ${OBJECT_BUCKET_SHIFT}u) & 3u, 2u)];
 
-        let center = (object.worldMatrix * vec4f(object.sphere.xyz, 1.0)).xyz;
-        let radius = object.sphere.w * object.maxScale;
+        let sphere = meshletPrimitiveData(instance).sphere;
+        let center = (meshletInstanceMatrix(instance) * vec4f(sphere.xyz, 1.0)).xyz;
+        let radius = sphere.w * object.maxScale;
         if (!meshletInCullVolume(center, radius)) { return; }
 
         // projected size from the priority origin (the viewing camera, also for shadow views)
@@ -179,18 +179,20 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     // word base of the band-sorted root list
     uniform sortedBase: u32;
     uniform queueCapacity: u32;
+    // the share of the index, record and queue capacity roots may take; the rest is kept for
+    // the cut to refine what was admitted (see MeshletWorld#rootBudgetFraction)
+    uniform rootShare: f32;
     var<storage, read_write> cutQueue: array<vec2u>;
     var<storage, read> cutGroups: array<u32>;
     var<storage, read> residency: array<u32>;
     var<storage, read_write> requests: array<atomic<u32>>;
     var<storage, read_write> claimBits: array<atomic<u32>>;
-    // used indices per bucket, used records, then rejected record demand
+    // used indices per bucket, used records, rejected record demand, then the cut queue
+    // entries admitted roots have claimed
     var<storage, read_write> cutBudget: array<atomic<u32>>;
     var<storage, read_write> counters: array<atomic<u32>>;
     var<storage, read> rootList: array<u32>;
     var<storage, read> rootBands: array<u32>;
-
-    ${meshletCutEnqueueWGSL}
 
     @compute @workgroup_size(64)
     fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
@@ -218,10 +220,35 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         let bucket = cutGroups[offset + 5u];
         let records = cutGroups[offset + 6u];
         let capacity = select(select(uniform.indexCapacity0, uniform.indexCapacity1, bucket == 1u), uniform.indexCapacity2, bucket == 2u);
+        // Roots stop at their share of each capacity. Bands admit largest on screen first, so
+        // what does not fit is the far tail - and the rest stays free for the cut to refine the
+        // near instances, rather than every instance in view sitting at its coarsest level.
+        let indexLimit = u32(f32(capacity) * uniform.rootShare);
+        let recordLimit = u32(f32(uniform.recordCapacity) * uniform.rootShare);
         atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indices);
         let indexBefore = atomicAdd(&cutBudget[bucket], indices);
         let recordBefore = atomicAdd(&cutBudget[3u], records);
-        if (indexBefore + indices > capacity || recordBefore + records > uniform.recordCapacity) {
+        // the root-owned task list follows the root page list, then the root lists for the
+        // emit pass (see meshletCutEmitWGSL)
+        let ownedStart = pageStart + pageCount;
+        let ownedCount = cutGroups[ownedStart];
+        let chunkStart = ownedStart + 1u + ownedCount;
+        let chunkCount = cutGroups[chunkStart];
+        let queueNeed = ownedCount + chunkCount;
+        // An admitted instance must get its queue entries - dropping them afterwards would leave
+        // it charged for roots it never draws - so they are charged here with the rest. A charge
+        // is a tally, undone on rejection like the others; the entries themselves are appended
+        // only once admitted, so their total never passes the limit. (Reserving the ranges
+        // directly needs a compare-exchange loop, which serialises every instance in view on
+        // one counter.)
+        let queueBefore = atomicAdd(&cutBudget[5u], queueNeed);
+        let queueFits = queueBefore + queueNeed <= u32(f32(uniform.queueCapacity) * uniform.rootShare);
+        if (!queueFits) {
+            atomicAdd(&counters[${MESHLET_COUNTER.CUT_QUEUE_REJECTED}u], queueNeed);
+        }
+        let fits = queueFits && indexBefore + indices <= indexLimit && recordBefore + records <= recordLimit;
+        if (!fits) {
+            atomicSub(&cutBudget[5u], queueNeed);
             atomicSub(&cutBudget[bucket], indices);
             atomicSub(&cutBudget[3u], records);
             atomicAdd(&cutBudget[4u], records);
@@ -233,21 +260,14 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         let admission = uniform.totalPairs + instance;
         atomicOr(&claimBits[admission >> 5u], 1u << (admission & 31u));
         atomicOr(&claimBits[uniform.nextBase + (instance >> 5u)], 1u << (instance & 31u));
-        // the root-owned task list follows the root page list
-        let ownedStart = pageStart + pageCount;
-        cutEnqueue(instance, ownedStart);
-        // then the root lists, queued for the emit pass (see meshletCutEmitWGSL). They land in
-        // the queue ahead of every stage's tasks, so a full queue drops tasks (which stay
-        // coarse) before it drops roots.
-        let chunkStart = ownedStart + 1u + cutGroups[ownedStart];
-        let chunkCount = cutGroups[chunkStart];
-        if (chunkCount != 0u) {
-            let base = atomicAdd(&counters[${MESHLET_COUNTER.CUT_QUEUE_END}u], chunkCount);
-            for (var k = 0u; k < chunkCount; k++) {
-                if (base + k < uniform.queueCapacity) {
-                    cutQueue[base + k] = vec2u(instance | ${MESHLET_CUT_ROOT_FLAG}u, chunkStart + 1u + k * ${MESHLET_CUT_ROOT_CHUNK + 1}u);
-                }
-            }
+        // the tasks that depend on the roots alone, then the root lists - ahead of every stage's
+        // tasks, so a full queue drops refinements (which stay coarse) and never roots
+        let queueBase = atomicAdd(&counters[${MESHLET_COUNTER.CUT_QUEUE_END}u], queueNeed);
+        for (var k = 0u; k < ownedCount; k++) {
+            cutQueue[queueBase + k] = vec2u(instance, cutGroups[ownedStart + 1u + k]);
+        }
+        for (var k = 0u; k < chunkCount; k++) {
+            cutQueue[queueBase + ownedCount + k] = vec2u(instance | ${MESHLET_CUT_ROOT_FLAG}u, chunkStart + 1u + k * ${MESHLET_CUT_ROOT_CHUNK + 1}u);
         }
     }
 `;

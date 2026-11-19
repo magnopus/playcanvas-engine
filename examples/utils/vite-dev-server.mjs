@@ -530,16 +530,17 @@ const serveExampleFile = async (url, req, res) => {
  * to, including the old names of moved examples.
  *
  * @param {string} url - request url.
+ * @param {HttpRequest} req - http request.
  * @param {HttpResponse} res - http response.
  * @returns {Promise<boolean>} true if handled.
  */
-const serveThumbnail = async (url, res) => {
+const serveThumbnail = async (url, req, res) => {
     const match = THUMBNAIL_URL.exec(url);
     const item = match ? getExample(match[1]) ?? getRedirect(match[1]) : undefined;
     if (!item) {
         return notFound(res);
     }
-    const found = await sendFile(res, getThumbnailPath(item, /** @type {'large' | 'small'} */ (match[2])));
+    const found = await sendFile(req, res, getThumbnailPath(item, /** @type {'large' | 'small'} */ (match[2])));
     return found || notFound(res);
 };
 
@@ -595,7 +596,7 @@ const handle = async (server, req, res, engineInfo, engineStamp) => {
         return found || notFound(res);
     }
     if (url.startsWith('/thumbnails/')) {
-        return serveThumbnail(url, res);
+        return serveThumbnail(url, req, res);
     }
     const route = STATIC_ROUTES.find(item => url.startsWith(item.url));
     if (route) {

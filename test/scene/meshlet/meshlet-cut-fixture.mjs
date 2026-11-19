@@ -1,4 +1,4 @@
-import { MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT, OBJECT_DATA as O, OBJECT_DATA_U32S } from '../../../src/scene/meshlet/constants.js';
+import { MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT } from '../../../src/scene/meshlet/constants.js';
 
 // Cross-linked DAG: both middle replacements depend on BOTH root refinements.
 // Coverage bits denote disjoint surface patches, independent of triangle count.
@@ -20,11 +20,7 @@ export const createCutFixture = () => {
         f[row + M.PARENT_SPHERE + 3] = 1;
         f[row + M.SPHERE + 3] = 1;
     }
-    const objects = new Uint32Array(OBJECT_DATA_U32S);
-    const of = new Float32Array(objects.buffer);
-    of[0] = of[5] = of[10] = of[15] = 1;
-    of[O.SPHERE + 3] = 1;
-    of[O.MAX_SCALE] = 1;
-    objects[O.MESHLET_COUNT] = 10;
-    return { meshlets, objects };
+    // one instance of the primitive, its meshlets from world-global id 0
+    const instances = { count: 1, first: () => 0, meshletCount: () => 10 };
+    return { meshlets, instances };
 };

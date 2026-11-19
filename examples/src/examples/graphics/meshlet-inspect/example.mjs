@@ -1,5 +1,6 @@
 // @config
-//
+// @flag WEBGL_DISABLED
+
 // GPU-driven meshlet rendering: a grid of Stanford bunnies, fully resident, culled and
 // LOD-selected on the GPU every frame - instance frustum cull, per-cluster DAG cut (crack-free,
 // screen-space error driven), cone backface cull, GPU-generated index buffer, indirect draw.
@@ -10,8 +11,6 @@
 // pixel, and that same index outlines it - shift-click to add to the selection.
 // Untick "Meshlets" (or ?meshlets=0) to draw the same bunnies as ordinary meshes - one render
 // component and draw call per bunny, at full resolution, culled on the CPU - for comparison.
-//
-// @flag WEBGL_DISABLED
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
@@ -36,6 +35,7 @@ import {
     CameraFrame,
     EVENT_MOUSEDOWN,
     EVENT_MOUSEMOVE,
+    EVENT_MOUSEWHEEL,
     Layer,
     Mesh,
     MeshInstance,
@@ -315,7 +315,12 @@ data.set('data', {
     secondView: params.get('view2') === '1',
     selection: '',
     shadows: params.get('meshletshadows') !== '0',
-    aaMode: 'none'
+    aaMode: 'none',
+    // geometry VRAM budget in MB (0 = unbudgeted: every page resident, indices sized to demand)
+    // and the share of it, after fixed and per-view costs, given to the draw index buffers
+    geoBudget: parseInt(params.get('budget') ?? '0', 10),
+    indexShare: parseFloat(params.get('indexShare') ?? '0.35'),
+    budgetStats: ''
 });
 
 // meshlet shadow casting is opt-in per scene (one single-phase cull chain per cascade)
@@ -327,17 +332,28 @@ const numCascades = Math.max(1, Math.min(4, parseInt(params.get('cascades') ?? '
 
 let builtSize = 0;
 let builtMeshlets = true;
+let builtBudget = '';
 let gridExtent = 1;
+const budgetKey = () => `${data.get('data.geoBudget')}:${data.get('data.indexShare')}`;
+const MB = 1024 * 1024;
 const rebuild = (n) => {
     const meshlets = !!data.get('data.meshlets');
     builtSize = n;
     builtMeshlets = meshlets;
+    builtBudget = budgetKey();
     gridExtent = Math.max(n, 2) * SPACING;
-    // one of the two at a time: the meshlet world, or the ordinary meshes
+    // one of the two at a time: the meshlet world, or the ordinary meshes. The budget is
+    // resolved when the world is built, so a budget change rebuilds it too.
     director.rebuild((world) => {
+        world.poolBytes = Math.max(0, Math.round(data.get('data.geoBudget'))) * MB;
+        world.indexBudgetFraction = data.get('data.indexShare');
         if (meshlets) world.addResource(resource, null, shardBuffers, buildInstances(n));
     });
     buildPlainGrid(meshlets ? 0 : n);
+    const b = director.world.budgetBreakdown;
+    data.set('data.budgetStats', b ?
+        `fixed ${(b.fixed / MB).toFixed(0)} + views ${(b.perView / MB).toFixed(0)} + pages ${(b.pagePool / MB).toFixed(0)} + indices ${(b.indices / MB).toFixed(0)} + records ${(b.records / MB).toFixed(0)} + queue ${(b.cutQueue / MB).toFixed(0)} MB` :
+        'unbudgeted');
 };
 rebuild(data.get('data.gridSize'));
 
@@ -669,6 +685,12 @@ const mouse = new Mouse(canvas);
 mouse.on(EVENT_MOUSEDOWN, (event) => {
     selectAt(event.x, event.y, event.shiftKey || event.ctrlKey || event.metaKey);
 });
+// wheel zooms the orbiting camera in and out: scales its orbit radius and height
+let zoom = 1;
+mouse.on(EVENT_MOUSEWHEEL, (event) => {
+    zoom = Math.min(Math.max(zoom * (event.wheelDelta > 0 ? 1.1 : 1 / 1.1), 0.01), 4);
+    event.event.preventDefault();
+});
 // hover: one pick per frame at most, and only when the pointer has actually moved
 let hoverX = -1;
 let hoverY = -1;
@@ -702,12 +724,12 @@ app.on('update', (dt) => {
     if (freezeAt >= 0) dt = Math.max(Math.min(dt, freezeAt - time), 0);
     time += dt;
 
-    // debounce the grid slider - a resize rebuilds the world
+    // debounce the grid and budget sliders - a change rebuilds the world
     const wanted = Math.round(data.get('data.gridSize'));
     if (!!data.get('data.meshlets') !== builtMeshlets) {
         sizeChangedAt = -1;
         rebuild(wanted);
-    } else if (wanted !== builtSize) {
+    } else if (wanted !== builtSize || budgetKey() !== builtBudget) {
         if (sizeChangedAt < 0) sizeChangedAt = time;
         if (time - sizeChangedAt > 0.35) {
             sizeChangedAt = -1;
@@ -718,9 +740,11 @@ app.on('update', (dt) => {
     }
 
     angle += dt * 0.15;
-    const r = gridExtent * (0.55 + 0.25 * Math.sin(angle * 0.6));
-    camera.setLocalPosition(Math.sin(angle) * r, gridExtent * 0.35, Math.cos(angle) * r);
+    const r = gridExtent * (0.55 + 0.25 * Math.sin(angle * 0.6)) * zoom;
+    const height = gridExtent * 0.35 * zoom;
+    camera.setLocalPosition(Math.sin(angle) * r, height, Math.cos(angle) * r);
     camera.lookAt(0, 0.06, 0);
+    camera.camera.farClip = Math.max(500, (Math.hypot(r, height) + gridExtent) * 1.5);
 
     // orbit the point lights through the grid
     omniA.setLocalPosition(Math.sin(time * 0.7) * gridExtent * 0.4, 0.25, Math.cos(time * 0.7) * gridExtent * 0.4);

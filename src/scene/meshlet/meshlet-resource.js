@@ -1,5 +1,10 @@
 import { Debug } from '../../core/debug.js';
 import { MESHLET_DATA_U32S, PAGE_TABLE_FIELDS } from './constants.js';
+import { MeshletInstanceList } from './meshlet-instance-list.js';
+
+/**
+ * @import { MeshletInstanceListBuilder } from './meshlet-instance-list.js'
+ */
 
 /**
  * @typedef {object} MeshletLightmap
@@ -117,20 +122,31 @@ class MeshletResource {
      */
     textureManifest = null;
 
+    /** @type {MeshletInstanceList} */
+    _instances;
+
     /**
-     * Document-space placements: one entry per (gltf node, primitive) pair.
+     * Document-space placements: one per (gltf node or scatter entry, primitive) pair. Set
+     * either a list or an array of `{ primIndex, matrix, lightmap }` placements, which is packed
+     * into a list.
      *
-     * @type {Array<{ primIndex: number, matrix: Float32Array, lightmap?: MeshletLightmap|null }>}
+     * @type {MeshletInstanceList}
      */
-    instances;
+    set instances(value) {
+        this._instances = MeshletInstanceList.from(value);
+    }
+
+    get instances() {
+        return this._instances;
+    }
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {MeshletPrimitive[]} primitives - Parsed primitives.
      * @param {object} manifest - The stream manifest.
-     * @param {Array<{ primIndex: number, matrix: Float32Array, lightmap?: MeshletLightmap|null }>} [instances] - Placements.
+     * @param {MeshletInstanceList|MeshletInstanceListBuilder|Array<{ primIndex: number, matrix: Float32Array, lightmap?: MeshletLightmap|null }>} [instances] - Placements.
      */
-    constructor(device, primitives, manifest, instances = []) {
+    constructor(device, primitives, manifest, instances = null) {
         this.device = device;
         this.primitives = primitives;
         this.manifest = manifest;

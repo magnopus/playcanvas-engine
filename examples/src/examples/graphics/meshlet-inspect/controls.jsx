@@ -56,9 +56,36 @@ export function Controls({ observer }) {
                         binding={new BindingTwoWay()}
                         link={{ observer, path: 'data.gridSize' }}
                         min={1}
-                        max={100}
+                        max={1000}
                         step={1}
                         precision={0}
+                    />
+                </LabelGroup>
+                <LabelGroup text='Geo budget MB'>
+                    <SliderInput
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'data.geoBudget' }}
+                        min={0}
+                        max={8192}
+                        step={64}
+                        precision={0}
+                    />
+                </LabelGroup>
+                <LabelGroup text='Index share'>
+                    <SliderInput
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'data.indexShare' }}
+                        min={0.05}
+                        max={0.9}
+                        step={0.05}
+                        precision={2}
+                    />
+                </LabelGroup>
+                <LabelGroup text='Budget'>
+                    <Label
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'data.budgetStats' }}
+                        value={observer.get('data.budgetStats')}
                     />
                 </LabelGroup>
                 <LabelGroup text='Error px'>

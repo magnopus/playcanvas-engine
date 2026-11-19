@@ -1,5 +1,8 @@
 // @config
-//
+// @flag WEBGL_DISABLED
+// @flag WEBGPU_BARE_DISABLED
+// @flag HIDDEN
+
 // The Zorah courtyard (NVIDIA RTX Kit sample geometry), streamed through the GPU-driven meshlet
 // pipeline. The export carries geometry only, no textures, so the look comes from the lighting: a
 // sun with four cascaded shadows, an HDRI sky for ambient light, contact ambient
@@ -16,10 +19,6 @@
 //   ?view=start            begin at the manifest's start pose instead of the hero view
 //   ?scale=<0.25..1>       scene render scale, TAA upscales to the output (default 0.6)
 //   ?ssao=0                start with SSAO off
-//
-// @flag WEBGL_DISABLED
-// @flag WEBGPU_BARE_DISABLED
-// @flag HIDDEN
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
@@ -322,8 +321,8 @@ for (const asset of assets.values()) {
     const materials = asset.resource.data?.materials;
     if (!resource || !materials) continue;
     const letters = resource.primitives.map(p => /Mountains_Background_([A-Z])/i.exec(materials[p.materialIndex]?.name ?? '')?.[1]?.toUpperCase());
-    resource.instances = resource.instances.filter((inst) => {
-        const letter = letters[inst.primIndex];
+    resource.instances = resource.instances.filter((primIndex) => {
+        const letter = letters[primIndex];
         return !letter || keepMountains.has(letter);
     });
 }

@@ -70,11 +70,18 @@ const makeWorld = () => ({
 const makeView = (singlePhase = false) => ({
     singlePhase,
     recordCapacity: 100,
+    workItemCapacity: 130,
+    ensureWorkItems(capacity) {
+        if (capacity <= this.workItemCapacity) return false;
+        this.workItemCapacity = capacity;
+        this.workItemsBuffer = storage(capacity * 8);
+        return true;
+    },
     indexCapacity: [10, 20, 30],
     cullParamsBuffer: storage(256),
     countersBuffer: storage(MESHLET_COUNTER_U32S * 4),
-    cutBudgetBuffer: storage(20),
-    cutBudgetInitial: new Uint32Array(5),
+    cutBudgetBuffer: storage(24),
+    cutBudgetInitial: new Uint32Array(6),
     claimBitsBuffer: storage(64),
     workItemsBuffer: storage(),
     recordsBuffer: storage(),
@@ -176,9 +183,9 @@ describe('MeshletCuller', function () {
     });
 
     it('rejects a work-item buffer too small to hold the root list', function () {
-        const world = makeWorld();
-        world.workItemCapacity = 10;
-        expect(() => new MeshletCuller(device, world, makeView(), shaders)).to.throw(/root list/);
+        const view = makeView();
+        view.workItemCapacity = 10;
+        expect(() => new MeshletCuller(device, makeWorld(), view, shaders)).to.throw(/root list/);
     });
 
     it('writes the root priority rows, from the view camera or a given priority origin', function () {
@@ -316,8 +323,16 @@ describe('MeshletCuller', function () {
     });
 
     it('selects the cut by compaction instead when direct emit is off', function () {
-        const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
+        const world = makeWorld();
+        world.workItemCapacity = 4000;
+        const view = makeView();
+        const culler = new MeshletCuller(device, world, view, shaders);
         culler.directEmit = false;
+        // compaction needs the worst case of work items, where direct emit kept only the root list
+        expect(view.workItemCapacity).to.equal(4000);
+        expect(culler.instanceCull.getParameter('workItems')).to.equal(view.workItemsBuffer);
+        expect(culler.instanceCull.getParameter('workItemCapacity')).to.equal(4000);
+        expect(culler.rootClassify.getParameter('rootList')).to.equal(view.workItemsBuffer);
         device.gpuProfiler = { enabled: true, passDetail: true, destroy() {} };
         culler.beginFrame(planes, camera, 640, viewProj, null);
         expect(log.dispatches.map(d => d.name)).to.deep.equal([

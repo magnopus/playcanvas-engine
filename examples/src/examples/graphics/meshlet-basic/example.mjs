@@ -1,13 +1,12 @@
 // @config
-//
+// @flag WEBGL_DISABLED
+// @flag WEBGPU_BARE_DISABLED
+
 // Load a local test asset as a container and stream its
 // geometry pages on demand. Fly (WASD + mouse look, Shift/Ctrl for speed) or orbit and pan to inspect
 // residency transitions; toggle occlusion to exercise CameraFrame's scene-depth attachment and
 // two-phase HZB path.
 // See assets/meshlets/README.md for the local asset setup.
-//
-// @flag WEBGL_DISABLED
-// @flag WEBGPU_BARE_DISABLED
 
 import {
     AppBase,

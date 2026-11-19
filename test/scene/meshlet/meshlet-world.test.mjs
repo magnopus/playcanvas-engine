@@ -6,7 +6,7 @@ import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-gra
 import {
     MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_FLAG_UNLIT, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
     MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COLOR_MODE, MESHLET_DATA,
-    MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA, OBJECT_DATA_U32S,
+    MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA, OBJECT_DATA_U32S, PRIMITIVE_DATA,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletPrimitive, MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
@@ -120,13 +120,15 @@ describe('MeshletWorld', function () {
             const array = { id: 7, name: 'linear_0', containerVersion: 2, width: 256, height: 256, tailMip: 0, layers: [[], []] };
             first.textureManifest = { arrays: [array] };
             second.textureManifest = { arrays: [array] };
-            second.instances[0].lightmap = {
+            const placements = Array.from({ length: 3 }, (_, i) => second.instances.get(i));
+            placements[0].lightmap = {
                 texture: { arrayId: 7, layer: 1, texCoord: 0 },
                 coordinateScaleBias: [0.25, 0.5, 0.125, 0.25],
                 lightmapScale: [1, 2, 3, 4],
                 lightmapAdd: [0, 1, 0, -5.75]
             };
-            second.instances[2].lightmap = { ...second.instances[0].lightmap, texture: { arrayId: 7, layer: 0, texCoord: 1 } };
+            placements[2].lightmap = { ...placements[0].lightmap, texture: { arrayId: 7, layer: 0, texCoord: 1 } };
+            second.instances = placements;
             world.addStreamedResource(first, null, 'https://example.test/first/');
             world.addStreamedResource(second, null, 'https://example.test/second/');
             world.finalize();
@@ -162,8 +164,17 @@ describe('MeshletWorld', function () {
         }
     });
 
+    // one resource instance placed twice, as a merged placement of two components: one run of
+    // the instance list per root transform
+    const buildRuns = (world, runs) => {
+        const { resource, shards } = makeResource(device, { instances: 1 });
+        world.addResource(resource, new Array(runs).fill(null), shards);
+        world.finalize();
+        return world;
+    };
+
     it('refreshes and shrinks world bounds after partial placement transform updates', function () {
-        const world = build(new MeshletWorld(device), makeResource(device, { instances: 2 }));
+        const world = buildRuns(new MeshletWorld(device), 2);
         const bounds = world.worldBounds;
         const transform = new Mat4().setScale(10, 2, 3);
         transform.data[12] = 100;
@@ -172,11 +183,11 @@ describe('MeshletWorld', function () {
         world.setPlacementTransform(0, transform, 1, 1);
         expect(world.worldBounds).to.equal(bounds);
         expect(bounds.getMin().toArray()).to.deep.equal([0, 1, 2]);
-        expect(bounds.getMax().toArray()).to.deep.equal([220, 6, 62]);
+        expect(bounds.getMax().toArray()).to.deep.equal([120, 6, 62]);
 
         world.setPlacementTransform(0, null, 1, 1);
         expect(world.worldBounds.getMin().toArray()).to.deep.equal([0, 1, 2]);
-        expect(world.worldBounds.getMax().toArray()).to.deep.equal([12, 3, 4]);
+        expect(world.worldBounds.getMax().toArray()).to.deep.equal([2, 3, 4]);
         world.destroy();
     });
 
@@ -187,23 +198,32 @@ describe('MeshletWorld', function () {
             expect(world.instanceCount).to.equal(2);
             expect(world.totalPairs).to.equal(2 * MESHLETS);
 
-            const u32 = world.objectDataCpu;
-            const f32 = world.objectDataCpuF;
+            // the instance rows, then the primitive row both instances share
+            const u32 = uploaded(world.objectDataBuffer);
+            expect(u32).to.have.lengthOf(2 * OBJECT_DATA_U32S);
+            const f32 = new Float32Array(u32.buffer, u32.byteOffset, u32.length);
             const row = 1 * OBJECT_DATA_U32S;
-            expect(f32[row + OBJECT_DATA.MATRIX + 12], 'translation of the second instance').to.equal(10);
-            expect(Array.from(f32.subarray(row + OBJECT_DATA.SPHERE, row + OBJECT_DATA.SPHERE + 3))).to.deep.equal([1, 2, 3]);
-            expect(f32[row + OBJECT_DATA.SPHERE + 3]).to.be.closeTo(Math.sqrt(3), 1e-6);
-            expect(u32[row + OBJECT_DATA.FIRST_MESHLET]).to.equal(0);
-            expect(u32[row + OBJECT_DATA.MESHLET_COUNT]).to.equal(MESHLETS);
-            expect(u32[row + OBJECT_DATA.MATERIAL]).to.equal(0);
+            const m = row + OBJECT_DATA.MATRIX_ROWS;
+            expect(Array.from(f32.subarray(m, m + 12)), 'matrix rows: scale 2, translation x 10').to.deep.equal([2, 0, 0, 10, 0, 2, 0, 0, 0, 0, 2, 0]);
+            expect(u32[OBJECT_DATA.PRIMITIVE], 'the primitive row follows the instance rows').to.equal(2);
+            expect(u32[row + OBJECT_DATA.PRIMITIVE]).to.equal(2);
             expect(u32[row + OBJECT_DATA.FLAGS]).to.equal(0);
             expect(f32[row + OBJECT_DATA.MAX_SCALE]).to.equal(2);
             expect(u32[row + OBJECT_DATA.FIRST_PAIR_BIT], 'second instance starts after the first one\'s pairs').to.equal(MESHLETS);
-            expect(f32[row + OBJECT_DATA.GRID_ORIGIN]).to.equal(0.5);
-            expect(f32[row + OBJECT_DATA.GRID_STEP]).to.be.closeTo(0.01, 1e-9);
-            expect(u32[row + OBJECT_DATA.UV_FLOATS_PER_VERTEX]).to.equal(2);
-            expect(u32[row + OBJECT_DATA.PICK_ID]).to.equal(world.pickIdBase + 1);
-            expect(uploaded(world.objectDataBuffer)).to.have.lengthOf(2 * OBJECT_DATA_U32S);
+
+            const p32 = world.objectDataBuffer.impl.writes.find(w => w.offset === 2 * OBJECT_DATA_U32S * 4).data;
+            expect(p32).to.have.lengthOf(OBJECT_DATA_U32S);
+            const pf32 = new Float32Array(p32.buffer, p32.byteOffset, p32.length);
+            expect(Array.from(pf32.subarray(PRIMITIVE_DATA.SPHERE, PRIMITIVE_DATA.SPHERE + 3))).to.deep.equal([1, 2, 3]);
+            expect(pf32[PRIMITIVE_DATA.SPHERE + 3]).to.be.closeTo(Math.sqrt(3), 1e-6);
+            expect(p32[PRIMITIVE_DATA.FIRST_MESHLET]).to.equal(0);
+            expect(p32[PRIMITIVE_DATA.MESHLET_COUNT]).to.equal(MESHLETS);
+            expect(p32[PRIMITIVE_DATA.MATERIAL]).to.equal(0);
+            expect(pf32[PRIMITIVE_DATA.GRID_ORIGIN]).to.equal(0.5);
+            expect(pf32[PRIMITIVE_DATA.GRID_STEP]).to.be.closeTo(0.01, 1e-9);
+            expect(p32[PRIMITIVE_DATA.UV_FLOATS_PER_VERTEX]).to.equal(2);
+            expect(p32[PRIMITIVE_DATA.PICK_ID_BASE]).to.equal(world.pickIdBase);
+            expect(world.objectDataBuffer.byteSize).to.equal(3 * OBJECT_DATA_U32S * 4);
             world.destroy();
         });
 
@@ -257,30 +277,46 @@ describe('MeshletWorld', function () {
             unlit.destroy();
         });
 
-        it('splits a geometry budget between the page pool and the index buffers after the fixed costs', function () {
+        it('splits a geometry budget between the page pool and the draw working set after the fixed costs', function () {
             const world = new MeshletWorld(device);
-            world.poolBytes = 1024 * 1024;
+            world.poolBytes = 64 * 1024 * 1024;
             build(world, makeResource(device, { instances: 4 }));
             const b = world.budgetBreakdown;
-            expect(b.budget).to.equal(1024 * 1024);
+            expect(b.budget).to.equal(64 * 1024 * 1024);
             expect(b.fixed).to.be.above(0);
-            expect(b.pagePool + b.indices + b.fixed + b.perView).to.equal(b.budget);
-            // the pool is capped at every page; the rest of its share goes to the indices
-            const share = Math.floor((b.budget - b.fixed - b.perView) * world.indexBudgetFraction);
-            const allPages = world.totalPages * world.pageSizeBytes;
-            expect(b.pagePool).to.equal(Math.min(b.budget - b.fixed - b.perView - share, allPages));
-            expect(b.indices).to.equal(b.budget - b.fixed - b.perView - b.pagePool);
-            expect(world.indexBudgetTotal).to.equal(Math.floor(b.indices / 4));
+            // every byte is accounted for, to the rounding of the per-view shares
+            const total = b.fixed + b.perView + b.pagePool + b.indices + b.records + b.cutQueue;
+            expect(total).to.be.at.most(b.budget);
+            expect(total).to.be.above(b.budget - 64);
+            // the pool is capped at every page; the rest of its share goes to the draw working set
+            expect(b.pagePool).to.equal(world.totalPages * world.pageSizeBytes);
             expect(world.pagePoolBytes).to.equal(b.pagePool);
+            expect(world.indexBudgetTotal).to.equal(Math.floor(b.indices / 4));
+            // one camera view: its records and cut queue are bounded by the budget, not the scene
+            expect(world.recordCeiling).to.equal(Math.floor(b.records / 24));
+            expect(world.cutQueueCeiling).to.equal(Math.floor(b.cutQueue / 8));
+            expect(b.records).to.be.below(b.indices);
             world.destroy();
         });
 
-        it('falls back to a minimum page pool when the budget cannot even hold the fixed costs', function () {
+        it('falls back to a minimum page pool and index buffer when the budget cannot even hold the fixed costs', function () {
             const world = new MeshletWorld(device);
             world.poolBytes = 64;
             build(world, makeResource(device, { instances: 4 }));
-            expect(world.pagePoolBytes, 'min(pages, 64) pages').to.be.above(0);
-            expect(world.budgetBreakdown.pagePool + world.budgetBreakdown.indices).to.equal(2 * PAGE_BYTES);
+            expect(world.pagePoolBytes, 'min(pages, 64) pages').to.equal(2 * PAGE_BYTES);
+            // the indices keep a floor: with none, root admission takes no instance and nothing draws
+            expect(world.budgetBreakdown.indices).to.be.at.least(16 * 1024 * 1024);
+            expect(world.indexBudgetTotal).to.be.at.least(4 * 1024 * 1024);
+            world.destroy();
+        });
+
+        it('keeps the index floor when the page roots take a small budget\'s share', function () {
+            const world = new MeshletWorld(device);
+            world.indexBudgetFraction = 0.05;
+            world.poolBytes = 20 * 1024 * 1024;
+            build(world, makeResource(device, { instances: 4 }));
+            expect(world.budgetBreakdown.indices).to.be.at.least(16 * 1024 * 1024);
+            expect(world.pagePoolBytes).to.be.at.least(2 * PAGE_BYTES);
             world.destroy();
         });
     });
@@ -342,26 +378,30 @@ describe('MeshletWorld', function () {
 
     describe('after finalize', function () {
 
-        it('rewrites only the transform-derived words of a placement', function () {
-            const world = build(new MeshletWorld(device), makeResource(device, { instances: 2 }));
+        it('rewrites only the rows of the run whose root transform changed', function () {
+            const world = buildRuns(new MeshletWorld(device), 2);
             world.objectDataBuffer.impl.writes.length = 0;
             const t = new Float32Array(16);
             t[0] = 3; t[5] = 3; t[10] = 3; t[15] = 1; t[12] = 100;
-            world.setPlacementTransform(0, { data: t, mul2: () => {} }, 1, 1);
-            const row = 1 * OBJECT_DATA_U32S;
-            // the test transform object only carries data; the world multiplies inst.matrix into it
-            expect(world.objectDataCpuF[row + OBJECT_DATA.MAX_SCALE]).to.equal(3);
-            expect(world.objectDataCpu[row + OBJECT_DATA.MESHLET_COUNT], 'untouched').to.equal(MESHLETS);
+            // the world copies the root's data rather than keeping the caller's matrix
+            world.setPlacementTransform(0, { data: t }, 1, 1);
+            t[12] = 0;
             const write = world.objectDataBuffer.impl.writes[0];
+            expect(world.objectDataBuffer.impl.writes).to.have.lengthOf(1);
             expect(write.offset, 'only the second row is uploaded').to.equal(OBJECT_DATA_U32S * 4);
             expect(write.data).to.have.lengthOf(OBJECT_DATA_U32S);
+            const f32 = new Float32Array(write.data.buffer, write.data.byteOffset, write.data.length);
+            expect(f32[OBJECT_DATA.MAX_SCALE]).to.equal(3);
+            expect(f32[OBJECT_DATA.MATRIX_ROWS + 3]).to.equal(100);
+            expect(write.data[OBJECT_DATA.PRIMITIVE], 'untouched').to.equal(2);
+            expect(write.data[OBJECT_DATA.FIRST_PAIR_BIT], 'the second run\'s pairs').to.equal(MESHLETS);
             world.destroy();
         });
 
         it('hides a sub-range of a placement through the flags word without a rebuild', function () {
             const world = build(new MeshletWorld(device), makeResource(device, { instances: 3 }));
             world.setPlacementHidden(0, true, 1, 2);
-            const flag = i => world.objectDataCpu[i * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS] & OBJECT_FLAG_HIDDEN;
+            const flag = i => world.instanceFlags[i] & OBJECT_FLAG_HIDDEN;
             expect([flag(0), flag(1), flag(2)]).to.deep.equal([0, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HIDDEN]);
             world.setPlacementHidden(0, false);
             expect([flag(0), flag(1), flag(2)]).to.deep.equal([0, 0, 0]);
@@ -372,12 +412,13 @@ describe('MeshletWorld', function () {
             const world = build(new MeshletWorld(device), makeResource(device, { instances: 4 }));
             world.objectDataBuffer.impl.writes.length = 0;
             world.setInstancesOutlined([1, 3]);
-            const flag = i => world.objectDataCpu[i * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS] & OBJECT_FLAG_OUTLINED;
+            const flag = i => world.instanceFlags[i] & OBJECT_FLAG_OUTLINED;
             expect([flag(0), flag(1), flag(2), flag(3)]).to.deep.equal([0, OBJECT_FLAG_OUTLINED, 0, OBJECT_FLAG_OUTLINED]);
             expect(world.outlinedCount).to.equal(2);
             const write = world.objectDataBuffer.impl.writes[0];
             expect(write.offset).to.equal(1 * OBJECT_DATA_U32S * 4);
             expect(write.data, 'rows 1..3').to.have.lengthOf(3 * OBJECT_DATA_U32S);
+            expect(write.data[2 * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS] & OBJECT_FLAG_OUTLINED, 'the uploaded rows carry the flags').to.equal(OBJECT_FLAG_OUTLINED);
             world.clearOutlines();
             expect(world.outlinedCount).to.equal(0);
             expect(flag(1) | flag(3)).to.equal(0);

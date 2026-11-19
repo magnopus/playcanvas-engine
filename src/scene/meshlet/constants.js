@@ -62,41 +62,59 @@ export const MESHLET_DATA = {
 };
 
 /**
- * Words per instance in objectData - the per-placement record the world uploads and the cull /
- * material shaders read.
+ * Words per row of the objectData buffer. The buffer holds one row per instance, then one row
+ * per primitive of every added resource. Instances of a primitive share its row, so an
+ * instance row carries only what differs between instances: a scattered forest pays 64 bytes
+ * per tree primitive instead of repeating the primitive's bounds, meshlet range, material and
+ * page layout in every copy.
  *
- * Word layout:
- * - [0-15] f32 world matrix (column major)
- * - [16-19] f32 local bounding sphere (cx, cy, cz, r)
- * - [20] u32 first meshlet id (world-global), [21] u32 meshlet count
- * - [22] u32 material row, [23] u32 flags (OBJECT_FLAG_*), [24] f32 max scale of the matrix
- * - [25] u32 first pair bit (base of the instance's claim / visibility bit range)
- * - [26-28] f32 position grid origin, [29] f32 grid step (per-resource quantisation)
- * - [30] u32 UV floats per vertex (per-resource page attribute layout)
- * - [31] u32 pick id (the placement's, shared by its instances)
+ * The primitive rows share the buffer instead of having their own binding because several
+ * cull passes are already at the device's storage-buffer limit per stage.
+ *
+ * Instance row (OBJECT_DATA):
+ * - [0-11] f32 the first three rows of the affine world matrix (row major)
+ * - [12] u32 objectData row of the instance's primitive (see PRIMITIVE_DATA)
+ * - [13] u32 flags (OBJECT_FLAG_*), [14] f32 max scale of the matrix
+ * - [15] u32 first pair bit (base of the instance's claim / visibility bit range)
  *
  * @type {number}
  */
-export const OBJECT_DATA_U32S = 32;
+export const OBJECT_DATA_U32S = 16;
 
 /**
- * Word offsets into an objectData record.
+ * Word offsets into an objectData instance row.
  *
  * @ignore
  */
 export const OBJECT_DATA = {
-    MATRIX: 0,
-    SPHERE: 16,
-    FIRST_MESHLET: 20,
-    MESHLET_COUNT: 21,
-    MATERIAL: 22,
-    FLAGS: 23,
-    MAX_SCALE: 24,
-    FIRST_PAIR_BIT: 25,
-    GRID_ORIGIN: 26,
-    GRID_STEP: 29,
-    UV_FLOATS_PER_VERTEX: 30,
-    PICK_ID: 31
+    MATRIX_ROWS: 0,
+    PRIMITIVE: 12,
+    FLAGS: 13,
+    MAX_SCALE: 14,
+    FIRST_PAIR_BIT: 15
+};
+
+/**
+ * Word offsets into an objectData primitive row (OBJECT_DATA_U32S words, after the instance
+ * rows):
+ * - [0-3] f32 local bounding sphere (cx, cy, cz, r)
+ * - [4-6] f32 position grid origin, [7] f32 grid step (per-resource quantisation)
+ * - [8] u32 first meshlet id (world-global), [9] u32 meshlet count, [10] u32 material row
+ * - [11] u32 UV floats per vertex (per-resource page attribute layout)
+ * - [12] u32 the world's first pick id (an instance picks as this plus its index)
+ * - [13-15] reserved
+ *
+ * @ignore
+ */
+export const PRIMITIVE_DATA = {
+    SPHERE: 0,
+    GRID_ORIGIN: 4,
+    GRID_STEP: 7,
+    FIRST_MESHLET: 8,
+    MESHLET_COUNT: 9,
+    MATERIAL: 10,
+    UV_FLOATS_PER_VERTEX: 11,
+    PICK_ID_BASE: 12
 };
 
 /** u32 per cull work item: [instance, slice start]. @type {number} */
@@ -308,7 +326,8 @@ export const MESHLET_COUNTER = {
     CUT_STAGE_BEGIN: 26,          // the current cut stage's range of the queue
     CUT_STAGE_END: 27,
     ROOT_OCCLUDED: 28,            // instances hidden behind last frame's depth, not admitted
-    CUT_WAITING: 29               // cut groups that would refine but wait for pages to stream in
+    CUT_WAITING: 29,              // cut groups that would refine but wait for pages to stream in
+    CUT_QUEUE_REJECTED: 30        // queue entries root admission could not reserve (queue demand past its capacity)
 };
 
 /**

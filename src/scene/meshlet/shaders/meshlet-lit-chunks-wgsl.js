@@ -150,12 +150,13 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         let meshletPage = meshletData[meshletIndex].page;
         let meshletVerticesOffset = meshletData[meshletIndex].verticesOffset;
 
-        // per-instance page attribute layout and position grid (resources may differ)
-        let meshletUvFloats = objectData[meshletInstance].uvFloatsPerVertex;
+        // per-primitive page attribute layout and position grid (resources may differ)
+        let meshletPrimitive = meshletPrimitiveData(meshletInstance);
+        let meshletUvFloats = meshletPrimitive.uvFloatsPerVertex;
         let meshletHasTangents = (objectData[meshletInstance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
         let meshletHasColors = (objectData[meshletInstance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
-        let meshletGridOrigin = meshletObjectGridOrigin(meshletInstance);
-        let meshletGridStep = objectData[meshletInstance].gridStep;
+        let meshletGridOrigin = meshletPrimitive.gridOrigin;
+        let meshletGridStep = meshletPrimitive.gridStep;
 
         let meshletLayout = meshletPageLayout(residency[meshletPage] * uniform.pageSizeWords, meshletHasTangents, meshletUvFloats, meshletHasColors);
         let meshletVert = pagePool[meshletLayout.meshletVertexBase + meshletVerticesOffset + meshletLocalVert];
@@ -175,7 +176,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         dMeshletHovered = select(0u, 1u, (meshletOutlineFlags & ${OBJECT_FLAG_HOVERED}u) != 0u);
         #endif
         vertex_normal = meshletDecodeOct16(pagePool[meshletLayout.normalBase + meshletVert]);
-        dMeshletModelMatrix = objectData[meshletInstance].worldMatrix;
+        dMeshletModelMatrix = meshletInstanceMatrix(meshletInstance);
         #ifdef SHADOW_PASS
         #if LIGHT_TYPE == DIRECTIONAL
         // A simplified cluster lies within its error of the true surface - above it as often
@@ -194,8 +195,8 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         dMeshletModelMatrix[3] = dMeshletModelMatrix[3] + vec4f(meshletAwayFromLight * meshletLodError, 0.0);
         #endif
         #endif
-        dMeshletMatRow = objectData[meshletInstance].material;
-        dMeshletPickId = objectData[meshletInstance].pickId;
+        dMeshletMatRow = meshletPrimitive.material;
+        dMeshletPickId = meshletPrimitive.pickIdBase + meshletInstance;
 
         ${uvs.map(n => /* wgsl */ `
         // channel ${n}: two floats per channel per vertex, present when the page carries them

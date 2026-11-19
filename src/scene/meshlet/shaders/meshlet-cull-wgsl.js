@@ -4,7 +4,7 @@
  * `var<storage>` resources).
  *
  * The world's buffers are read through the typed views in meshlet-page-wgsl.js
- * (`objectData[instance].sphere`, `meshletData[meshlet].page`, ...); their layouts are the
+ * (`objectData[instance].flags`, `meshletData[meshlet].page`, ...); their layouts are the
  * OBJECT_DATA / MESHLET_DATA enums in constants.js. The remaining raw buffers:
  * - counters: MESHLET_COUNTER.* — work items, records, then per-bucket cursors, committed
  *   ends and unclamped demand (the demand block survives the phase-2 reset; the CPU grows the
@@ -166,10 +166,10 @@ export const instanceCullWGSL = /* wgsl */ `
             return 0u;
         }
 
-        let worldMatrix = objectData[instance].worldMatrix;
-        let localSphere = objectData[instance].sphere;
+        let primitive = meshletPrimitiveData(instance);
+        let localSphere = primitive.sphere;
         let radius = localSphere.w * objectData[instance].maxScale;
-        let center = (worldMatrix * vec4f(localSphere.xyz, 1.0)).xyz;
+        let center = (meshletInstanceMatrix(instance) * vec4f(localSphere.xyz, 1.0)).xyz;
         if (!meshletInCullVolume(center, radius)) {
             return 0u;
         }
@@ -177,8 +177,8 @@ export const instanceCullWGSL = /* wgsl */ `
         // Selected meshlets lie no finer than the cut's finest refined level (the cut records it
         // per instance) or the DAG's lowest root level. Meshlets are level-major, finest first,
         // so skip every finer level rather than scanning the whole DAG of a distant instance.
-        let meshletCount = objectData[instance].meshletCount;
-        let firstMeshlet = objectData[instance].firstMeshlet;
+        let meshletCount = primitive.meshletCount;
+        let firstMeshlet = primitive.firstMeshlet;
         var level = levelStarts[firstMeshlet];
         let finest = admittedBits[uniform.levelBase + instance];
         if (finest != 0u) { level = min(level, ${MESHLET_LEVEL_BIAS}u - finest); }
@@ -258,10 +258,11 @@ export const compactMeshletsWGSL = /* wgsl */ `
     var<workgroup> selectedBase: u32;
 
     fn isSelected(instance: u32, localIndex: u32) -> bool {
-        if (localIndex >= objectData[instance].meshletCount) { return false; }
+        let primitive = meshletPrimitiveData(instance);
+        if (localIndex >= primitive.meshletCount) { return false; }
         let admission = uniform.totalPairs + instance;
         if ((claimBits[admission >> 5u] & (1u << (admission & 31u))) == 0u) { return false; }
-        let meshlet = objectData[instance].firstMeshlet + localIndex;
+        let meshlet = primitive.firstMeshlet + localIndex;
         let pairBase = objectData[instance].firstPairBit;
         let parent = selectionTopology[meshlet].x;
         if (parent != ${MESHLET_NO_PARENT}u) {
@@ -471,9 +472,10 @@ export const meshletCullWGSL = /* wgsl */ `
         let selected = selectedMeshlets[selectedIndex];
         let instance = selected.x;
         let localIndex = selected.y;
-        let meshlet = objectData[instance].firstMeshlet + localIndex;
+        let primitive = meshletPrimitiveData(instance);
+        let meshlet = primitive.firstMeshlet + localIndex;
 
-        let worldMatrix = objectData[instance].worldMatrix;
+        let worldMatrix = meshletInstanceMatrix(instance);
         let maxScale = objectData[instance].maxScale;
         let camPos = cullParams[${CULL_PARAMS.CAMERA}u].xyz;
         let projScale = cullParams[${CULL_PARAMS.CAMERA}u].w;
@@ -570,7 +572,7 @@ export const meshletCullWGSL = /* wgsl */ `
             // +1 so a mark of 0 means "not seen this frame"; 4095 caps the mark at 12 bits
             let texelRate = clamp(u32(${TEXEL_RATE_PER_MIP}.0 * log2(max(screenPx / uvSpan, 1.0))) + 1u, 1u, 4095u);
             let texelRateMarkBase = u32(cullParams[${CULL_PARAMS.STREAMING}u].x);
-            atomicMax(&requests[texelRateMarkBase + objectData[instance].material], texelRate);
+            atomicMax(&requests[texelRateMarkBase + primitive.material], texelRate);
         }
 
         // Residency was checked for the entire replacement before its cut bit was set.
@@ -699,7 +701,7 @@ export const indexWriteWGSL = /* wgsl */ `
         let page = meshletData[meshlet].page;
 
         // per-instance page attribute layout (resources may differ)
-        let uvFloatsPerVertex = objectData[instance].uvFloatsPerVertex;
+        let uvFloatsPerVertex = meshletPrimitiveData(instance).uvFloatsPerVertex;
         let hasTangents = (objectData[instance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
         let hasColors = (objectData[instance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
 
@@ -708,7 +710,7 @@ export const indexWriteWGSL = /* wgsl */ `
         let pageBase = residency[page] * uniform.pageSizeWords;
         let pageLayout = meshletPageLayout(pageBase, hasTangents, uvFloatsPerVertex, hasColors);
         let triangleStreamByte = (pageLayout.meshletVertexBase + pageLayout.meshletVertexCount) * 4u + triangleOffset;
-        let worldMatrix = objectData[instance].worldMatrix;
+        let worldMatrix = meshletInstanceMatrix(instance);
         let mirrored = dot(cross(worldMatrix[0].xyz, worldMatrix[1].xyz), worldMatrix[2].xyz) < 0.0;
 
         for (var corner = lane; corner < cornerCount; corner += lanes) {

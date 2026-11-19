@@ -1,14 +1,13 @@
 // @config
-//
+// @flag WEBGL_DISABLED
+// @flag WEBGPU_BARE_DISABLED
+// @flag HIDDEN
+
 // The JungleRuins scene as streamed meshlets: an 8 km terrain under millions of scattered trees,
 // saplings and seedlings, with the pyramid and the banyan forest in the 1 km cinematic core. Each
 // group (terrain, static, trees, plants) is its own bake; every scatter is one prototype mesh
 // with an EXT_mesh_gpu_instancing node, so all copies of a plant share one set of pages. See
 // examples/utils/jungle/usd2glb.py for building the assets.
-//
-// @flag WEBGL_DISABLED
-// @flag WEBGPU_BARE_DISABLED
-// @flag HIDDEN
 
 import {
     ADDRESS_CLAMP_TO_EDGE,

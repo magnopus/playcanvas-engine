@@ -1,15 +1,14 @@
 // @config
-//
+// @flag WEBGL_DISABLED
+// @flag HIDDEN
+// @flag HIDDEN_IN_DEV
+
 // GPU-driven meshlet rendering: the Bistro (100k meshlets, 166 MB of geometry pages) streams on
 // demand over HTTP Range requests from its pinned root pages - the GPU cull pass marks the
 // pages its LOD cut needs, missing clusters render their nearest resident ancestor, and the
 // scene refines coarse to fine with no holes. A grid of Stanford bunnies (a separately baked
 // asset sharing the world) sits in the street. Two-phase HZB occlusion culling can be toggled:
 // watch the triangles-drawn counter drop when the buildings occlude the street behind them.
-//
-// @flag WEBGL_DISABLED
-// @flag HIDDEN
-// @flag HIDDEN_IN_DEV
 
 import {
     ADDRESS_CLAMP_TO_EDGE,

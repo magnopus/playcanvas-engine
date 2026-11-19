@@ -887,14 +887,14 @@ class MeshletShadowRenderer {
         const { director } = this;
         const faces = light.numShadowFaces;
         // sized exactly as a view sizes its own (one bit per instance-meshlet pair, 32 to a
-        // word; one work item per WORK_ITEM_U32S words)
+        // word; work items for the root list, one per instance - see MeshletWorld#rootListItems)
         if (this.shareClaimBits && !this._claimBits) {
             const words = claimWordCount(director.world.totalPairs, director.world.instanceCount);
             this._claimBits = new StorageBuffer(this.device, words * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         }
         if (!this._workItems) {
             this._workItems = new StorageBuffer(this.device,
-                Math.max(director.world.workItemCapacity * WORK_ITEM_U32S * BYTES_PER_WORD, 16), BUFFERUSAGE_COPY_DST);
+                director.world.rootListItems * WORK_ITEM_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         }
         this._viewsDirty = true;
         const views = [];

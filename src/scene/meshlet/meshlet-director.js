@@ -721,7 +721,7 @@ class MeshletDirector {
             });
         });
         this.shadowRenderer?.reset();
-        const { poolBytes, texturePoolBytes, maxFineTextureSize, initialIndices, initialRecords, indexBudgetFraction } = prevWorld;
+        const { poolBytes, texturePoolBytes, maxFineTextureSize, initialIndices, initialRecords, indexBudgetFraction, rootBudgetFraction } = prevWorld;
         this.residency = null;
         this.rootsLoaded = null;
         this._playable = false;
@@ -734,6 +734,7 @@ class MeshletDirector {
         this.world.maxInstallBytesPerFrame = prevWorld.maxInstallBytesPerFrame;
         this.world.initialIndices = initialIndices;
         this.world.indexBudgetFraction = indexBudgetFraction;
+        this.world.rootBudgetFraction = rootBudgetFraction;
         this.world.initialRecords = initialRecords;
         this.world.transcode = this._transcode;
         this.world.fetchScheduler = this.fetchScheduler;
@@ -805,14 +806,17 @@ class MeshletDirector {
         const prevEntries = prevWorld.buildEntries;
         const { poolBytes, texturePoolBytes } = world;
 
+        // the same placement list (an instance list is compared by identity, a placement array
+        // by its entries), repeated as often
         const sameInstances = (a, b) => {
             if (a === b) return true;
-            if (!a || !b || a.length !== b.length) return false;
+            if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
             for (let i = 0; i < a.length; i++) {
                 if (a[i] !== b[i]) return false;
             }
             return true;
         };
+        const repeatOf = transform => (Array.isArray(transform) ? transform.length : 1);
         let prefix = 0;
         let adoptedPages = 0;
         let carriedPairs = 0;
@@ -822,7 +826,7 @@ class MeshletDirector {
             const o = prevEntries[prefix];
             if (n.resource !== o.resource || (n.baseUrl ?? null) !== o.baseUrl ||
                 !o.streamed || !!n.shardBuffers) break;
-            if (pairPrefixIntact && sameInstances(n.instances ?? n.resource.instances, o.instances)) {
+            if (pairPrefixIntact && sameInstances(n.instances ?? n.resource.instances, o.instances) && repeatOf(n.transform) === o.repeat) {
                 carriedPairs += prevWorld.placements[prefix].pairCount;
             } else {
                 pairPrefixIntact = false;

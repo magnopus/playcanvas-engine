@@ -2,7 +2,7 @@ import { expect } from 'chai';
 
 import { createCutFixture } from './meshlet-cut-fixture.mjs';
 import {
-    MESHLET_CELL_SIZE, MESHLET_CUT_ROOT_CHUNK, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT, OBJECT_DATA as O, OBJECT_DATA_U32S
+    MESHLET_CELL_SIZE, MESHLET_CUT_ROOT_CHUNK, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCells } from '../../../src/scene/meshlet/meshlet-cells.js';
 import { MeshletCutData } from '../../../src/scene/meshlet/meshlet-cut-data.js';
@@ -21,27 +21,16 @@ const createDevice = () => ({
     })
 });
 
-// `count` placements of the fixture primitive at the given positions and bounding radii
-const createObjects = (positions, radii) => {
-    const { objects: one } = createCutFixture();
-    const objects = new Uint32Array(positions.length * OBJECT_DATA_U32S);
-    const f = new Float32Array(objects.buffer);
-    positions.forEach((p, i) => {
-        const row = i * OBJECT_DATA_U32S;
-        objects.set(one, row);
-        f[row + 12] = p[0];
-        f[row + 13] = p[1];
-        f[row + 14] = p[2];
-        f[row + O.SPHERE + 3] = radii[i];
-    });
-    return { objects, f };
+// world spheres of instances at the given positions and bounding radii, and the callback the
+// cells read them through
+const createSpheres = (positions, radii) => {
+    const spheres = new Float32Array(positions.length * 4);
+    positions.forEach((p, i) => spheres.set([p[0], p[1], p[2], radii[i]], i * 4));
+    const sphereOf = (i, out, offset) => out.set(spheres.subarray(i * 4, i * 4 + 4), offset);
+    return { spheres, sphereOf };
 };
 
-// the world sphere of instance i, as the cull shaders compute it
-const worldSphere = (f, i) => {
-    const row = i * OBJECT_DATA_U32S;
-    return [f[row + 12], f[row + 13], f[row + 14], f[row + O.SPHERE + 3] * f[row + O.MAX_SCALE]];
-};
+const worldSphere = (spheres, i) => Array.from(spheres.subarray(i * 4, i * 4 + 4));
 
 const contains = (outer, inner) => Math.hypot(outer[0] - inner[0], outer[1] - inner[1], outer[2] - inner[2]) + inner[3] <= outer[3];
 
@@ -59,8 +48,8 @@ describe('MeshletCells', function () {
             positions.push([i * 10, 0, 500]);
             radii.push(600);
         }
-        const { objects, f } = createObjects(positions, radii);
-        const cells = new MeshletCells(createDevice(), f, positions.length);
+        const { spheres, sphereOf } = createSpheres(positions, radii);
+        const cells = new MeshletCells(createDevice(), positions.length, sphereOf);
         try {
             expect(cells.cellCount).to.equal(3);
             expect(Array.from(cells.instanceOrder).sort((a, b) => a - b), 'a permutation of the instances')
@@ -70,13 +59,12 @@ describe('MeshletCells', function () {
                 const sphere = Array.from(cells.spheres.subarray(c * 4, c * 4 + 4));
                 members.forEach((i) => {
                     expect(cells.instanceCell[i]).to.equal(c);
-                    expect(contains(sphere, worldSphere(f, i)), `cell ${c} bounds instance ${i}`).to.equal(true);
+                    expect(contains(sphere, worldSphere(spheres, i)), `cell ${c} bounds instance ${i}`).to.equal(true);
                 });
                 // a cell is one cluster or the large instances, never a mix
                 const kinds = new Set(members.map(i => (i >= 128 ? 'large' : `cluster${i % 2}`)));
                 expect(kinds.size, `cell ${c} holds ${[...kinds]}`).to.equal(1);
             }
-            expect(objects.length).to.equal(positions.length * OBJECT_DATA_U32S);
         } finally {
             cells.destroy();
         }
@@ -84,16 +72,16 @@ describe('MeshletCells', function () {
 
     it('refits only the cells of moved instances and uploads just their range', function () {
         const positions = Array.from({ length: 130 }, (_, i) => [i, 0, 0]);
-        const { f } = createObjects(positions, positions.map(() => 1));
-        const cells = new MeshletCells(createDevice(), f, positions.length);
+        const { spheres, sphereOf } = createSpheres(positions, positions.map(() => 1));
+        const cells = new MeshletCells(createDevice(), positions.length, sphereOf);
         try {
             const moved = 70;
             const cell = cells.instanceCell[moved];
-            f[moved * OBJECT_DATA_U32S + 12] = 5000;
+            spheres[moved * 4] = 5000;
             cells.boundsBuffer.impl.writes.length = 0;
-            cells.refit(f, moved, 1);
+            cells.refit(moved, 1);
             const sphere = Array.from(cells.spheres.subarray(cell * 4, cell * 4 + 4));
-            expect(contains(sphere, worldSphere(f, moved))).to.equal(true);
+            expect(contains(sphere, worldSphere(spheres, moved))).to.equal(true);
             expect(cells.boundsBuffer.impl.writes).to.deep.equal([{ offset: cell * 16, dataOffset: cell * 4, size: 4 }]);
         } finally {
             cells.destroy();
@@ -104,9 +92,9 @@ describe('MeshletCells', function () {
 describe('MeshletCutData queue ownership', function () {
 
     it('gives every task exactly one owner: its first parent, or the root when it has none', function () {
-        const { meshlets, objects } = createCutFixture();
+        const { meshlets, instances } = createCutFixture();
         const device = createDevice();
-        const cut = new MeshletCutData(device, meshlets, objects);
+        const cut = new MeshletCutData(device, meshlets, instances);
         try {
             const words = cut.groups.impl.words;
             const rootOffset = words[0];
@@ -116,7 +104,7 @@ describe('MeshletCutData queue ownership', function () {
             const rowOf = new Map();
             const groupTasks = [];
             for (let offset = 1; offset < rootOffset;) {
-                rowOf.set(words[offset] - objects[O.FIRST_MESHLET], offset);
+                rowOf.set(words[offset] - instances.first(0), offset);
                 groupTasks.push(offset);
                 const ownedStart = words[offset + 2] + words[offset + 3];
                 // the children list follows the owned task list
@@ -147,13 +135,13 @@ describe('MeshletCutData queue ownership', function () {
     });
 
     it('lists each group\'s children and the roots in chunks, for the emit pass', function () {
-        const { meshlets, objects } = createCutFixture();
+        const { meshlets, instances } = createCutFixture();
         const device = createDevice();
-        const cut = new MeshletCutData(device, meshlets, objects);
+        const cut = new MeshletCutData(device, meshlets, instances);
         try {
             const words = cut.groups.impl.words;
             const rootOffset = words[0];
-            const first = objects[O.FIRST_MESHLET];
+            const first = instances.first(0);
             const parentOf = m => meshlets[m * MESHLET_DATA_U32S + M.PARENT];
             const listAfterOwned = (offset) => {
                 const ownedStart = words[offset + 2] + words[offset + 3];

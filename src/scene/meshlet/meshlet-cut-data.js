@@ -2,7 +2,7 @@ import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import {
     MESHLET_CUT_ROOT_CHUNK, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT,
-    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_SLOPPY, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA as O, OBJECT_DATA_U32S
+    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_SLOPPY, MESHLET_FLAG_TWO_SIDED
 } from './constants.js';
 
 /**
@@ -167,9 +167,10 @@ class MeshletCutData {
      * @param {import('../../platform/graphics/graphics-device.js').GraphicsDevice} device - Device.
      * @param {Uint32Array|MeshletRecordSource} meshlets - World records, whole or one primitive at
      * a time; reserved words receive primitive-local birth representatives.
-     * @param {Uint32Array} objects - World instance records.
+     * @param {{ count: number, first: (instance: number) => number, meshletCount: (instance: number) => number }} instances - The
+     * world's instances: per instance, its primitive's first world-global meshlet and meshlet count.
      */
-    constructor(device, meshlets, objects) {
+    constructor(device, meshlets, instances) {
         const records = recordSource(meshlets);
         const words = new U32Builder();
         const levelSet = new Set();
@@ -186,12 +187,12 @@ class MeshletCutData {
         // Compaction scans every LOD. Keep its two links contiguous instead of fetching
         // them from 128-byte geometry records for every instance of a primitive.
         const topology = new Uint32Array(records.count * 2);
-        const instanceCount = objects.length / OBJECT_DATA_U32S;
+        const instanceCount = instances.count;
         // Leading words [0, instanceCount): each instance's root header offset in cutGroups.
         for (let i = 0; i < instanceCount; i++) words.push(0);
         for (let instance = 0; instance < instanceCount; instance++) {
-            const first = objects[instance * OBJECT_DATA_U32S + O.FIRST_MESHLET];
-            const count = objects[instance * OBJECT_DATA_U32S + O.MESHLET_COUNT];
+            const first = instances.first(instance);
+            const count = instances.meshletCount(instance);
             let primitive = primitives.get(first);
             if (!primitive) {
                 const source = records.get(first, count);

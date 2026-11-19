@@ -41,6 +41,7 @@ const makeWorld = (device, overrides = {}) => {
     return {
         totalPairs: PAIRS,
         workItemCapacity: 50,
+        rootListItems: 7,
         cut: { rootIndices: [0, 0, 0], rootRecords: 0, stageLevels: [] },
         cells: { cellCount: 1, boundsBuffer: {}, instancesBuffer: {} },
         recordCapacity: 4000,
@@ -103,7 +104,18 @@ describe('MeshletView', function () {
         const view = makeView();
         expect(view.indexCapacity).to.deep.equal([300, 60, 30]);
         expect(view.recordCapacity).to.equal(100);
-        expect(Array.from(view.cutBudgetInitial)).to.deep.equal([0, 0, 0, 0, 0]);
+        expect(Array.from(view.cutBudgetInitial)).to.deep.equal([0, 0, 0, 0, 0, 0]);
+        view.destroy();
+    });
+
+    it('never grows its records or cut queue past the budget\'s ceilings', function () {
+        const view = makeView({}, makeWorld(device, { recordCeiling: 150, cutQueueCeiling: 500 }));
+        expect(view.recordCapacity).to.equal(100);
+        expect(view.growRecordsBuffer(1000)).to.equal(true);
+        expect(view.recordCapacity, 'grown to the ceiling, not to demand').to.equal(150);
+        expect(view.growRecordsBuffer(5000)).to.equal(false);
+        expect(view.cutQueueCapacity, 'starts no larger than its ceiling').to.equal(500);
+        expect(view.growCutQueue(10000)).to.equal(false);
         view.destroy();
     });
 
@@ -113,7 +125,9 @@ describe('MeshletView', function () {
         expect(view.cullParamsBuffer.byteSize).to.equal(CULL_PARAMS_VEC4S * 16);
         // the counters, then the visible-cell list (one cell in the mock world) and no chunks
         expect(view.countersBuffer.byteSize).to.equal((MESHLET_VISIBLE_CELLS_BASE + 1) * 4);
-        expect(view.workItemsBuffer.byteSize).to.equal(50 * WORK_ITEM_U32S * 4);
+        // direct emit keeps only the root list there, one entry per instance - not the worst case
+        expect(view.workItemsBuffer.byteSize).to.equal(7 * WORK_ITEM_U32S * 4);
+        expect(view.workItemCapacity).to.equal(7);
         expect(view.recordCapacity, 'starts at the initial record count').to.equal(100);
         expect(view.recordsBuffer.byteSize).to.equal(100 * RECORD_U32S * 4);
         expect(view.selectedMeshletsBuffer.byteSize).to.equal(100 * 8);
@@ -133,7 +147,7 @@ describe('MeshletView', function () {
     });
 
     it('starts a single-phase view on the shared placeholders with one set of instances', function () {
-        const shared = { claim: { byteSize: 8, destroy() {} }, work: { byteSize: 8, destroy() {} } };
+        const shared = { claim: { byteSize: 8, destroy() {} }, work: { byteSize: 7 * WORK_ITEM_U32S * 4, destroy() {} } };
         const view = makeView({
             singlePhase: true, castShadow: true, sharedClaimBits: shared.claim, sharedWorkItems: shared.work, initialIndexScale: 0.5
         });

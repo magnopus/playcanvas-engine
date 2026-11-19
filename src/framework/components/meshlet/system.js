@@ -1176,14 +1176,10 @@ class MeshletComponentSystem extends ComponentSystem {
     _buildPartition(world, groups, partition, components) {
         for (let gi = 0; gi < groups.length; gi++) {
             const { resource, baseUrl, fetchOptions, components: members } = groups[gi];
-            const per = resource.instances.length;
+            const per = resource.instances.count;
 
-            // one placement per group; each member owns a sub-range of its instances
-            let merged = null;
-            if (members.length > 1) {
-                merged = [];
-                for (let mi = 0; mi < members.length; mi++) merged.push(...resource.instances);
-            }
+            // one placement per group: the resource's instance list repeated once per member
+            // (one root transform each), so each member owns a run of the placement's instances
             // The build bakes each member's current transform and the default state (shown,
             // casting), so the first sync after it only rewrites what actually differs - not
             // every row of a world of millions of instances.
@@ -1205,7 +1201,7 @@ class MeshletComponentSystem extends ComponentSystem {
                 component._queueState();
                 components.push(component);
             }
-            world.addStreamedResource(resource, transforms, baseUrl, merged, fetchOptions);
+            world.addStreamedResource(resource, transforms, baseUrl, null, fetchOptions);
         }
     }
 

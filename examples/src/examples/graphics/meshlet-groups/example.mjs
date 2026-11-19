@@ -1,14 +1,13 @@
 // @config
-//
-// Mission ISS baked with simplification groups of 8, 16 and 32. Orbit, pan and zoom any
-// pane to move all cameras together. The LOD error and colour mode are shared. Each
-// geometry pool fits its entire asset. See assets/meshlets/README.md for local bake setup.
-//
 // @flag WEBGL_DISABLED
 // @flag WEBGPU_BARE_DISABLED
 // @flag NO_MINISTATS
 // @flag HIDDEN
 // @flag HIDDEN_IN_DEV
+
+// Mission ISS baked with simplification groups of 8, 16 and 32. Orbit, pan and zoom any
+// pane to move all cameras together. The LOD error and colour mode are shared. Each
+// geometry pool fits its entire asset. See assets/meshlets/README.md for local bake setup.
 
 import {
     AppBase,

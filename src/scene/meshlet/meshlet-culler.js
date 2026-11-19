@@ -201,6 +201,11 @@ class MeshletCuller {
     set directEmit(value) {
         if (this._directEmit !== value) {
             this._directEmit = value;
+            // compaction fans every admitted instance out over its DAG levels: it needs the
+            // world's worst case of work items, where direct emit only keeps the root list there
+            if (!value && this.view.ensureWorkItems(this.world.workItemCapacity)) {
+                this.bindWorkItems(this.view);
+            }
             this._buildChains();
         }
     }
@@ -342,10 +347,13 @@ class MeshletCuller {
         // candidates by band, then admit band by band - largest on screen first - each pass over
         // its own band's range only. Both the classify-order list and the band-sorted copy after
         // it live in the work-item buffer, which is unused until the instance cull fills it.
-        const rootListWords = world.workItemCapacity * WORK_ITEM_U32S;
+        const rootListWords = view.workItemCapacity * WORK_ITEM_U32S;
         if (rootListWords < 2 * world.instanceCount) {
             throw new Error(`MeshletCuller: work items (${rootListWords} words) cannot hold the root lists of ${world.instanceCount} instances.`);
         }
+        // under a budget, roots take only their share of each capacity (see
+        // MeshletWorld#rootBudgetFraction); unbudgeted, the buffers grow to whatever they ask for
+        const rootShare = world.poolBytes > 0 ? Math.min(Math.max(world.rootBudgetFraction, 0.05), 1) : 1;
         this.rootBandsBuffer = new StorageBuffer(device, ROOT_BANDS_WORDS * 4, BUFFERUSAGE_COPY_DST);
         this.persistBase = claimPersistBase(world.totalPairs, world.instanceCount);
         this.persistWords = Math.ceil(world.instanceCount / 32);
@@ -390,6 +398,7 @@ class MeshletCuller {
             compute.setParameter('rootList', view.workItemsBuffer);
             compute.setParameter('rootBands', this.rootBandsBuffer);
             compute.setParameter('sortedBase', world.instanceCount);
+            compute.setParameter('rootShare', rootShare);
             this.rootAdmit.push(compute);
         }
 
@@ -434,7 +443,7 @@ class MeshletCuller {
         instanceCull.setParameter('admittedBits', view.claimBitsBuffer);
         instanceCull.setParameter('levelBase', claimLevelBase(world.totalPairs, world.instanceCount));
         instanceCull.setParameter('levelStarts', world.cut.levelStarts);
-        instanceCull.setParameter('workItemCapacity', world.workItemCapacity);
+        instanceCull.setParameter('workItemCapacity', view.workItemCapacity);
         instanceCull.setParameter('objectData', world.objectDataBuffer);
         instanceCull.setParameter('cullParams', view.cullParamsBuffer);
         instanceCull.setParameter('workItems', view.workItemsBuffer);
@@ -443,7 +452,7 @@ class MeshletCuller {
 
         this.compactMeshlets.setParameter('totalPairs', world.totalPairs);
         this.compactMeshlets.setParameter('freeBase', world.totalPairs + world.instanceCount);
-        this.compactMeshlets.setParameter('workItemCapacity', world.workItemCapacity);
+        this.compactMeshlets.setParameter('workItemCapacity', view.workItemCapacity);
         this.compactMeshlets.setParameter('recordCapacity', view.recordCapacity);
         this.compactMeshlets.setParameter('objectData', world.objectDataBuffer);
         this.compactMeshlets.setParameter('meshletData', world.meshletDataBuffer);
@@ -459,7 +468,7 @@ class MeshletCuller {
         this.dispatchArgs.setParameter('counterIndex', MESHLET_COUNTER.WORK_ITEMS);
         // compaction packs several work items into one workgroup
         this.dispatchArgs.setParameter('groupSize', MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE);
-        this.dispatchArgs.setParameter('workItemCapacity', world.workItemCapacity);
+        this.dispatchArgs.setParameter('workItemCapacity', view.workItemCapacity);
         this.dispatchArgs.setParameter('counters', view.countersBuffer);
 
         for (const meshletCull of [this.meshletCull, this.meshletCullPhase2]) {
@@ -586,6 +595,23 @@ class MeshletCuller {
         for (const compute of [this.finalizeArgs, this.finalizeArgsPhase2]) {
             compute.setParameter('recordCapacity', view.recordCapacity);
         }
+    }
+
+    /**
+     * Re-applies the work-item buffer, which also holds the root lists, and its capacity after
+     * {@link MeshletView#ensureWorkItems}.
+     *
+     * @param {MeshletView} view - The view.
+     */
+    bindWorkItems(view) {
+        for (const compute of [this.rootClassify, this.rootScatter, ...this.rootAdmit]) {
+            compute.setParameter('rootList', view.workItemsBuffer);
+        }
+        for (const compute of [this.instanceCull, this.compactMeshlets]) {
+            compute.setParameter('workItems', view.workItemsBuffer);
+            compute.setParameter('workItemCapacity', view.workItemCapacity);
+        }
+        this.dispatchArgs.setParameter('workItemCapacity', view.workItemCapacity);
     }
 
     /**

@@ -5,7 +5,7 @@ import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-gra
 import {
     INDIRECT_DRAW_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED,
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COMPACT_SLICE, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S,
-    MESHLET_DISPATCH_WIDTH, MESHLET_INDEX_WRITE_RECORDS, OBJECT_BUCKET_SHIFT, OBJECT_DATA, OBJECT_DATA_U32S, PAGE_HEADER, RECORD_U32S, TEX_RESIDENCY_U32S,
+    MESHLET_DISPATCH_WIDTH, MESHLET_INDEX_WRITE_RECORDS, OBJECT_BUCKET_SHIFT, OBJECT_DATA, OBJECT_DATA_U32S, PAGE_HEADER, PRIMITIVE_DATA, RECORD_U32S, TEX_RESIDENCY_U32S,
     WORK_ITEM_U32S
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
@@ -65,7 +65,7 @@ describe('meshlet cull shaders', function () {
         expect(meshletCullWGSL).to.not.include(`counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket]`);
         expect(meshletRootAdmitWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indices)`);
         expect(meshletRootAdmitWGSL.indexOf(`counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indices`))
-        .to.be.below(meshletRootAdmitWGSL.indexOf('if (indexBefore + indices > capacity'));
+        .to.be.below(meshletRootAdmitWGSL.indexOf('let fits = queueFits && indexBefore + indices <= indexLimit'));
         expect(meshletCullWGSL).to.include(`atomicMax(&counters[${MESHLET_COUNTER.COMMITTED_BASE}u + bucket], cursor + indexNeed)`);
         // demand is recorded BEFORE the capacity check so an overflowing frame still reports it
         expect(meshletCutQueueWGSL.indexOf(`counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indexNeed`))
@@ -98,6 +98,26 @@ describe('meshlet cull shaders', function () {
         expect(meshletCutQueueWGSL).to.not.include('rootStage');
     });
 
+    it('admit roots only within their share of each capacity, reserving their queue entries up front', function () {
+        // the rest of every capacity is left for the cut to refine what was admitted
+        expect(meshletRootAdmitWGSL).to.include('let indexLimit = u32(f32(capacity) * uniform.rootShare);');
+        expect(meshletRootAdmitWGSL).to.include('let recordLimit = u32(f32(uniform.recordCapacity) * uniform.rootShare);');
+        expect(meshletRootAdmitWGSL).to.include('queueBefore + queueNeed <= u32(f32(uniform.queueCapacity) * uniform.rootShare)');
+        // the queue charge is a tally like the others; ranges are appended only once admitted,
+        // and never handed back - and no compare-exchange loop serialising every instance
+        expect(meshletRootAdmitWGSL).to.include('atomicSub(&cutBudget[5u], queueNeed)');
+        expect(meshletRootAdmitWGSL).to.not.include('atomicCompareExchangeWeak');
+        expect(meshletRootAdmitWGSL).to.not.include(`atomicSub(&counters[${MESHLET_COUNTER.CUT_QUEUE_END}u]`);
+        expect(meshletRootAdmitWGSL.indexOf(`let queueBase = atomicAdd(&counters[${MESHLET_COUNTER.CUT_QUEUE_END}u], queueNeed);`))
+        .to.be.above(meshletRootAdmitWGSL.indexOf('if (!fits) {'));
+        // what did not fit still counts as queue demand
+        expect(meshletRootAdmitWGSL).to.include(`atomicAdd(&counters[${MESHLET_COUNTER.CUT_QUEUE_REJECTED}u], queueNeed)`);
+        // the claim bits are set only once every reservation succeeded
+        const fitsCheck = meshletRootAdmitWGSL.indexOf('if (!fits) {');
+        expect(fitsCheck).to.be.at.least(0);
+        expect(meshletRootAdmitWGSL.indexOf('atomicOr(&claimBits[admission >> 5u]')).to.be.above(fitsCheck);
+    });
+
     it('keeps the root passes within the per-stage storage buffer limit', function () {
         expect(count(meshletRootClassifyWGSL, /var<storage/g)).to.be.at.most(10);
         expect(count(meshletRootAdmitWGSL, /var<storage/g)).to.be.at.most(10);
@@ -119,7 +139,7 @@ describe('meshlet cull shaders', function () {
     });
 
     it('reverses triangle winding per mirrored instance without changing draw index destinations', function () {
-        expect(indexWriteWGSL).to.include('let worldMatrix = objectData[instance].worldMatrix;');
+        expect(indexWriteWGSL).to.include('let worldMatrix = meshletInstanceMatrix(instance);');
         expect(indexWriteWGSL).to.include('dot(cross(worldMatrix[0].xyz, worldMatrix[1].xyz), worldMatrix[2].xyz) < 0.0');
         expect(indexWriteWGSL).to.include('select(corner, corner - triangleCorner + (3u - triangleCorner) % 3u, mirrored)');
         expect(indexWriteWGSL).to.include('let byteIndex = triangleStreamByte + sourceCorner;');
@@ -198,15 +218,30 @@ describe('meshlet cull shaders', function () {
     };
 
     it('lay the typed struct views out exactly as the CPU-side enums describe the flat buffers', function () {
-        expectLayout(pageWGSL.MESHLET_OBJECT_STRUCT, OBJECT_DATA, OBJECT_DATA_U32S, { worldMatrix: 'MATRIX' });
+        expectLayout(pageWGSL.MESHLET_OBJECT_STRUCT, OBJECT_DATA, OBJECT_DATA_U32S);
+        expectLayout(pageWGSL.MESHLET_PRIMITIVE_STRUCT, PRIMITIVE_DATA, OBJECT_DATA_U32S);
         expectLayout(pageWGSL.MESHLET_DATA_STRUCT, MESHLET_DATA, MESHLET_DATA_U32S);
         expectLayout(pageWGSL.MESHLET_MATERIAL_STRUCT, MATERIAL_RECORD, MATERIAL_RECORD_U32S);
         expect(wgslLayout(pageWGSL.MESHLET_RECORD_STRUCT).size).to.equal(RECORD_U32S * 4);
         expect(wgslLayout(pageWGSL.MESHLET_WORK_ITEM_STRUCT).size).to.equal(WORK_ITEM_U32S * 4);
         expect(wgslLayout(pageWGSL.MESHLET_TEX_RESIDENCY_STRUCT).size).to.equal(TEX_RESIDENCY_U32S * 4);
         // every enum field is covered by a struct field (nothing addressable only from the CPU)
-        const covered = new Set(pageWGSL.MESHLET_OBJECT_STRUCT.map(([f]) => enumName(f, { worldMatrix: 'MATRIX' })));
+        const covered = new Set(pageWGSL.MESHLET_OBJECT_STRUCT.map(([f]) => enumName(f)));
         Object.keys(OBJECT_DATA).forEach(k => expect(covered.has(k), `OBJECT_DATA.${k} has a struct field`).to.equal(true));
+        const primitiveCovered = new Set(pageWGSL.MESHLET_PRIMITIVE_STRUCT.map(([f]) => enumName(f)));
+        Object.keys(PRIMITIVE_DATA).forEach(k => expect(primitiveCovered.has(k), `PRIMITIVE_DATA.${k} has a struct field`).to.equal(true));
+        // the primitive accessor reads each field from the instance-struct word its enum names
+        const accessor = pageWGSL.meshletObjectDataWGSL;
+        expect(PRIMITIVE_DATA.SPHERE / 4).to.equal(0);
+        expect(accessor).to.include('primitive.sphere = row.matrixRows[0];');
+        expect(PRIMITIVE_DATA.GRID_ORIGIN / 4).to.equal(1);
+        expect(PRIMITIVE_DATA.GRID_STEP).to.equal(7);
+        expect(accessor).to.include('primitive.gridOrigin = row.matrixRows[1].xyz;');
+        expect(accessor).to.include('primitive.gridStep = row.matrixRows[1].w;');
+        expect([PRIMITIVE_DATA.FIRST_MESHLET, PRIMITIVE_DATA.MESHLET_COUNT, PRIMITIVE_DATA.MATERIAL, PRIMITIVE_DATA.UV_FLOATS_PER_VERTEX]).to.deep.equal([8, 9, 10, 11]);
+        expect(accessor).to.include('let words = bitcast<vec4u>(row.matrixRows[2]);');
+        expect(accessor).to.include('primitive.uvFloatsPerVertex = words.w;');
+        expect(accessor).to.include('primitive.pickIdBase = row.primitive;');
     });
 
     it('encode drawn indices as record << 8 | local vertex and read the page header by name', function () {

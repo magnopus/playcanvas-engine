@@ -8,10 +8,11 @@ import {
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER_U32S, MESHLET_CULL_SLICE, MESHLET_DATA_U32S,
     MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_DAG_ROOT, MESHLET_FLAG_TWO_SIDED,
     MESHLET_INDEX_WRITE_WORKGROUP, MESHLET_INSTANCE_CULL_WORKGROUP,
-    OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED,
+    OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED, PRIMITIVE_DATA,
     PAGE_HEADER, PAGE_HEADER_BYTES, PAGE_TABLE, PAGE_TABLE_FIELDS, RECORD_U32S, TEX_RESIDENCY_U32S, TEXEL_RATE_PER_MIP,
     WORK_ITEM_U32S, claimLevelBase, claimPersistBase, claimWordCount
 } from '../../../src/scene/meshlet/constants.js';
+import { MeshletInstanceList } from '../../../src/scene/meshlet/meshlet-instance-list.js';
 import { MeshletPrimitive, MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
 
 // These constants are the runtime half of a contract with gltf-tools' MAG_meshlets_gpu /
@@ -71,7 +72,12 @@ describe('meshlet constants', function () {
     it('keeps every record field inside its record', function () {
         Object.values(MESHLET_DATA).forEach(v => expect(v).to.be.below(MESHLET_DATA_U32S));
         Object.values(OBJECT_DATA).forEach(v => expect(v).to.be.below(OBJECT_DATA_U32S));
-        expect(OBJECT_DATA.PICK_ID).to.equal(OBJECT_DATA_U32S - 1);
+        Object.values(PRIMITIVE_DATA).forEach(v => expect(v).to.be.below(OBJECT_DATA_U32S));
+        expect(OBJECT_DATA.FIRST_PAIR_BIT).to.equal(OBJECT_DATA_U32S - 1);
+        // the primitive row is read through the instance struct's words: the matrix rows hold
+        // sphere, grid and meshlet range, and the primitive word holds the pick id base
+        expect(OBJECT_DATA.PRIMITIVE).to.equal(PRIMITIVE_DATA.PICK_ID_BASE);
+        expect(PRIMITIVE_DATA.UV_FLOATS_PER_VERTEX).to.be.below(OBJECT_DATA.PRIMITIVE);
         expect(MESHLET_DATA.SPHERE + 4).to.be.at.most(MESHLET_DATA.CONE_APEX);
         expect(MESHLET_DATA.GROUP_SPHERE + 4).to.be.at.most(MESHLET_DATA.PARENT);
     });
@@ -151,14 +157,16 @@ describe('MeshletResource', function () {
         const instances = [{ primIndex: 0, matrix: new Float32Array(16) }, { primIndex: 1, matrix: new Float32Array(16) }];
         const resource = new MeshletResource(null, [makePrimitive(5), makePrimitive(7)], makeManifest(3), instances);
         expect(resource.totalMeshlets).to.equal(12);
-        expect(resource.instances).to.equal(instances);
+        expect(resource.instances).to.be.an.instanceof(MeshletInstanceList);
+        expect(Array.from(resource.instances.primIndex)).to.deep.equal([0, 1]);
+        expect(resource.instances.transforms, 'one transform per distinct matrix').to.have.lengthOf(2 * 12);
         expect(resource.materialTable).to.equal(null);
         expect(resource.textureManifest).to.equal(null);
     });
 
     it('defaults to no placements and releases its data on destroy', function () {
         const resource = new MeshletResource(null, [makePrimitive(1)], makeManifest(1));
-        expect(resource.instances).to.deep.equal([]);
+        expect(resource.instances.count).to.equal(0);
         resource.destroy();
         expect(resource.primitives).to.deep.equal([]);
         expect(resource.manifest).to.equal(null);

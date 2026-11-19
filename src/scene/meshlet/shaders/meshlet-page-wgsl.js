@@ -21,18 +21,30 @@ import {
 
 /** @type {StructFields} */
 export const MESHLET_OBJECT_STRUCT = [
-    ['worldMatrix', 'mat4x4f', 'column major'],
+    ['matrixRows', 'array<vec4f, 3>', 'rows 0-2 of the affine world matrix'],
+    ['primitive', 'u32', 'objectData row of the instance\'s primitive'],
+    ['flags', 'u32', 'OBJECT_FLAG_*'],
+    ['maxScale', 'f32', 'largest axis scale of the world matrix - scales radii and errors'],
+    ['firstPairBit', 'u32', 'base of this instance\'s (instance, meshlet) bit range']
+];
+
+/**
+ * A primitive row of objectData, as {@link meshletObjectDataWGSL}'s `meshletPrimitiveData`
+ * returns it. The row is stored in the instance struct's words (both are OBJECT_DATA_U32S
+ * long), so this table documents and tests the reinterpretation rather than a buffer view.
+ *
+ * @type {StructFields}
+ */
+export const MESHLET_PRIMITIVE_STRUCT = [
     ['sphere', 'vec4f', 'local bounding sphere: center, radius'],
+    ['gridOrigin', 'vec3f', 'position grid of the primitive\'s resource'],
+    ['gridStep', 'f32'],
     ['firstMeshlet', 'u32', 'world-global id of the primitive\'s first meshlet'],
     ['meshletCount', 'u32'],
     ['material', 'u32', 'material record row'],
-    ['flags', 'u32', 'OBJECT_FLAG_*'],
-    ['maxScale', 'f32', 'largest axis scale of worldMatrix - scales radii and errors'],
-    ['firstPairBit', 'u32', 'base of this instance\'s (instance, meshlet) bit range'],
-    ['gridOrigin', 'array<f32, 3>', 'position grid of the instance\'s resource'],
-    ['gridStep', 'f32'],
-    ['uvFloatsPerVertex', 'u32', 'page attribute layout of the instance\'s resource'],
-    ['pickId', 'u32', 'the placement\'s picker id']
+    ['uvFloatsPerVertex', 'u32', 'page attribute layout of the primitive\'s resource'],
+    ['pickIdBase', 'u32', 'the world\'s first pick id'],
+    ['reserved', 'array<u32, 3>']
 ];
 
 /** @type {StructFields} */
@@ -114,6 +126,7 @@ ${fields.map(([field, type, comment]) => `        ${field} : ${type},${comment ?
  */
 export const meshletStructsWGSL = /* wgsl */ `
     ${structWGSL('MeshletObjectData', MESHLET_OBJECT_STRUCT)}
+    ${structWGSL('MeshletPrimitiveData', MESHLET_PRIMITIVE_STRUCT)}
     ${structWGSL('MeshletData', MESHLET_DATA_STRUCT)}
     ${structWGSL('MeshletMaterial', MESHLET_MATERIAL_STRUCT)}
     ${structWGSL('MeshletRecord', MESHLET_RECORD_STRUCT)}
@@ -130,13 +143,34 @@ export const meshletStructsWGSL = /* wgsl */ `
     fn meshletTexTailLayer(r : MeshletTexResidency) -> u32 { return r.minLodTailLayer >> 16u; }
 `;
 
-/** `objectData : array<MeshletObjectData>` (read). Requires meshletStructsWGSL. */
+/**
+ * `objectData : array<MeshletObjectData>` (read), with the accessors for what an instance row
+ * does not hold itself: `meshletInstanceMatrix(instance)` expands the affine rows to a full
+ * matrix, and `meshletPrimitiveData(instance)` reads the instance's primitive row (see
+ * OBJECT_DATA_U32S). Requires meshletStructsWGSL.
+ */
 export const meshletObjectDataWGSL = /* wgsl */ `
     var<storage, read> objectData : array<MeshletObjectData>;
 
-    fn meshletObjectGridOrigin(instance : u32) -> vec3f {
-        let origin = objectData[instance].gridOrigin;
-        return vec3f(origin[0], origin[1], origin[2]);
+    fn meshletInstanceMatrix(instance : u32) -> mat4x4f {
+        let rows = objectData[instance].matrixRows;
+        return transpose(mat4x4f(rows[0], rows[1], rows[2], vec4f(0.0, 0.0, 0.0, 1.0)));
+    }
+
+    // the primitive row reinterpreted from the instance struct's words, per PRIMITIVE_DATA
+    fn meshletPrimitiveData(instance : u32) -> MeshletPrimitiveData {
+        let row = objectData[objectData[instance].primitive];
+        let words = bitcast<vec4u>(row.matrixRows[2]);
+        var primitive : MeshletPrimitiveData;
+        primitive.sphere = row.matrixRows[0];
+        primitive.gridOrigin = row.matrixRows[1].xyz;
+        primitive.gridStep = row.matrixRows[1].w;
+        primitive.firstMeshlet = words.x;
+        primitive.meshletCount = words.y;
+        primitive.material = words.z;
+        primitive.uvFloatsPerVertex = words.w;
+        primitive.pickIdBase = row.primitive;
+        return primitive;
     }
 `;
 
@@ -232,8 +266,8 @@ export const meshletDecodeTangentWGSL = /* wgsl */ `
  * `pagePool : array<u32>`. A page is: header (PAGE_HEADER_BYTES) | positions (u16x4 anchor-
  * relative, or i32x3 when PAGE_FLAG_WIDE_POSITIONS) | oct16 normals | oct16_sign tangents when
  * the resource has them | UV floats | rgba8 vertex colours when the resource has them | the
- * meshlet-vertex remap table | the u8 triangle corner stream. The attribute layout is per resource, so the two per-instance parameters come from
- * objectData.
+ * meshlet-vertex remap table | the u8 triangle corner stream. The attribute layout is per resource, so its
+ * parameters come from the instance's primitive row in objectData.
  */
 export const meshletPageLayoutWGSL = /* wgsl */ `
     struct MeshletPageLayout {
