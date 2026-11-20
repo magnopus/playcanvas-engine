@@ -362,7 +362,7 @@ describe('MeshletDirector', function () {
         const view = director.views.get(cameraComponent);
         const frameGraph = {
             passes: [],
-            addRenderPass(pass) {
+            addPass(pass) {
                 this.passes.push(pass);
             }
         };

@@ -718,7 +718,7 @@ class MeshletDirectorGroup {
             clearDepth: firstAction.clearDepth,
             clearStencil: firstAction.clearStencil
         });
-        frameGraph.addRenderPass(state.drawPass1);
+        frameGraph.addPass(state.drawPass1);
 
         let splitIndex = endIndex + 1;
         for (let j = startIndex; j <= endIndex; j++) {
@@ -731,11 +731,11 @@ class MeshletDirectorGroup {
             renderer.addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, splitIndex - 1, true);
         }
         if (state.useOcclusion) {
-            frameGraph.addRenderPass(state.hzb.mip0Pass);
-            frameGraph.addRenderPass(state.hzbMipsPass);
-            frameGraph.addRenderPass(state.cullPhase2Pass);
+            frameGraph.addPass(state.hzb.mip0Pass);
+            frameGraph.addPass(state.hzbMipsPass);
+            frameGraph.addPass(state.cullPhase2Pass);
             state.drawPass2.setup(cameraComponent, renderTarget, lightLayer);
-            frameGraph.addRenderPass(state.drawPass2);
+            frameGraph.addPass(state.drawPass2);
         }
         if (splitIndex <= endIndex) {
             renderer.addMainRenderPass(frameGraph, layerComposition, renderTarget, splitIndex, endIndex, true);

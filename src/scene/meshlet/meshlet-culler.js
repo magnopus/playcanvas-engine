@@ -2,7 +2,7 @@ import { Compute } from '../../platform/graphics/compute.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import {
-    CULL_FLAG_HZB_LINEAR, CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_CULL_SLICE,
+    CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_CULL_SLICE,
     MESHLET_COMPACT_SLICE, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS,
     MESHLET_ROOT_BAND_OCTAVES, WORK_ITEM_U32S, claimLevelBase, claimPersistBase
 } from './constants.js';
@@ -181,7 +181,7 @@ class MeshletCuller {
     /** @type {number} - CULL_FLAG_* bits (CULL_FLAG_NO_TEXEL_RATE for orthographic views). */
     cullFlags = 0;
 
-    /** @type {Vec3|null} - view direction, replaces apex - camPos in the ortho cone cull. */
+    /** @type {Vec3|null} - view direction: the ortho cone cull and the occlusion test depth axis. */
     viewDir = null;
 
     /** @type {boolean} - two-phase occlusion (requires an HZB). */
@@ -233,14 +233,6 @@ class MeshletCuller {
 
     /** @type {string} - the pyramid's size and depth encoding last frame. @private */
     _prevHzbKey = '';
-
-    /**
-     * True when the HZB holds linear view depth (built from a CameraFrame's scene depth) rather
-     * than NDC depth from a depth texture - the occlusion test then compares along viewDir.
-     *
-     * @type {boolean}
-     */
-    hzbLinear = false;
 
 
     /** @private */
@@ -678,7 +670,7 @@ class MeshletCuller {
         params.set(viewProj, row(CULL_PARAMS.VIEW_PROJ));
         // Root admission reads last frame's pyramid, so it is only valid against the camera that
         // built it and only while that pyramid is the same texture at the same size.
-        const hzbKey = twoPhase ? `${hzb.width}x${hzb.height}x${hzb.mipCount}${this.hzbLinear}` : '';
+        const hzbKey = twoPhase ? `${hzb.width}x${hzb.height}x${hzb.mipCount}${hzb.linear}` : '';
         const prevValid = this.occlusionAdmission && twoPhase && this._prevHzbTexture === hzb.texture && this._prevHzbKey === hzbKey;
         params.set(this._prevViewProj, row(CULL_PARAMS.PREV_VIEW_PROJ));
         const prevCamera = this._prevCamera;
@@ -702,7 +694,7 @@ class MeshletCuller {
         // base of the texture-mip feedback marks inside the requests buffer (= page count)
         params[row(CULL_PARAMS.STREAMING) + 0] = world.totalPages;
         params[row(CULL_PARAMS.STREAMING) + 1] = this.orthoScale;
-        params[row(CULL_PARAMS.STREAMING) + 2] = this.cullFlags | (this.hzbLinear ? CULL_FLAG_HZB_LINEAR : 0);
+        params[row(CULL_PARAMS.STREAMING) + 2] = this.cullFlags;
         params[row(CULL_PARAMS.STREAMING) + 3] = this.casterPlaneCount;
         params.set(this.casterPlanes, row(CULL_PARAMS.CASTER_PLANES));
         params[row(CULL_PARAMS.VIEW_DIR) + 0] = this.viewDir?.x ?? 0;

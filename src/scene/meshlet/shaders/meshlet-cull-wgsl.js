@@ -11,8 +11,7 @@
  *   index buffer from it). Bucket order is opaque, opaque-two-sided, masked (MESHLET_BUCKET_*).
  * - cullParams: array<vec4f>, rows CULL_PARAMS.* (planes, camera, LOD, view-projection,
  *   streaming, view direction). orthoScale > 0 selects the orthographic LOD projection (shadow
- *   cascades); CULL_FLAG_NO_TEXEL_RATE suppresses the texture-mip feedback; CULL_FLAG_HZB_LINEAR
- *   says the HZB holds linear view depth (a CameraFrame's scene depth) rather than NDC depth.
+ *   cascades); CULL_FLAG_NO_TEXEL_RATE suppresses the texture-mip feedback.
  *   All are float-encoded and read back through u32() where integral, matching the mipCount
  *   convention.
  * - residency: page -> pool slot (PAGE_NOT_RESIDENT when absent); requests: page marks then
@@ -23,7 +22,7 @@
  */
 
 import { OBJECT_FLAG_NO_SHADOW, CULL_FLAG_SHADOW_VIEW,
-    CULL_FLAG_HZB_LINEAR, CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
+    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
     MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_COMPACT_SLICE,
     MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP, MESHLET_INDEX_WRITE_RECORDS,
     MESHLET_NO_PARENT, MESHLET_VISIBLE_CELLS_BASE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HIDDEN,
@@ -339,48 +338,63 @@ export const dispatchArgsWGSL = /* wgsl */ `
  * view of the pyramid: the current frame's camera (the cluster cull), or the camera the pyramid
  * was built from (root admission, which reads last frame's). Returns true when the sphere is
  * potentially visible. Expects the including shader to declare `hzbTexture` and the `cullParams`
- * array (which carries the pyramid's size and mip count and the linear-depth flag).
+ * array (which carries the pyramid's size and mip count). The pyramid holds linear view depth,
+ * so no projection conventions enter the comparison.
  *
  * @ignore
  */
 export const meshletHzbVisibleWGSL = /* wgsl */ `
+// the texels a uv rect covers at a mip, as (min, max). Texel i covers mip-0 texels
+// [i * 2^mip, (i + 1) * 2^mip), the last one also the remainder an odd size floors away, so map
+// through mip 0 rather than the floored mip size.
+fn hzbTexelRange(uvMin : vec2f, uvMax : vec2f, hzbSize : vec2f, mip : u32) -> vec4u {
+    let mipSize = vec2f(f32(max(u32(hzbSize.x) >> mip, 1u)), f32(max(u32(hzbSize.y) >> mip, 1u)));
+    let mipScale = hzbSize / f32(1u << mip);
+    return vec4u(vec2u(clamp(uvMin * mipScale, vec2f(0.0), mipSize - 1.0)),
+                 vec2u(clamp(uvMax * mipScale, vec2f(0.0), mipSize - 1.0)));
+}
+
 fn hzbVisibleFrom(viewProjMatrix : mat4x4f, camPos : vec3f, viewDir : vec3f, center : vec3f, radius : f32) -> bool {
     let toCenter = center - camPos;
-    let dist = length(toCenter);
-    if (dist <= radius * 1.05) {
+    if (dot(toCenter, toCenter) <= radius * radius * 1.1025) {
         return true; // camera inside or at the sphere
     }
 
-    // nearest point of the sphere toward the camera - the sphere's minimal depth
-    let nearestPoint = center - (toCenter / dist) * radius;
-    let nearestClip = viewProjMatrix * vec4f(nearestPoint, 1.0);
-    if (nearestClip.w <= 1e-5) {
-        return true; // crosses the near plane
+    // nearest view depth; the point nearest the camera is deeper than this off the view axis
+    let sphereDepth = dot(toCenter, viewDir) - radius;
+    if (sphereDepth <= 0.0) {
+        return true;
     }
-    // the pyramid holds NDC depth when built from a depth texture, or linear view depth when
-    // built from the scene depth a CameraFrame renders - the sphere is measured the same way,
-    // along the view direction for the linear case (which is what the scene depth stores)
-    let linearHzb = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_HZB_LINEAR}u) != 0u;
-    let sphereDepth = select(
-        nearestClip.z / nearestClip.w,
-        dot(nearestPoint - camPos, viewDir),
-        linearHzb);
 
-    // screen rect from camera-facing billboard corners
-    let right = normalize(vec3f(viewProjMatrix[0].x, viewProjMatrix[1].x, viewProjMatrix[2].x));
-    let up = normalize(vec3f(viewProjMatrix[0].y, viewProjMatrix[1].y, viewProjMatrix[2].y));
-    var ndcMin = vec2f(1e30);
-    var ndcMax = vec2f(-1e30);
-    for (var corner = 0u; corner < 4u; corner++) {
-        let signX = select(-1.0, 1.0, (corner & 1u) != 0u);
-        let signY = select(-1.0, 1.0, (corner & 2u) != 0u);
-        let clip = viewProjMatrix * vec4f(center + right * (radius * signX) + up * (radius * signY), 1.0);
-        if (clip.w <= 1e-5) {
-            return true;
-        }
-        let ndc = clip.xy / clip.w;
-        ndcMin = min(ndcMin, ndc);
-        ndcMax = max(ndcMax, ndc);
+    // view axes and projection scales from the view-projection rows: row i's xyz is
+    // P[i][i] * axis - P[2][i] * viewDir, the second term only for off-centre (XR) frusta
+    let rowX = vec3f(viewProjMatrix[0].x, viewProjMatrix[1].x, viewProjMatrix[2].x);
+    let rowY = vec3f(viewProjMatrix[0].y, viewProjMatrix[1].y, viewProjMatrix[2].y);
+    let ndcOffset = vec2f(dot(rowX, viewDir), dot(rowY, viewDir));
+    let axisX = rowX - viewDir * ndcOffset.x;
+    let axisY = rowY - viewDir * ndcOffset.y;
+    let ndcScale = vec2f(length(axisX), length(axisY));
+
+    var ndcMin : vec2f;
+    var ndcMax : vec2f;
+    let perspective = dot(vec3f(viewProjMatrix[0].w, viewProjMatrix[1].w, viewProjMatrix[2].w), viewDir) > 0.5;
+    if (perspective) {
+        // exact bounds of the projected sphere (Mara and McGuire 2013, "2D Polyhedral Bounds of a
+        // Clipped, Perspective-Projected 3D Sphere"); denominators are positive as c.z > radius
+        let c = vec3f(dot(toCenter, axisX / ndcScale.x), dot(toCenter, axisY / ndcScale.y), dot(toCenter, viewDir));
+        let czr2 = c.z * c.z - radius * radius;
+        let vx = sqrt(c.x * c.x + czr2);
+        let vy = sqrt(c.y * c.y + czr2);
+        let tanMin = vec2f((vx * c.x - radius * c.z) / (vx * c.z + radius * c.x),
+                           (vy * c.y - radius * c.z) / (vy * c.z + radius * c.y));
+        let tanMax = vec2f((vx * c.x + radius * c.z) / (vx * c.z - radius * c.x),
+                           (vy * c.y + radius * c.z) / (vy * c.z - radius * c.y));
+        ndcMin = tanMin * ndcScale + ndcOffset;
+        ndcMax = tanMax * ndcScale + ndcOffset;
+    } else {
+        let ndcCenter = (viewProjMatrix * vec4f(center, 1.0)).xy;
+        ndcMin = ndcCenter - ndcScale * radius;
+        ndcMax = ndcCenter + ndcScale * radius;
     }
 
     // ndc -> uv (y down)
@@ -390,27 +404,25 @@ fn hzbVisibleFrom(viewProjMatrix : mat4x4f, camPos : vec3f, viewDir : vec3f, cen
     let hzbSize = cullParams[${CULL_PARAMS.LOD}u].yz;
     let rectPx = (uvMax - uvMin) * hzbSize;
     let mipCount = u32(cullParams[${CULL_PARAMS.LOD}u].w);
-    // pick the mip where the rect is at most one texel wide, so it straddles at most two texels
-    // per axis and the four corner samples below cover the whole footprint. A coarser rect
-    // can straddle three, leaving the middle texel (and any far depth in it) untested.
-    let mip = min(u32(max(ceil(log2(max(max(rectPx.x, rectPx.y), 1.0))), 0.0)), mipCount - 1u);
-    let mipSize = vec2f(f32(max(u32(hzbSize.x) >> mip, 1u)), f32(max(u32(hzbSize.y) >> mip, 1u)));
-    // texel i of a mip covers mip-0 texels [i * 2^mip, (i + 1) * 2^mip), the last one also the
-    // remainder an odd size floors away - so map through mip 0, not the floored mip size,
-    // which drifts the lookup toward the origin by up to a texel per level
-    let mipScale = hzbSize / f32(1u << mip);
-    let texelMin = vec2u(clamp(uvMin * mipScale, vec2f(0.0), mipSize - 1.0));
-    let texelMax = vec2u(clamp(uvMax * mipScale, vec2f(0.0), mipSize - 1.0));
-    // the four corners of the 2x2 footprint; the HZB is a max-depth pyramid, so the
-    // farthest of them is the conservative occluder depth
-    let depth00 = textureLoad(hzbTexture, vec2i(i32(texelMin.x), i32(texelMin.y)), i32(mip)).x;
-    let depth10 = textureLoad(hzbTexture, vec2i(i32(texelMax.x), i32(texelMin.y)), i32(mip)).x;
-    let depth01 = textureLoad(hzbTexture, vec2i(i32(texelMin.x), i32(texelMax.y)), i32(mip)).x;
-    let depth11 = textureLoad(hzbTexture, vec2i(i32(texelMax.x), i32(texelMax.y)), i32(mip)).x;
+    // the mip where the rect is at most one texel wide straddles at most 2x2 texels, so the four
+    // corner samples cover it. One mip finer often still fits, with tighter depths.
+    var mip = min(u32(max(ceil(log2(max(max(rectPx.x, rectPx.y), 1.0))), 0.0)), mipCount - 1u);
+    var texels = hzbTexelRange(uvMin, uvMax, hzbSize, mip);
+    if (mip > 0u) {
+        let fine = hzbTexelRange(uvMin, uvMax, hzbSize, mip - 1u);
+        if (all(fine.zw - fine.xy <= vec2u(1u))) {
+            mip -= 1u;
+            texels = fine;
+        }
+    }
+    // max-depth pyramid: the farthest corner is the conservative occluder depth
+    let depth00 = textureLoad(hzbTexture, vec2i(i32(texels.x), i32(texels.y)), i32(mip)).x;
+    let depth10 = textureLoad(hzbTexture, vec2i(i32(texels.z), i32(texels.y)), i32(mip)).x;
+    let depth01 = textureLoad(hzbTexture, vec2i(i32(texels.x), i32(texels.w)), i32(mip)).x;
+    let depth11 = textureLoad(hzbTexture, vec2i(i32(texels.z), i32(texels.w)), i32(mip)).x;
     let occluderDepth = max(max(depth00, depth10), max(depth01, depth11));
-    // linear depth spans the whole view range, so its tolerance is relative to the occluder
-    let tolerance = select(1e-5, occluderDepth * 1e-4 + 1e-3, linearHzb);
-    return sphereDepth <= occluderDepth + tolerance;
+    // float rounding only; source precision is already in the pyramid
+    return sphereDepth <= occluderDepth * (1.0 + 1e-5) + 1e-4;
 }
 `;
 

@@ -1043,9 +1043,9 @@ class MeshletDirector {
         this.priorityProjScale = projScale;
 
         // Two-phase occlusion needs a scene depth the HZB can sample. A render target with a
-        // depth texture supplies hardware (NDC) depth. A CameraFrame keeps its scene depth as a
+        // depth texture supplies hardware depth. A CameraFrame keeps its scene depth as a
         // renderbuffer, but renders the linear scene depth as an extra attachment when asked
-        // (wantsSceneDepth -> sceneTextureDepth), and the HZB reads that in view units instead.
+        // (wantsSceneDepth -> sceneTextureDepth), and the HZB reads that instead.
         // Either way the pyramid is built mid-frame, after phase 1 and the scene's opaque
         // layers, so meshlet and scene geometry both occlude.
         const framePass = cameraComponent.framePasses?.[0];
@@ -1080,6 +1080,7 @@ class MeshletDirector {
                 return target?.depthBuffer ?? passes?.[0]?.sceneDepthTexture ?? null;
             };
             view.hzb.resize(depthTexture, rt.width, rt.height, hzbLinear, view._hzbSource);
+            view.hzb.setProjection(camera.projectionMatrix);
         }
         // a CameraFrame caches its pass chain, and the HZB and phase-2 passes are only spliced
         // in (or dropped) when it rebuilds - so tell it when the occlusion state flips
@@ -1088,8 +1089,6 @@ class MeshletDirector {
         }
         view.culler.twoPhase = useOcclusion;
         view.culler.occlusionAdmission = this.occlusionAdmission;
-        view.culler.hzbLinear = hzbLinear;
-        // the linear occlusion test measures depth along the view direction, as the scene depth does
         view.culler.viewDir = cameraComponent.entity.forward;
         view.useOcclusion = useOcclusion;
 
@@ -1666,7 +1665,7 @@ class MeshletDirector {
             clearStencil: firstAction.clearStencil
         });
         fillPhase1Draws(view);
-        frameGraph.addRenderPass(view.drawPass1);
+        frameGraph.addPass(view.drawPass1);
 
         // split the block at its first transparent render action
         let splitIndex = endIndex + 1;
@@ -1685,12 +1684,12 @@ class MeshletDirector {
         // two-phase occlusion: HZB from the combined meshlet + scene opaque depth, then the
         // newly-disoccluded remainder - all before transparents
         if (view.useOcclusion) {
-            frameGraph.addRenderPass(view.hzb.mip0Pass);
-            frameGraph.addRenderPass(view.hzbMipsPass);
-            frameGraph.addRenderPass(view.cullPhase2Pass);
+            frameGraph.addPass(view.hzb.mip0Pass);
+            frameGraph.addPass(view.hzbMipsPass);
+            frameGraph.addPass(view.cullPhase2Pass);
             view.drawPass2.setup(cameraComponent, renderTarget, this._lightLayer);
             fillPhase2Draws(view);
-            frameGraph.addRenderPass(view.drawPass2);
+            frameGraph.addPass(view.drawPass2);
         }
 
         // transparent scene passes (and anything after them - immediate, UI)

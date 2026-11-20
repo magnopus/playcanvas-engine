@@ -191,13 +191,6 @@ export const MESHLET_ROOT_BAND_OCTAVES = 13;
 export const CULL_FLAG_NO_TEXEL_RATE = 1 << 0;
 
 /**
- * cullFlags bit 1: the HZB holds linear view depth (built from the scene depth a CameraFrame
- * renders) rather than NDC depth (built from a depth texture), so the occlusion test compares
- * in view units. @type {number}
- */
-export const CULL_FLAG_HZB_LINEAR = 1 << 1;
-
-/**
  * Cull flag: the view is a shadow face. Instances flagged OBJECT_FLAG_NO_SHADOW are skipped.
  *
  * @type {number}

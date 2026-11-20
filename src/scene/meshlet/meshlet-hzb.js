@@ -1,10 +1,13 @@
+import { Mat4 } from '../../core/math/mat4.js';
 import {
-    ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST, PIXELFORMAT_R32F, SEMANTIC_POSITION, SHADERLANGUAGE_WGSL
+    ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST, PIXELFORMAT_DEPTH, PIXELFORMAT_DEPTH16, PIXELFORMAT_R16F, PIXELFORMAT_R32F,
+    SEMANTIC_POSITION, SHADERLANGUAGE_WGSL
 } from '../../platform/graphics/constants.js';
 import { Compute } from '../../platform/graphics/compute.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
 import { Shader } from '../../platform/graphics/shader.js';
 import { Texture } from '../../platform/graphics/texture.js';
+import { Camera } from '../camera.js';
 import { RenderPassShaderQuad } from '../graphics/render-pass-shader-quad.js';
 import { ShaderUtils } from '../shader-lib/shader-utils.js';
 
@@ -12,9 +15,36 @@ import { ShaderUtils } from '../shader-lib/shader-utils.js';
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  */
 
-// mip 0: max of the 2x2 full-res depth texels under each half-res HZB texel
+const _shaderProjection = new Mat4();
+
+// Mip 0 moves each source value a few quanta of its format farther before decoding, so the
+// pyramid is never nearer than the surface the stored value was rounded from. A too-near pyramid
+// culls visible geometry, and a cluster culled in phase 2 is not drawn next frame either.
+const REVERSE_FLOAT_STEP = 2 ** -21; // relative, reverse-z float depth
+const RECIPROCAL_STEP_R32F = 2 ** -21; // relative, CameraFrame scene depth
+const RECIPROCAL_STEP_R16F = 2 ** -9; // relative, its fallback when R32F is not blendable
+
+/**
+ * The absolute step for a depth texture format. A reverse-z float buffer needs none, its relative
+ * step covers it.
+ *
+ * @param {number} format - The depth texture's format.
+ * @param {boolean} reverseZ - Whether the device renders reverse-z.
+ * @returns {number} The step.
+ */
+const depthStep = (format, reverseZ) => {
+    if (format === PIXELFORMAT_DEPTH16) return 2 ** -14;
+    if (format === PIXELFORMAT_DEPTH && reverseZ) return 0;
+    return 2 ** -22; // depth32float near 1, depth24plus
+};
+
+// mip 0 from a depth texture: the farthest of the 2x2 texels under each HZB texel, decoded to
+// linear view depth by inverting the projection (see setProjection). Reducing the raw value and
+// decoding once keeps the precision reverse-z stores near the far plane.
 const mip0DepthWGSL = /* wgsl */ `
     var uDepthMap : texture_depth_2d;
+    uniform uDepthDecode : vec4f;
+    uniform uDepthStep : f32;
 
     @fragment
     fn fragmentMain(input : FragmentInput) -> FragmentOutput {
@@ -26,32 +56,41 @@ const mip0DepthWGSL = /* wgsl */ `
         // the final destination texel reduces it too - otherwise it would drop out of the pyramid
         let extent = vec2i(2) + vec2i(select(0, 1, dst.x == (size.x >> 1u) - 1 && (size.x & 1) == 1),
                                       select(0, 1, dst.y == (size.y >> 1u) - 1 && (size.y & 1) == 1));
-        var depth = 0.0;
+        #ifdef REVERSE_Z
+            var farthest = 1.0;
+        #else
+            var farthest = 0.0;
+        #endif
         for (var y = 0; y < extent.y; y++) {
             for (var x = 0; x < extent.x; x++) {
-                var texel = textureLoad(uDepthMap, min(src + vec2i(x, y), size - 1), 0);
-                // a reverse-z buffer holds 1 at the near plane: flip it, so the pyramid stays a
-                // max-reduce of forward depth (farthest = largest) for the cull's comparison
+                let texel = textureLoad(uDepthMap, min(src + vec2i(x, y), size - 1), 0);
                 #ifdef REVERSE_Z
-                    texel = 1.0 - texel;
+                    farthest = min(farthest, texel);
+                #else
+                    farthest = max(farthest, texel);
                 #endif
-                depth = max(depth, texel);
             }
         }
-        output.color = vec4f(depth, 0.0, 0.0, 1.0);
+        #ifdef REVERSE_Z
+            let d = max(farthest - farthest * ${REVERSE_FLOAT_STEP} - uniform.uDepthStep, 0.0);
+        #else
+            let d = min(farthest + uniform.uDepthStep, 1.0);
+        #endif
+        let decode = uniform.uDepthDecode;
+        output.color = vec4f((decode.x - d * decode.y) / (decode.z - d * decode.w), 0.0, 0.0, 1.0);
         return output;
     }
 `;
 
 // mip 0 from the scene depth a CameraFrame renders as a colour attachment: a coverage weighted
-// average of reciprocal view depths, cleared to the reciprocal of the far clip. Decoded back to
-// linear depth here, so the pyramid and its max-reduce work in view units; a texel nothing wrote
-// (zero) reads as infinitely far.
+// average of reciprocal view depths, cleared to the reciprocal of the far clip. A texel nothing
+// wrote (zero) reads as infinitely far.
 const mip0LinearWGSL = /* wgsl */ `
     var uDepthMap : texture_2d<f32>;
+    uniform uReciprocalScale : f32;
 
     fn linearDepth(reciprocal : f32) -> f32 {
-        return select(1e30, 1.0 / reciprocal, reciprocal > 0.0);
+        return select(1e30, 1.0 / (reciprocal * uniform.uReciprocalScale), reciprocal > 0.0);
     }
 
     @fragment
@@ -112,9 +151,9 @@ const mipReduceWGSL = /* wgsl */ `
  * (depth textures cannot be storage-written); the remaining mips reduce in compute through
  * per-mip texture views.
  *
- * The source is either a depth texture, giving a pyramid of NDC depth, or the linear scene depth
- * a CameraFrame renders as a colour attachment, giving a pyramid in view units - see
- * {@link linear}. The cull compares in whichever units the pyramid holds.
+ * The pyramid holds linear view depth (world units along the view direction) whichever source
+ * it is built from: a depth texture, decoded with {@link setProjection}, or the linear scene depth
+ * a CameraFrame renders (see {@link linear}).
  *
  * @ignore
  */
@@ -132,12 +171,18 @@ class MeshletHzb {
     mipCount = 0;
 
     /**
-     * True when the pyramid holds linear view depth decoded from a scene depth attachment, false
-     * when it holds NDC depth from a depth texture.
+     * True when built from a CameraFrame's linear scene depth, false for a depth texture.
      *
      * @type {boolean}
      */
     linear = false;
+
+    /**
+     * Decodes a depth texture value d into view depth as (x - d * y) / (z - d * w).
+     *
+     * @type {Float32Array}
+     */
+    depthDecode = new Float32Array([0, -1, 1, 0]);
 
     /**
      * Mip 0 build (added to the frame graph). One pass for the lifetime of the pyramid: a
@@ -238,6 +283,26 @@ class MeshletHzb {
     }
 
     /**
+     * Sets the projection the depth texture source was rendered with. Unused for the linear
+     * scene depth.
+     *
+     * @param {Mat4} projectionMatrix - The camera's projection matrix.
+     */
+    setProjection(projectionMatrix) {
+        // invert the matrix the shaders render with, float32 rounding included: for reverse z
+        // that rounding is a large part of its depth term. d = (m22 * z + m32) / (m23 * z + m33)
+        // for view-space z, solved for -z.
+        const device = this.device;
+        const m = Camera.applyShaderProjectionTransform(projectionMatrix, _shaderProjection, false,
+            device.isWebGPU, device.isReverseZ).data;
+        const decode = this.depthDecode;
+        decode[0] = m[14];
+        decode[1] = m[15];
+        decode[2] = m[10];
+        decode[3] = m[11];
+    }
+
+    /**
      * (Re)creates the pyramid for a depth source of the given size and kind.
      *
      * @param {Texture} depthTexture - The scene depth to reduce from: a depth texture, or the
@@ -299,7 +364,15 @@ class MeshletHzb {
                 // destroyed texture; the pyramid then keeps last frame's contents
                 const texture = self._source ? self._source() : self._depthTexture;
                 if (!texture) return;
-                device.scope.resolve('uDepthMap').setValue(texture);
+                const scope = device.scope;
+                scope.resolve('uDepthMap').setValue(texture);
+                if (self.linear) {
+                    const step = texture.format === PIXELFORMAT_R16F ? RECIPROCAL_STEP_R16F : RECIPROCAL_STEP_R32F;
+                    scope.resolve('uReciprocalScale').setValue(1 - step);
+                } else {
+                    scope.resolve('uDepthDecode').setValue(self.depthDecode);
+                    scope.resolve('uDepthStep').setValue(depthStep(texture.format, device.isReverseZ));
+                }
                 superExecute();
             };
             this.mip0Pass = pass;
