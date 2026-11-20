@@ -2,7 +2,7 @@ import { expect } from 'chai';
 
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import {
-    CULL_PARAMS_VEC4S, CUT_BUDGET, CUT_BUDGET_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MESHLET_BUCKET_COUNT,
+    CULL_PARAMS_VEC4S, CUT_BUDGET, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MESHLET_BUCKET_COUNT,
     MESHLET_CELL_CULL_WORKGROUP, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_CULL_SLICE,
     MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_DISPATCH_WIDTH, MESHLET_INDEX_WRITE_WORKGROUP, MESHLET_LIST_WORKGROUP,
     MESHLET_VISIBLE_CELLS_BASE, OBJECT_DATA, OBJECT_DATA_U32S, PRIMITIVE_DATA, RECORD_U32S, TEX_RESIDENCY_U32S
@@ -41,13 +41,10 @@ describe('meshlet cull shaders', function () {
 
     it('bind at most eight storage buffers per stage, the WebGPU guaranteed minimum', function () {
         // a storage binding past the adapter's limit disables the pipeline outright; two views of
-        // one buffer count twice. The cut stage and root admission still exceed the minimum (they
-        // rely on the adapter's higher limit) and must not grow further.
-        const over = { meshletCutQueueWGSL: 10, meshletRootAdmitWGSL: 9 };
+        // one buffer count twice
         for (const [name, text] of Object.entries(compute)) {
-            expect(count(text, /var<storage/g), name).to.be.at.most(over[name] ?? 8);
+            expect(count(text, /var<storage/g), name).to.be.at.most(8);
         }
-        expect(count(cullWGSL.meshletCullWGSL, /var<storage/g)).to.be.at.most(8);
     });
 
     it('size each workgroup by the constant its dispatch is computed from', function () {
@@ -87,18 +84,14 @@ describe('meshlet cull shaders', function () {
         }
     });
 
-    it('address the cut budget only through its enum, within the buffer', function () {
+    it('charge the cut budget in the counter words its enum names', function () {
         const used = new Set();
-        for (const [name, text] of Object.entries(compute)) {
-            expect(text, `${name} indexes cutBudget by a constant`).to.not.match(/cutBudget\[[a-z]/);
-            for (const index of indices(text, 'cutBudget')) {
-                expect(index, name).to.be.below(CUT_BUDGET_U32S);
-                used.add(index);
-            }
+        for (const text of Object.values(compute)) {
+            for (const index of indices(text, 'counters')) used.add(index);
         }
-        // every slot the CPU resets is one some shader charges
+        // a per-bucket index reads as its last bucket's word
         expect(used).to.include.members([CUT_BUDGET.INDICES_BASE + MESHLET_BUCKET_COUNT - 1, CUT_BUDGET.RECORDS, CUT_BUDGET.REJECTED_RECORDS, CUT_BUDGET.QUEUE]);
-        expect(CUT_BUDGET.INDICES_BASE + MESHLET_BUCKET_COUNT).to.be.at.most(CUT_BUDGET.RECORDS);
+        for (const text of Object.values(compute)) expect(text).to.not.include('cutBudget');
     });
 
     it('keep the per-frame counters inside the cleared block and the cell list after it', function () {
@@ -128,7 +121,7 @@ describe('meshlet cull shaders', function () {
         }
         // finalize writes one draw per bucket, with the whole cut's record demand
         expect(count(cullWGSL.finalizeArgsWGSL, /writeDraw\(uniform\.drawSlot\d/g)).to.equal(MESHLET_BUCKET_COUNT);
-        expect(new Set(indices(cullWGSL.finalizeArgsWGSL, 'cutBudget'))).to.deep.equal(new Set([CUT_BUDGET.RECORDS, CUT_BUDGET.REJECTED_RECORDS]));
+        expect(indices(cullWGSL.finalizeArgsWGSL, 'counters')).to.include.members([CUT_BUDGET.RECORDS, CUT_BUDGET.REJECTED_RECORDS]);
     });
 
     it('charge and record demand before checking capacity, and claim only what fits', function () {

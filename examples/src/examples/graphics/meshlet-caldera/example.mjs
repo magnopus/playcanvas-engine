@@ -455,7 +455,7 @@ app.on('framerender', () => {
         const worlds = directors.length > 1 ? ` (${directors.length} worlds)` : '';
         data.set(
             'data.stats',
-            `${meshlets} meshlets, cut ${(indices / 3e6).toFixed(2)}M tris, ` + `${resident}/${pages} pages${worlds}`
+            `${meshlets} meshlets, cut ${(indices / 3e6).toFixed(2)}M tris, ${resident}/${pages} pages${worlds}`
         );
     }
 });

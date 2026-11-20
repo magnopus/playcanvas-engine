@@ -5,7 +5,7 @@ import { Vec3 } from '../../../src/core/math/vec3.js';
 import { BoundingBox } from '../../../src/core/shape/bounding-box.js';
 import { BUFFERUSAGE_COPY_SRC } from '../../../src/platform/graphics/constants.js';
 import {
-    CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, ROOT_LIST_U32S
+    MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, ROOT_LIST_U32S
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
 import { MeshletShadowView } from '../../../src/scene/meshlet/meshlet-shadow-view.js';
@@ -53,7 +53,6 @@ describe('MeshletView', function () {
         const view = makeView();
         expect(view.indexCapacity).to.deep.equal([300, 60, 30]);
         expect(view.recordCapacity).to.equal(100);
-        expect(Array.from(view.cutBudgetInitial)).to.deep.equal([0, 0, 0, 0, 0, 0]);
         view.destroy();
     });
 
@@ -71,7 +70,6 @@ describe('MeshletView', function () {
     it('sizes its frame buffers from the layout constants and the world', function () {
         const view = makeView();
         const pairWords = Math.ceil(PAIRS / 32);
-        expect(view.cullParamsBuffer.byteSize).to.equal(CULL_PARAMS_VEC4S * 16);
         // the counters, then the visible-cell list (one cell in the mock world) and no chunks
         expect(view.countersBuffer.byteSize).to.equal((MESHLET_VISIBLE_CELLS_BASE + 1) * 4);
         // the root list holds one entry per instance

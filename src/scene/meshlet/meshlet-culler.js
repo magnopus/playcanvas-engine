@@ -271,7 +271,7 @@ class MeshletCuller {
         this.cellCull.setParameter('cellCount', cells.cellCount);
         this.cellCull.setParameter('cellBounds', cells.boundsBuffer);
         this.cellCull.setParameter('cellMaxRadius', cells.radiiBuffer);
-        this.cellCull.setParameter('cullParams', this.cullParams);
+        this.cellCull.setParameter('cullParams[0]', this.cullParams);
         this.cellCull.setParameter('counters', view.countersBuffer);
         const cellGroups = Math.ceil(cells.cellCount / MESHLET_CELL_CULL_WORKGROUP);
         this.cellCull.setupDispatch(Math.min(cellGroups, MESHLET_DISPATCH_WIDTH), Math.ceil(cellGroups / MESHLET_DISPATCH_WIDTH));
@@ -303,7 +303,7 @@ class MeshletCuller {
             compute.setParameter('cutGroups', world.cut.groups);
             compute.setParameter('meshletData', world.meshletDataBuffer);
             compute.setParameter('objectData', world.objectDataBuffer);
-            compute.setParameter('cullParams', this.cullParams);
+            compute.setParameter('cullParams[0]', this.cullParams);
             compute.setParameter('residency', world.residencyBuffer);
             compute.setParameter('requests', world.requestsBuffer);
             compute.setParameter('claimBits', view.claimBitsBuffer);
@@ -329,7 +329,7 @@ class MeshletCuller {
         this.rootClassify.setParameter('instanceCount', world.instanceCount);
         this.rootClassify.setParameter('sortedBase', world.instanceCount);
         this.rootClassify.setParameter('objectData', world.objectDataBuffer);
-        this.rootClassify.setParameter('cullParams', this.cullParams);
+        this.rootClassify.setParameter('cullParams[0]', this.cullParams);
         this.rootClassify.setParameter('claimBits', view.claimBitsBuffer);
         this.rootClassify.setParameter('rootList', view.rootListBuffer);
         this.rootClassify.setParameter('rootBands', this.rootBandsBuffer);
@@ -412,7 +412,7 @@ class MeshletCuller {
             bindCapacities(meshletCull, view);
             meshletCull.setParameter('objectData', world.objectDataBuffer);
             meshletCull.setParameter('meshletData', world.meshletDataBuffer);
-            meshletCull.setParameter('cullParams', this.cullParams);
+            meshletCull.setParameter('cullParams[0]', this.cullParams);
             meshletCull.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
             meshletCull.setParameter('counters', view.countersBuffer);
             meshletCull.setParameter('records', view.recordsBuffer);

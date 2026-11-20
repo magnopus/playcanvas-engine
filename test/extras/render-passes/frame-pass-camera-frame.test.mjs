@@ -19,6 +19,7 @@ import {
 import { Entity } from '../../../src/framework/entity.js';
 import { PIXELFORMAT_RGBA8 } from '../../../src/platform/graphics/constants.js';
 import { FramePass } from '../../../src/platform/graphics/frame-pass.js';
+import { RenderPass } from '../../../src/platform/graphics/render-pass.js';
 import { SceneDepthMapHandle } from '../../../src/platform/graphics/scene-depth-map-handle.js';
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import { LAYERID_IMMEDIATE, LAYERID_WORLD, PROJECTION_ORTHOGRAPHIC, TONEMAP_ACES, TONEMAP_NONE } from '../../../src/scene/constants.js';
@@ -135,7 +136,7 @@ describe('FramePassCameraFrame', function () {
 
     it('leaves the meshlet passes it splices in to their owner when it rebuilds or is destroyed', function () {
         // the meshlet director owns these and splices the same instances into every rebuilt chain
-        const before = new FramePass(app.graphicsDevice);
+        const before = new RenderPass(app.graphicsDevice);
         const middle = new FramePass(app.graphicsDevice);
         const destroyBefore = spy(before, 'destroy');
         const destroyMiddle = spy(middle, 'destroy');
@@ -167,7 +168,7 @@ describe('FramePassCameraFrame', function () {
 
     it('gives the meshlet draw passes the scene pass settings, and leaves its other passes alone', function () {
         // a draw pass declares the scene settings it can take; the HZB and cull passes do not
-        const draw = new FramePass(app.graphicsDevice);
+        const draw = new RenderPass(app.graphicsDevice);
         draw.sceneTextures = undefined;
         draw.gammaCorrection = undefined;
         draw.toneMapping = undefined;
@@ -196,7 +197,7 @@ describe('FramePassCameraFrame', function () {
     it('resizes the scene render target when the render target scale changes after the passes are created', function () {
         // the meshlet passes split the scene into a pass before and one after them, both resizing
         // the one scene render target - one left on the old scale would size it back every frame
-        const before = new FramePass(app.graphicsDevice);
+        const before = new RenderPass(app.graphicsDevice);
         const middle = new FramePass(app.graphicsDevice);
         app.renderer.meshletDirector = {
             buildCameraFramePasses: () => ({ before: [before], middle: [middle] }),
@@ -236,7 +237,7 @@ describe('FramePassCameraFrame', function () {
     });
 
     it('renders each layer once when meshlets split a scene that also has a grab pass', function () {
-        const before = new FramePass(app.graphicsDevice);
+        const before = new RenderPass(app.graphicsDevice);
         const middle = new FramePass(app.graphicsDevice);
         app.renderer.meshletDirector = {
             buildCameraFramePasses: () => ({ before: [before], middle: [middle] }),

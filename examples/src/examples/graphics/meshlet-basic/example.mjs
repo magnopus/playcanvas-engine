@@ -194,7 +194,7 @@ app.on('framerender', () => {
     if (demand && ++statFrames % 30 === 0) {
         data.set(
             'data.stats',
-            `${meshlets} meshlets drawn, cut ${(indices / 3e6).toFixed(2)}M tris, ` + `${resident}/${pages} pages`
+            `${meshlets} meshlets drawn, cut ${(indices / 3e6).toFixed(2)}M tris, ${resident}/${pages} pages`
         );
     }
     if (!framed) {

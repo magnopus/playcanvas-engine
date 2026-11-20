@@ -1,10 +1,10 @@
 import { expect } from 'chai';
 
 import {
-    CULL_PARAMS, CULL_PARAMS_VEC4S, CUT_BUDGET, CUT_BUDGET_U32S, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT,
+    CULL_PARAMS, CULL_PARAMS_VEC4S, CUT_BUDGET, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_COLOR_MODE,
     MESHLET_MAX_UV_CHANNELS,
-    MESHLET_COUNTER, MESHLET_DATA,
+    MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_DATA,
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER_U32S, MESHLET_CULL_SLICE, MESHLET_DATA_U32S,
     MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_DAG_ROOT, MESHLET_FLAG_TWO_SIDED,
     MESHLET_INDEX_WRITE_WORKGROUP,
@@ -30,6 +30,10 @@ describe('meshlet constants', function () {
     it('sizes the counter buffer to its last word, padded to 4, with no two counters sharing a word', function () {
         const words = [];
         for (const [name, index] of Object.entries(MESHLET_COUNTER)) {
+            const span = name.endsWith('_BASE') ? MESHLET_BUCKET_COUNT : 1;
+            for (let k = 0; k < span; k++) words.push(index + k);
+        }
+        for (const [name, index] of Object.entries(CUT_BUDGET)) {
             const span = name.endsWith('_BASE') ? MESHLET_BUCKET_COUNT : 1;
             for (let k = 0; k < span; k++) words.push(index + k);
         }
@@ -91,11 +95,12 @@ describe('meshlet constants', function () {
         expect(new Set(Object.values(MESHLET_COLOR_MODE)).size).to.equal(3);
     });
 
-    it('lays the cut budget out as one index word per bucket, then the scalar charges', function () {
+    it('lays the cut budget out in the cleared counter block, after the counters', function () {
         expect(CUT_BUDGET.INDICES_BASE + MESHLET_BUCKET_COUNT).to.equal(CUT_BUDGET.RECORDS);
         const words = [CUT_BUDGET.RECORDS, CUT_BUDGET.REJECTED_RECORDS, CUT_BUDGET.QUEUE];
         expect(new Set(words).size).to.equal(words.length);
-        expect(Math.max(...words) + 1).to.equal(CUT_BUDGET_U32S);
+        expect(CUT_BUDGET.INDICES_BASE).to.be.above(Math.max(...Object.values(MESHLET_COUNTER)));
+        expect(Math.max(...words)).to.be.below(MESHLET_COUNTER_CLEAR_U32S);
     });
 
     it('lays the counter blocks out contiguously, one word per bucket', function () {

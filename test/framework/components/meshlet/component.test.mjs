@@ -31,7 +31,12 @@ describe('MeshletComponent', function () {
             e.addComponent('meshlet');
             app.root.addChild(e);
             expect(system._initialized).to.equal(true);
-            expect(system.group, 'null device: no pipeline').to.equal(null);
+            // the pipeline exists only on WebGPU (the suite also runs on a real WebGPU device)
+            if (app.graphicsDevice.isWebGPU) {
+                expect(system.group).to.not.equal(null);
+            } else {
+                expect(system.group, 'null device: no pipeline').to.equal(null);
+            }
             e.destroy();
         } finally {
             console.warn = warn;
@@ -40,6 +45,7 @@ describe('MeshletComponent', function () {
     });
 
     it('registers its system and stays inert without WebGPU', function () {
+        if (app.graphicsDevice.isWebGPU) this.skip();
         expect(app.systems.meshlet).to.exist;
         expect(app.systems.meshlet.director, 'null device: no director').to.equal(null);
         const e = new Entity();
@@ -70,6 +76,7 @@ describe('MeshletComponent', function () {
     });
 
     it('exposes the pipeline defaults on the system without a director', function () {
+        if (app.graphicsDevice.isWebGPU) this.skip();
         const system = app.systems.meshlet;
         expect(system.dagPixelThreshold).to.equal(2);
         expect(system.bucketThresholdScales).to.deep.equal([4, 1, 1]);
