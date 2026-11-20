@@ -73,11 +73,13 @@ const BASE = params.get('base') ?? './assets/meshlets/jungle/';
  * instances?: number }} Group
  */
 /** @type {{ groups: Group[], start?: { pos: number[], look: number[] } }} */
-const manifest = await fetch(`${BASE}jungle_scene.json`).then(r => r.json());
+const manifest = await fetch(`${BASE}jungle_scene.json`).then((r) => r.json());
 // ?groups=terrain,trees loads only those
 const only = params.get('groups')?.split(',');
 // ?moss=0 leaves the pyramid's moss out, most of the scatter's cost
-const groups = manifest.groups.filter(g => (!only || only.includes(g.name)) && !(g.name === 'moss' && params.get('moss') === '0'));
+const groups = manifest.groups.filter(
+    (g) => (!only || only.includes(g.name)) && !(g.name === 'moss' && params.get('moss') === '0')
+);
 
 const device = await createGraphicsDevice(canvas, {
     deviceTypes: [deviceType],
@@ -165,10 +167,14 @@ const canopyVisibilityWGSL = /* wgsl */ `
  * size: number, offset: number, levels: number }} CanopyMap
  */
 /** @type {{ maps: CanopyMap[], extinction: number, toSun: number[] }|null} */
-const canopy = params.get('canopy') === '0' ? null :
-    await fetch(`${BASE}jungle_canopy.json`).then(r => (r.ok ? r.json() : null)).catch(() => null);
+const canopy =
+    params.get('canopy') === '0'
+        ? null
+        : await fetch(`${BASE}jungle_canopy.json`)
+              .then((r) => (r.ok ? r.json() : null))
+              .catch(() => null);
 if (canopy) {
-    const bin = await fetch(`${BASE}jungle_canopy.bin`).then(r => r.arrayBuffer());
+    const bin = await fetch(`${BASE}jungle_canopy.bin`).then((r) => r.arrayBuffer());
     for (const map of canopy.maps) {
         const levels = [];
         let offset = map.offset;
@@ -191,8 +197,8 @@ if (canopy) {
         const id = `canopy${map.name[0].toUpperCase()}${map.name.slice(1)}`;
         const inv = 1 / map.span;
         device.scope.resolve(id).setValue(texture);
-        device.scope.resolve(`${id}U`).setValue(new Float32Array([...map.u.map(c => c * inv), -map.origin[0] * inv]));
-        device.scope.resolve(`${id}V`).setValue(new Float32Array([...map.v.map(c => c * inv), -map.origin[1] * inv]));
+        device.scope.resolve(`${id}U`).setValue(new Float32Array([...map.u.map((c) => c * inv), -map.origin[0] * inv]));
+        device.scope.resolve(`${id}V`).setValue(new Float32Array([...map.v.map((c) => c * inv), -map.origin[1] * inv]));
     }
     device.scope.resolve('canopySunAxis').setValue(new Float32Array([...canopy.toSun, 0]));
 }
@@ -221,31 +227,47 @@ if (canopy) {
     const patchChunk = (name, search, replacement, suffix = '') => {
         const source = chunks.get(name);
         if (!source.includes(search)) {
-            console.warn(`meshlet-jungle: '${search.trim()}' not found in shader chunk ${name}, canopy lighting is not applied`);
+            console.warn(
+                `meshlet-jungle: '${search.trim()}' not found in shader chunk ${name}, canopy lighting is not applied`
+            );
             return;
         }
         chunks.set(name, source.replace(search, replacement) + suffix);
     };
     chunks.set('litUserDeclarationPS', canopyVisibilityWGSL);
-    patchChunk('lightFunctionLightPS', '    // Relief self shadowing', `
+    patchChunk(
+        'lightFunctionLightPS',
+        '    // Relief self shadowing',
+        `
     #if LIGHT{i}TYPE == DIRECTIONAL
         dAtten = dAtten * canopySunVisibility();
     #endif
 
-    // Relief self shadowing`);
-    patchChunk('ambientPS', 'fn addAmbient(', 'fn addAmbientOpen(', `
+    // Relief self shadowing`
+    );
+    patchChunk(
+        'ambientPS',
+        'fn addAmbient(',
+        'fn addAmbientOpen(',
+        `
 fn addAmbient(worldNormal: vec3f) {
     addAmbientOpen(worldNormal);
     dDiffuseLight = dDiffuseLight * (canopySkyVisibility() * uniform.canopyEnvScale);
 }
-`);
+`
+    );
     for (const name of ['reflectionEnvPS', 'reflectionEnvHQPS']) {
-        patchChunk(name, 'fn addReflection(', 'fn addReflectionOpen(', `
+        patchChunk(
+            name,
+            'fn addReflection(',
+            'fn addReflectionOpen(',
+            `
 fn addReflection(reflDir: vec3f, gloss: f32) {
     addReflectionOpen(reflDir, gloss);
     dReflection = vec4f(dReflection.rgb * (canopySkyVisibility() * uniform.canopyEnvScale), dReflection.a);
 }
-`);
+`
+        );
     }
 }
 
@@ -270,7 +292,7 @@ const scene = new Entity('Jungle');
 app.root.addChild(scene);
 for (const group of groups) {
     const asset = new Asset(group.label, 'container', { url: BASE + group.url });
-    asset.once('error', err => console.error(`Jungle: failed to load ${group.url}`, err));
+    asset.once('error', (err) => console.error(`Jungle: failed to load ${group.url}`, err));
     app.assets.add(asset);
     const entity = new Entity(group.label);
     entity.addComponent('meshlet', { asset });
@@ -280,8 +302,12 @@ for (const group of groups) {
 // the reference render's dome HDR (sky.py): skybox, clamped lighting copy, and the glow it clamped
 // away as the sun. ?sky=procedural (or a bake without it) uses the procedural sky and a fixed sun.
 /** @type {{ toSun: number[], sunColor: number[], sunIntensity: number }|null} */
-const hdrSky = params.get('sky') === 'procedural' ? null :
-    await fetch(`${BASE}jungle_sky.json`).then(r => (r.ok ? r.json() : null)).catch(() => null);
+const hdrSky =
+    params.get('sky') === 'procedural'
+        ? null
+        : await fetch(`${BASE}jungle_sky.json`)
+              .then((r) => (r.ok ? r.json() : null))
+              .catch(() => null);
 
 const light = new Entity('Sun');
 light.addComponent('light', {
@@ -347,13 +373,14 @@ if (hdrSky) {
      * @param {string} file - HDR file in the bake folder.
      * @returns {Promise<Texture>} The equirect texture.
      */
-    const loadHdr = file => new Promise((resolve, reject) => {
-        const asset = new Asset(file, 'texture', { url: BASE + file }, { mipmaps: false });
-        asset.once('load', () => resolve(asset.resource));
-        asset.once('error', reject);
-        app.assets.add(asset);
-        app.assets.load(asset);
-    });
+    const loadHdr = (file) =>
+        new Promise((resolve, reject) => {
+            const asset = new Asset(file, 'texture', { url: BASE + file }, { mipmaps: false });
+            asset.once('load', () => resolve(asset.resource));
+            asset.once('error', reject);
+            app.assets.add(asset);
+            app.assets.load(asset);
+        });
     const [skyTexture, envTexture] = await Promise.all([loadHdr('jungle_sky.hdr'), loadHdr('jungle_sky_env.hdr')]);
     app.scene.skybox = EnvLighting.generateSkyboxCubemap(skyTexture);
     const lighting = EnvLighting.generateLightingSource(envTexture);
@@ -390,14 +417,17 @@ app.on('postrender', () => {
     pickRequested = false;
     pickInFlight = true;
     picker.prepare(camera.camera, app.scene, [app.scene.layers.getLayerByName('World')]);
-    picker.getWorldPointAsync(picker.width * 0.5, picker.height * 0.5).then((point) => {
-        if (point) {
-            pivotTarget.copy(point);
-            cc.focusPoint = pivotTarget;
-        }
-    }).finally(() => {
-        pickInFlight = false;
-    });
+    picker
+        .getWorldPointAsync(picker.width * 0.5, picker.height * 0.5)
+        .then((point) => {
+            if (point) {
+                pivotTarget.copy(point);
+                cc.focusPoint = pivotTarget;
+            }
+        })
+        .finally(() => {
+            pickInFlight = false;
+        });
 });
 
 data.set('data', {
@@ -472,10 +502,16 @@ cc.reset(startLook, startPos);
 
 let statFrames = 0;
 app.on('framerender', () => {
-    const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
+    const directors = app.systems.meshlet.directors.filter((d) => d.world.finalized);
     if (!directors.length) return;
-    const colorMode = data.get('data.visualization') === 'meshlet' ? MESHLET_COLOR_MODE.MESHLET : MESHLET_COLOR_MODE.LIT;
-    let meshlets = 0, indices = 0, resident = 0, pages = 0, instances = 0, demand = false;
+    const colorMode =
+        data.get('data.visualization') === 'meshlet' ? MESHLET_COLOR_MODE.MESHLET : MESHLET_COLOR_MODE.LIT;
+    let meshlets = 0,
+        indices = 0,
+        resident = 0,
+        pages = 0,
+        instances = 0,
+        demand = false;
     for (const director of directors) {
         director.world.setColorMode(colorMode);
         const view = director.views.get(camera.camera);
@@ -490,8 +526,11 @@ app.on('framerender', () => {
     }
     if (demand && ++statFrames % 30 === 0) {
         const worlds = directors.length > 1 ? ` (${directors.length} worlds)` : '';
-        data.set('data.stats', `${meshlets} meshlets, cut ${(indices / 3e6).toFixed(2)}M tris, ` +
-            `${(instances / 1e6).toFixed(2)}M instances, ${resident}/${pages} pages${worlds}`);
+        data.set(
+            'data.stats',
+            `${meshlets} meshlets, cut ${(indices / 3e6).toFixed(2)}M tris, ` +
+                `${(instances / 1e6).toFixed(2)}M instances, ${resident}/${pages} pages${worlds}`
+        );
     }
 });
 

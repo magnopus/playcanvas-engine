@@ -37,10 +37,7 @@ device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
 const createOptions = new AppOptions();
 createOptions.graphicsDevice = device;
-createOptions.componentSystems = [
-    RenderComponentSystem,
-    CameraComponentSystem
-];
+createOptions.componentSystems = [RenderComponentSystem, CameraComponentSystem];
 createOptions.resourceHandlers = [TextureHandler];
 
 const app = new AppBase(canvas);

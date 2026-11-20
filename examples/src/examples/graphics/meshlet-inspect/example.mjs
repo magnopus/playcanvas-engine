@@ -161,7 +161,8 @@ const PAGE_FLAG_WIDE_POSITIONS = 1 << 2;
 const decodeOct16 = (word, out, o) => {
     const sx = ((word << 16) >> 16) / 32767;
     const sy = (word >> 16) / 32767;
-    let x = sx, y = sy;
+    let x = sx,
+        y = sy;
     const z = 1 - Math.abs(sx) - Math.abs(sy);
     if (z < 0) {
         x = (1 - Math.abs(sy)) * (sx >= 0 ? 1 : -1);
@@ -197,12 +198,13 @@ const decodeFinestMesh = () => {
         const records = prim.meshletData;
         for (let m = 0; m < prim.meshletCount; m++) {
             const r = m * MESHLET_DATA_U32S;
-            if (records[r + 22] !== 0) continue;  // lodLevel: 0 is the source geometry
+            if (records[r + 22] !== 0) continue; // lodLevel: 0 is the source geometry
             const words = pageOf(records[r + 23]);
             const vertexCount = words[2];
             const wide = (words[5] & PAGE_FLAG_WIDE_POSITIONS) !== 0;
             const normalBase = PAGE_HEADER_WORDS + vertexCount * (wide ? 3 : 2);
-            const remapBase = normalBase + vertexCount * (1 + (layout.tangents ? 1 : 0) + uvFloats + (layout.colors ? 1 : 0));
+            const remapBase =
+                normalBase + vertexCount * (1 + (layout.tangents ? 1 : 0) + uvFloats + (layout.colors ? 1 : 0));
             const cornerByte = (remapBase + words[6]) * 4 + records[r + 3];
             const bytes = new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
             const first = positions.length / 3;
@@ -211,12 +213,14 @@ const decodeFinestMesh = () => {
                 let x, y, z;
                 if (wide) {
                     const b = PAGE_HEADER_WORDS + pv * 3;
-                    x = words[b] | 0; y = words[b + 1] | 0; z = words[b + 2] | 0;
+                    x = words[b] | 0;
+                    y = words[b + 1] | 0;
+                    z = words[b + 2] | 0;
                 } else {
                     const b = PAGE_HEADER_WORDS + pv * 2;
-                    x = (words[7] | 0) + (words[b] & 0xFFFF);
+                    x = (words[7] | 0) + (words[b] & 0xffff);
                     y = (words[8] | 0) + (words[b] >>> 16);
-                    z = (words[9] | 0) + (words[b + 1] & 0xFFFF);
+                    z = (words[9] | 0) + (words[b + 1] & 0xffff);
                 }
                 positions.push(x * step + origin[0], y * step + origin[1], z * step + origin[2]);
                 decodeOct16(words[normalBase + pv], n, 0);
@@ -244,7 +248,7 @@ const plainMaterial = new StandardMaterial();
 plainMaterial.diffuse.fromArray(resource.primitives[0].baseColorFactor);
 plainMaterial.gloss = 0.4;
 // the same face culling the meshlet draw buckets apply
-if (resource.materialTable && (resource.materialTable[11] & 1)) plainMaterial.cull = CULLFACE_NONE;
+if (resource.materialTable && resource.materialTable[11] & 1) plainMaterial.cull = CULLFACE_NONE;
 plainMaterial.update();
 
 /**
@@ -342,9 +346,12 @@ const rebuild = (n) => {
     });
     buildPlainGrid(meshlets ? 0 : n);
     const b = director.world.budgetBreakdown;
-    data.set('data.budgetStats', b ?
-        `fixed ${(b.fixed / MB).toFixed(0)} + views ${(b.perView / MB).toFixed(0)} + pages ${(b.pagePool / MB).toFixed(0)} + indices ${(b.indices / MB).toFixed(0)} + records ${(b.records / MB).toFixed(0)} + queue ${(b.cutQueue / MB).toFixed(0)} MB` :
-        'unbudgeted');
+    data.set(
+        'data.budgetStats',
+        b
+            ? `fixed ${(b.fixed / MB).toFixed(0)} + views ${(b.perView / MB).toFixed(0)} + pages ${(b.pagePool / MB).toFixed(0)} + indices ${(b.indices / MB).toFixed(0)} + records ${(b.records / MB).toFixed(0)} + queue ${(b.cutQueue / MB).toFixed(0)} MB`
+            : 'unbudgeted'
+    );
 };
 rebuild(data.get('data.gridSize'));
 

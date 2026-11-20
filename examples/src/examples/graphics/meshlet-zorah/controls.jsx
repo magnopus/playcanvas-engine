@@ -148,10 +148,16 @@ export function Controls({ observer }) {
                 <Label binding={new BindingTwoWay()} link={{ observer, path: 'data.statsRoots' }} />
             </LabelGroup>
             <LabelGroup text='Demand'>
-                <Label binding={new BindingTwoWay()} link={{ observer, path: 'data.statsDemand' }} />
+                <Label
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.statsDemand' }}
+                />
             </LabelGroup>
             <LabelGroup text='LOD pressure'>
-                <Label binding={new BindingTwoWay()} link={{ observer, path: 'data.statsPressure' }} />
+                <Label
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.statsPressure' }}
+                />
             </LabelGroup>
             <LabelGroup text='Pages'>
                 <Label binding={new BindingTwoWay()} link={{ observer, path: 'data.statsPages' }} />

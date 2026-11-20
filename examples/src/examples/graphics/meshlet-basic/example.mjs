@@ -172,9 +172,14 @@ app.on('framerender', () => {
     }
     // the index demand covers the LOD cut before occlusion; an asset past maxWorldMeshlets is
     // split across several worlds, so their stats are summed
-    const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
-    const colorMode = data.get('data.visualization') === 'meshlet' ? MESHLET_COLOR_MODE.MESHLET : MESHLET_COLOR_MODE.LIT;
-    let meshlets = 0, indices = 0, resident = 0, pages = 0, demand = false;
+    const directors = app.systems.meshlet.directors.filter((d) => d.world.finalized);
+    const colorMode =
+        data.get('data.visualization') === 'meshlet' ? MESHLET_COLOR_MODE.MESHLET : MESHLET_COLOR_MODE.LIT;
+    let meshlets = 0,
+        indices = 0,
+        resident = 0,
+        pages = 0,
+        demand = false;
     for (const director of directors) {
         director.world.setColorMode(colorMode);
         const view = director.views.get(camera.camera);
@@ -187,8 +192,10 @@ app.on('framerender', () => {
         pages += director.world.totalPages;
     }
     if (demand && ++statFrames % 30 === 0) {
-        data.set('data.stats', `${meshlets} meshlets drawn, cut ${(indices / 3e6).toFixed(2)}M tris, ` +
-            `${resident}/${pages} pages`);
+        data.set(
+            'data.stats',
+            `${meshlets} meshlets drawn, cut ${(indices / 3e6).toFixed(2)}M tris, ` + `${resident}/${pages} pages`
+        );
     }
     if (!framed) {
         const bounds = world.worldBounds;
