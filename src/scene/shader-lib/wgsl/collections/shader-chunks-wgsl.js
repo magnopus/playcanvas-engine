@@ -262,6 +262,16 @@ const shaderChunksWGSL = {
     litShaderArgsPS,
     litShaderCorePS,
     litShadowMainPS,
+    // engine-internal hooks, mirroring the litUser* slots below and included before them at
+    // every site, so engine features do not collide with an application's litUser* overrides
+    litEngineDeclarationPS: '',
+    litEngineDeclarationVS: '',
+    litEngineCodePS: '',
+    litEngineCodeVS: '',
+    litEngineMainStartPS: '',
+    litEngineMainStartVS: '',
+    litEngineMainEndPS: '',
+    litEngineMainEndVS: '',
     litUserDeclarationPS: '',  // empty chunk allowing user to add custom code
     litUserDeclarationVS: '',  // empty chunk allowing user to add custom code
     litUserCodePS: '',  // empty chunk allowing user to add custom code

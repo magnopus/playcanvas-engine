@@ -1,5 +1,6 @@
 import { Debug } from '../../core/debug.js';
 
+import { BLEND_NONE } from '../../scene/constants.js';
 import { GraphNode } from '../../scene/graph-node.js';
 import { MeshInstance } from '../../scene/mesh-instance.js';
 import { Model } from '../../scene/model.js';
@@ -65,6 +66,10 @@ class GlbContainerResource {
         this.animations = animations;
         this.gsplats = gsplats;
         this._meshGSplats = meshGSplats;
+
+        // streamed meshlet resources (MAG_meshlets_gpu v2) - at most one per document, populated
+        // by the magMeshlets resource extension when the meshlet component system is registered
+        this.meshlets = data.meshlets ?? [];
     }
 
     get model() {
@@ -96,6 +101,10 @@ class GlbContainerResource {
     instantiateRenderEntity(options) {
 
         const defaultMaterial = this._defaultMaterial;
+        let skipBlendedShadowCasters = false;
+        if (options?.skipBlendedShadowCasters !== undefined) {
+            ({ skipBlendedShadowCasters, ...options } = options);
+        }
         const skinnedMeshInstances = [];
 
         const createMeshInstance = function (root, entity, mesh, materials, meshDefaultMaterials, skins, gltfNode, nodeInstancingMap) {
@@ -222,6 +231,18 @@ class GlbContainerResource {
 
                 // assign asset id without recreating mesh instances which are already set up with materials
                 entity.render.assignAsset(renderAsset);
+
+                // a shadow map can only record a blended or transmissive surface as solid; applied
+                // after the component, which sets every mesh instance from its own castShadows
+                if (skipBlendedShadowCasters) {
+                    for (let i = 0; i < attachedMi.length; i++) {
+                        const material = attachedMi[i].material;
+                        const blended = material.blendType !== BLEND_NONE && !(material.alphaTest > 0);
+                        if (blended || material.refraction > 0) {
+                            attachedMi[i].castShadows = false;
+                        }
+                    }
+                }
             }
 
             // recursively clone children
@@ -412,6 +433,11 @@ class GlbContainerResource {
             destroyAssets(this.gsplats);
             this.gsplats = null;
             this._meshGSplats = null;
+        }
+
+        if (this.meshlets) {
+            this.meshlets.forEach(resource => resource.destroy());
+            this.meshlets = null;
         }
 
         if (this._model) {

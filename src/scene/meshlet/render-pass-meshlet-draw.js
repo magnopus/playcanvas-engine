@@ -1,0 +1,180 @@
+import { SHADER_FORWARD } from '../constants.js';
+import { RenderPass } from '../../platform/graphics/render-pass.js';
+import { addDirectionalShadowPasses } from '../renderer/render-pass-forward.js';
+
+/**
+ * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
+ * @import { ForwardRenderer } from '../renderer/forward-renderer.js'
+ * @import { CameraComponent } from '../../framework/components/camera/component.js'
+ * @import { Layer } from '../layer.js'
+ * @import { MeshInstance } from '../mesh-instance.js'
+ * @import { RenderTarget } from '../../platform/graphics/render-target.js'
+ */
+
+/**
+ * Renders one phase's meshlet mesh instances into the camera's render target. Phase 1 runs
+ * before the scene's opaque passes and owns the camera clear (color/depth/stencil); phase 2
+ * loads everything. Driven entirely by the GPU-written indirect draw args each instance was
+ * pointed at.
+ *
+ * Lighting rides on a borrowed layer (the camera's World layer): its light list feeds the
+ * light uniforms and keys the shader variants. For clustered lighting the pass requests a
+ * cluster for a one-entry layerRenderSteps array - the WorldClustersAllocator hash-dedupes it
+ * with the main pass, so meshlet draws share the World layer's cluster data.
+ *
+ * @ignore
+ */
+class RenderPassMeshletDraw extends RenderPass {
+    /** @type {ForwardRenderer} */
+    renderer;
+
+    /** @type {CameraComponent|null} */
+    cameraComponent = null;
+
+    /** @type {MeshInstance[]} */
+    meshInstances = [];
+
+    /**
+     * The scene textures this pass writes alongside the scene colour, when it renders into a
+     * CameraFrame's scene target - the same setting the frame gives its own scene passes (see
+     * RenderPassForward#sceneTextures). Undefined leaves the camera's setting in place.
+     *
+     * @type {string[]|undefined}
+     */
+    sceneTextures;
+
+    /**
+     * Gamma correction override for the draws, applied for the duration of this pass the way
+     * RenderPassForward applies it: a CameraFrame renders its scene passes with none, as its
+     * compose pass applies gamma and tonemapping to the whole frame, and the meshlet draws
+     * sharing that target must match. Undefined leaves the camera's setting in place.
+     *
+     * @type {number|undefined}
+     */
+    gammaCorrection;
+
+    /**
+     * Tone mapping override for the draws - see {@link gammaCorrection}.
+     *
+     * @type {number|undefined}
+     */
+    toneMapping;
+
+    /**
+     * Duck-typed {@link LayerRenderStep} list, requested from WorldClustersAllocator in
+     * frameUpdate: one entry pointing at the borrowed light layer; the allocator writes
+     * lightClusters.
+     *
+     * @type {Array<{ layer: Layer|null, lightClusters: object|null }>}
+     */
+    layerRenderSteps = [{ layer: null, lightClusters: null }];
+
+    /**
+     * The options handed to the forward layer render, reused every frame.
+     *
+     * @private
+     */
+    _forwardOptions = { meshInstances: null, lightList: undefined, lightClusters: undefined };
+
+    /**
+     * @param {GraphicsDevice} device - The graphics device.
+     * @param {ForwardRenderer} renderer - The forward renderer.
+     * @param {string} name - Pass name for debugging.
+     */
+    constructor(device, renderer, name) {
+        super(device);
+        this.renderer = renderer;
+        this.name = name;
+    }
+
+    /**
+     * Points the pass at this frame's target, camera and light layer. Named setup, not
+     * frameUpdate - the frame graph calls frameUpdate() on every pass with no arguments each
+     * frame.
+     *
+     * @param {CameraComponent} cameraComponent - The camera.
+     * @param {RenderTarget|null} renderTarget - The target.
+     * @param {Layer|null} lightLayer - The layer whose lights shade the meshlet draws
+     * (typically the camera's World layer). Null renders unlit-by-scene (no lights).
+     * @param {{ clearColor: boolean, clearDepth: boolean, clearStencil: boolean }|null} [clears] - When
+     * set, this pass owns the camera clear: the flagged targets clear with the camera's clear
+     * values (phase 1). Null loads everything (phase 2).
+     */
+    setup(cameraComponent, renderTarget, lightLayer = null, clears = null) {
+        this.cameraComponent = cameraComponent;
+        this.layerRenderSteps[0].layer = lightLayer;
+
+        // null is the backbuffer. A camera whose renderTarget was assigned undefined (rather than
+        // never assigned) hands undefined down through the render action, and comparing that
+        // against the not-yet-initialised pass would skip init() - the pass would then execute
+        // without a render pass having been started.
+        renderTarget ??= null;
+
+        // No resize options: the pass draws into a target the scene passes own and size. Options
+        // would resize it to the back buffer each frame, against a scaled scene pass resizing it
+        // back, recreating its textures twice a frame (and leaving aliases of them destroyed).
+        if (this.renderTarget !== renderTarget) {
+            this.init(renderTarget);
+            this.colorOps.store = true;
+            this.depthStencilOps.storeDepth = true;
+        }
+        const camera = cameraComponent.camera;
+        this.setClearColor(clears?.clearColor ? camera.clearColor : undefined);
+        this.setClearDepth(clears?.clearDepth ? camera.clearDepth : undefined);
+        this.setClearStencil(clears?.clearStencil ? camera.clearStencil : undefined);
+    }
+
+    /**
+     * Claims this camera's directional shadow passes, as RenderPassForward does: this pass runs
+     * ahead of the scene passes, so without the claim the meshlet draws would shade with last
+     * frame's shadow maps.
+     */
+    frameUpdate() {
+        super.frameUpdate();
+        this.internalBeforePasses.length = 0;
+        const camera = this.cameraComponent?.camera;
+        const renderer = this.renderer;
+        if (!camera) return;
+
+        // under clustered lighting, request the borrowed light layer's cluster (shared with the
+        // scene passes rendering the same light set), as RenderPassForward does for its steps
+        const step = this.layerRenderSteps[0];
+        if (step.layer && renderer.scene.clusteredLightingEnabled) {
+            renderer.worldClustersAllocator.request(step);
+        }
+        addDirectionalShadowPasses(renderer, camera, this.internalBeforePasses);
+    }
+
+    execute() {
+        const cameraComponent = this.cameraComponent;
+        const camera = cameraComponent?.camera;
+        if (!camera || !this.meshInstances.length) {
+            return;
+        }
+
+        // the per-pass overrides a forward pass applies, so the draws match the scene passes
+        // rendering into the same target
+        const { shaderParams } = cameraComponent;
+        const originalGammaCorrection = cameraComponent.gammaCorrection;
+        const originalToneMapping = cameraComponent.toneMapping;
+        const originalSceneTextures = shaderParams.sceneTextures;
+        if (this.gammaCorrection !== undefined) cameraComponent.gammaCorrection = this.gammaCorrection;
+        if (this.toneMapping !== undefined) cameraComponent.toneMapping = this.toneMapping;
+        if (this.sceneTextures !== undefined) shaderParams.sceneTextures = this.sceneTextures;
+
+        const step = this.layerRenderSteps[0];
+        // Match the regular forward passes, including the camera's material debug views.
+        const shaderPass = camera.shaderPassInfo?.index ?? SHADER_FORWARD;
+        const options = this._forwardOptions;
+        options.meshInstances = this.meshInstances;
+        options.lightList = step.layer?.getLightList(this.renderer.scene.clusteredLightingEnabled);
+        options.lightClusters = step.lightClusters ?? undefined;
+        this.renderer.renderForwardLayer(camera, this.renderTarget, null, false, shaderPass, options);
+
+        if (this.gammaCorrection !== undefined) cameraComponent.gammaCorrection = originalGammaCorrection;
+        if (this.toneMapping !== undefined) cameraComponent.toneMapping = originalToneMapping;
+        if (this.sceneTextures !== undefined) shaderParams.sceneTextures = originalSceneTextures;
+    }
+}
+
+export { RenderPassMeshletDraw };

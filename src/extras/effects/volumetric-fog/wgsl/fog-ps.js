@@ -53,7 +53,13 @@ export default /* wgsl */`
             let shadowCoord: vec3f = (uniform.uFogShadowMatrixPalette[cascadeIndex] * vec4f(worldPos, 1.0)).xyz;
             // the biased depth beyond the far plane of the shadow stays below the cleared depth of the
             // shadow map, so only the casters in the shadow map shadow it
-            let z: f32 = min(shadowCoord.z - uniform.uFogShadowParams.y, 0.9999);
+            #ifdef REVERSE_Z
+                // reversed: the bias pushes the receiver towards the light (greater z), and the far
+                // plane / cleared depth is 0
+                let z: f32 = max(shadowCoord.z + uniform.uFogShadowParams.y, 0.0001);
+            #else
+                let z: f32 = min(shadowCoord.z - uniform.uFogShadowParams.y, 0.9999);
+            #endif
 
             #if defined(FOG_SHADOW_PCF)
                 // hardware comparison on the depth format shadow map
@@ -61,10 +67,19 @@ export default /* wgsl */`
             #elif defined(FOG_SHADOW_VSM)
                 // Chebyshev test on the blurred moments of the exponentially warped depth
                 let moments: vec3f = textureSampleLevel(uFogShadowMap, uFogShadowMapSampler, shadowCoord.xy, 0.0).xyz;
-                return calculateEVSM(moments, z, uniform.uFogShadowParams.z, fogVsmExponent);
+                #ifdef REVERSE_Z
+                    // the VSM shadow map stores forward depth
+                    return calculateEVSM(moments, 1.0 - z, uniform.uFogShadowParams.z, fogVsmExponent);
+                #else
+                    return calculateEVSM(moments, z, uniform.uFogShadowParams.z, fogVsmExponent);
+                #endif
             #else
                 // manual comparison on the color format shadow map storing depth (PCSS)
-                return step(z, textureSampleLevel(uFogShadowMap, uFogShadowMapSampler, shadowCoord.xy, 0.0).r);
+                #ifdef REVERSE_Z
+                    return step(textureSampleLevel(uFogShadowMap, uFogShadowMapSampler, shadowCoord.xy, 0.0).r, z);
+                #else
+                    return step(z, textureSampleLevel(uFogShadowMap, uFogShadowMapSampler, shadowCoord.xy, 0.0).r);
+                #endif
             #endif
         }
     #endif

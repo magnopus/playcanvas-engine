@@ -8,6 +8,7 @@ import { http } from '../../platform/net/http.js';
  * @import { AssetType } from '../asset/asset.js'
  * @import { BundlesFilterCallback } from '../asset/asset-registry.js'
  * @import { ResourceHandler } from './handler.js'
+ * @import { ByteCache } from '../../platform/net/byte-cache.js'
  */
 
 /**
@@ -51,6 +52,14 @@ class ResourceLoader {
         this._requests = {};
         this._cache = {};
         this._app = app;
+
+        /**
+         * The byte cache this loader installed on the shared HTTP layer, cleared on destroy.
+         *
+         * @type {ByteCache|null}
+         * @private
+         */
+        this._byteCache = null;
     }
 
     /**
@@ -436,9 +445,43 @@ class ResourceLoader {
     }
 
     /**
+     * Sets a persistent cache for asset downloads, or null for none. Asset requests are answered
+     * from the cache when the whole response is stored, and stored in it when they succeed, so
+     * assets downloaded in an earlier session load without touching the network. The cache
+     * assumes the content behind a URL never changes, so serve assets from versioned URLs.
+     *
+     * Note this is a process-global setting (it applies to the shared HTTP layer), so with
+     * multiple applications the last value set wins; destroying the loader clears it if it is
+     * still the value this loader set. It applies to requests made through the
+     * engine's HTTP layer, which carries most asset loads; formats fetched with `fetch()`
+     * directly (Gaussian splat PLY and SOG bundles, asset bundles) are not cached.
+     *
+     * @type {ByteCache|null}
+     * @example
+     * app.loader.byteCache = new pc.ByteCache(new pc.OpfsByteStore('my-app-assets'));
+     */
+    set byteCache(value) {
+        http.byteCache = value;
+        this._byteCache = value;
+    }
+
+    /**
+     * Gets the persistent cache for asset downloads.
+     *
+     * @type {ByteCache|null}
+     */
+    get byteCache() {
+        return http.byteCache;
+    }
+
+    /**
      * Destroys the resource loader.
      */
     destroy() {
+        if (this._byteCache && http.byteCache === this._byteCache) {
+            http.byteCache = null;
+        }
+        this._byteCache = null;
         this._handlers = {};
         this._requests = {};
         this._cache = {};

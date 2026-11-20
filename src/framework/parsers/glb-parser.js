@@ -86,6 +86,8 @@ class GlbResources {
 
     gsplats;
 
+    meshlets;
+
     skins;
 
     lights;
@@ -463,6 +465,13 @@ const createMesh = (device, gltfMesh, accessors, bufferViews, vertexBufferDict, 
                         // silently convert to 16bit
                         indexFormat = INDEXFORMAT_UINT16;
                         indices = new Uint16Array(indices);
+                    }
+
+                    // the accessor data can be a view into the whole GLB binary, and the index
+                    // buffer keeps its data by reference as CPU storage: copy it, so the buffer
+                    // does not keep the entire file alive after the container drops it
+                    if (indices.byteLength !== indices.buffer.byteLength) {
+                        indices = indices.slice();
                     }
 
                     const indexBuffer = new IndexBuffer(device, indexFormat, indices.length, BUFFER_STATIC, indices);
@@ -1182,6 +1191,26 @@ const createNodes = (gltf, options, nodeInstancingMap) => {
     return nodes;
 };
 
+/**
+ * Whether every mesh primitive is handled by a resource extension that carries its own instance
+ * placements (such as a streamed-meshlet bake), and nothing (skins, animations, lights, cameras)
+ * needs the node hierarchy. Such a document renders only through those resources, so building a
+ * GraphNode per glTF node would only hold heap (large scattered bakes carry millions of
+ * placement nodes).
+ *
+ * @param {object} gltf - The glTF document.
+ * @param {GlbResourceExtension[]} resourceExtensions - The registered resource extensions.
+ * @returns {boolean} True when the node hierarchy can be skipped.
+ */
+const isSelfPlacedDocument = (gltf, resourceExtensions) => {
+    const placing = resourceExtensions.filter(extension => extension.placesInstances);
+    if (!placing.length || !gltf.meshes?.length || gltf.skins?.length || gltf.animations?.length || gltf.cameras?.length ||
+        gltf.extensions?.KHR_lights_punctual?.lights?.length) {
+        return false;
+    }
+    return gltf.meshes.every(mesh => mesh.primitives?.every(primitive => placing.some(extension => extension.handlesPrimitive(primitive))));
+};
+
 const createScenes = (gltf, nodes) => {
     const scenes = [];
     const count = gltf.scenes.length;
@@ -1278,8 +1307,11 @@ const createResources = async (device, gltf, bufferViews, textures, options, app
     }
 
     const nodeInstancingMap = new Map();
-    const nodes = createNodes(gltf, options, nodeInstancingMap);
-    const scenes = createScenes(gltf, nodes);
+    // a self-placed bake (e.g. meshlets) keeps an empty root per scene instead of its
+    // (placement-only) nodes
+    const selfPlaced = isSelfPlacedDocument(gltf, resourceExtensions);
+    const nodes = selfPlaced ? [] : createNodes(gltf, options, nodeInstancingMap);
+    const scenes = selfPlaced ? (gltf.scenes ?? []).map(scene => new GraphNode(scene.name)) : createScenes(gltf, nodes);
     const lights = createLights(gltf, nodes, options, app);
     const cameras = createCameras(gltf, nodes, options, app);
     const variants = createVariants(gltf);

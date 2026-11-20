@@ -133,6 +133,136 @@ describe('FramePassCameraFrame', function () {
         restore();
     });
 
+    it('leaves the meshlet passes it splices in to their owner when it rebuilds or is destroyed', function () {
+        // the meshlet director owns these and splices the same instances into every rebuilt chain
+        const before = new FramePass(app.graphicsDevice);
+        const middle = new FramePass(app.graphicsDevice);
+        const destroyBefore = spy(before, 'destroy');
+        const destroyMiddle = spy(middle, 'destroy');
+        app.renderer.meshletDirector = {
+            buildCameraFramePasses: () => ({ before: [before], middle: [middle] }),
+            wantsSceneDepth: () => false
+        };
+        try {
+            cameraFrame.update();
+            const passes = cameraFrame.renderPassCamera.beforePasses;
+            expect(passes).to.include(before);
+            expect(passes).to.include(middle);
+
+            // a rebuild, as when the director's views change
+            cameraFrame.renderPassCamera.layersDirty = true;
+            cameraFrame.update();
+            expect(cameraFrame.renderPassCamera.beforePasses).to.include(before);
+
+            cameraFrame.destroy();
+            expect(destroyBefore.called, 'borrowed phase-1 pass').to.equal(false);
+            expect(destroyMiddle.called, 'borrowed HZB / phase-2 pass').to.equal(false);
+        } finally {
+            app.renderer.meshletDirector = null;
+            cameraFrame = new CameraFrame(app, app.root.findByName('Camera').camera);
+            before.destroy();
+            middle.destroy();
+        }
+    });
+
+    it('gives the meshlet draw passes the scene pass settings, and leaves its other passes alone', function () {
+        // a draw pass declares the scene settings it can take; the HZB and cull passes do not
+        const draw = new FramePass(app.graphicsDevice);
+        draw.sceneTextures = undefined;
+        draw.gammaCorrection = undefined;
+        draw.toneMapping = undefined;
+        const hzb = new FramePass(app.graphicsDevice);
+        app.renderer.meshletDirector = {
+            buildCameraFramePasses: () => ({ before: [draw], middle: [hzb] }),
+            wantsSceneDepth: () => false
+        };
+        try {
+            cameraFrame.update();
+            const scenePass = cameraFrame.renderPassCamera.scenePass;
+            expect(draw.toneMapping).to.equal(TONEMAP_NONE);
+            expect(draw.gammaCorrection).to.equal(scenePass.gammaCorrection);
+            expect(draw.sceneTextures).to.equal(scenePass.sceneTextures);
+            expect(hzb).to.not.have.property('sceneTextures');
+            expect(hzb).to.not.have.property('toneMapping');
+        } finally {
+            app.renderer.meshletDirector = null;
+            cameraFrame.destroy();
+            cameraFrame = new CameraFrame(app, app.root.findByName('Camera').camera);
+            draw.destroy();
+            hzb.destroy();
+        }
+    });
+
+    it('resizes the scene render target when the render target scale changes after the passes are created', function () {
+        // the meshlet passes split the scene into a pass before and one after them, both resizing
+        // the one scene render target - one left on the old scale would size it back every frame
+        const before = new FramePass(app.graphicsDevice);
+        const middle = new FramePass(app.graphicsDevice);
+        app.renderer.meshletDirector = {
+            buildCameraFramePasses: () => ({ before: [before], middle: [middle] }),
+            wantsSceneDepth: () => false
+        };
+        try {
+            cameraFrame.update();
+            const framePass = cameraFrame.renderPassCamera;
+            // a frame settles the passes, as one which is not rebuilt keeps the scale it was made with
+            framePass.frameUpdate();
+            const { scenePassAfterMeshlets } = framePass;
+            expect(scenePassAfterMeshlets, 'pass after the meshlets').to.not.equal(null);
+
+            cameraFrame.rendering.renderTargetScale = 0.5;
+            cameraFrame.update();
+            expect(framePass.scenePassAfterMeshlets, 'not rebuilt').to.equal(scenePassAfterMeshlets);
+            const resizing = framePass.collectPasses().filter(pass => pass?.renderTarget === framePass.rt && pass.options);
+            expect(resizing.length).to.be.above(1);
+            for (const pass of resizing) {
+                expect([pass.scaleX, pass.scaleY], pass.name).to.deep.equal([0.5, 0.5]);
+            }
+
+            // the frame graph updates the passes in order, each resizing what it renders to
+            framePass.frameUpdate();
+            for (const pass of resizing) {
+                pass.frameUpdate();
+            }
+            const { backBuffer } = app.graphicsDevice;
+            expect([framePass.rt.width, framePass.rt.height]).to.deep.equal([Math.floor(backBuffer.width * 0.5), Math.floor(backBuffer.height * 0.5)]);
+        } finally {
+            app.renderer.meshletDirector = null;
+            cameraFrame.destroy();
+            cameraFrame = new CameraFrame(app, app.root.findByName('Camera').camera);
+            before.destroy();
+            middle.destroy();
+        }
+    });
+
+    it('renders each layer once when meshlets split a scene that also has a grab pass', function () {
+        const before = new FramePass(app.graphicsDevice);
+        const middle = new FramePass(app.graphicsDevice);
+        app.renderer.meshletDirector = {
+            buildCameraFramePasses: () => ({ before: [before], middle: [middle] }),
+            wantsSceneDepth: () => false
+        };
+        try {
+            cameraFrame.rendering.sceneColorMap = true;
+            cameraFrame.update();
+            const framePass = cameraFrame.renderPassCamera;
+            // the opaque half already ends at the grab layer: no second opaque pass
+            expect(framePass.scenePassAfterMeshlets).to.equal(null);
+            expect(framePass.scenePassTransparent).to.not.equal(null);
+
+            const rendered = [framePass.scenePass, framePass.scenePassTransparent]
+            .flatMap(pass => pass.layerRenderSteps.map(step => `${step.layer.id}:${step.transparent}`));
+            expect(new Set(rendered).size, rendered.join(' ')).to.equal(rendered.length);
+            expect(framePass.scenePass.layerRenderSteps.every(step => !step.transparent)).to.equal(true);
+        } finally {
+            app.renderer.meshletDirector = null;
+            cameraFrame.destroy();
+            cameraFrame = new CameraFrame(app, app.root.findByName('Camera').camera);
+            before.destroy();
+            middle.destroy();
+        }
+    });
+
     it('blurs the TAA output for the bloom and the high quality depth of field', function () {
         cameraFrame.dof.highQuality = true;
         cameraFrame.update();

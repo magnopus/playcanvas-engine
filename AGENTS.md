@@ -151,6 +151,13 @@ This is a **performance-critical** engine. Always consider:
   - Stub methods should be empty or return safe default values to avoid crashes
   - This ensures the engine can run without a real graphics backend for testing/server-side use
 
+#### Meshlets
+
+- The GPU-driven meshlet renderer (`src/scene/meshlet/`, `MeshletComponent`) is **WebGPU-only**: compute culling plus indirect draws, WGSL shaders only. It does nothing on WebGL2
+- Buffer layouts, strides and flags are defined once in `src/scene/meshlet/constants.js`; the WGSL reads them through the struct views in `src/scene/meshlet/shaders/meshlet-page-wgsl.js`. Change both together
+- The asset format (`MAG_meshlets_gpu`, `MAG_meshlets_stream`, `MAG_texture_streaming`) is specified in Magnopus's private gltf-tools repo, which produces the bakes. Layouts in `constants.js` and the glTF parser must match those specs
+- Read `docs/meshlet/architecture.md` before changing the pipeline; `docs/meshlet/removed-features.md` records features cut from it and how to rebuild them
+
 ## Project-Specific Rules
 
 ### 8. API Stability and Deprecation

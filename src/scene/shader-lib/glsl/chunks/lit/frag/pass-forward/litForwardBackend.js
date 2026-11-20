@@ -41,6 +41,12 @@ void evaluateBackend() {
         #endif
     #endif
 
+    // refraction's fresnel uses the material specularity, captured before the area lights reset it
+    // to 1 for their own accumulation - which would cancel the refraction out entirely
+    #ifdef LIT_REFRACTION
+        vec3 refractionSpecularity = litArgs_specularity;
+    #endif
+
     // ambient
     #ifdef LIT_ADD_AMBIENT
 
@@ -207,7 +213,7 @@ void evaluateBackend() {
             dViewDirW,
             litArgs_thickness,
             litArgs_gloss,
-            litArgs_specularity,
+            refractionSpecularity,
             litArgs_albedo,
             litArgs_transmission,
             litArgs_ior,

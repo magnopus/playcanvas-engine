@@ -128,6 +128,16 @@ class WebgpuResolver {
      */
     resolveDepth(commandEncoder, sourceTexture, destinationTexture, mode = DEPTHRESOLVE_MIN, destinationLayer = 0) {
 
+        // the modes are defined in terms of the standard depth buffer (min is the nearest surface),
+        // which reverse-z inverts
+        if (this.device.isReverseZ) {
+            if (mode === DEPTHRESOLVE_MIN) {
+                mode = DEPTHRESOLVE_MAX;
+            } else if (mode === DEPTHRESOLVE_MAX) {
+                mode = DEPTHRESOLVE_MIN;
+            }
+        }
+
         Debug.assert(sourceTexture.sampleCount > 1);
         Debug.assert(destinationTexture.sampleCount === 1);
         Debug.assert(destinationLayer + sourceTexture.depthOrArrayLayers <= destinationTexture.depthOrArrayLayers,

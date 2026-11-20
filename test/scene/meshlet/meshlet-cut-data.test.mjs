@@ -1,0 +1,127 @@
+import { expect } from 'chai';
+
+import { createCutFixture } from './meshlet-cut-fixture.mjs';
+import { MESHLET_BUCKET_OPAQUE, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_FLAG_SLOPPY, MESHLET_NO_PARENT } from '../../../src/scene/meshlet/constants.js';
+import { buildMeshletGroups, collectFloorPages, MeshletCutData } from '../../../src/scene/meshlet/meshlet-cut-data.js';
+
+describe('meshlet replacement groups', function () {
+    it('checks each shared page and parent representative once per replacement', function () {
+        const { meshlets, instances } = createCutFixture();
+        // Every meshlet shares a page, and the two coarse members share one parent.
+        for (let m = 0; m < 10; m++) meshlets[m * MESHLET_DATA_U32S + M.PAGE] = 0;
+        meshlets[5 * MESHLET_DATA_U32S + M.PARENT] = 8;
+        const device = {
+            buffers: new Set(),
+            _vram: { sb: 0 },
+            createBufferImpl: () => ({
+                allocate() {},
+                destroy() {},
+                write(device, offset, data) {
+                    this.words = data.slice();
+                }
+            })
+        };
+        const cut = new MeshletCutData(device, meshlets, instances);
+        try {
+            const words = cut.groups.impl.words;
+            const group0 = 1;
+            expect(words[group0 + 1], 'unique ancestor count').to.equal(1);
+            expect(words[group0 + 3], 'unique finer page count').to.equal(1);
+            const roots = words[0];
+            expect(words[roots + 3], 'unique root page count').to.equal(1);
+            expect(words[roots + 4], 'root index cost').to.equal(6);
+            expect(words[roots + 5], 'draw bucket of the root flags').to.equal(MESHLET_BUCKET_OPAQUE);
+            expect(cut.selectionTopology.byteSize).to.equal(10 * 8);
+            const topology = cut.selectionTopology.impl.words;
+            expect(Array.from(topology)).to.deep.equal([
+                4, MESHLET_NO_PARENT, 4, MESHLET_NO_PARENT,
+                6, MESHLET_NO_PARENT, 6, MESHLET_NO_PARENT,
+                8, 4, 8, 4, 8, 6, 9, 6,
+                MESHLET_NO_PARENT, 8, MESHLET_NO_PARENT, 9
+            ]);
+        } finally {
+            cut.destroy();
+        }
+    });
+
+    it('stores the coarse cost each parent contributes to a replacement', function () {
+        const { meshlets, instances } = createCutFixture();
+        const device = {
+            buffers: new Set(),
+            _vram: { sb: 0 },
+            createBufferImpl: () => ({
+                allocate() {},
+                destroy() {},
+                write(device, offset, data) {
+                    this.words = data.slice();
+                }
+            })
+        };
+        const cut = new MeshletCutData(device, meshlets, instances);
+        try {
+            // Word 0 is the instance's root offset; group 4 starts at word 1 and replaces
+            // coarse members 4 (under root 8) and 5 (under root 9) with 0 and 1.
+            const words = Array.from(cut.groups.impl.words.slice(1, 17));
+            expect(words).to.deep.equal([
+                4, 2, 15, 2, 12, 6, 2, 2,
+                8, 3, 1, 9, 3, 1,
+                0, 1
+            ]);
+        } finally {
+            cut.destroy();
+        }
+    });
+
+    it('recovers all coarse members and cross-linked fine dependencies', function () {
+        const { groups, roots } = buildMeshletGroups(createCutFixture().meshlets);
+        expect(roots).to.deep.equal([8, 9]);
+        expect(groups).to.deep.equal([
+            { start: 4, count: 2, level: 1, children: [0, 1] },
+            { start: 6, count: 2, level: 1, children: [2, 3] },
+            { start: 8, count: 1, level: 2, children: [4, 6] },
+            { start: 9, count: 1, level: 2, children: [5, 7] }
+        ]);
+    });
+
+    it('rejects a coarse boundary inconsistent with the stored group bounds', function () {
+        const { meshlets } = createCutFixture();
+        meshlets[5 * MESHLET_DATA_U32S + M.GROUP_SPHERE] = 1;
+        expect(() => buildMeshletGroups(meshlets)).to.throw('inconsistent error or bounds');
+    });
+
+    it('rejects cycles and parents outside the primitive', function () {
+        for (const parent of [0, 100]) {
+            const { meshlets } = createCutFixture();
+            meshlets[M.PARENT] = parent;
+            expect(() => buildMeshletGroups(meshlets)).to.throw('invalid parent');
+        }
+    });
+});
+
+describe('meshlet playable floor', function () {
+
+    // fixture: G4 = {4,5} replaces {0,1}, G6 = {6,7} replaces {2,3}, G8 = {8} replaces {4,6},
+    // G9 = {9} replaces {5,7}; roots 8 and 9; page = meshlet index
+    const floor = (sloppy) => {
+        const { meshlets } = createCutFixture();
+        for (const m of sloppy) meshlets[m * MESHLET_DATA_U32S + M.FLAGS] |= MESHLET_FLAG_SLOPPY;
+        const { groups } = buildMeshletGroups(meshlets);
+        const pages = new Map();
+        collectFloorPages(meshlets, groups, pages);
+        return [...pages.keys()].sort((a, b) => (pages.get(b) - pages.get(a)) || (a - b));
+    };
+
+    it('is the roots alone when nothing is sloppy', function () {
+        expect(floor([])).to.deep.equal([8, 9]);
+    });
+
+    it('refines a sloppy root down to its replaced clusters', function () {
+        expect(floor([8])).to.deep.equal([8, 9, 4, 6]);
+    });
+
+    it('taints every coarser group built from sloppy clusters', function () {
+        // G4 is sloppy, and both roots replace one of its clusters: all four paths down to
+        // level 0 under G4 are needed, while G6's clean level 1 clusters stop there
+        expect(floor([4])).to.deep.equal([8, 9, 4, 5, 6, 7, 0, 1]);
+    });
+});

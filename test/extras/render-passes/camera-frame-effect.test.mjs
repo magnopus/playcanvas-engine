@@ -11,6 +11,7 @@ import { DofEffect } from '../../../src/extras/effects/dof/dof-effect.js';
 import { FramePassDof } from '../../../src/extras/effects/dof/passes/frame-pass-dof.js';
 import { FringingEffect } from '../../../src/extras/effects/fringing/fringing-effect.js';
 import { GradingEffect } from '../../../src/extras/effects/grading/grading-effect.js';
+import { RenderPassSsaoCombine } from '../../../src/extras/effects/ssao/passes/render-pass-ssao-combine.js';
 import { RenderPassSsao } from '../../../src/extras/effects/ssao/passes/render-pass-ssao.js';
 import { SsaoEffect } from '../../../src/extras/effects/ssao/ssao-effect.js';
 import { VignetteEffect } from '../../../src/extras/effects/vignette/vignette-effect.js';
@@ -558,7 +559,12 @@ describe('CameraFrameEffect', function () {
         const createResources = () => {
             const texture = new Texture(device, { name: 'depth', width: 64, height: 32, format: PIXELFORMAT_RGBA16F });
             const depth = { texture, defines: new Map(), key: '' };
-            return { [FRAMERESOURCE_DEPTH]: depth, [FRAMERESOURCE_PREPASSDEPTH]: depth };
+            const colorBuffer = new Texture(device, { name: 'scene', width: 64, height: 32, format: PIXELFORMAT_RGBA16F });
+            return {
+                [FRAMERESOURCE_DEPTH]: depth,
+                [FRAMERESOURCE_PREPASSDEPTH]: depth,
+                [FRAMERESOURCE_SCENETARGET]: new RenderTarget({ colorBuffer, depth: false })
+            };
         };
 
         const createPasses = (ssao, resources = createResources()) => {
@@ -578,9 +584,9 @@ describe('CameraFrameEffect', function () {
             expect(ssao.active).to.equal(false);
         });
 
-        it('requires the depth of the prepass in the lighting mode, and any scene depth otherwise', function () {
+        it('requires the depth of the prepass in the lighting mode, and the scene depth and target otherwise', function () {
             const ssao = createSsao(SSAOTYPE_COMBINE);
-            expect(ssao.requires).to.deep.equal([FRAMERESOURCE_DEPTH]);
+            expect(ssao.requires).to.deep.equal([FRAMERESOURCE_DEPTH, FRAMERESOURCE_SCENETARGET]);
             ssao.type = SSAOTYPE_LIGHTING;
             expect(ssao.requires).to.deep.equal([FRAMERESOURCE_PREPASSDEPTH]);
             expect(ssao.debugViews).to.deep.equal(['ssao']);
@@ -593,19 +599,20 @@ describe('CameraFrameEffect', function () {
             expect(ssao.buildKey()).to.not.equal(key);
         });
 
-        it('generates the occlusion after the scene in the combine mode', function () {
+        it('generates the occlusion after the scene and multiplies the scene by it before the resolve in the combine mode', function () {
             const ssao = createSsao(SSAOTYPE_COMBINE);
             const resources = createResources();
             const passes = createPasses(ssao, resources);
-            expect(passes.postScene).to.have.lengthOf(1);
+            // at the postScene stage, so the temporal anti-aliasing resolves the occluded scene
+            expect(passes.postScene).to.have.lengthOf(2);
             expect(passes.preScene).to.have.lengthOf(0);
-            const [pass] = passes.postScene;
+            const [pass, combine] = passes.postScene;
             expect(pass).to.be.an.instanceOf(RenderPassSsao);
             expect(pass.sourceTexture).to.equal(resources.depth.texture);
+            expect(combine).to.be.an.instanceOf(RenderPassSsaoCombine);
+            expect(combine.ssaoPass).to.equal(pass);
+            expect(combine.renderTarget).to.equal(resources.sceneTarget);
             expect(ssao.cameraFrame.cameraComponent.shaderParams.ssaoEnabled).to.equal(false);
-
-            ssao.update();
-            expect(ssao._defines.has('SSAO_LIGHTING')).to.equal(false);
         });
 
         it('generates the occlusion before the scene for the lit materials in the lighting mode', function () {
@@ -616,10 +623,6 @@ describe('CameraFrameEffect', function () {
             expect(passes.postScene).to.have.lengthOf(0);
             expect(passes.preScene[0].sourceTexture).to.equal(resources.prepassDepth.texture);
             expect(ssao.cameraFrame.cameraComponent.shaderParams.ssaoEnabled).to.equal(true);
-
-            // the composition then only displays it in the debug view
-            ssao.update();
-            expect(ssao._defines.get('SSAO_LIGHTING')).to.equal(true);
         });
 
         it('applies its parameters to its pass and the composition when updated', function () {
@@ -644,7 +647,8 @@ describe('CameraFrameEffect', function () {
             createPasses(ssao);
             ssao.type = SSAOTYPE_LIGHTING;
             ssao.update();
-            expect(ssao._defines.has('SSAO_LIGHTING')).to.equal(false);
+            expect(ssao._lighting).to.equal(false);
+            expect(ssao._combinePass).to.be.an.instanceOf(RenderPassSsaoCombine);
         });
 
         it('destroys its pass once', function () {

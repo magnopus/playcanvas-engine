@@ -1255,6 +1255,20 @@ describe('StandardMaterial', function () {
 
     });
 
+    describe('shader generation', function () {
+
+        it('includes dual-source blending usage in the shader key', function () {
+            const options = new StandardMaterialOptions();
+            const regularKey = standard.generateKey(options);
+
+            options.useDualSourceBlending = true;
+            const dualSourceKey = standard.generateKey(options);
+
+            expect(dualSourceKey).to.not.equal(regularKey);
+        });
+
+    });
+
     describe('material asset', function () {
 
         it('accepts the diffuse transmission and its maps', function () {

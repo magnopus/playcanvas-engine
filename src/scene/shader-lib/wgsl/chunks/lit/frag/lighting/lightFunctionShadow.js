@@ -42,9 +42,19 @@ export default /* wgsl */`
                 #if LIGHT{i}SHADOWTYPE == PCSS_32F
                     // PCSS needs the depth of the receivers beyond the far plane, for their distance to
                     // the blockers, and clamps the depth itself where it samples the shadow map
-                    positionInShadowSpace.z = positionInShadowSpace.z - 0.0001;
+                    #ifdef REVERSE_Z
+                        positionInShadowSpace.z = positionInShadowSpace.z + 0.0001;
+                    #else
+                        positionInShadowSpace.z = positionInShadowSpace.z - 0.0001;
+                    #endif
                 #else
-                    positionInShadowSpace.z = saturate(positionInShadowSpace.z) - 0.0001;
+                    #ifdef REVERSE_Z
+                        // reverse-z stores 1 nearest the light: offset the receiver towards the
+                        // light so the greater-than compare reports its own surface as lit
+                        positionInShadowSpace.z = saturate(positionInShadowSpace.z) + 0.0001;
+                    #else
+                        positionInShadowSpace.z = saturate(positionInShadowSpace.z) - 0.0001;
+                    #endif
                 #endif
             #else
                 #ifdef LIGHT{i}_SHADOW_SAMPLE_SOURCE_ZBUFFER
@@ -52,6 +62,10 @@ export default /* wgsl */`
                 #else
                     positionInShadowSpace.xy = positionInShadowSpace.xy / positionInShadowSpace.w;
                     positionInShadowSpace.z = length(*lightDir) * shadowParams.w;
+                    #ifdef REVERSE_Z
+                        // the shadow map stores 1 - normalized distance (see litShadowMain)
+                        positionInShadowSpace.z = 1.0 - positionInShadowSpace.z;
+                    #endif
                 #endif
             #endif
 

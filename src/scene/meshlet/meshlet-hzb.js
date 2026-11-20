@@ -1,0 +1,441 @@
+import { Mat4 } from '../../core/math/mat4.js';
+import {
+    ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST, PIXELFORMAT_DEPTH, PIXELFORMAT_DEPTH16, PIXELFORMAT_R16F, PIXELFORMAT_R32F,
+    SEMANTIC_POSITION, SHADERLANGUAGE_WGSL
+} from '../../platform/graphics/constants.js';
+import { Compute } from '../../platform/graphics/compute.js';
+import { RenderTarget } from '../../platform/graphics/render-target.js';
+import { Shader } from '../../platform/graphics/shader.js';
+import { Texture } from '../../platform/graphics/texture.js';
+import { Camera } from '../camera.js';
+import { RenderPassShaderQuad } from '../graphics/render-pass-shader-quad.js';
+import { ShaderUtils } from '../shader-lib/shader-utils.js';
+
+/**
+ * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
+ */
+
+const _shaderProjection = new Mat4();
+
+// Mip 0 moves each source value a few quanta of its format farther before decoding, so the
+// pyramid is never nearer than the surface the stored value was rounded from. A too-near pyramid
+// culls visible geometry, and a cluster culled in phase 2 is not drawn next frame either.
+const REVERSE_FLOAT_STEP = 2 ** -21; // relative, reverse-z float depth
+const RECIPROCAL_STEP_R32F = 2 ** -21; // relative, CameraFrame scene depth
+const RECIPROCAL_STEP_R16F = 2 ** -9; // relative, its fallback when R32F is not blendable
+
+/**
+ * The absolute step for a depth texture format. A reverse-z float buffer needs none, its relative
+ * step covers it.
+ *
+ * @param {number} format - The depth texture's format.
+ * @param {boolean} reverseZ - Whether the device renders reverse-z.
+ * @returns {number} The step.
+ */
+const depthStep = (format, reverseZ) => {
+    if (format === PIXELFORMAT_DEPTH16) return 2 ** -14;
+    if (format === PIXELFORMAT_DEPTH && reverseZ) return 0;
+    return 2 ** -22; // depth32float near 1, depth24plus
+};
+
+/**
+ * Loops over the source texels one destination texel reduces: its 2x2 footprint, widened to 3x3
+ * on the last row / column of an odd-sized source, which the floored destination size would
+ * otherwise drop from the pyramid. Expects `dst`, `src` (= dst * 2) and `srcSize` in scope.
+ *
+ * @param {string} texture - The source texture.
+ * @param {string} combine - WGSL folding each loaded `texel` into the result.
+ * @returns {string} The loop.
+ */
+const footprintWGSL = (texture, combine) => /* wgsl */ `
+        let extent = vec2i(2) + vec2i(select(0, 1, dst.x == (srcSize.x >> 1u) - 1 && (srcSize.x & 1) == 1),
+                                      select(0, 1, dst.y == (srcSize.y >> 1u) - 1 && (srcSize.y & 1) == 1));
+        for (var y = 0; y < extent.y; y++) {
+            for (var x = 0; x < extent.x; x++) {
+                let texel = textureLoad(${texture}, min(src + vec2i(x, y), srcSize - 1), 0);
+                ${combine}
+            }
+        }`;
+
+// mip 0 from a depth texture: the farthest of the 2x2 texels under each HZB texel, decoded to
+// linear view depth by inverting the projection (see setProjection). Reducing the raw value and
+// decoding once keeps the precision reverse-z stores near the far plane.
+const mip0DepthWGSL = /* wgsl */ `
+    var uDepthMap : texture_depth_2d;
+    uniform uDepthDecode : vec4f;
+    uniform uDepthStep : f32;
+
+    @fragment
+    fn fragmentMain(input : FragmentInput) -> FragmentOutput {
+        var output : FragmentOutput;
+        let dst = vec2i(input.position.xy);
+        let srcSize = vec2i(textureDimensions(uDepthMap));
+        let src = dst * 2;
+        #ifdef REVERSE_Z
+            var farthest = 1.0;
+        #else
+            var farthest = 0.0;
+        #endif
+        ${footprintWGSL('uDepthMap', `
+                #ifdef REVERSE_Z
+                    farthest = min(farthest, texel);
+                #else
+                    farthest = max(farthest, texel);
+                #endif`)}
+        #ifdef REVERSE_Z
+            let d = max(farthest - farthest * ${REVERSE_FLOAT_STEP} - uniform.uDepthStep, 0.0);
+        #else
+            let d = min(farthest + uniform.uDepthStep, 1.0);
+        #endif
+        let decode = uniform.uDepthDecode;
+        output.color = vec4f((decode.x - d * decode.y) / (decode.z - d * decode.w), 0.0, 0.0, 1.0);
+        return output;
+    }
+`;
+
+// mip 0 from the scene depth a CameraFrame renders as a colour attachment: a coverage weighted
+// average of reciprocal view depths, cleared to the reciprocal of the far clip. A texel nothing
+// wrote (zero) reads as infinitely far.
+const mip0LinearWGSL = /* wgsl */ `
+    var uDepthMap : texture_2d<f32>;
+    uniform uReciprocalScale : f32;
+
+    fn linearDepth(reciprocal : f32) -> f32 {
+        return select(1e30, 1.0 / (reciprocal * uniform.uReciprocalScale), reciprocal > 0.0);
+    }
+
+    @fragment
+    fn fragmentMain(input : FragmentInput) -> FragmentOutput {
+        var output : FragmentOutput;
+        let dst = vec2i(input.position.xy);
+        let srcSize = vec2i(textureDimensions(uDepthMap));
+        let src = dst * 2;
+        var depth = 0.0;
+        ${footprintWGSL('uDepthMap', 'depth = max(depth, linearDepth(texel.x));')}
+        output.color = vec4f(depth, 0.0, 0.0, 1.0);
+        return output;
+    }
+`;
+
+// threads per side of a mip-reduce workgroup: one 8x8 tile of destination texels per group
+const REDUCE_WORKGROUP = 8;
+
+// mip i: max-reduce of the 2x2 texels of mip i-1
+const mipReduceWGSL = /* wgsl */ `
+    var srcMip : texture_2d<f32>;
+    var dstMip : texture_storage_2d<r32float, write>;
+
+    @compute @workgroup_size(${REDUCE_WORKGROUP}, ${REDUCE_WORKGROUP})
+    fn main(@builtin(global_invocation_id) gid : vec3u) {
+        let dstSize = vec2i(textureDimensions(dstMip));
+        let dst = vec2i(gid.xy);
+        if (dst.x >= dstSize.x || dst.y >= dstSize.y) {
+            return;
+        }
+        let srcSize = vec2i(textureDimensions(srcMip));
+        let src = dst * 2;
+        var depth = 0.0;
+        ${footprintWGSL('srcMip', 'depth = max(depth, texel.x);')}
+        textureStore(dstMip, dst, vec4f(depth, 0.0, 0.0, 1.0));
+    }
+`;
+
+/**
+ * The pass building mip 0 of a {@link MeshletHzb}. It resolves the depth source as it executes,
+ * and when there is none - a frame rebuilt this frame has no depth yet - draws nothing and keeps
+ * the pyramid's previous contents rather than clearing them.
+ *
+ * @ignore
+ */
+class MeshletHzbMip0Pass extends RenderPassShaderQuad {
+    /** @type {MeshletHzb} */
+    hzb;
+
+    /** @type {Texture|null} - the source resolved for this frame, null to skip. */
+    _texture = null;
+
+    /**
+     * @param {GraphicsDevice} device - The graphics device.
+     * @param {MeshletHzb} hzb - The pyramid this pass builds mip 0 of.
+     */
+    constructor(device, hzb) {
+        super(device);
+        this.name = 'MeshletHzbMip0';
+        this.hzb = hzb;
+        const scope = device.scope;
+        this.depthMapId = scope.resolve('uDepthMap');
+        this.reciprocalScaleId = scope.resolve('uReciprocalScale');
+        this.depthDecodeId = scope.resolve('uDepthDecode');
+        this.depthStepId = scope.resolve('uDepthStep');
+    }
+
+    before() {
+        const hzb = this.hzb;
+        this._texture = hzb._source ? hzb._source() : hzb._depthTexture;
+        // clearing skips loading what the quad overwrites; with no source, load to keep the old pyramid
+        this.colorOps.clear = !!this._texture;
+    }
+
+    execute() {
+        const texture = this._texture;
+        if (!texture) return;
+        const hzb = this.hzb;
+        this.depthMapId.setValue(texture);
+        if (hzb.linear) {
+            const step = texture.format === PIXELFORMAT_R16F ? RECIPROCAL_STEP_R16F : RECIPROCAL_STEP_R32F;
+            this.reciprocalScaleId.setValue(1 - step);
+        } else {
+            this.depthDecodeId.setValue(hzb.depthDecode);
+            this.depthStepId.setValue(depthStep(texture.format, this.device.isReverseZ));
+        }
+        super.execute();
+        hzb.valid = true;
+    }
+}
+
+/**
+ * A max-depth hierarchical Z pyramid built from a scene depth source: a half-resolution R32F mip
+ * chain where each texel holds the maximum (farthest) depth of the screen region it covers. The
+ * phase-2 meshlet cull tests cluster bounding spheres against it. Mip 0 is a fragment quad pass
+ * (depth textures cannot be storage-written); the remaining mips reduce in compute through
+ * per-mip texture views.
+ *
+ * The pyramid holds linear view depth (world units along the view direction) whichever source
+ * it is built from: a depth texture, decoded with {@link setProjection}, or the linear scene depth
+ * a CameraFrame renders (see {@link linear}).
+ *
+ * @ignore
+ */
+class MeshletHzb {
+    /** @type {GraphicsDevice} */
+    device;
+
+    /** @type {Texture|null} */
+    texture = null;
+
+    width = 0;
+
+    height = 0;
+
+    mipCount = 0;
+
+    /**
+     * True when built from a CameraFrame's linear scene depth, false for a depth texture.
+     *
+     * @type {boolean}
+     */
+    linear = false;
+
+    /**
+     * False from the time the pyramid is (re)created until mip 0 has first been built into it:
+     * until then it holds no depth, and an occlusion test against it would hide everything.
+     *
+     * @type {boolean}
+     */
+    valid = false;
+
+    /**
+     * Decodes a depth texture value d into view depth as (x - d * y) / (z - d * w).
+     *
+     * @type {Float32Array}
+     */
+    depthDecode = new Float32Array([0, -1, 1, 0]);
+
+    /**
+     * Mip 0 build (added to the frame graph). One pass for the lifetime of the pyramid: a
+     * CameraFrame caches the pass objects it splices in, so a resize re-targets this pass rather
+     * than replacing it.
+     *
+     * @type {MeshletHzbMip0Pass|null}
+     */
+    mip0Pass = null;
+
+    /** @type {Compute[]} - mip reduce chain, dispatched by the owner between passes. */
+    _reduces = [];
+
+    /** @type {RenderTarget|null} */
+    _mip0Target = null;
+
+    /** @type {Shader|null} */
+    _reduceShader = null;
+
+    /** @type {Shader|null} */
+    _mip0DepthShader = null;
+
+    /** @type {Shader|null} */
+    _mip0LinearShader = null;
+
+    /** @type {Texture|null} - the source the mip 0 pass reads, bound at execute. */
+    _depthTexture = null;
+
+    /**
+     * Resolves the source at execute time, when set. A CameraFrame replaces its scene textures
+     * when it rebuilds, which happens while the frame graph is being built - after the director
+     * pointed this pyramid at the frame's texture and before the pass runs on it - so the pass
+     * asks again as it executes rather than trusting the reference it was given.
+     *
+     * @type {(() => Texture|null)|null}
+     */
+    _source = null;
+
+    /**
+     * @param {GraphicsDevice} device - The graphics device.
+     */
+    constructor(device) {
+        this.device = device;
+
+        this._reduceShader = new Shader(device, {
+            name: 'MeshletHzbReduce',
+            shaderLanguage: SHADERLANGUAGE_WGSL,
+            cshader: mipReduceWGSL
+        });
+    }
+
+    destroy() {
+        this._destroyReduces();
+        this._reduceShader?.destroy();
+        this._reduceShader = null;
+        // the mip 0 shaders live in the program library's cache, shared with other pyramids;
+        // destroying the pass frees only its quad, not the shader
+        this.mip0Pass?.destroy();
+        this.mip0Pass = null;
+        this._mip0Target?.destroy();
+        this._mip0Target = null;
+        this.texture?.destroy();
+        this.texture = null;
+    }
+
+    /** @private */
+    _destroyReduces() {
+        for (const compute of this._reduces) compute.destroy();
+        this._reduces.length = 0;
+    }
+
+    /**
+     * The mip 0 shader for a source kind, compiled on first use.
+     *
+     * @param {boolean} linear - True for the linear scene depth source.
+     * @returns {Shader} The shader.
+     * @private
+     */
+    _mip0Shader(linear) {
+        if (linear) {
+            this._mip0LinearShader ??= ShaderUtils.createShader(this.device, {
+                uniqueName: 'MeshletHzbMip0Linear',
+                attributes: { aPosition: SEMANTIC_POSITION },
+                vertexChunk: 'quadVS',
+                fragmentWGSL: mip0LinearWGSL
+            });
+            return this._mip0LinearShader;
+        }
+        this._mip0DepthShader ??= ShaderUtils.createShader(this.device, {
+            uniqueName: 'MeshletHzbMip0',
+            attributes: { aPosition: SEMANTIC_POSITION },
+            vertexChunk: 'quadVS',
+            fragmentWGSL: mip0DepthWGSL
+        });
+        return this._mip0DepthShader;
+    }
+
+    /**
+     * Sets the projection the depth texture source was rendered with. Unused for the linear
+     * scene depth.
+     *
+     * @param {Mat4} projectionMatrix - The camera's projection matrix.
+     */
+    setProjection(projectionMatrix) {
+        // invert the matrix the shaders render with, float32 rounding included: for reverse z
+        // that rounding is a large part of its depth term. d = (m22 * z + m32) / (m23 * z + m33)
+        // for view-space z, solved for -z.
+        const device = this.device;
+        const m = Camera.applyShaderProjectionTransform(projectionMatrix, _shaderProjection, false,
+            device.isWebGPU, device.isReverseZ).data;
+        const decode = this.depthDecode;
+        decode[0] = m[14];
+        decode[1] = m[15];
+        decode[2] = m[10];
+        decode[3] = m[11];
+    }
+
+    /**
+     * (Re)creates the pyramid for a depth source of the given size and kind.
+     *
+     * @param {Texture} depthTexture - The scene depth to reduce from: a depth texture, or the
+     * linear scene depth attachment when `linear` is set.
+     * @param {number} width - Source width.
+     * @param {number} height - Source height.
+     * @param {boolean} [linear] - True when the source is the reciprocal linear depth a
+     * CameraFrame renders (see the class notes). Defaults to false.
+     * @param {(() => Texture|null)|null} [source] - Resolves the source texture as the mip 0
+     * pass executes, for sources that can be replaced between now and then (see {@link _source}).
+     * Null reads `depthTexture` as given.
+     */
+    resize(depthTexture, width, height, linear = false, source = null) {
+        const w = Math.max(width >> 1, 1);
+        const h = Math.max(height >> 1, 1);
+        this._depthTexture = depthTexture;
+        this._source = source;
+        if (this.texture && this.width === w && this.height === h && this.linear === linear) {
+            return;
+        }
+        const device = this.device;
+
+        this._mip0Target?.destroy();
+        this.texture?.destroy();
+
+        this.width = w;
+        this.height = h;
+        this.linear = linear;
+        this.valid = false;
+        this.mipCount = Math.floor(Math.log2(Math.max(w, h))) + 1;
+
+        this.texture = new Texture(device, {
+            name: 'MeshletHzb',
+            width: w,
+            height: h,
+            format: PIXELFORMAT_R32F,
+            mipmaps: true,
+            storage: true,
+            minFilter: FILTER_NEAREST,
+            magFilter: FILTER_NEAREST,
+            addressU: ADDRESS_CLAMP_TO_EDGE,
+            addressV: ADDRESS_CLAMP_TO_EDGE
+        });
+
+        this._mip0Target = new RenderTarget({
+            name: 'MeshletHzbMip0',
+            colorBuffer: this.texture,
+            depth: false,
+            mipLevel: 0
+        });
+
+        // mip 0 quad pass - created once, re-targeted on every resize
+        this.mip0Pass ??= new MeshletHzbMip0Pass(device, this);
+        const pass = this.mip0Pass;
+        pass.shader = this._mip0Shader(linear);
+        pass.init(this._mip0Target);
+        pass.colorOps.clear = true;
+        pass.colorOps.store = true;
+
+        // mip reduce chain through per-mip views
+        this._destroyReduces();
+        for (let mip = 1; mip < this.mipCount; mip++) {
+            const compute = new Compute(device, this._reduceShader, `MeshletHzbReduce${mip}`);
+            compute.setParameter('srcMip', this.texture.getView(mip - 1));
+            compute.setParameter('dstMip', this.texture.getView(mip));
+            const mw = Math.max(w >> mip, 1);
+            const mh = Math.max(h >> mip, 1);
+            compute.setupDispatch(Math.ceil(mw / REDUCE_WORKGROUP), Math.ceil(mh / REDUCE_WORKGROUP));
+            this._reduces.push(compute);
+        }
+    }
+
+    /**
+     * Dispatches the mip reduce chain (mip 0 must have rendered already).
+     */
+    buildMips() {
+        this.device.computeDispatch(this._reduces, 'MeshletHzbMips');
+    }
+}
+
+export { MeshletHzb };

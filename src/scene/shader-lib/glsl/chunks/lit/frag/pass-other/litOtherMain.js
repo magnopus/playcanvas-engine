@@ -11,6 +11,8 @@ export default /* glsl */`
 
 void main(void) {
 
+    #include "litEngineMainStartPS"
+
     #ifdef CLIP_PLANES
         applyClipPlanes(vPositionW);
     #endif
@@ -37,6 +39,7 @@ void main(void) {
         gl_FragColor = float2vec4(vLinearDepth);
     #endif
 
+    #include "litEngineMainEndPS"
     #include "litUserMainEndPS"
 }
 `;

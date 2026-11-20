@@ -46,6 +46,10 @@ float VSM16(TEXTURE_ACCEPT(tex), vec2 texCoords, float resolution, float Z, floa
 }
 
 float getShadowVSM16(TEXTURE_ACCEPT(shadowMap), vec3 shadowCoord, vec4 shadowParams, float exponent) {
+    #ifdef REVERSE_Z
+        // the shadow map stores forward depth
+        shadowCoord.z = 1.0 - shadowCoord.z;
+    #endif
     return VSM16(TEXTURE_PASS(shadowMap), shadowCoord.xy, shadowParams.x, shadowCoord.z, shadowParams.y, exponent);
 }
 
@@ -77,6 +81,10 @@ float VSM32(TEXTURE_ACCEPT(tex), vec2 texCoords, float resolution, float Z, floa
 }
 
 float getShadowVSM32(TEXTURE_ACCEPT(shadowMap), vec3 shadowCoord, vec4 shadowParams, float exponent) {
+    #ifdef REVERSE_Z
+        // the shadow map stores forward depth
+        shadowCoord.z = 1.0 - shadowCoord.z;
+    #endif
     return VSM32(TEXTURE_PASS(shadowMap), shadowCoord.xy, shadowParams.x, shadowCoord.z, shadowParams.y, exponent);
 }
 

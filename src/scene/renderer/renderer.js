@@ -53,6 +53,7 @@ import { MAX_CLIP_PLANES } from '../clip-planes.js';
  * @import { Scene } from '../scene.js'
  * @import { Shader } from '../../platform/graphics/shader.js'
  * @import { GSplatDirector } from '../gsplat-unified/gsplat-director.js'
+ * @import { MeshletDirectorGroup } from '../meshlet/meshlet-director-group.js'
  */
 
 let _skinUpdateIndex = 0;
@@ -346,6 +347,13 @@ class Renderer {
     gsplatDirector = null;
 
     /**
+     * The meshlet director group driving GPU-driven meshlet rendering, if any.
+     *
+     * @type {MeshletDirectorGroup|null}
+     */
+    meshletDirector = null;
+
+    /**
      * Create a new instance.
      *
      * @param {GraphicsDevice} graphicsDevice - The graphics device used by the renderer.
@@ -541,8 +549,9 @@ class Renderer {
             let projMatSkybox = camera.getProjectionMatrixSkybox();
 
             const webgpu = this.device.isWebGPU;
-            projMat = Camera.applyShaderProjectionTransform(projMat, _tempProjMat0, flipY, webgpu);
-            projMatSkybox = Camera.applyShaderProjectionTransform(projMatSkybox, _tempProjMat1, flipY, webgpu);
+            const reverseZ = this.device.isReverseZ;
+            projMat = Camera.applyShaderProjectionTransform(projMat, _tempProjMat0, flipY, webgpu, reverseZ);
+            projMatSkybox = Camera.applyShaderProjectionTransform(projMatSkybox, _tempProjMat1, flipY, webgpu, reverseZ);
 
             // camera jitter
             const { jitter } = camera;
@@ -1450,6 +1459,18 @@ class Renderer {
         // #if _PROFILER
         scene._stats.meshInstances = totalMeshInstances;
         // #endif
+
+        // meshlet mesh instances live outside the layer system (GPU-driven culling), but their
+        // materials are engine-lit and must react to scene shader invalidation (envAtlas,
+        // lighting settings) like any other
+        if (updateShaders) {
+            const meshletMIs = this.meshletDirector?.allMeshInstances;
+            if (meshletMIs) {
+                for (let i = 0; i < meshletMIs.length; i++) {
+                    _tempMeshInstances.push(meshletMIs[i]);
+                }
+            }
+        }
 
         // update shaders if needed
         if (updateShaders) {

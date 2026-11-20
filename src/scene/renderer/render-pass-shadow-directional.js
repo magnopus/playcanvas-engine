@@ -19,7 +19,13 @@ class RenderPassShadowDirectional extends RenderPass {
         this.light = light;
         this.camera = camera;
         this.cascadeMask = cascadeMask;
-        this.allCascadesRendering = cascadeMask === (1 << light.numShadowFaces) - 1;
+        // A cascade update schedule decides during cull, after this pass is created, so a
+        // scheduled light always clears per cascade: a whole-target clear would wipe the cascades
+        // it skips.
+        this.allCascadesRendering = cascadeMask === (1 << light.numShadowFaces) - 1 && !light.cascadeUpdateIntervals;
+
+        // the cascades rendered by the last execute, which the VSM blur is limited to
+        this.renderedMask = 0;
     }
 
     frameUpdate() {
@@ -34,6 +40,8 @@ class RenderPassShadowDirectional extends RenderPass {
         const { light, camera, shadowRenderer, allCascadesRendering, cascadeMask } = this;
         const faceCount = light.numShadowFaces;
         const shadowUpdateOverrides = light.shadowUpdateOverrides;
+        // a cascade update schedule decides per camera and leaves the overrides alone
+        const scheduled = !!light.cascadeUpdateIntervals;
 
         // the shadow map is shared by the cameras, which are all culled before any of them renders,
         // so the split distances this camera's cascades are fitted to are set as the map renders.
@@ -43,25 +51,29 @@ class RenderPassShadowDirectional extends RenderPass {
         }
 
         // Use the scheduled cascades even if an earlier camera consumed their one-shot overrides.
+        let renderedMask = 0;
         for (let face = 0; face < faceCount; face++) {
-            if (cascadeMask & (1 << face)) {
+            if (shadowRenderer.isCascadeRendering(light, camera, face, cascadeMask)) {
                 shadowRenderer.renderFace(light, camera, face, !allCascadesRendering);
 
-                if (shadowUpdateOverrides?.[face] === SHADOWUPDATE_THISFRAME) {
+                renderedMask |= 1 << face;
+
+                if (!scheduled && shadowUpdateOverrides?.[face] === SHADOWUPDATE_THISFRAME) {
                     shadowUpdateOverrides[face] = SHADOWUPDATE_NONE;
                 }
             }
         }
 
-        if (allCascadesRendering) {
+        this.renderedMask = renderedMask;
+        if (renderedMask === (1 << faceCount) - 1) {
             light._shadowCascadesInvalidated = false;
         }
     }
 
     after() {
         // apply VSM blur if needed
-        if (this.executeEnabled) {
-            this.shadowRenderer.renderVsm(this.light, this.camera, this.cascadeMask);
+        if (this.executeEnabled && this.renderedMask) {
+            this.shadowRenderer.renderVsm(this.light, this.camera, this.renderedMask);
         }
     }
 }

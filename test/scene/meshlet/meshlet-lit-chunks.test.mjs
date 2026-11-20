@@ -1,0 +1,346 @@
+import { expect } from 'chai';
+
+import { Preprocessor } from '../../../src/core/preprocessor.js';
+import { CULLFACE_BACK, CULLFACE_NONE } from '../../../src/platform/graphics/constants.js';
+import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
+import {
+    MATERIAL_FLAG_UNLIT, MATERIAL_SLOT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED,
+    MESHLET_MAX_UV_CHANNELS
+} from '../../../src/scene/meshlet/constants.js';
+import { createMeshletLitMaterial } from '../../../src/scene/meshlet/meshlet-lit-material.js';
+import { createMeshletMaterial } from '../../../src/scene/meshlet/meshlet-material.js';
+import { buildMeshletLitChunks } from '../../../src/scene/meshlet/shaders/meshlet-lit-chunks-wgsl.js';
+import {
+    meshletDecodeOct16WGSL, meshletDecodeTangentWGSL, meshletFetchVertexWGSL, meshletNormalMatrixWGSL
+} from '../../../src/scene/meshlet/shaders/meshlet-page-wgsl.js';
+import litMainPS from '../../../src/scene/shader-lib/wgsl/chunks/lit/frag/litMain.js';
+import litForwardMainPS from '../../../src/scene/shader-lib/wgsl/chunks/lit/frag/pass-forward/litForwardMain.js';
+import litOtherMainPS from '../../../src/scene/shader-lib/wgsl/chunks/lit/frag/pass-other/litOtherMain.js';
+import litShadowMainPS from '../../../src/scene/shader-lib/wgsl/chunks/lit/frag/pass-shadow/litShadowMain.js';
+import litMainVS from '../../../src/scene/shader-lib/wgsl/chunks/lit/vert/litMain.js';
+import { shaderChunksWGSL } from '../../../src/scene/shader-lib/wgsl/collections/shader-chunks-wgsl.js';
+import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
+
+const ENGINE_SLOTS = [
+    'litEngineDeclarationPS', 'litEngineDeclarationVS', 'litEngineCodePS', 'litEngineCodeVS',
+    'litEngineMainStartPS', 'litEngineMainStartVS', 'litEngineMainEndPS', 'litEngineMainEndVS'
+];
+
+describe('litEngine* chunk hooks', function () {
+
+    it('exist in the WGSL collection as empty chunks', function () {
+        for (const slot of ENGINE_SLOTS) {
+            expect(shaderChunksWGSL[slot], slot).to.equal('');
+        }
+    });
+
+    it('are included before the matching litUser* slot at every site', function () {
+        const sites = [
+            [litMainVS, 'litEngineDeclarationVS', 'litUserDeclarationVS'],
+            [litMainVS, 'litEngineCodeVS', 'litUserCodeVS'],
+            [litMainVS, 'litEngineMainStartVS', 'litUserMainStartVS'],
+            [litMainVS, 'litEngineMainEndVS', 'litUserMainEndVS'],
+            [litMainPS, 'litEngineDeclarationPS', 'litUserDeclarationPS'],
+            [litForwardMainPS, 'litEngineMainStartPS', 'litUserMainStartPS'],
+            [litForwardMainPS, 'litEngineMainEndPS', 'litUserMainEndPS'],
+            [litOtherMainPS, 'litEngineMainStartPS', 'litUserMainStartPS'],
+            [litOtherMainPS, 'litEngineMainEndPS', 'litUserMainEndPS'],
+            [litShadowMainPS, 'litEngineMainStartPS', 'litUserMainStartPS'],
+            [litShadowMainPS, 'litEngineMainEndPS', 'litUserMainEndPS']
+        ];
+        for (const [source, engine, user] of sites) {
+            const e = source.indexOf(`"${engine}"`);
+            const u = source.indexOf(`"${user}"`);
+            expect(e, engine).to.be.above(-1);
+            expect(e, `${engine} before ${user}`).to.be.below(u);
+        }
+        // litEngineCodePS precedes litUserCodePS in each of the three pass branches
+        expect((litMainPS.match(/"litEngineCodePS"/g) ?? []).length).to.equal(3);
+    });
+});
+
+describe('buildMeshletLitChunks', function () {
+
+    const textured = {
+        textures: true,
+        uvChannels: 2,
+        tangents: true,
+        familySizes: [1024, 512, 1024, 256],
+        familyLevels: [{ slotLevels: 2, tailLevels: 7 }, { slotLevels: 1, tailLevels: 7 }, { slotLevels: 2, tailLevels: 7 }, { slotLevels: 0, tailLevels: 7 }]
+    };
+
+    it('interpolates every constant for the geometry-only and textured configurations', function () {
+        for (const options of [{}, { textures: true, uvChannels: 1 }, textured]) {
+            const chunks = buildMeshletLitChunks(options);
+            for (const [name, text] of Object.entries(chunks)) {
+                expect(text.replace(/\/\/[^\n]*/g, ''), `${JSON.stringify(options)} ${name}`).to.not.match(/\$\{|undefined|NaN/);
+            }
+        }
+    });
+
+    it('samples explicit resident levels and blends across the fine-tail boundary', function () {
+        // slot sampling sits in material-dependent branches, where implicit derivatives are illegal
+        const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
+        expect(source).not.to.match(/textureSample(?:Grad)?\(/);
+        expect(source).to.include('return mix(fineColor, tailColor, tailWeight)');
+        for (const family of ['Srgb', 'Srgba', 'Normal', 'Linear']) {
+            expect(source).to.include(`textureSampleLevel(meshletFine${family}, meshletFine${family}Sampler, uv, i32(slotLayer), fineLod)`);
+            expect(source).to.include(`textureSampleLevel(meshletTail${family}, meshletTail${family}Sampler, uv, tailLayer, tailFloor)`);
+            expect(source).to.include(`textureSampleLevel(meshletTail${family}, meshletTail${family}Sampler, uv, tailLayer, tailLod)`);
+        }
+    });
+
+    it('decodes per-instance EPIC lightmaps without changing unlightmapped lighting', function () {
+        const chunks = buildMeshletLitChunks({ ...textured, uvChannels: 5, lightmaps: true });
+        expect(chunks.litEngineMainEndVS).to.include('output.vMeshletInstance = meshletInstance;');
+        // four vec4 rows per instance: transform, decode scale, decode add, texture info
+        expect(chunks.litEngineDeclarationPS).to.include('meshletLightmaps[vMeshletInstance * 4u + 3u].z != 0.0');
+        expect(chunks.litEngineDeclarationPS).to.match(/exp2\(logLuminance\) - 0\.01858136, 0\.0\) \* 0\.6 \*/);
+        expect(chunks.litEngineDeclarationPS).to.include('uv = vMeshletUv1; ddx = dMeshletUv1Dx; ddy = dMeshletUv1Dy;');
+        expect(chunks.litEngineDeclarationPS).to.include('uv = vMeshletUv4; ddx = dMeshletUv4Dx; ddy = dMeshletUv4Dy;');
+        expect(chunks.litEngineDeclarationPS).to.include('meshletTexMinLod(texResidency[u32(textureInfo.x)])');
+        expect(chunks.litForwardBackendPS).to.include('if (meshletHasLightmap()) {\n        dDiffuseLight = meshletLightmapIrradiance();');
+        expect(chunks.litForwardBackendPS.indexOf('meshletLightmapIrradiance()')).to.be.above(chunks.litForwardBackendPS.indexOf('addAmbient('));
+        expect(buildMeshletLitChunks(textured).litForwardBackendPS).not.to.include('meshletHasLightmap');
+        expect(buildMeshletLitChunks({ lightmaps: true }).litEngineDeclarationPS).not.to.include('meshletLightmaps');
+    });
+
+    it('preserves application reflection signatures when injecting lightmaps into a tab-indented backend', function () {
+        const forwardBackend = '\tvar output : FragmentOutput;\n\t#ifdef LIT_LIGHTMAP\n\t#endif\naddReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);\n\t#ifdef AREA_LIGHTS\n\t#endif\n#include "endPS"';
+        const chunks = buildMeshletLitChunks({ ...textured, lightmaps: true, forwardBackend });
+        expect(chunks.litForwardBackendPS).to.include('dDiffuseLight = meshletLightmapIrradiance();');
+        expect(chunks.litForwardBackendPS).to.include('addReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);');
+        expect(chunks.litForwardBackendPS).not.to.include('addReflection(dReflDirW, litArgs_gloss);');
+        expect(chunks.litForwardBackendPS).not.to.include('meshletProbeWeight');
+    });
+
+    it('preserves probe reflections on lightmapped non-metals as well as metals', function () {
+        const backend = buildMeshletLitChunks({ ...textured, lightmaps: true }).litForwardBackendPS;
+        expect(backend).not.to.include('meshletProbeWeight');
+        expect(backend).to.include('addReflection(dReflDirW, litArgs_gloss);');
+        expect(backend).to.include('dDiffuseLight = meshletDiffuseBeforeProbes;');
+        expect(buildMeshletLitChunks(textured).litForwardBackendPS).not.to.include('meshletDiffuseBeforeProbes');
+    });
+
+    it('removes probe ambient added by a custom reflection backend without removing direct lighting', function () {
+        const forwardBackend = `
+            var output: FragmentOutput;
+            #ifdef LIT_LIGHTMAP
+            #endif
+            #ifdef LIT_LIGHTING || LIT_REFLECTIONS
+                #ifdef LIT_REFLECTIONS
+                    addReflection(dReflDirW, litArgs_gloss, litArgs_worldNormal);
+                    dDiffuseLight += processEnvironment(probeAmbient);
+                #endif
+                #ifdef AREA_LIGHTS
+                #endif
+                addClusteredLights();
+            #endif
+            #include "endPS"`;
+        const backend = buildMeshletLitChunks({ ...textured, lightmaps: true, forwardBackend }).litForwardBackendPS;
+        const snapshot = backend.indexOf('let meshletDiffuseBeforeProbes = dDiffuseLight;');
+        const restore = backend.indexOf('dDiffuseLight = meshletDiffuseBeforeProbes;');
+        expect(snapshot).to.be.above(backend.indexOf('dDiffuseLight = meshletLightmapIrradiance();'));
+        expect(snapshot).to.be.below(backend.indexOf('addReflection('));
+        expect(restore).to.be.above(backend.indexOf('dDiffuseLight += processEnvironment(probeAmbient);'));
+        expect(restore).to.be.below(backend.indexOf('addClusteredLights();'));
+        expect(backend).to.include('if (meshletHasLightmap()) {\n                dDiffuseLight = meshletDiffuseBeforeProbes;');
+    });
+
+    it('keeps derivative-dependent lighting uniform and selects unlit colour before common outputs', function () {
+        for (const options of [{}, textured]) {
+            const chunks = buildMeshletLitChunks(options);
+            expect(chunks.litEngineDeclarationPS).to.include(`materialTable[vMeshletMatRow].flags & ${MATERIAL_FLAG_UNLIT}u`);
+            expect(chunks.diffusePS).to.include('dAlbedo = select(meshletSurfaceRgb(), vec3f(0.0), meshletUnlit());');
+            expect(chunks.emissivePS).to.include('if (meshletUnlit()) {\n                dEmission = meshletSurfaceRgb();');
+
+            const backend = chunks.litForwardBackendPS;
+            const unlitOutput = backend.indexOf('if (meshletUnlit()) {');
+            expect(unlitOutput).to.be.above(backend.indexOf('addReflection('));
+            expect(unlitOutput).to.be.above(backend.indexOf('addClusteredLights('));
+            expect(unlitOutput).to.be.below(backend.indexOf('#include "outputAlphaPS"'));
+            const block = backend.slice(unlitOutput, backend.indexOf('}', unlitOutput));
+            expect(block).to.include('addFog(litArgs_emission)');
+            expect(block).not.to.include('return');
+            expect(backend.match(/return output;/g)).to.have.lengthOf(1);
+            expect(backend.indexOf('#include "outlineOutputPS"')).to.be.above(unlitOutput);
+        }
+
+        // an application backend with its own whitespace is hooked the same way
+        const custom = buildMeshletLitChunks({ forwardBackend: '\taddReflection();\n\t#include "endPS"\n\t#include "outputAlphaPS"' }).litForwardBackendPS;
+        expect(custom.indexOf('if (meshletUnlit())')).to.be.above(custom.indexOf('addReflection();'));
+        expect(custom.indexOf('if (meshletUnlit())')).to.be.below(custom.indexOf('#include "outputAlphaPS"'));
+    });
+
+    it('compiles the texture-debug path only when its define is set', function () {
+        const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
+        const output = buildMeshletLitChunks(textured).outputPS;
+        const plain = Preprocessor.run(source);
+        expect(plain).to.not.include('dMeshletTexDebug');
+        expect(Preprocessor.run(output).trim()).to.equal('');
+
+        const debug = Preprocessor.run(`#define MESHLET_TEX_DEBUG\n${source}`);
+        expect(debug).to.include('dMeshletTexDebugBase = dMeshletTexDebug;');
+        expect(Preprocessor.run(`#define MESHLET_TEX_DEBUG\n${output}`)).to.include('gammaCorrectOutput(dMeshletTexDebugBase)');
+    });
+
+    it('reverses tangent handedness for mirrored normal-mapped placements', function () {
+        const source = buildMeshletLitChunks(textured).litEngineMainStartVS;
+        expect(source).to.include('dMeshletBtSign = meshletTangent.w * select(1.0, -1.0, meshletMirrored);');
+        expect(buildMeshletLitChunks().litEngineMainStartVS, 'only with tangents').not.to.include('meshletMirrored');
+    });
+
+    it('replaces the vertex buffer with the shared page-pool vertex pull', function () {
+        const chunks = buildMeshletLitChunks();
+        expect(chunks.transformCoreVS).to.include('var<private> vertex_position: vec4f;');
+        expect(chunks.transformCoreVS).to.not.match(/^\s*attribute\s/m);
+        // the same vertex pull and normal transform as the debug material, not a copy of them
+        expect(chunks.litEngineCodeVS).to.include(meshletFetchVertexWGSL);
+        expect(chunks.normalCoreVS).to.include(meshletNormalMatrixWGSL);
+        expect(chunks.litEngineMainStartVS).to.include('meshletFetchVertex(pcVertexIndex, uniform.pageSizeWords)');
+        expect(chunks.litEngineMainStartPS, 'no UV derivatives without UVs').to.equal(undefined);
+    });
+
+    it('decodes tangents only alongside the normal decode they share the octahedral unfold with', function () {
+        expect(buildMeshletLitChunks().litEngineCodeVS).to.not.include(meshletDecodeTangentWGSL);
+        const code = buildMeshletLitChunks(textured).litEngineCodeVS;
+        expect(code).to.include(meshletDecodeTangentWGSL);
+        expect(code.indexOf(meshletDecodeOct16WGSL)).to.be.at.least(0);
+    });
+
+    it('reads material factors from the typed record by field name', function () {
+        const chunks = buildMeshletLitChunks();
+        expect(chunks.diffusePS).to.include('materialTable[vMeshletMatRow].baseColor.rgb');
+        expect(chunks.opacityPS).to.include('materialTable[vMeshletMatRow].baseColor.a');
+        expect(chunks.metalnessPS).to.include('materialTable[vMeshletMatRow].metallic');
+        expect(chunks.glossPS).to.include('materialTable[vMeshletMatRow].roughness');
+        expect(chunks.emissivePS).to.include('materialTable[vMeshletMatRow].emissive * materialTable[vMeshletMatRow].emissiveStrength');
+        expect(chunks.alphaTestPS).to.include('materialTable[vMeshletMatRow].alphaCutoff');
+        expect(chunks.litEngineDeclarationPS).to.include('struct MeshletMaterial');
+        expect(chunks.litEngineDeclarationVS, 'both stages declare the structs').to.include('struct MeshletMaterial');
+        expect(chunks.diffusePS, 'no texture sampling without textures').to.not.include('meshletSampleSlot');
+    });
+
+    it('applies vertex RGB to albedo only when the world carries colours', function () {
+        for (const options of [{}, textured]) {
+            const chunks = buildMeshletLitChunks({ ...options, colors: true });
+            const albedo = chunks.diffusePS.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+            expect(albedo).to.include('rgb = rgb * clamp(vMeshletColor.rgb, vec3f(0.0), vec3f(1.0));');
+            expect(chunks.litEngineMainStartVS).to.include('dMeshletColor = vec4f(1.0);');
+            expect(chunks.litEngineMainStartVS).to.include('if (meshletHasColors)');
+            expect(chunks.litEngineMainStartVS).to.include('dMeshletColor = meshletPageColor(meshletLayout, meshletVert);');
+            expect(chunks.litEngineMainEndVS).to.include('output.vMeshletColor = dMeshletColor;');
+
+            const uncolored = buildMeshletLitChunks(options);
+            expect(uncolored.diffusePS).to.not.include('vMeshletColor');
+            expect(uncolored.litEngineDeclarationVS).to.not.include('vMeshletColor');
+            expect(uncolored.litEngineDeclarationPS).to.not.include('vMeshletColor');
+        }
+    });
+
+    it('compiles texture sampling, UV derivatives and normal mapping in only when the world has them', function () {
+        const chunks = buildMeshletLitChunks(textured);
+        // base colour and ORM are each sampled once per fragment, through cached helpers
+        const all = Object.values(chunks).join('\n');
+        expect(all).to.include(`meshletSampleSlot(${MATERIAL_SLOT.BASE_COLOR}u`);
+        expect(all).to.include(`meshletSampleSlot(${MATERIAL_SLOT.ORM}u`);
+        expect(chunks.diffusePS).to.include('meshletBaseTex()');
+        expect(chunks.metalnessPS).to.include('meshletOrmTex()');
+        expect(chunks.normalMapPS).to.include(`meshletSampleSlot(${MATERIAL_SLOT.NORMAL}u`);
+        expect(chunks.litEngineMainStartPS).to.include('dpdx(vMeshletUv0)');
+        expect(chunks.litEngineMainStartPS).to.include('dpdx(vMeshletUv1)');
+        expect(chunks.litEngineDeclarationPS).to.include(`meshletSlotDesc[vMeshletMatRow * ${MATERIAL_SLOT.EMISSIVE + 1}u + slot]`);
+        expect(chunks.litEngineDeclarationPS).to.include('materialTable[vMeshletMatRow].slotTransforms[slot]');
+        expect(chunks.litEngineDeclarationPS).to.include('meshletTexMinLod(resident)');
+        expect(chunks.litEngineDeclarationPS).to.include('dMeshletTexDebugBase = dMeshletTexDebug;');
+        // the WGSL processor reads one resource declaration per line
+        const declarations = chunks.litEngineDeclarationPS.split('\n').filter(l => /var meshlet(?:Tail|Fine)\w+: (?:texture_2d_array<f32>|sampler);/.test(l));
+        expect(declarations, 'four families x (tail, sampler, fine, sampler)').to.have.lengthOf(16);
+        expect(chunks.litEngineMainStartVS).to.include('meshletDecodeTangent(');
+    });
+
+    it('uses only baked tangent frames for normal mapping', function () {
+        const chunks = buildMeshletLitChunks({ ...textured, tangents: true });
+        expect(chunks.normalMapPS).to.include(`meshletSampleSlot(${MATERIAL_SLOT.NORMAL}u`);
+        expect(chunks.normalMapPS).to.include('vMeshletTangentW');
+        expect(chunks.normalMapPS).to.include('B = cross(n, T) * vMeshletBtSign');
+        expect(chunks.normalMapPS, 'no screen-space tangent frame').not.to.match(/dpdx\(|dpdy\(/);
+
+        const noTangents = buildMeshletLitChunks({ ...textured, tangents: false });
+        expect(noTangents.normalMapPS).not.to.include(`meshletSampleSlot(${MATERIAL_SLOT.NORMAL}u`);
+        expect(noTangents.normalMapPS).not.to.include('vMeshletTangentW');
+    });
+
+    it('threads one varying per UV channel up to the slot word limit and selects per slot', function () {
+        const chunks = buildMeshletLitChunks({ textures: true, uvChannels: MESHLET_MAX_UV_CHANNELS + 5 });
+        for (let n = 0; n < MESHLET_MAX_UV_CHANNELS; n++) {
+            expect(chunks.litEngineDeclarationVS).to.include(`varying vMeshletUv${n}: vec2f;`);
+            expect(chunks.litEngineMainStartVS).to.include(`if (meshletUvFloats >= ${2 * (n + 1)}u)`);
+            expect(chunks.litEngineMainEndVS).to.include(`output.vMeshletUv${n} = dMeshletUv${n};`);
+            expect(chunks.litEngineMainStartPS).to.include(`dpdx(vMeshletUv${n})`);
+        }
+        expect(chunks.litEngineDeclarationVS, 'capped at the supported channel count').to.not.include(`vMeshletUv${MESHLET_MAX_UV_CHANNELS}`);
+        expect(chunks.litEngineDeclarationPS).to.include('let slotUvChannel = (slotWord >> 24u) & 3u;');
+        for (let n = 1; n < 4; n++) {
+            expect(chunks.litEngineDeclarationPS).to.include(`if (slotUvChannel == ${n}u)`);
+        }
+        const single = buildMeshletLitChunks({ textures: true, uvChannels: 1 });
+        expect(single.litEngineDeclarationPS, 'no channel select with one channel').to.not.include('slotUvChannel');
+    });
+
+    it('routes the pick id through objectData and collapses unselected instances in the outline pass', function () {
+        const chunks = buildMeshletLitChunks();
+        expect(chunks.litEngineDeclarationPS).to.include('encodePickOutput(vMeshletPickId)');
+        expect(chunks.litEngineMainStartVS).to.include('dMeshletPickId = meshletPrimitive.pickIdBase + meshletInstance;');
+        expect(chunks.litEngineMainStartVS).to.include('#ifdef PCOUTLINE_PASS');
+        expect(chunks.litEngineMainStartVS).to.include('vertex_position = vec4f(meshletGridOrigin, 1.0);');
+        expect(chunks.outlineOutputPS).to.include('pcOutlineColorHover');
+    });
+});
+
+describe('meshlet materials', function () {
+
+    let device;
+
+    beforeEach(function () {
+        jsdomSetup();
+        device = new NullGraphicsDevice(document.createElement('canvas'));
+    });
+
+    afterEach(function () {
+        device.destroy();
+        device = null;
+        jsdomTeardown();
+    });
+
+    it('creates one lit material per bucket differing only in culling and alpha test', function () {
+        const chunks = buildMeshletLitChunks();
+        const opaque = createMeshletLitMaterial(MESHLET_BUCKET_OPAQUE, chunks);
+        const twoSided = createMeshletLitMaterial(MESHLET_BUCKET_OPAQUE_TWO_SIDED, chunks);
+        const masked = createMeshletLitMaterial(MESHLET_BUCKET_MASKED, chunks);
+        expect([opaque.name, twoSided.name, masked.name]).to.deep.equal(['MeshletLit', 'MeshletLitTwoSided', 'MeshletLitMasked']);
+        expect(opaque.cull).to.equal(CULLFACE_BACK);
+        expect(twoSided.cull).to.equal(CULLFACE_NONE);
+        expect(masked.cull).to.equal(CULLFACE_NONE);
+        expect(opaque.alphaTest, 'opaque buckets keep early-Z: no alpha test').to.equal(0);
+        expect(twoSided.alphaTest).to.equal(0);
+        expect(masked.alphaTest).to.be.above(0);
+        expect(twoSided.twoSidedLighting).to.equal(true);
+        expect(opaque.useMetalness).to.equal(true);
+        [opaque, twoSided, masked].forEach(m => m.destroy());
+    });
+
+    it('creates the per-meshlet debug material with per-bucket culling', function () {
+        const opaque = createMeshletMaterial(MESHLET_BUCKET_OPAQUE);
+        const masked = createMeshletMaterial(MESHLET_BUCKET_MASKED);
+        expect(opaque.cull).to.equal(CULLFACE_BACK);
+        expect(masked.cull).to.equal(CULLFACE_NONE);
+        const vertex = opaque.shaderDesc?.vertexWGSL ?? opaque._shaderDesc?.vertexWGSL ?? '';
+        // the lit path's vertex pull and normal transform, coloured per meshlet, no material record
+        expect(vertex).to.include(meshletFetchVertexWGSL);
+        expect(vertex).to.include(meshletNormalMatrixWGSL);
+        expect(vertex).to.include('output.vColor = meshletColor(fetched.meshlet);');
+        expect(vertex).not.to.include('materialTable');
+        [opaque, masked].forEach(m => m.destroy());
+    });
+});

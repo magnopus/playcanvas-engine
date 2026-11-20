@@ -72,7 +72,13 @@ export default /* wgsl */`
             // omni light - a cube face stored in the atlas, using the normalized distance to the
             // light as the depth
             let uv: vec2f = getCubemapAtlasCoordinates(uniform.uVolLightAtlas.xyz, uniform.shadowAtlasParams.y, uniform.shadowAtlasParams.x, lightVec);
-            let shadowZ: f32 = length(lightVec) / uniform.uVolLightPosRange.w + uniform.uVolLightAtlas.w;
+            let zForward: f32 = length(lightVec) / uniform.uVolLightPosRange.w + uniform.uVolLightAtlas.w;
+            // the omni atlas stores the distance reversed, as the surface shading reads it
+            #ifdef REVERSE_Z
+                let shadowZ: f32 = 1.0 - zForward;
+            #else
+                let shadowZ: f32 = zForward;
+            #endif
             return textureSampleCompareLevel(shadowAtlasTexture, shadowAtlasTextureSampler, uv + tapOffset, shadowZ);
         }
     #endif

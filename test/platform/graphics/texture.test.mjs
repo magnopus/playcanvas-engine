@@ -402,3 +402,29 @@ describe('Texture', function () {
         });
     });
 });
+
+describe('Texture#gpuSize', function () {
+
+    /** @type {import('../../../src/platform/graphics/graphics-device.js').GraphicsDevice} */
+    let device;
+
+    beforeEach(function () {
+        jsdomSetup();
+        device = createGraphicsDevice(document.createElement('canvas'));
+    });
+
+    afterEach(function () {
+        device.destroy();
+        device = null;
+        jsdomTeardown();
+    });
+
+    it('counts every layer of a 2D array texture', function () {
+        const single = new Texture(device, { width: 64, height: 64, format: PIXELFORMAT_RGBA8, mipmaps: false });
+        const array = new Texture(device, { width: 64, height: 64, format: PIXELFORMAT_RGBA8, mipmaps: false, arrayLength: 4 });
+        expect(single.gpuSize).to.equal(64 * 64 * 4);
+        expect(array.gpuSize).to.equal(single.gpuSize * 4);
+        single.destroy();
+        array.destroy();
+    });
+});

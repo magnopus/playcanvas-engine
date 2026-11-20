@@ -1304,6 +1304,35 @@ class LightComponent extends Component {
     }
 
     /**
+     * Sets the number of frames between refreshes of each shadow cascade of a directional light,
+     * or null to refresh every cascade every frame (the default). A cascade that is not refreshed
+     * keeps its last shadow map, so it costs no culling or rendering. Far cascades cover the most
+     * geometry and change the least, so they can wait: `[1, 1, 2, 4]` refreshes the two near
+     * cascades every frame, the third every second frame and the fourth every fourth frame, offset
+     * so they do not land on the same frame. A cascade is refreshed early when the camera moves or
+     * turns far enough to leave the area it was fitted to, or when the light turns. While set,
+     * it decides which cascades render, and {@link LightComponent#shadowUpdateOverrides} is
+     * ignored. Cameras share the light's shadow map, so with several cameras rendering the light
+     * each refreshes every cascade.
+     *
+     * @type {number[]|null}
+     * @example
+     * light.cascadeUpdateIntervals = [1, 1, 2, 4];
+     */
+    set cascadeUpdateIntervals(values) {
+        this._light.cascadeUpdateIntervals = values;
+    }
+
+    /**
+     * Gets the number of frames between refreshes of each shadow cascade.
+     *
+     * @type {number[]|null}
+     */
+    get cascadeUpdateIntervals() {
+        return this._light.cascadeUpdateIntervals;
+    }
+
+    /**
      * Sets the number of shadow samples used for soft shadows when the shadow type is
      * {@link SHADOW_PCSS_32F}. This value should be a positive whole number starting at 1. Higher
      * values result in smoother shadows but can significantly decrease performance. Defaults to 16.

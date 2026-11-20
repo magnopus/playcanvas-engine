@@ -17,6 +17,7 @@ import {
     EVENT_POSTCULL,
     EVENT_PRECULL,
     LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI,
+    SHADOW_PCSS_32F,
     SHADOWCAMERA_NAME,
     SHADOWUPDATE_NONE,
     shadowTypeInfo
@@ -169,12 +170,10 @@ class ShadowRenderer {
         const isVsm = shadowInfo?.vsm ?? false;
         const isPcf = shadowInfo?.pcf ?? false;
 
-        // don't clear the color buffer if rendering a depth map
-        if (isVsm) {
-            shadowCam.clearColor = new Color(0, 0, 0, 0);
-        } else {
-            shadowCam.clearColor = new Color(1, 1, 1, 1);
-        }
+        // don't clear the color buffer if rendering a depth map. A directional PCSS map stores the
+        // rasterized depth, so with reverse-z its far value, and so its clear value, is 0
+        const clearToZero = isVsm || (device.isReverseZ && shadowType === SHADOW_PCSS_32F && type === LIGHTTYPE_DIRECTIONAL);
+        shadowCam.clearColor = clearToZero ? new Color(0, 0, 0, 0) : new Color(1, 1, 1, 1);
 
         shadowCam.clearDepthBuffer = true;
         shadowCam.clearStencilBuffer = false;
@@ -508,6 +507,11 @@ class ShadowRenderer {
         shadowCam.scissorRect = lightRenderData.shadowScissor;
 
         viewportMatrix.setViewport(rectViewport.x, rectViewport.y, rectViewport.z, rectViewport.w);
+        // viewport matrix bakes the GL [-1,1] -> [0,1] z remap. For reverse-z, flip the z row
+        // so shadowMatrix produces hardware-z in [1,0] (matching the reverse-z shadow buffer).
+        if (this.device.isReverseZ) {
+            viewportMatrix.data[10] = -0.5;
+        }
         lightRenderData.shadowMatrix.mul2(viewportMatrix, shadowCamViewProj);
 
         if (light._type === LIGHTTYPE_DIRECTIONAL) {
@@ -690,6 +694,25 @@ class ShadowRenderer {
 
     needsShadowRendering(light) {
         return needsShadowRendering(light);
+    }
+
+    /**
+     * Whether a directional light's cascade renders this frame for a camera: it must be in the
+     * cascade mask of the shadow pass, and when the light has a cascade update schedule, the
+     * schedule must have decided (during cull) to refresh it.
+     *
+     * @param {Light} light - The directional light.
+     * @param {Camera} camera - The camera.
+     * @param {number} face - The cascade index.
+     * @param {number} cascadeMask - Bit mask of cascades the shadow pass renders.
+     * @returns {boolean} True when the cascade renders.
+     * @ignore
+     */
+    isCascadeRendering(light, camera, face, cascadeMask) {
+        if (!(cascadeMask & (1 << face))) {
+            return false;
+        }
+        return !light.cascadeUpdateIntervals || light.getRenderData(camera, face).cascadeRefresh;
     }
 
     getLightRenderData(light, camera, face) {

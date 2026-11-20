@@ -8,19 +8,25 @@
 build
 tree*.*.html
 coverage
-docs
+# generated API reference; hand-written docs live in docs/meshlet
+docs/*
+!docs/meshlet/
+!docs/url-resolver.md
 docs-scripts
 examples/.cert
 examples/dist
 examples/node_modules
-examples/assets/meshlets/zorah-local
+# local meshlet bakes (see examples/assets/meshlets/README.md); only the bunny is committed.
+# No trailing slash where the bake folder is often a symlink to another disk.
+examples/assets/meshlets/_pre-sloppy/
+examples/assets/meshlets/bistro*
+examples/assets/meshlets/caldera*
+examples/assets/meshlets/docks-isolate/
 examples/assets/meshlets/iss-group-comparison/
-examples/assets/meshlets/zorah-tiles/
-examples/assets/meshlets/magoffice_streamed.glb
-examples/assets/meshlets/magoffice_streamed_meshlets/
-examples/assets/meshlets/magoffice_streamed_textures/
-examples/assets/meshlets
-examples/utils/caldera
+examples/assets/meshlets/jungle*
+examples/assets/meshlets/magoffice_*
+examples/assets/meshlets/minioffice_*
+examples/assets/meshlets/zorah*
 node_modules
 npm-debug.log
 types

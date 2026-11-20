@@ -97,6 +97,20 @@ class LightRenderData {
         // depth range compensation for PCSS with directional lights
         this.projectionCompensation = 0;
 
+        // Cascade reuse (see Light#cascadeUpdateIntervals), directional cascades only, per
+        // camera: what the cascade was last fitted to, so a skipped cascade can tell when the
+        // view has outgrown it. PCSS caster bounds are retained in shadowCasterAabb below.
+        this.fitValid = false;
+        this.fitCenter = new Vec3();
+        this.fitRadius = 0;
+        this.fitLightDir = new Vec3();
+
+        // whether this cascade's shadow map region is rendered this frame for this camera
+        this.cascadeRefresh = true;
+
+        // frames counted by the camera's cascade update schedule (used on cascade 0's data)
+        this.scheduleFrame = 0;
+
         // face index, value is based on light type:
         // - spot: always 0
         // - omni: cubemap face, 0..5
@@ -253,6 +267,10 @@ class Light {
         this._outerConeAngle = 45;
 
         // Directional properties
+        // per cascade, the camera whose fit the cascade's shadow map region holds: cameras share
+        // the map, so a cascade last rendered for another camera cannot be reused (see
+        // cascadeUpdateIntervals)
+        this._cascadeMapCamera = [];
         this.cascades = null;               // an array of Vec4 viewports per cascade
         this._shadowMatrixPalette = null;   // a float array, 16 floats per cascade
         this._shadowCascadeDistances = null;
@@ -303,6 +321,20 @@ class Light {
         this._normalOffsetBias = 0.0;
         this.shadowUpdateMode = SHADOWUPDATE_REALTIME;
         this.shadowUpdateOverrides = null;
+
+        /**
+         * Frames between refreshes of each directional shadow cascade, or null to refresh every
+         * cascade every frame. A cascade that is not refreshed keeps its last shadow map and the
+         * matrix that goes with it, and costs no culling or rendering: far cascades cover the most
+         * geometry and change the least, so they can wait several frames. A cascade is refreshed
+         * early when the camera has moved or turned far enough that the view has left what the
+         * cascade was fitted to, or when the light has turned. While set, it decides which
+         * cascades render, and {@link Light#shadowUpdateOverrides} is ignored.
+         *
+         * @type {number[]|null}
+         */
+        this.cascadeUpdateIntervals = null;
+
         this._isVsm = false;
         this._isPcf = true;
         this._isPcss = false;
@@ -957,6 +989,9 @@ class Light {
                 }
             }
         }
+
+        // the new map holds no cascade yet
+        this._cascadeMapCamera.length = 0;
     }
 
     // returns LightRenderData with matching camera and face
@@ -1006,6 +1041,9 @@ class Light {
 
         if (this.shadowUpdateOverrides) {
             clone.shadowUpdateOverrides = this.shadowUpdateOverrides.slice();
+        }
+        if (this.cascadeUpdateIntervals) {
+            clone.cascadeUpdateIntervals = this.cascadeUpdateIntervals.slice();
         }
 
         // Spot properties

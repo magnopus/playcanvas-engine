@@ -80,6 +80,12 @@ class ContainerResource {
     /**
      * Instantiates an entity with a render component.
      *
+     * In addition to the render component data, the options object accepts
+     * `skipBlendedShadowCasters`: when true, mesh instances whose material is blended (and not
+     * alpha tested) or uses refraction do not cast shadows, as a shadow map can only record them
+     * as solid. Defaults to false. Changing {@link RenderComponent#castShadows} afterwards applies
+     * the new value to all of the component's mesh instances again.
+     *
      * @param {object} [options] - The initialization data for the render component type
      * {@link RenderComponent}.
      * @returns {Entity} A hierarchy of entities with render components on entities containing

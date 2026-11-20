@@ -53,6 +53,14 @@ class RenderPassPicker extends RenderPass {
     _pickMeshInstances = new Map();
 
     /**
+     * Whether meshlet geometry was added to this pick: it is world-wide, so it is added once per
+     * pick, not per layer.
+     *
+     * @type {boolean}
+     */
+    _meshletAdded = false;
+
+    /**
      * Minimal view uniform format used by the picker. The pick shaders only need the view
      * projection (and the view matrix for depth picking); any other view uniform a shader happens
      * to reference falls back to the per-mesh uniform buffer automatically. This avoids pulling in
@@ -108,6 +116,7 @@ class RenderPassPicker extends RenderPass {
     before() {
         this._qualifiedLayerIndices.length = 0;
         this._pickMeshInstances.clear();
+        this._meshletAdded = false;
 
         const { camera, scene, layers, renderer } = this;
         const srcLayers = scene.layers.layerList;
@@ -188,6 +197,15 @@ class RenderPassPicker extends RenderPass {
             const pickMI = this._pickMeshInstances.get(i);
             if (pickMI) {
                 tempMeshInstances.push(pickMI);
+            }
+
+            // Meshlet geometry, for the same reason: its mesh instances are not in the layer,
+            // so the loop above cannot have seen them. Added once, on the layer the meshlet
+            // draws are lit by, since one indirect draw covers the whole world.
+            if (!this._meshletAdded && renderer.meshletDirector?.isLightLayer(srcLayer)) {
+                this._meshletAdded = true;
+                const mis = renderer.meshletDirector.preparePicking(camera, mapping);
+                for (let j = 0; j < mis.length; j++) tempMeshInstances.push(mis[j]);
             }
 
             // Process gsplat placements when ID is enabled

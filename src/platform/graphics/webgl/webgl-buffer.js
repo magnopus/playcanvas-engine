@@ -27,11 +27,21 @@ class WebglBuffer {
         this.bufferId = null;
     }
 
-    unlock(device, usage, target, storage, byteOffset = 0, byteLength = storage.byteLength - byteOffset) {
+    /**
+     * @param {object} device - Graphics device.
+     * @param {number} usage - BUFFER_* usage hint.
+     * @param {number} target - GL buffer target.
+     * @param {ArrayBuffer|ArrayBufferView|null} storage - The CPU copy to upload, or null to
+     * allocate an empty buffer of byteSize (contents written elsewhere).
+     * @param {number} [byteOffset] - Byte offset in both the storage and GPU buffer. Defaults to 0.
+     * @param {number} [byteLength] - Number of bytes to upload. Defaults to the remaining storage.
+     * @param {number} [byteSize] - Size to allocate when there is no storage to size it from.
+     */
+    unlock(device, usage, target, storage, byteOffset = 0, byteLength = storage ? storage.byteLength - byteOffset : 0, byteSize) {
         const gl = device.gl;
 
         // Do not retain old CPU storage after setData replaces its backing buffer.
-        if (this.uploadView && this.uploadView.buffer !== (storage.buffer ?? storage)) {
+        if (this.uploadView && this.uploadView.buffer !== (storage?.buffer ?? storage)) {
             this.uploadView = null;
         }
 
@@ -54,8 +64,9 @@ class WebglBuffer {
 
             this.bufferId = gl.createBuffer();
             gl.bindBuffer(target, this.bufferId);
-            gl.bufferData(target, storage, glUsage);
-        } else {
+            // the size overload allocates without uploading
+            gl.bufferData(target, storage ?? byteSize, glUsage);
+        } else if (storage) {
             gl.bindBuffer(target, this.bufferId);
             if (byteOffset === 0 && byteLength === storage.byteLength) {
                 gl.bufferSubData(target, 0, storage);

@@ -20,6 +20,7 @@ import { exampleRedirects } from '../src/app/redirects.mjs';
  * @property {string} categoryKebab - category name.
  * @property {string} exampleNameKebab - example name.
  * @property {boolean} hidden - true if hidden from production navigation.
+ * @property {boolean} [hiddenInDev] - true if hidden from development navigation too.
  */
 
 /**

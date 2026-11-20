@@ -6,6 +6,8 @@ export default /* wgsl */`
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
+    #include "litEngineMainStartPS"
+
     #ifdef CLIP_PLANES
         applyClipPlanes(vPositionW);
     #endif
@@ -65,6 +67,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         writeSceneTextureDepth(&output, vLinearDepth, 1.0);
     #endif
 
+    #include "litEngineMainEndPS"
     #include "litUserMainEndPS"
 
     return output;

@@ -13,6 +13,9 @@
  * handles the primitive instead of the normal mesh path.
  * @property {(device: GraphicsDevice, gltf: object, bufferViews: Uint8Array[]) => *} createResources -
  * Creates resources for all matching primitives.
+ * @property {boolean} [placesInstances] - True when the created resources carry their own instance
+ * placements, so a document whose primitives are all handled by such extensions skips building its
+ * glTF node hierarchy.
  * @ignore
  */
 

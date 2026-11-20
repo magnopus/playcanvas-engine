@@ -92,8 +92,11 @@ const compareGraphs = (a, b) => groupOrder(a) - groupOrder(b) || graphOrder(a) -
  * on stats collected into Application.stats. Counters sourced exclusively from AppStats.user
  * are displayed in a collapsible User section in the detailed views. Other additional counters
  * are grouped under Engine, including DrawCalls and Frame. VRAM keeps its own category.
+ * @property {number} [gpuMinSize] - Minimum size index at which to show the GPU graph. GPU timing
+ * runs the GPU profiler, which adds timestamp queries to every pass, so the smallest size leaves
+ * it off by default and shows only the cheap stats. Set to 0 to always show it. Defaults to 1.
  * @property {number} [gpuTimingMinSize] - Minimum size index at which to show GPU pass timing
- * graphs. Defaults to 1.
+ * graphs. Never below {@link MiniStatsOptions#gpuMinSize}. Defaults to 1.
  * @property {number} [cpuTimingMinSize] - Minimum size index at which to show CPU sub-timing
  * graphs (script, anim, physics, render). Defaults to 1.
  * @property {number} [vramTimingMinSize] - Minimum size index at which to show VRAM subcategory
@@ -153,7 +156,9 @@ class MiniStats {
         this._resourceCounts = new Map();
         /** @type {Map<string, Graph>} @private */
         this._resourceGraphs = new Map();
-        this.gpuTimingMinSize = options.gpuTimingMinSize ?? 1;
+        // the GPU graph, and the GPU profiler it drives, only run from gpuMinSize
+        this.gpuMinSize = options.gpuMinSize ?? 1;
+        this.gpuTimingMinSize = Math.max(options.gpuTimingMinSize ?? 1, this.gpuMinSize);
         this.cpuTimingMinSize = options.cpuTimingMinSize ?? 1;
         this.vramTimingMinSize = options.vramTimingMinSize ?? 1;
         this.textRefreshRate = options.textRefreshRate;
@@ -254,6 +259,8 @@ class MiniStats {
      */
     destroy() {
         if (this._destroyed) return;
+        // stops the timers, which turns off the GPU profiler the GPU timer enabled
+        this.enabled = false;
         this._destroyed = true;
         this.device.off('resizecanvas', this.updateDiv, this);
         this.device.off('losecontext', this.loseContext, this);
@@ -328,6 +335,7 @@ class MiniStats {
                 { name: 'Frame', stats: ['frame.ms'], decimalPlaces: 1, unitsName: 'ms', watermark: 33 },
                 { name: 'VRAM', stats: ['vram.totalUsed'], decimalPlaces: 1, multiplier: 1 / (1024 * 1024), unitsName: 'MB', watermark: 1024 }
             ],
+            gpuMinSize: 1,
             gpuTimingMinSize: 1,
             cpuTimingMinSize: 1,
             vramTimingMinSize: 1
@@ -355,6 +363,7 @@ class MiniStats {
         if (!this._detailed || value < this.cpuTimingMinSize) this.clearSubGraphs(this.cpuGraphs);
         if (!this._detailed || value < this.vramTimingMinSize) this.clearSubGraphs(this.vramGraphs);
         this.resize(size.width, size.height, size.graphs);
+        this._updateGpuGraph();
         this.div.setAttribute('aria-label', !this._detailed ? 'MiniStats: compact counters. Change size.' :
             size.graphs ? 'MiniStats: averages, peaks and history. Change size.' : 'MiniStats: grouped averages. Change size.');
     }
@@ -394,12 +403,31 @@ class MiniStats {
             }
             this.div.style.display = value ? 'block' : 'none';
             if (!value) this.render2d.setLayer(null);
+            this._updateGpuGraph();
         }
     }
 
     /** @type {boolean} */
     get enabled() {
         return this._enabled;
+    }
+
+    /**
+     * Runs the GPU timer (and so the GPU profiler) only while the overlay is enabled at a size of
+     * at least {@link gpuMinSize}, and requests per-stage pass detail from the profiler only while
+     * the pass graphs show.
+     *
+     * @private
+     */
+    _updateGpuGraph() {
+        const graph = this.gpuGraph;
+        if (!graph) return;
+        const active = this._enabled && this._activeSizeIndex >= this.gpuMinSize;
+        graph.timer.enabled = active;
+        if (!active) this.clearSubGraphs(this.gpuPassGraphs);
+        const profiler = this.device.gpuProfiler;
+        if (profiler) profiler.passDetail = active && this._detailed && this._activeSizeIndex >= this.gpuTimingMinSize;
+        this._layoutDirty = true;
     }
 
     /**
@@ -684,6 +712,7 @@ class MiniStats {
      * @returns {boolean} Whether the row participates in the current layout.
      */
     isGraphVisible(graph) {
+        if (this.gpuGraph && (graph === this.gpuGraph || graph.parent === this.gpuGraph) && this._activeSizeIndex < this.gpuMinSize) return false;
         if (graph.countOnly && (!this._resourcesEnabled || !this._detailed)) return false;
         if (!this._detailed) return !graph.headerOnly;
         return !graph.parent || !this.collapsedGroups.has(graph.group);
