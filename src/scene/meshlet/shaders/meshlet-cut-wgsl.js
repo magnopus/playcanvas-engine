@@ -3,7 +3,7 @@ import {
     MESHLET_NO_PARENT
 } from '../constants.js';
 import {
-    meshletBucketWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL, meshletRequestPagesWGSL
+    meshletBucketWGSL, meshletCullParamsWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL, meshletRequestPagesWGSL
 } from './meshlet-cull-common-wgsl.js';
 import { meshletStructsWGSL, meshletDataWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
@@ -24,12 +24,10 @@ const cutShader = entry => /* wgsl */ `
     ${meshletDataWGSL}
     ${meshletObjectDataWGSL}
     var<storage, read> cutGroups: array<u32>;
-    var<storage, read> cullParams: array<vec4f>;
+    ${meshletCullParamsWGSL}
     var<storage, read> residency: array<u32>;
     var<storage, read_write> requests: array<atomic<u32>>;
     var<storage, read_write> claimBits: array<atomic<u32>>;
-    // CUT_BUDGET.*
-    var<storage, read_write> cutBudget: array<atomic<u32>>;
     var<storage, read_write> counters: array<atomic<u32>>;
 
     fn bitSet(bit: u32) -> bool {
@@ -71,20 +69,20 @@ const cutShader = entry => /* wgsl */ `
         let group = meshletData[first];
         let bucket = meshletBucket(group.flags);
         // this bucket's threshold, and its ratio to the base one for the camera LOD test
-        let bucketLod = cullParams[${CULL_PARAMS.BUCKET_LOD}u][bucket];
+        let bucketLod = uniform.cullParams[${CULL_PARAMS.BUCKET_LOD}u][bucket];
         let center = (meshletInstanceMatrix(instance) * vec4f(group.groupSphere.xyz, 1.0)).xyz;
         let radius = group.groupSphere.w * object.maxScale;
-        let ortho = cullParams[${CULL_PARAMS.STREAMING}u].y;
-        let distanceToGroup = max(distance(center, cullParams[${CULL_PARAMS.CAMERA}u].xyz) - radius, 1e-5);
-        let scale = select(cullParams[${CULL_PARAMS.CAMERA}u].w / distanceToGroup, ortho, ortho > 0.0);
+        let ortho = uniform.cullParams[${CULL_PARAMS.STREAMING}u].y;
+        let distanceToGroup = max(distance(center, uniform.cullParams[${CULL_PARAMS.CAMERA}u].xyz) - radius, 1e-5);
+        let scale = select(uniform.cullParams[${CULL_PARAMS.CAMERA}u].w / distanceToGroup, ortho, ortho > 0.0);
         let worldError = group.clusterError * object.maxScale;
         var refine = worldError * scale > bucketLod;
         // Shadow views also refine as far as the viewing camera does. A far cascade's texel
         // spans metres, and a caster simplified to a few of them stands proud of the surface
         // the camera draws - which then shadows itself in broad blotches no bias covers.
-        let cameraLod = cullParams[${CULL_PARAMS.VIEW_DIR}u].w * bucketLod / max(cullParams[${CULL_PARAMS.LOD}u].x, 1e-6);
+        let cameraLod = uniform.cullParams[${CULL_PARAMS.VIEW_DIR}u].w * bucketLod / max(uniform.cullParams[${CULL_PARAMS.LOD}u].x, 1e-6);
         if (!refine && cameraLod > 0.0) {
-            let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
+            let priority = uniform.cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
             let cameraDistance = max(distance(center, priority.xyz) - radius, 1e-5);
             refine = worldError * priority.w / cameraDistance > cameraLod;
         }
@@ -99,8 +97,8 @@ const cutShader = entry => /* wgsl */ `
             let refundIndices = cutGroups[offset + 5u] - unchargedIndices;
             let refundRecords = cutGroups[offset + 7u] - unchargedRecords;
             atomicSub(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], refundIndices);
-            atomicSub(&cutBudget[${CUT_BUDGET.INDICES_BASE}u + bucket], refundIndices);
-            atomicSub(&cutBudget[${CUT_BUDGET.RECORDS}u], refundRecords);
+            atomicSub(&counters[${CUT_BUDGET.INDICES_BASE}u + bucket], refundIndices);
+            atomicSub(&counters[${CUT_BUDGET.RECORDS}u], refundRecords);
             markBit(object.firstPairBit + first - firstMeshlet);
             markBit(uniform.freeBase + object.firstPairBit + first - firstMeshlet);
             return true;
@@ -122,12 +120,12 @@ const cutShader = entry => /* wgsl */ `
         // drawn meshlets lets occlusion shrink these buffers and randomly reject otherwise
         // affordable replacements on the next frame. Include accepted and rejected growth.
         atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indexNeed);
-        let recordBefore = atomicAdd(&cutBudget[${CUT_BUDGET.RECORDS}u], recordNeed);
-        let indexBefore = atomicAdd(&cutBudget[${CUT_BUDGET.INDICES_BASE}u + bucket], indexNeed);
+        let recordBefore = atomicAdd(&counters[${CUT_BUDGET.RECORDS}u], recordNeed);
+        let indexBefore = atomicAdd(&counters[${CUT_BUDGET.INDICES_BASE}u + bucket], indexNeed);
         if (recordBefore + recordNeed > uniform.recordCapacity || indexBefore + indexNeed > capacity) {
-            atomicSub(&cutBudget[${CUT_BUDGET.RECORDS}u], recordNeed);
-            atomicSub(&cutBudget[${CUT_BUDGET.INDICES_BASE}u + bucket], indexNeed);
-            atomicAdd(&cutBudget[${CUT_BUDGET.REJECTED_RECORDS}u], recordNeed);
+            atomicSub(&counters[${CUT_BUDGET.RECORDS}u], recordNeed);
+            atomicSub(&counters[${CUT_BUDGET.INDICES_BASE}u + bucket], indexNeed);
+            atomicAdd(&counters[${CUT_BUDGET.REJECTED_RECORDS}u], recordNeed);
             return false;
         }
         markBit(object.firstPairBit + first - firstMeshlet);
