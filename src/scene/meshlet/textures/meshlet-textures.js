@@ -14,6 +14,72 @@ import { FETCH_PRIORITY_FINE } from '../streaming/meshlet-fetch-scheduler.js';
 import { MeshletTextureSource } from './meshlet-texture-source.js';
 
 /**
+ * @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js'
+ * @import { MeshletFetchOptions } from '../meshlet-world.js'
+ * @import { MeshletFetchScheduler } from '../streaming/meshlet-fetch-scheduler.js'
+ * @import { MeshletTranscodeFn } from './meshlet-ktx2.js'
+ */
+
+const MESHLET_TEX_FAMILIES = ['srgb', 'srgba', 'normal', 'linear'];
+const FAMILY_SRGB = 0;
+const FAMILY_NORMAL = 2;
+const FAMILY_LINEAR = 3;
+const FAMILY_IS_SRGB = [true, true, false, false];
+// only srgba carries alpha: the opaque families transcode to the smaller opaque formats (BC1)
+const FAMILY_HAS_ALPHA = [false, true, false, false];
+const TAIL_MAX_SIZE = 256;
+const MIN_MIP_SIZE = 4;
+/** Largest fine-pool texture a family allocates, whatever the budget says (one GPU resource). */
+const MAX_FINE_TEXTURE_BYTES = 1024 * 1024 * 1024;
+
+const familyOfArray = (array) => {
+    const prefix = String(array.name ?? '').split('_')[0];
+    const index = MESHLET_TEX_FAMILIES.indexOf(prefix);
+    if (index >= 0) return index;
+    return array.type === 'normal' ? FAMILY_NORMAL : (array.type === 'srgb' ? FAMILY_SRGB : FAMILY_LINEAR);
+};
+
+const log2i = v => Math.round(Math.log2(v));
+
+/**
+ * Where a source texture array lands: its family, and the sizes that decide its place in the
+ * family arrays.
+ *
+ * @param {object} array - The manifest's texture array.
+ * @param {number} maxFineSize - Largest size the fine pool holds.
+ * @returns {{ family: number, srcSize: number, tailTop: number, topSize: number }} The family;
+ * the source size; the tail's top size; and the finest size the fine pool holds of it, where
+ * the source-mip space the residency, marks and shader work in starts (mip 0 = topSize).
+ */
+const arrayLayout = (array, maxFineSize) => {
+    const srcSize = Math.max(array.width ?? 1, array.height ?? 1);
+    const tailTop = Math.min(srcSize >> array.tailMip, TAIL_MAX_SIZE);
+    return {
+        family: familyOfArray(array),
+        srcSize,
+        tailTop,
+        topSize: Math.max(Math.min(srcSize, maxFineSize), tailTop)
+    };
+};
+
+/**
+ * Packs a texture's residency word0: slot layer (0xFFFF = none), family, its own fine/tail
+ * boundary and its level offset inside the family arrays - see the class comment.
+ *
+ * @param {object} tex - The texture entry.
+ * @param {number} slot - Fine slot layer, or MATERIAL_SLOT_ABSENT.
+ * @returns {number} The packed word.
+ */
+const texResidencyWord0 = (tex, slot) => (slot & 0xFFFF) | (tex.family << 16) | ((tex.tailStart & 0x3F) << 18) | (tex.sizeBias << 24);
+
+// processMarks bookkeeping and tunables
+const MAX_SOURCE_MIPS = 32;   // fineMask is one bit per source mip; also the (texture, mip) key stride
+const CHURN_THRESHOLD = 2;    // evictions per frame above which the fine pool is thrashing
+const MIP_BIAS_ATTACK = 0.5;  // mips per frame the pressure bias rises while thrashing
+const MIP_BIAS_DECAY = 0.05;  // mips per frame it relaxes once evictions stop - 10x slower, hysteresis
+const MIP_BIAS_MAX = 8;       // 8 levels coarser than any top is already under every tail
+
+/**
  * Streamed-texture state of a meshlet world.
  *
  * Two tiers per texture family (srgb / srgba / normal / linear - a family is one transcode
@@ -41,51 +107,15 @@ import { MeshletTextureSource } from './meshlet-texture-source.js';
  *
  * @ignore
  */
-
-const MESHLET_TEX_FAMILIES = ['srgb', 'srgba', 'normal', 'linear'];
-const FAMILY_IS_SRGB = [true, true, false, false];
-// only srgba carries alpha: the opaque families transcode to the smaller opaque formats (BC1)
-const FAMILY_HAS_ALPHA = [false, true, false, false];
-const TAIL_MAX_SIZE = 256;
-const MIN_MIP_SIZE = 4;
-/** Largest fine-pool texture a family allocates, whatever the budget says (one GPU resource). */
-const MAX_FINE_TEXTURE_BYTES = 1024 * 1024 * 1024;
-
-const familyOfArray = (array) => {
-    const prefix = String(array.name ?? '').split('_')[0];
-    const index = MESHLET_TEX_FAMILIES.indexOf(prefix);
-    if (index >= 0) return index;
-    return array.type === 'normal' ? 2 : (array.type === 'srgb' ? 0 : 3);
-};
-
-const log2i = v => Math.round(Math.log2(v));
-
-/**
- * Packs a texture's residency word0: slot layer (0xFFFF = none), family, its own fine/tail
- * boundary and its level offset inside the family arrays - see the class comment.
- *
- * @param {object} tex - The texture entry.
- * @param {number} slot - Fine slot layer, or MATERIAL_SLOT_ABSENT.
- * @returns {number} The packed word.
- */
-const texResidencyWord0 = (tex, slot) => (slot & 0xFFFF) | (tex.family << 16) | ((tex.tailStart & 0x3F) << 18) | (tex.sizeBias << 24);
-
-// processMarks bookkeeping and tunables
-const MAX_SOURCE_MIPS = 32;   // fineMask is one bit per source mip; also the (texture, mip) key stride
-const CHURN_THRESHOLD = 2;    // evictions per frame above which the fine pool is thrashing
-const MIP_BIAS_ATTACK = 0.5;  // mips per frame the pressure bias rises while thrashing
-const MIP_BIAS_DECAY = 0.05;  // mips per frame it relaxes once evictions stop - 10x slower, hysteresis
-const MIP_BIAS_MAX = 8;       // 8 levels coarser than any top is already under every tail
-
 class MeshletTextures {
     /** @type {Array<{ family: number, srcSize: number, topSize: number, array: object, layer: number, source: MeshletTextureSource, tailLayer: number, tailTop: number, tailStart: number, sizeBias: number, fineMask: number, slot: number }>} */
     textures = [];
 
     /**
      * Largest source size streamed into the fine pool. A family's slot is sized to its largest
-     * texture, so one 8192 texture would make every slot an 8192 mip chain (~90 MB) and a 2 GB
-     * budget would buy about twenty of them for a whole scene; textures above this size stream
-     * their mips down to it and no further. Defaults to 2048.
+     * texture, so one very large texture would make every slot that large and leave a budget
+     * room for few of them; textures above this size stream their mips down to it and no
+     * further. Defaults to 2048.
      *
      * @type {number}
      */
@@ -125,10 +155,9 @@ class MeshletTextures {
 
     /**
      * Total texture VRAM budget in bytes - the always-resident tail arrays and the demand-
-     * streamed fine slot pool, not the pool alone. Budgeting only the pool understates what is
-     * held: the tails are typically the same size again, so a pool-only budget would cover
-     * about half the texture VRAM actually in use. The tails are sized by the asset and cannot be traded away, so they come
-     * off the top and the fine pool gets what remains, split across families by demand.
+     * streamed fine slot pool, not the pool alone, since the tails are typically as large again.
+     * The tails are sized by the asset and cannot be traded away, so they come off the top and
+     * the fine pool gets what remains, split across families by demand.
      *
      * @type {number}
      */
@@ -145,9 +174,59 @@ class MeshletTextures {
 
     fineEvictions = 0;
 
+    /** @type {number} - fine mip fetches that failed. */
+    fineFailures = 0;
+
     slotDenials = 0;
 
     wantedAboveTail = 0;
+
+    /** @type {GraphicsDevice} */
+    device;
+
+    /** @type {MeshletTranscodeFn|null} - required before any texture can be uploaded. */
+    transcode;
+
+    /** @type {MeshletFetchScheduler|null} - null selects the page-wide default. */
+    scheduler;
+
+    /**
+     * Per texture, residency word 0 then word 1 (see the class description): the CPU mirror of
+     * {@link residencyBuffer}.
+     *
+     * @type {Uint32Array}
+     */
+    residencyCpu = new Uint32Array(0);
+
+    /** @type {MeshletTextureSource[]} - one per registered resource. @private */
+    _sources = [];
+
+    /**
+     * Per registered texture array: its manifest entry, source, flat index of its first layer,
+     * owning manifest and whether its tail load finished.
+     *
+     * @type {Array<{ array: object, source: MeshletTextureSource, firstTexIndex: number, owner: object, tailDone: boolean }>}
+     * @private
+     */
+    _arrays = [];
+
+    /** @type {Int32Array|null} - per (material row, slot), the flat texture index or -1. @private */
+    _rowTex = null;
+
+    /** @type {Int16Array|null} - per (material row, slot), the tiling bias. @private */
+    _rowTilingBias = null;
+
+    /** @type {Int32Array|null} - (material row, texture index, tiling bias) per lightmap. @private */
+    _lightmapSlots = null;
+
+    /** @type {Set<number>} - fine fetches in flight, keyed texIndex * MAX_SOURCE_MIPS + mip. @private */
+    _inFlight = new Set();
+
+    /** @type {Uint16Array|null} - per texture, this frame's desired texel rate. @private */
+    _desiredTexelRate = null;
+
+    /** @private */
+    _warnedFineFailure = false;
 
     _dirty = false;
 
@@ -205,21 +284,16 @@ class MeshletTextures {
     _lastEvictions = 0;
 
     /**
-     * @param {import('../../../platform/graphics/graphics-device.js').GraphicsDevice} device - The device.
-     * @param {import('./meshlet-ktx2.js').MeshletTranscodeFn|null} [transcode] - The KTX2
-     * transcoder (see {@link transcodeKtx2}); required before any texture can be uploaded.
-     * @param {import('../streaming/meshlet-fetch-scheduler.js').MeshletFetchScheduler|null} [scheduler] - The
-     * scheduler container fetches go through; null selects the page-wide default.
+     * @param {GraphicsDevice} device - The device.
+     * @param {MeshletTranscodeFn|null} [transcode] - The KTX2 transcoder (see
+     * {@link transcodeKtx2}); required before any texture can be uploaded.
+     * @param {MeshletFetchScheduler|null} [scheduler] - The scheduler container fetches go
+     * through; null selects the page-wide default.
      */
     constructor(device, transcode = null, scheduler = null) {
         this.device = device;
         this.transcode = transcode;
         this.scheduler = scheduler;
-        this._sources = [];
-        this._arrays = []; // { array, source, firstTexIndex }
-        this._rowTex = null; // Int32Array rows*4, -1 = slot absent
-        this._rowTilingBias = null; // Int16Array rows*4, per-slot texture-transform tiling bias
-        this._inFlight = new Set(); // texIndex * MAX_SOURCE_MIPS + sourceMip
     }
 
     /**
@@ -229,8 +303,8 @@ class MeshletTextures {
      *
      * @param {object} textureManifest - The parsed MAG_texture_streaming manifest ({ arrays }).
      * @param {string} baseUrl - Directory the manifest's container URIs are relative to.
-     * @param {import('../meshlet-world.js').MeshletFetchOptions|null} [fetchOptions] - How the
-     * containers are fetched (see MeshletWorld#addStreamedResource).
+     * @param {MeshletFetchOptions|null} [fetchOptions] - How the containers are fetched (see
+     * MeshletWorld#addStreamedResource).
      * @returns {number} The resource's texture base index.
      */
     addResource(textureManifest, baseUrl, fetchOptions = null) {
@@ -242,12 +316,7 @@ class MeshletTextures {
                 Debug.warnOnce(`MeshletTextures: array '${array.name}' has an unsupported containerVersion (${array.containerVersion}) and is skipped.`);
                 continue;
             }
-            const family = familyOfArray(array);
-            const srcSize = Math.max(array.width ?? 1, array.height ?? 1);
-            const tailTop = Math.min(srcSize >> array.tailMip, TAIL_MAX_SIZE);
-            // the finest size the fine pool holds for this texture; the source-mip space the
-            // residency, marks and shader work in starts at it (mip 0 = topSize)
-            const topSize = Math.max(Math.min(srcSize, this.maxFineSize), tailTop);
+            const { family, srcSize, tailTop, topSize } = arrayLayout(array, this.maxFineSize);
             // owner: the manifest identifies the resource across rebuilds (a carried texture
             // system keeps it), so per-resource tail progress survives a rebuild
             this._arrays.push({ array, source, firstTexIndex: this.textures.length, owner: textureManifest, tailDone: false });
@@ -355,7 +424,6 @@ class MeshletTextures {
         }
 
         // residency: everything starts "nothing resident" - the shader uses factors only
-        this.residencyCpu = new Uint32Array(0);
         this._rebuildResidency();
         this.finalized = true;
         this._loadTails();
@@ -374,10 +442,8 @@ class MeshletTextures {
         if (!this.finalized || this._destroyed) return false;
         for (const array of textureManifest.arrays ?? []) {
             if (array.containerVersion !== 2) continue;
-            const fam = this.families[familyOfArray(array)];
-            const srcSize = Math.max(array.width ?? 1, array.height ?? 1);
-            const tailTop = Math.min(srcSize >> array.tailMip, TAIL_MAX_SIZE);
-            const topSize = Math.max(Math.min(srcSize, this.maxFineSize), tailTop);
+            const { family, tailTop, topSize } = arrayLayout(array, this.maxFineSize);
+            const fam = this.families[family];
             if (tailTop > fam.size || topSize > fam.slotSize) return false;
         }
         return true;
@@ -391,8 +457,7 @@ class MeshletTextures {
      *
      * @param {object} textureManifest - The parsed MAG_texture_streaming manifest ({ arrays }).
      * @param {string} baseUrl - URL directory the manifest's container URIs are relative to.
-     * @param {import('../meshlet-world.js').MeshletFetchOptions|null} [fetchOptions] - How the
-     * containers are fetched.
+     * @param {MeshletFetchOptions|null} [fetchOptions] - How the containers are fetched.
      * @returns {number} The flat texture index of the resource's first texture.
      */
     appendResource(textureManifest, baseUrl, fetchOptions = null) {
@@ -453,9 +518,7 @@ class MeshletTextures {
 
     /**
      * Replaces a family's tail array with one holding at least its current layer count (grown
-     * geometrically so appends amortise), copying every existing layer across on the queue -
-     * ordered before any upload that follows, so a tail landing right after the growth cannot
-     * be overwritten by the copy of its old, empty layer.
+     * geometrically so appends amortise), copying every existing layer across.
      *
      * @param {number} family - Family index.
      * @private
@@ -464,39 +527,70 @@ class MeshletTextures {
         const info = this.families[family];
         const old = info.tail;
         const layers = Math.max(info.layerCount, Math.ceil(old.arrayLength * 1.5));
-        const tail = new Texture(this.device, {
-            name: old.name,
-            width: info.size,
-            height: info.size,
+        const tail = this._createFamilyTexture(family, old.name, info.size, layers, old.format, true);
+        this._copyLayers(old, tail, old.numLevels, info.size);
+        this.tailBytes += tail.gpuSize - old.gpuSize;
+        old.destroy();
+        info.tail = tail;
+        this.onFamilyTexturesReady?.(family, tail, info.fine);
+    }
+
+    /**
+     * Creates one of a family's texture arrays.
+     *
+     * @param {number} family - Family index.
+     * @param {string} name - The texture name.
+     * @param {number} size - Width and height of its top level.
+     * @param {number} layers - Array layers.
+     * @param {number} format - Engine pixel format.
+     * @param {boolean} tail - A tail array (sampled without anisotropy) rather than a fine pool.
+     * @returns {Texture} The texture.
+     * @private
+     */
+    _createFamilyTexture(family, name, size, layers, format, tail) {
+        return new Texture(this.device, {
+            name,
+            width: size,
+            height: size,
             arrayLength: layers,
-            format: old.format,
+            format,
             srgb: FAMILY_IS_SRGB[family],
             mipmaps: true,
             addressU: ADDRESS_REPEAT,
             addressV: ADDRESS_REPEAT,
             minFilter: FILTER_LINEAR_MIPMAP_LINEAR,
             magFilter: FILTER_LINEAR,
-            anisotropy: 1
+            ...(tail ? { anisotropy: 1 } : null)
         });
+    }
+
+    /**
+     * Copies every layer of a family array's leading levels into its larger replacement, on a
+     * command buffer submitted at once - ordered before any upload that follows, so a mip
+     * landing right after the growth cannot be overwritten by the copy of its old content.
+     *
+     * @param {Texture} src - The array being replaced.
+     * @param {Texture} dst - Its replacement, with at least as many layers.
+     * @param {number} levels - Levels to copy.
+     * @param {number} size - Size of level 0.
+     * @private
+     */
+    _copyLayers(src, dst, levels, size) {
         const wgpu = this.device.wgpu;
         const encoder = wgpu.createCommandEncoder();
         // a block-compressed level smaller than a block (the 2x2 and 1x1 mips) is copied at its
         // physical, block-rounded size: the copy must cover whole blocks, and a 2-texel extent
         // fails validation and takes the entire command buffer with it
-        const block = isCompressedPixelFormat(old.format) ? 4 : 1;
-        for (let level = 0; level < old.numLevels; level++) {
-            const size = Math.ceil(Math.max(info.size >> level, 1) / block) * block;
+        const block = isCompressedPixelFormat(src.format) ? 4 : 1;
+        for (let level = 0; level < levels; level++) {
+            const levelSize = Math.ceil(Math.max(size >> level, 1) / block) * block;
             encoder.copyTextureToTexture(
-                { texture: old.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
-                { texture: tail.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
-                { width: size, height: size, depthOrArrayLayers: old.arrayLength }
+                { texture: src.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
+                { texture: dst.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
+                { width: levelSize, height: levelSize, depthOrArrayLayers: src.arrayLength }
             );
         }
         wgpu.queue.submit([encoder.finish()]);
-        this.tailBytes += tail.gpuSize - old.gpuSize;
-        old.destroy();
-        info.tail = tail;
-        this.onFamilyTexturesReady?.(family, tail, info.fine);
     }
 
     /**
@@ -531,32 +625,9 @@ class MeshletTextures {
         const old = info.fine;
         const slotCount = this._fineSlotCount(info);
         if (!old || slotCount <= info.slotCount) return;
-        const fine = new Texture(this.device, {
-            name: old.name,
-            width: info.slotSize,
-            height: info.slotSize,
-            arrayLength: slotCount,
-            format: old.format,
-            srgb: FAMILY_IS_SRGB[family],
-            mipmaps: true,
-            addressU: ADDRESS_REPEAT,
-            addressV: ADDRESS_REPEAT,
-            minFilter: FILTER_LINEAR_MIPMAP_LINEAR,
-            magFilter: FILTER_LINEAR
-        });
-        const wgpu = this.device.wgpu;
-        const encoder = wgpu.createCommandEncoder();
-        // only the above-tail levels are ever written; copies cover whole blocks (see _growTail)
-        const block = isCompressedPixelFormat(old.format) ? 4 : 1;
-        for (let level = 0; level < info.slotLevels; level++) {
-            const size = Math.ceil(Math.max(info.slotSize >> level, 1) / block) * block;
-            encoder.copyTextureToTexture(
-                { texture: old.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
-                { texture: fine.impl.gpuTexture, mipLevel: level, origin: [0, 0, 0] },
-                { width: size, height: size, depthOrArrayLayers: old.arrayLength }
-            );
-        }
-        wgpu.queue.submit([encoder.finish()]);
+        const fine = this._createFamilyTexture(family, old.name, info.slotSize, slotCount, old.format, false);
+        // only the above-tail levels are ever written
+        this._copyLayers(old, fine, info.slotLevels, info.slotSize);
 
         const slotTex = new Int32Array(slotCount).fill(-1);
         slotTex.set(info.slotTex);
@@ -750,14 +821,17 @@ class MeshletTextures {
             if (!wantsFine) continue;
             wantedAboveTail++;
             const fam = this.families[tex.family];
+            // no pool yet (or a budget of 0)
             if (!fam.fine) {
-                denials++; continue;
-            } // pool not created yet (or budget 0)
+                denials++;
+                continue;
+            }
 
             if (tex.slot < 0) {
                 const slot = this._acquireSlot(fam, desiredTexelRate);
                 if (slot < 0) {
-                    denials++; continue;
+                    denials++;
+                    continue;
                 }
                 tex.slot = slot;
                 fam.slotTex[slot] = i;
@@ -818,8 +892,8 @@ class MeshletTextures {
         for (let s = 0; s < fam.slotCount; s++) {
             const holder = fam.slotTex[s];
             // a slot with no holder that is not on the free list was evicted earlier this frame
-            // and sits in pendingFree: handing it out now and from the free list next frame
-            // would give two textures the same slot, each uploading over the other's mips
+            // and sits in pendingFree: handing it out now and again from the free list next
+            // frame would give two textures the same slot, each uploading over the other's mips
             if (holder < 0) continue;
             if (desiredTexelRate[holder] > 0) continue; // wanted this frame
             if (fam.slotLastUsed[s] < bestUsed) {
@@ -828,27 +902,23 @@ class MeshletTextures {
             }
         }
         if (best < 0) return -1;
-        // evict the least recently wanted holder; the slot itself is handed out next frame
+        // Evict the least recently wanted holder. The slot is reused only next frame, after the
+        // residency rewrite reached the GPU: it goes through pendingFree, and this frame's
+        // requester is denied.
         const victim = fam.slotTex[best];
-        {
-            const tex = this.textures[victim];
-            tex.slot = -1;
-            tex.fineMask = 0;
-            this.residencyCpu[victim * TEX_RESIDENCY_U32S] = texResidencyWord0(tex, MATERIAL_SLOT_ABSENT);
-            const tailMin = this.residencyCpu[victim * TEX_RESIDENCY_U32S + 1] & 0xFFFF;
-            if (tailMin !== MESHLET_TEX_NO_MINLOD) {
-                this.residencyCpu[victim * TEX_RESIDENCY_U32S + 1] = (tex.tailStart & 0xFFFF) | (tex.tailLayer << 16);
-            }
-            this._dirty = true;
-            this.fineEvictions++;
-            fam.slotTex[best] = -1;
-            // The slot is reused only next frame, after the residency rewrite reached the GPU:
-            // it goes through pendingFree, and this frame's requester is denied. Handing it out
-            // now would leave it queued in pendingFree as well, and the next frame would give
-            // the same slot to a second texture.
-            fam.pendingFree.push(best);
-            return -1;
+        const tex = this.textures[victim];
+        tex.slot = -1;
+        tex.fineMask = 0;
+        this.residencyCpu[victim * TEX_RESIDENCY_U32S] = texResidencyWord0(tex, MATERIAL_SLOT_ABSENT);
+        const tailMin = this.residencyCpu[victim * TEX_RESIDENCY_U32S + 1] & 0xFFFF;
+        if (tailMin !== MESHLET_TEX_NO_MINLOD) {
+            this.residencyCpu[victim * TEX_RESIDENCY_U32S + 1] = (tex.tailStart & 0xFFFF) | (tex.tailLayer << 16);
         }
+        this._dirty = true;
+        this.fineEvictions++;
+        fam.slotTex[best] = -1;
+        fam.pendingFree.push(best);
+        return -1;
     }
 
     /**
@@ -896,13 +966,12 @@ class MeshletTextures {
             }
         }).catch((err) => {
             this._inFlight.delete(key);
-            // console, not Debug: a profile build strips Debug, and a silent failure here is a
-            // texture that stays on its tail with no clue why
+            // shipped in release builds: a texture stuck on its tail otherwise gives no clue why
             if (!this._warnedFineFailure) {
                 this._warnedFineFailure = true;
                 console.warn(`MeshletTextures: fine mip fetch failed (${tex.array.name} layer ${tex.layer} mip ${sourceMip}): ${err.message}`);
             }
-            this.fineFailures = (this.fineFailures ?? 0) + 1;
+            this.fineFailures++;
         });
     }
 
@@ -928,28 +997,14 @@ class MeshletTextures {
     _createFamilyTextures(family, format) {
         const info = this.families[family];
         if (info.tail || this._destroyed) return;
-        const device = this.device;
         const name = MESHLET_TEX_FAMILIES[family];
 
-        info.tail = new Texture(device, {
-            name: `MeshletTail-${name}`,
-            width: info.size,
-            height: info.size,
-            arrayLength: Math.max(info.layerCount, 1),
-            format: format,
-            srgb: FAMILY_IS_SRGB[family],
-            mipmaps: true,
-            addressU: ADDRESS_REPEAT,
-            addressV: ADDRESS_REPEAT,
-            minFilter: FILTER_LINEAR_MIPMAP_LINEAR,
-            magFilter: FILTER_LINEAR,
-            anisotropy: 1
-        });
+        info.tail = this._createFamilyTexture(family, `MeshletTail-${name}`, info.size, Math.max(info.layerCount, 1), format, true);
 
         this.tailBytes += info.tail.gpuSize;
 
         if (info.slotLevels > 0 && info.fineDemandTex > 0 && this.finePoolBytes <= 0 && !this._noFinePoolWarned) {
-            // a configuration problem the application must act on, reported in every build
+            // a configuration problem the application must act on, so it ships in release builds
             this._noFinePoolWarned = true;
             console.warn(`MeshletTextures: the texture budget (${(this.poolBytes / 1048576).toFixed(0)} MB) is used up by the always-resident tails (${(this.tailBytes / 1048576).toFixed(0)} MB); no fine (high-resolution) mips will stream. Raise app.systems.meshlet.texturePoolBytes.`);
         }
@@ -966,19 +1021,7 @@ class MeshletTextures {
             info.slotLastUsed = new Uint32Array(info.slotCount);
             for (let s = info.slotCount - 1; s >= 0; s--) info.freeSlots.push(s);
 
-            info.fine = new Texture(device, {
-                name: `MeshletFine-${name}`,
-                width: info.slotSize,
-                height: info.slotSize,
-                arrayLength: info.slotCount,
-                format: format,
-                srgb: FAMILY_IS_SRGB[family],
-                mipmaps: true,
-                addressU: ADDRESS_REPEAT,
-                addressV: ADDRESS_REPEAT,
-                minFilter: FILTER_LINEAR_MIPMAP_LINEAR,
-                magFilter: FILTER_LINEAR
-            });
+            info.fine = this._createFamilyTexture(family, `MeshletFine-${name}`, info.slotSize, info.slotCount, format, false);
         }
 
         this.onFamilyTexturesReady?.(family, info.tail, info.fine);

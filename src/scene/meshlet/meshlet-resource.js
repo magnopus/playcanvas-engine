@@ -15,10 +15,6 @@ import { MeshletInstanceList } from './meshlet-instance-list.js';
  */
 
 /**
- * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
- */
-
-/**
  * One primitive's parsed MAG_meshlets_gpu v2 payload.
  *
  * @ignore
@@ -41,12 +37,6 @@ class MeshletPrimitive {
     /** @type {number} */
     uvChannelMask;
 
-    /** @type {number} */
-    vertexCount;
-
-    /** @type {Array<{ lodLevel: number, meshletStart: number, meshletCount: number }>} */
-    lods;
-
     /** @type {number[]} - local-space AABB center. */
     aabbCenter;
 
@@ -64,6 +54,18 @@ class MeshletPrimitive {
 
     /** @type {number} - index of the primitive within its gltf mesh. */
     primIndex;
+
+    // What a world build reads of the records besides the copy it uploads, cached so a resource
+    // whose records were released can still be laid out (see MeshletWorld#_countTotals).
+
+    /** @type {number[]|null} - primitive-local pages of the root clusters. @ignore */
+    _rootPages = null;
+
+    /** @type {number} - indices of every meshlet, or -1 before the first build. @ignore */
+    _indexCount = -1;
+
+    /** @type {number} - the first meshlet's flags. @ignore */
+    _firstFlags = 0;
 }
 
 /**
@@ -75,9 +77,6 @@ class MeshletPrimitive {
  * @ignore
  */
 class MeshletResource {
-    /** @type {GraphicsDevice} */
-    device;
-
     /** @type {MeshletPrimitive[]} */
     primitives;
 
@@ -141,13 +140,11 @@ class MeshletResource {
     }
 
     /**
-     * @param {GraphicsDevice} device - The graphics device.
      * @param {MeshletPrimitive[]} primitives - Parsed primitives.
      * @param {object} manifest - The stream manifest.
      * @param {MeshletInstanceList|MeshletInstanceListBuilder|Array<{ primIndex: number, matrix: Float32Array, lightmap?: MeshletLightmap|null }>} [instances] - Placements.
      */
-    constructor(device, primitives, manifest, instances = null) {
-        this.device = device;
+    constructor(primitives, manifest, instances = null) {
         this.primitives = primitives;
         this.manifest = manifest;
         this.instances = instances;

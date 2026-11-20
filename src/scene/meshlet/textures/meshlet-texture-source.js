@@ -1,6 +1,11 @@
 import { FETCH_PRIORITY_FINE, FETCH_PRIORITY_TAILS, defaultFetchScheduler } from '../streaming/meshlet-fetch-scheduler.js';
 
 /**
+ * @import { MeshletFetchOptions } from '../meshlet-world.js'
+ * @import { MeshletFetchScheduler } from '../streaming/meshlet-fetch-scheduler.js'
+ */
+
+/**
  * HTTP byte-range access to a MAG_texture_streaming v2 container (see the gltf-tools spec):
  * one packed file per texture array, addressed by the manifest's absolute per-(layer, mip)
  * byte ranges. The shared tail region (every layer's coarse mips) is one request; each finer
@@ -17,11 +22,26 @@ class MeshletTextureSource {
     /** @type {Map<string, string>} - container URI -> fetch URL, resolved once. */
     _urls = new Map();
 
+    /** @type {string} - directory of the containers, ending in a slash. */
+    baseUrl;
+
+    /** @type {((uri: string) => string)|null} */
+    resolveUrl;
+
+    /** @type {RequestCredentials|null} */
+    credentials;
+
+    /** @type {string|null} - versions the persistent cache keys. */
+    cacheVersion;
+
+    /** @type {MeshletFetchScheduler} */
+    scheduler;
+
     /**
      * @param {string} baseUrl - Directory the manifest's container URIs are relative to.
-     * @param {import('../meshlet-world.js').MeshletFetchOptions|null} [fetchOptions] - How the
+     * @param {MeshletFetchOptions|null} [fetchOptions] - How the
      * containers are fetched - see MeshletPageFetcher.
-     * @param {import('../streaming/meshlet-fetch-scheduler.js').MeshletFetchScheduler|null} [scheduler] - The
+     * @param {MeshletFetchScheduler|null} [scheduler] - The
      * scheduler requests go through; null selects the page-wide default.
      */
     constructor(baseUrl, fetchOptions = null, scheduler = null) {

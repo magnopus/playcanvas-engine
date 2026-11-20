@@ -4,7 +4,6 @@ import { MeshletView } from './meshlet-view.js';
 /**
  * @import { BoundingBox } from '../../core/shape/bounding-box.js'
  * @import { Camera } from '../camera.js'
- * @import { ForwardRenderer } from '../renderer/forward-renderer.js'
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { Light } from '../light.js'
  * @import { MeshletCullShaders } from './meshlet-cull-shaders.js'
@@ -45,7 +44,6 @@ class MeshletShadowView extends MeshletView {
     /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {MeshletWorld} world - The finalized world.
-     * @param {ForwardRenderer|null} renderer - The forward renderer.
      * @param {Light} light - The directional light.
      * @param {number} face - Shadow face index within the light.
      * @param {Camera|null} sceneCamera - The camera whose shadow render data this view culls
@@ -58,8 +56,8 @@ class MeshletShadowView extends MeshletView {
      * @param {StorageBuffer|null} [options.sharedRootList] - Root list shared with the sibling faces.
      * @param {number} [options.initialIndexScale] - Fraction of the world's initial index budget.
      */
-    constructor(device, world, renderer, light, face, sceneCamera, options = {}) {
-        super(device, world, renderer, null, {
+    constructor(device, world, light, face, sceneCamera, options = {}) {
+        super(device, world, null, {
             capCarry: options.capCarry ?? null,
             cullShaders: options.cullShaders ?? null,
             sharedClaimBits: options.sharedClaimBits ?? null,
@@ -74,7 +72,7 @@ class MeshletShadowView extends MeshletView {
 
         /**
          * This face's LOD pressure: a multiplier on the shadow threshold, raised while its
-         * demand overruns its index share (see MeshletDirector#_updateShadowPressure).
+         * demand overruns its index share (see MeshletBudgetManager#updateShadowPressure).
          *
          * @type {number}
          */

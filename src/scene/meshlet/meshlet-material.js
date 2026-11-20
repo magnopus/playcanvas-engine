@@ -1,8 +1,8 @@
 import { CULLFACE_NONE } from '../../platform/graphics/constants.js';
 import { ShaderMaterial } from '../materials/shader-material.js';
-import { MESHLET_BUCKET_OPAQUE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS } from './constants.js';
+import { MESHLET_BUCKET_OPAQUE } from './constants.js';
 import {
-    meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL,
+    meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL, meshletFetchVertexWGSL, meshletNormalMatrixWGSL,
     meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL
 } from './shaders/meshlet-page-wgsl.js';
 
@@ -34,6 +34,8 @@ const vertexWGSL = /* wgsl */ `
     ${meshletDecodeDrawIndexWGSL}
     ${meshletDecodeOct16WGSL}
     ${meshletPageLayoutWGSL}
+    ${meshletFetchVertexWGSL}
+    ${meshletNormalMatrixWGSL}
 
     // debug colour per meshlet (integer hash)
     fn meshletColor(id : u32) -> vec3f {
@@ -49,36 +51,16 @@ const vertexWGSL = /* wgsl */ `
     fn vertexMain(input : VertexInput) -> VertexOutput {
         var output : VertexOutput;
 
-        let drawIndex = meshletDecodeDrawIndex(input.vertexIndex);
-        let record = drawIndex.x;
-        let localVert = drawIndex.y;
+        let fetched = meshletFetchVertex(input.vertexIndex, uniform.pageSizeWords);
+        let primitive = fetched.primitive;
+        let localPos = meshletPagePosition(fetched.pageLayout, fetched.vertex, primitive.gridOrigin, primitive.gridStep);
 
-        let instance = records[record].instance;
-        let meshlet = records[record].meshlet;
-
-        // per-primitive page attribute layout (resources may differ)
-        let primitive = meshletPrimitiveData(instance);
-        let uvFloatsPerVertex = primitive.uvFloatsPerVertex;
-        let hasTangents = (objectData[instance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
-        let hasColors = (objectData[instance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
-
-        let pageLayout = meshletPageLayout(residency[meshletData[meshlet].page] * uniform.pageSizeWords, hasTangents, uvFloatsPerVertex, hasColors);
-        let vertex = pagePool[pageLayout.meshletVertexBase + meshletData[meshlet].verticesOffset + localVert];
-
-        // per-primitive position grid (resources may be baked on different grids)
-        let localPos = meshletPagePosition(pageLayout, vertex, primitive.gridOrigin, primitive.gridStep);
-
-        let worldMatrix = meshletInstanceMatrix(instance);
+        let worldMatrix = meshletInstanceMatrix(fetched.instance);
         output.position = uniform.matrix_viewProjection * worldMatrix * vec4f(localPos, 1.0);
-        // cofactor of the upper 3x3, signed by its determinant: correct under non-uniform scale
-        let m0 = worldMatrix[0].xyz;
-        let m1 = worldMatrix[1].xyz;
-        let m2 = worldMatrix[2].xyz;
-        let c0 = cross(m1, m2);
-        let normalMatrix = mat3x3f(c0, cross(m2, m0), cross(m0, m1)) * select(1.0, -1.0, dot(m0, c0) < 0.0);
-        output.vNormal = normalize(normalMatrix * meshletDecodeOct16(pagePool[pageLayout.normalBase + vertex]));
+        let normal = meshletDecodeOct16(pagePool[fetched.pageLayout.normalBase + fetched.vertex]);
+        output.vNormal = normalize(meshletNormalMatrix(worldMatrix) * normal);
 
-        output.vColor = meshletColor(meshlet);
+        output.vColor = meshletColor(fetched.meshlet);
 
         return output;
     }

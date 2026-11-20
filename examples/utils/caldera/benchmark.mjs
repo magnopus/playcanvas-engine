@@ -3,8 +3,9 @@
  * prints frame-time statistics per pass and per leg of the route.
  *
  * The camera flies a fixed low-altitude loop through the main regions twice: once looking along
- * the direction of travel, once looking at the mountain. See the benchmark section of
- * examples/src/examples/graphics/meshlet-caldera/example.mjs for the route.
+ * the direction of travel, once looking at the mountain. The route and the result format are in
+ * examples/src/examples/graphics/meshlet-caldera/benchmark.mjs, which reports back through
+ * `BENCHMARK_RESULT` / `BENCHMARK_ERROR` console lines.
  *
  *   npm run bench:caldera -- [options]
  *
@@ -15,8 +16,8 @@
  *   --pool <MiB>        Meshlet page pool (default 4096, the whole island).
  *   --speed <m/s>       Camera speed (default 60).
  *   --passes <list>     Comma separated: forward, mountain, jump (default all three). The jump pass
- *                       cuts between regions and reports `slowUntil`, the ms after the cut of the
- *                       last frame over 20 ms.
+ *                       cuts between regions and reports `lastSlowMs`, the ms after the cut of
+ *                       the last frame over 20 ms.
  *   --regions <list>    Only load these regions (a faster, shorter smoke test; the route still
  *                       covers the whole island).
  *   --cache             Keep fetched bytes in the OPFS cache, as `?cache=1` (a warm run).
@@ -146,11 +147,11 @@ const row = stats => [
     String(stats.over33).padStart(6),
     String(stats.over50).padStart(6),
     String(stats.over100).padStart(7),
-    stats.lastSlowMs === undefined ? '' : `${String(stats.lastSlowMs).padStart(8)}`
+    stats.lastSlowMs === undefined ? '' : `${String(stats.lastSlowMs).padStart(10)}`
 ].join(' ');
 
 const header = `${'frames'.padStart(6)} ${'avg'.padStart(7)} ${'p95'.padStart(7)} ${'p99'.padStart(7)} ${'max'.padStart(7)} ${'>33ms'.padStart(6)} ${'>50ms'.padStart(6)} ${'>100ms'.padStart(7)}`;
-const jumpHeader = `${header} ${'slowUntil'.padStart(8)}`;
+const jumpHeader = `${header} ${'lastSlowMs'.padStart(10)}`;
 
 /**
  * @param {object} results - The example's results.

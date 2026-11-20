@@ -1,3 +1,5 @@
+import { hash53 } from '../../../core/hash.js';
+
 /**
  * Bake stamps: a short id per streamed resource that changes whenever the bake does, used to
  * version the persistent cache keys of its sidecars (geometry shards, texture containers).
@@ -10,33 +12,6 @@
 
 /** @type {WeakMap<object, string>} */
 const stamps = new WeakMap();
-
-/**
- * 53-bit hash (cyrb53) folded over 32-bit words, rendered in base 36.
- *
- * @param {ArrayLike<number>} words - The words.
- * @param {number} [h1] - Running state, word 1.
- * @param {number} [h2] - Running state, word 2.
- * @returns {[number, number]} The new state.
- */
-const fold = (words, h1 = 0xdeadbeef, h2 = 0x41c6ce57) => {
-    for (let i = 0; i < words.length; i++) {
-        const w = words[i] >>> 0;
-        h1 = Math.imul(h1 ^ w, 2654435761);
-        h2 = Math.imul(h2 ^ w, 1597334677);
-    }
-    return [h1, h2];
-};
-
-/**
- * @param {string} str - A string.
- * @returns {Uint32Array} Its UTF-16 code units, one per word.
- */
-const codeUnits = (str) => {
-    const out = new Uint32Array(str.length);
-    for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i);
-    return out;
-};
 
 /**
  * The bake stamp of a streamed resource: the bake's own `bakeId` from its stream manifest when
@@ -53,15 +28,11 @@ function meshletBakeStamp(resource) {
         if (typeof manifest.bakeId === 'string' && manifest.bakeId) {
             stamp = manifest.bakeId;
         } else {
-            let state = fold(manifest.pageTable ?? []);
-            state = fold(codeUnits(JSON.stringify(manifest.blobs ?? [])), ...state);
-            if (resource.textureManifest) {
-                state = fold(codeUnits(JSON.stringify(resource.textureManifest)), ...state);
-            }
-            let [h1, h2] = state;
-            h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-            h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-            stamp = (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+            stamp = hash53(
+                manifest.pageTable ?? [],
+                JSON.stringify(manifest.blobs ?? []),
+                resource.textureManifest ? JSON.stringify(resource.textureManifest) : ''
+            );
         }
         stamps.set(resource, stamp);
     }

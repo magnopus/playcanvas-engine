@@ -21,17 +21,6 @@ import {
 export function Controls({ observer }) {
     return (
         <Panel headerText='Meshlet Basic'>
-            <LabelGroup text='Asset'>
-                <SelectInput
-                    type='string'
-                    binding={new BindingTwoWay()}
-                    link={{ observer, path: 'data.asset' }}
-                    options={[
-                        { v: 'bunny', t: 'Bunny' },
-                        { v: 'magoffice', t: 'MagOffice (local)' }
-                    ]}
-                />
-            </LabelGroup>
             <LabelGroup text='Error px'>
                 <SliderInput
                     binding={new BindingTwoWay()}

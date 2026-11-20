@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 
 import { createCutFixture } from './meshlet-cut-fixture.mjs';
-import { MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_FLAG_SLOPPY, MESHLET_NO_PARENT } from '../../../src/scene/meshlet/constants.js';
+import { MESHLET_BUCKET_OPAQUE, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_FLAG_SLOPPY, MESHLET_NO_PARENT } from '../../../src/scene/meshlet/constants.js';
 import { buildMeshletGroups, collectFloorPages, MeshletCutData } from '../../../src/scene/meshlet/meshlet-cut-data.js';
 
 describe('meshlet replacement groups', function () {
@@ -29,7 +29,8 @@ describe('meshlet replacement groups', function () {
             expect(words[group0 + 3], 'unique finer page count').to.equal(1);
             const roots = words[0];
             expect(words[roots + 3], 'unique root page count').to.equal(1);
-            expect(cut.rootIndices).to.deep.equal([6, 0, 0]);
+            expect(words[roots + 4], 'root index cost').to.equal(6);
+            expect(words[roots + 5], 'draw bucket of the root flags').to.equal(MESHLET_BUCKET_OPAQUE);
             expect(cut.selectionTopology.byteSize).to.equal(10 * 8);
             const topology = cut.selectionTopology.impl.words;
             expect(Array.from(topology)).to.deep.equal([

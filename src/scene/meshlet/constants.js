@@ -129,11 +129,16 @@ export const ROOT_LIST_U32S = 2;
  * Rows (vec4 indices) of the per-view cull parameter buffer the culler fills each frame and
  * the cull shaders read. PLANES are the six world frustum planes (xyz normal, w distance);
  * CAMERA = (position.xyz, projScale); LOD = (dagPixelThreshold, hzbWidth, hzbHeight,
- * hzbMipCount); VIEW_PROJ = four matrix columns; STREAMING = (texelRateMarkBase, orthoScale,
- * cullFlags, casterPlaneCount); VIEW_DIR = (direction.xyz, camera LOD threshold or 0);
- * CASTER_PLANES = up to MAX_CASTER_PLANES more planes, tested after the frustum's (a shadow
- * view's caster volume, see MeshletShadowRenderer). Scalars that the shader reads as integers are
- * float-encoded and converted with u32().
+ * hzbMipCount); VIEW_PROJ = four matrix columns; VIEW_DIR = (direction.xyz, camera LOD
+ * threshold or 0); CASTER_PLANES = up to MAX_CASTER_PLANES more planes, tested after the
+ * frustum's (a shadow view's caster volume, see MeshletShadowRenderer).
+ *
+ * STREAMING is a grab bag of per-view scalars with no better home, not only streaming ones:
+ * x = word offset of the texel-rate marks in the requests buffer (the world's page count),
+ * y = orthoScale (shadow-map texels per world unit; 0 for a perspective view), z = CULL_FLAG_*
+ * bits, w = how many CASTER_PLANES rows are in use.
+ *
+ * Scalars that the shader reads as integers are float-encoded and converted with u32().
  *
  * @ignore
  */
@@ -192,7 +197,7 @@ export const MESHLET_ROOT_BAND_MAX_PIXELS = 4096;
  */
 export const MESHLET_ROOT_BAND_OCTAVES = 13;
 
-/** cullFlags bit 0: suppress the texel-rate feedback marks (orthographic / shadow views). @type {number} */
+/** Cull flag: suppress the texel-rate feedback marks (orthographic / shadow views). @type {number} */
 export const CULL_FLAG_NO_TEXEL_RATE = 1 << 0;
 
 /**
@@ -218,8 +223,7 @@ export const MESHLET_INDEX_WRITE_WORKGROUP = 64;
  * Records (meshlets) expanded per index-write workgroup, each by WORKGROUP / RECORDS threads.
  * One record per workgroup leaves the pass bound by each group's chain of dependent loads
  * (record, meshlet, object, page) rather than by the writes; several records per group keep
- * several chains in flight and cut the group count. 8 is the sweet spot on mobile GPUs:
- * several times faster than 1, with 16 no faster.
+ * several chains in flight and cut the group count.
  *
  * @type {number}
  */
@@ -325,6 +329,23 @@ export const MESHLET_COUNTER = {
 };
 
 /**
+ * Word offsets into a view's cut budget buffer: the capacity the root admission and the cut
+ * stages have charged this frame, reset from the CPU before the chain runs. The index words
+ * are per bucket, `INDICES_BASE + bucket`.
+ *
+ * @ignore
+ */
+export const CUT_BUDGET = {
+    INDICES_BASE: 0,     // indices charged per bucket (MESHLET_BUCKET_COUNT words)
+    RECORDS: 3,          // records charged
+    REJECTED_RECORDS: 4, // records of roots and refinements that did not fit (still demand)
+    QUEUE: 5             // cut queue entries admitted roots have claimed
+};
+
+/** u32 words in a view's cut budget buffer. @type {number} */
+export const CUT_BUDGET_U32S = 6;
+
+/**
  * Leading counter-buffer words cleared every frame: the counters themselves. The visible-cell
  * list after them is written up to its count and needs no clear.
  *
@@ -403,14 +424,14 @@ export const TEXEL_RATE_PER_MIP = 16;
  */
 export const MATERIAL_TEXTURE_SLOTS = 4;
 
-/** @type {number} - objectData flags word (23), bit 0: instance hidden. */
+/** @type {number} - {@link OBJECT_DATA}.FLAGS word, bit 0: instance hidden. */
 export const OBJECT_FLAG_HIDDEN = 1 << 0;
 
-/** @type {number} - objectData flags word (23), bit 1: pages carry tangents. */
+/** @type {number} - {@link OBJECT_DATA}.FLAGS word, bit 1: pages carry tangents. */
 export const OBJECT_FLAG_HAS_TANGENTS = 1 << 1;
 
 /**
- * objectData flags word (23), bit 2: pages carry rgba8 vertex colours (COLOR_0), which multiply
+ * {@link OBJECT_DATA}.FLAGS word, bit 2: pages carry rgba8 vertex colours (COLOR_0), which multiply
  * the base colour as they do on the regular glTF path.
  *
  * @type {number}
@@ -418,7 +439,7 @@ export const OBJECT_FLAG_HAS_TANGENTS = 1 << 1;
 export const OBJECT_FLAG_HAS_COLORS = 1 << 2;
 
 /**
- * objectData flags word (23), bit 3: the instance casts no shadow - shadow views skip it in the
+ * {@link OBJECT_DATA}.FLAGS word, bit 3: the instance casts no shadow - shadow views skip it in the
  * cull, so casting is per instance rather than per pipeline.
  *
  * @type {number}
@@ -426,7 +447,7 @@ export const OBJECT_FLAG_HAS_COLORS = 1 << 2;
 export const OBJECT_FLAG_NO_SHADOW = 1 << 3;
 
 /**
- * objectData flags word (23), bits 4-5: the instance's draw bucket (MESHLET_BUCKET_*), so the
+ * {@link OBJECT_DATA}.FLAGS word, bits 4-5: the instance's draw bucket (MESHLET_BUCKET_*), so the
  * root classification can apply the bucket's size cut without reading the cut tables.
  *
  * @type {number}
@@ -434,7 +455,7 @@ export const OBJECT_FLAG_NO_SHADOW = 1 << 3;
 export const OBJECT_BUCKET_SHIFT = 4;
 
 /**
- * objectData flags word (23), bit 8: draw this instance in the outline pass. Selection is a
+ * {@link OBJECT_DATA}.FLAGS word, bit 8: draw this instance in the outline pass. Selection is a
  * per-instance property because one indirect draw covers the whole world - there is no mesh
  * instance to add to an outline layer, and no per-object uniform to set.
  *
@@ -443,7 +464,7 @@ export const OBJECT_BUCKET_SHIFT = 4;
 export const OBJECT_FLAG_OUTLINED = 1 << 8;
 
 /**
- * objectData flags word (23), bit 9: draw this instance in the outline pass in the hover colour.
+ * {@link OBJECT_DATA}.FLAGS word, bit 9: draw this instance in the outline pass in the hover colour.
  * Separate from {@link OBJECT_FLAG_OUTLINED} so a hovered instance reads differently from a
  * selected one, and a selected instance can be hovered without losing its colour.
  *
@@ -511,8 +532,8 @@ export const MATERIAL_SLOT = {
 
 /**
  * u32 per texture in the texResidency buffer: word 0 = fineSlotLayer:16 (0xFFFF = tail only) |
- * family:8 | sizeBias:8, word 1 = minLod:16 (source-mip space, 0x7FFF = nothing resident) |
- * tailLayer:16. Written by MeshletTextures, read by the lit chunks.
+ * family:2 | tailStart:6 | sizeBias:8, word 1 = minLod:16 (source-mip space, 0x7FFF = nothing
+ * resident) | tailLayer:16. Written by MeshletTextures, read by the lit chunks.
  *
  * @type {number}
  */
@@ -632,6 +653,21 @@ export const PAGE_TABLE = {
  * @ignore
  */
 export const MESHLET_CULL_SLICE = 64;
+
+/**
+ * Threads per workgroup of the passes that run one thread per entry of a GPU-built list: the cut
+ * queue stages and emit, and the root scatter and admission.
+ *
+ * @ignore
+ */
+export const MESHLET_LIST_WORKGROUP = 64;
+
+/**
+ * Threads per workgroup of the cell cull, one per spatial cell.
+ *
+ * @ignore
+ */
+export const MESHLET_CELL_CULL_WORKGROUP = 64;
 
 /**
  * Word offset of the persistent per-instance admission bits in a view's claim buffer: two

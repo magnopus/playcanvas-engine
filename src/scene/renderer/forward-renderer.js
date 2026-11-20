@@ -755,10 +755,7 @@ class ForwardRenderer extends Renderer {
                     if (mv) frameGraph.beginMultiView(this.device);
 
                     if (!isDepthOnly) {
-                        // the meshlet director may take over the camera block: meshlet draw
-                        // phase 1 first (owning the camera clear), the opaque scene passes
-                        // loading on top, HZB + phase-2 before the transparent ones. Returns
-                        // false when inactive (or multiview), leaving the default path.
+                        // the meshlet director builds the camera's passes when it drives it
                         const handled = !mv && this.meshletDirector?.buildCameraPasses(
                             frameGraph, layerComposition, renderTarget, startIndex, i, camera);
                         if (!handled) {
@@ -833,6 +830,11 @@ class ForwardRenderer extends Renderer {
     /**
      * @param {FrameGraph} frameGraph - The frame graph.
      * @param {LayerComposition} layerComposition - The layer composition.
+     * @param {RenderTarget|null} renderTarget - The render target the pass renders to.
+     * @param {number} startIndex - The index of the first render action of the pass.
+     * @param {number} endIndex - The index of the last render action of the pass.
+     * @param {boolean} [stripClears] - True when another pass owns the camera clear, so this pass
+     * loads the render target instead of clearing it. Defaults to false.
      */
     addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, endIndex, stripClears = false) {
 

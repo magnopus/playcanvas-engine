@@ -1,5 +1,6 @@
 import { expect } from 'chai';
 
+import { dressComputeDevice, makeMeshletResource } from './meshlet-test-utils.mjs';
 import { Color } from '../../../src/core/math/color.js';
 import { RenderTarget } from '../../../src/platform/graphics/render-target.js';
 import { Texture } from '../../../src/platform/graphics/texture.js';
@@ -7,65 +8,20 @@ import { WebgpuReadbackPool } from '../../../src/platform/graphics/webgpu/webgpu
 import { Camera } from '../../../src/scene/camera.js';
 import { LAYERID_WORLD } from '../../../src/scene/constants.js';
 import { GraphNode } from '../../../src/scene/graph-node.js';
-import {
-    MESHLET_BUCKET_COUNT, MESHLET_DATA, MESHLET_DATA_U32S, PAGE_TABLE, PAGE_TABLE_FIELDS
-} from '../../../src/scene/meshlet/constants.js';
-import { MeshletDirector } from '../../../src/scene/meshlet/meshlet-director.js';
-import { MeshletPrimitive, MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
+import { MESHLET_BUCKET_COUNT, MESHLET_COLOR_MODE } from '../../../src/scene/meshlet/constants.js';
+import { MeshletDirectorGroup } from '../../../src/scene/meshlet/meshlet-director-group.js';
 import { createApp } from '../../app.mjs';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
-const PAGE_BYTES = 256;
-const MESHLETS = 3;
 const BASE_URL = 'http://meshlets.test/';
 
-// a streamable resource of one primitive, MESHLETS meshlets over two pages, `instances`
-// placements along x (see meshlet-world.test.mjs for the fully resident variant)
-const makeResource = (device, instances) => {
-    const prim = new MeshletPrimitive();
-    prim.meshletData = new Uint32Array(MESHLETS * MESHLET_DATA_U32S);
-    for (let m = 0; m < MESHLETS; m++) {
-        prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.PARENT] = 0xFFFFFFFF;
-        prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.TRIANGLE_COUNT] = 10;
-        prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.PAGE] = m % 2;
-    }
-    prim.meshletDataF32 = new Float32Array(prim.meshletData.buffer);
-    prim.meshletCount = MESHLETS;
-    prim.uvChannelMask = 1;
-    prim.vertexCount = 12;
-    prim.lods = [];
-    prim.aabbCenter = [1, 2, 3];
-    prim.aabbHalfExtents = [1, 1, 1];
-    prim.materialIndex = 0;
-    prim.baseColorFactor = [0.5, 0.25, 1, 1];
-    prim.meshIndex = 0;
-    prim.primIndex = 0;
-
-    const pageTable = new Uint32Array(2 * PAGE_TABLE_FIELDS);
-    pageTable[1 * PAGE_TABLE_FIELDS + PAGE_TABLE.OFFSET_LO] = PAGE_BYTES;
-    const manifest = {
-        blobs: [{ uri: 'pages_roots.dat', byteLength: 2 * PAGE_BYTES }],
-        pageTable,
-        pageCount: 2,
-        rootPages: [0],
-        attributeLayout: { uvComponents: 1, tangents: false },
-        pageSizeBytes: PAGE_BYTES,
-        pageAlignment: 256,
-        positionGrid: { origin: [0.5, 0, 0], step: 0.01, bits: 16 }
-    };
-    const placements = Array.from({ length: instances }, (_, i) => {
-        const matrix = new Float32Array(16);
-        matrix[0] = matrix[5] = matrix[10] = matrix[15] = 1;
-        matrix[12] = i * 10;
-        return { primIndex: 0, matrix };
-    });
-    return new MeshletResource(device, [prim], manifest, placements);
-};
+const makeResource = (device, instances) => makeMeshletResource(device, { instances });
 
 describe('MeshletDirector', function () {
 
     let app;
     let device;
+    let group;
     let director;
     let renderer;
     let layer;
@@ -87,17 +43,7 @@ describe('MeshletDirector', function () {
         jsdomSetup();
         app = createApp();
         device = app.graphicsDevice;
-        // the null device dressed up as compute-capable WebGPU with recording stubs
-        device.isWebGPU = true;
-        device.supportsCompute = true;
-        device.createComputeImpl = () => ({ destroy() {} });
-        device.createBufferImpl = () => ({
-            allocate() {}, write() {}, destroy() {}, loseContext() {}, buffer: {}
-        });
-        device.getCommandEncoder = () => ({ copyBufferToBuffer() {}, clearBuffer() {} });
-        device.computeDispatch = () => {};
-        device.getIndirectDrawSlot = () => 0;
-        device.getIndirectDispatchSlot = () => 0;
+        dressComputeDevice(device);
         // no network and no GPU readbacks: root loads and demand reads stay pending
         savedFetch = globalThis.fetch;
         globalThis.fetch = () => new Promise(() => {});
@@ -113,8 +59,10 @@ describe('MeshletDirector', function () {
                 this.calls.push(['main', args[3], args[4], args[5]]);
             }
         };
-        director = new MeshletDirector(device);
-        director.bindRenderer(renderer);
+        // a lone director is a group of one
+        group = new MeshletDirectorGroup(device);
+        group.bindRenderer(renderer);
+        director = group.directors[0];
         layer = {
             id: LAYERID_WORLD,
             added: [],
@@ -131,7 +79,7 @@ describe('MeshletDirector', function () {
     });
 
     afterEach(function () {
-        director.destroy();
+        group.destroy();
         globalThis.fetch = savedFetch;
         WebgpuReadbackPool.prototype.read = savedRead;
         console.warn = savedWarn;
@@ -156,7 +104,8 @@ describe('MeshletDirector', function () {
         expect(director.world.budgetShadowViews).to.equal(director.shadowBudgetCascades);
         expect(director.residency, 'streamed world: residency created').to.not.equal(null);
         expect(director.rootsLoaded).to.be.a('promise');
-        expect(renderer.meshletDirector).to.equal(director);
+        expect(renderer.meshletDirector, 'the group drives the renderer').to.equal(group);
+        expect(director.renderer).to.equal(renderer);
     });
 
     it('creates one view for the composition camera and encodes its frame', function () {
@@ -237,11 +186,15 @@ describe('MeshletDirector', function () {
         const view = director.views.get(withDepth);
         expect(view.useOcclusion).to.equal(true);
         expect(view.culler.twoPhase).to.equal(true);
+        expect(view.hzb, 'the group\'s pyramid for the camera').to.equal(group.hzbFor(withDepth));
         expect([view.hzb.width, view.hzb.height], 'half-resolution pyramid of the target').to.deep.equal([320, 200]);
         rt.destroy();
         colorBuffer.destroy();
         depthBuffer.destroy();
     });
+
+    const distribute = () => director.budget.distributeIndexBudget(director.world.indexCeiling, director.views,
+        director.shadowRenderer.views, director.shadowIndicesPerTexel);
 
     it('budgets camera views before shadow views, which coarsen under their own pressure', function () {
         finalizeStreamed();
@@ -264,18 +217,18 @@ describe('MeshletDirector', function () {
 
         // floor 125 each; the camera is budgeted for its whole demand at half occupancy first
         cam.lastDemand = { indices: [300, 0, 0], records: 1 };
-        expect(director._distributeIndexBudget(), 'camera pressure only').to.be.closeTo(0.5, 1e-9);
+        expect(distribute(), 'camera pressure only').to.be.closeTo(0.5, 1e-9);
         expect(cam.indexShare).to.equal(600);
         expect(shadow.indexShare, 'the shadow view splits what the camera left').to.equal(400);
-        expect(director._shadowIndexRatio).to.be.closeTo(2000 / 400, 1e-9);
+        expect(director.budget.shadowIndexRatio).to.be.closeTo(2000 / 400, 1e-9);
 
         // a coarsened camera whose demand fell under the floor still gets headroom to recover
         cam.lastDemand = { indices: [100, 0, 0], records: 1 };
-        expect(director._distributeIndexBudget()).to.be.closeTo(0.5, 1e-9);
+        expect(distribute()).to.be.closeTo(0.5, 1e-9);
         expect(cam.indexShare).to.equal(200);
 
         cam.lastDemand = { indices: [3000, 0, 0], records: 1 };
-        director._distributeIndexBudget();
+        distribute();
         expect(cam.indexShare, 'a camera wanting everything takes it').to.equal(875);
         expect(shadow.indexShare, 'the shadow view keeps only its floor').to.equal(125);
 
@@ -283,14 +236,14 @@ describe('MeshletDirector', function () {
         // rate-limited per frame
         const budget = director.budget;
         const up = ((budget.indexStarvedAt + 0.1) / budget.indexStarvedAt) ** 0.1;
-        let scale = director._stepShadowPressure(1, budget.indexStarvedAt + 0.1);
+        let scale = director.budget.stepShadowPressure(1, budget.indexStarvedAt + 0.1);
         expect(scale).to.be.closeTo(up, 1e-9);
         expect(budget.pressureScale, 'the camera controller is untouched').to.equal(1);
-        scale = director._stepShadowPressure(scale, (budget.indexStarvedAt + budget.indexEasedAt) / 2);
+        scale = director.budget.stepShadowPressure(scale, (budget.indexStarvedAt + budget.indexEasedAt) / 2);
         expect(scale, 'held between the thresholds').to.be.closeTo(up, 1e-9);
-        scale = director._stepShadowPressure(scale, 100);
+        scale = director.budget.stepShadowPressure(scale, 100);
         expect(scale, 'a large overshoot still only raises by the rate limit').to.be.closeTo(up * 1.012, 1e-9);
-        scale = director._stepShadowPressure(scale, 0);
+        scale = director.budget.stepShadowPressure(scale, 0);
         expect(scale, 'and decays by the rate limit').to.be.closeTo(up * 1.012 * 0.992, 1e-9);
         director.shadowRenderer.entries.clear();
     });
@@ -309,18 +262,18 @@ describe('MeshletDirector', function () {
         const rootsA = 100;
         a.lastDemand = { indices: [900, 0, 0], records: 1 };
         b.lastDemand = { indices: [100, 0, 0], records: 1 };
-        expect(director._distributeIndexBudget()).to.be.closeTo((900 - rootsA) / (875 - rootsA), 1e-9);
+        expect(distribute()).to.be.closeTo((900 - rootsA) / (875 - rootsA), 1e-9);
         expect(a.indexShare).to.equal(875);
         expect(b.indexShare, 'a floor for the active working set').to.equal(125);
         expect(a.indexShare + b.indexShare).to.equal(1000);
 
         a.lastDemand = { indices: [3000, 0, 0], records: 1 };
         b.lastDemand = null;
-        expect(director._distributeIndexBudget(), 'demand over the share is starved').to.be.closeTo((3000 - rootsA) / (875 - rootsA), 1e-9);
+        expect(distribute(), 'demand over the share is starved').to.be.closeTo((3000 - rootsA) / (875 - rootsA), 1e-9);
         expect(b.indexShare, 'an empty view keeps capacity for renewed demand').to.equal(125);
 
         director.world.indexBudgetTotal = 300;
-        director._distributeIndexBudget();
+        distribute();
         expect(a.indexShare + b.indexShare).to.be.at.most(300);
 
         // a root floor filling most of the share, with nothing refined above it, is not starvation:
@@ -328,7 +281,7 @@ describe('MeshletDirector', function () {
         director.world.indexBudgetTotal = 1000;
         a.lastRoots.admitted = [800, 0, 0];
         a.lastDemand = { indices: [800, 0, 0], records: 1 };
-        director._distributeIndexBudget();
+        distribute();
         expect(a.indexPressure()).to.equal(0);
     });
 
@@ -353,65 +306,33 @@ describe('MeshletDirector', function () {
         expect(world.indexCeiling, 'the configured budget remains a limit').to.equal(1000);
         expect(reports[0].indexDemandRatio).to.equal(1.5);
         expect(reports[0].suggestedBudgetBytes).to.equal(world.poolBytes);
+        expect(reports[0].poolPages).to.equal(world.poolSlots);
+        expect(reports[0].rootInstancesDeferred, 'an overrun, not a deferral').to.equal(0);
     });
 
-    it('emits the meshlet-aware camera block: phase 1 with the clear, opaque, then transparent', function () {
+    it('reports instances deferred for capacity once per episode, in the same report shape', function () {
         finalizeStreamed();
         director.update(comp);
         const view = director.views.get(cameraComponent);
-        const frameGraph = {
-            passes: [],
-            addPass(pass) {
-                this.passes.push(pass);
-            }
-        };
-        const renderActions = [
-            { clearColor: true, clearDepth: true, clearStencil: false, transparent: false },
-            { transparent: false },
-            { transparent: true },
-            { transparent: true }
-        ];
-        const emitted = director.buildCameraPasses(frameGraph, { _renderActions: renderActions }, null, 0, 3, cameraComponent);
-        expect(emitted).to.equal(true);
-        expect(frameGraph.passes).to.deep.equal([view.drawPass1]);
-        expect(renderer.calls, 'opaque 0..1 then transparent 2..3, both stripped of clears').to.deep.equal([['main', 0, 1, true], ['main', 2, 3, true]]);
-        expect(view.drawPass1.colorOps.clear).to.equal(true);
-        expect(view.drawPass1.depthStencilOps.clearDepth).to.equal(true);
-        expect(view.drawPass1.depthStencilOps.clearStencil).to.equal(false);
-        expect(view.drawPass1.meshInstances).to.deep.equal(view.meshInstances.slice(0, MESHLET_BUCKET_COUNT));
-        expect(view.drawPass1.layerRenderSteps[0].layer).to.equal(layer);
-
-        expect(director.buildCameraPasses(frameGraph, { _renderActions: renderActions }, null, 0, 3, cameraComponent), 'once per frame').to.equal(false);
-        expect(director.buildCameraPasses(frameGraph, { _renderActions: renderActions }, null, 0, 3, makeCameraComponent()), 'not our camera').to.equal(false);
-    });
-
-    it('hands a CameraFrame its before and middle passes', function () {
-        finalizeStreamed();
+        const reports = [];
+        director.onBudgetExceeded = info => reports.push(info);
+        view.lastRoots.rejectedInstances = 3;
+        view.lastRoots.unready = 1;
+        view.lastRoots.admitted = [90, 0, 0];
+        view.lastRoots.rejected = [10, 0, 0];
         director.update(comp);
-        const view = director.views.get(cameraComponent);
-        const camera = cameraComponent.camera;
-        camera.clearColorBuffer = true;
-        camera.clearDepthBuffer = false;
-        camera.clearStencilBuffer = false;
-        const colorBuffer = new Texture(device, { width: 64, height: 64 });
-        const rt = new RenderTarget({ colorBuffer, depth: false });
-        const passes = director.buildCameraFramePasses(cameraComponent, rt, true);
-        expect(passes.before).to.deep.equal([view.drawPass1]);
-        expect(passes.middle, 'single-phase: nothing between opaque and transparent').to.deep.equal([]);
-        expect(view.drawPass1.renderTarget).to.equal(rt);
-        expect(view.drawPass1.colorOps.clear).to.equal(true);
-        expect(view.drawPass1.depthStencilOps.clearDepth).to.equal(false);
-        expect(view._passesAdded).to.equal(true);
-        expect(director.buildCameraFramePasses(makeCameraComponent(), rt, true)).to.equal(null);
-
-        view.useOcclusion = true;
-        view.hzb = { mip0Pass: { name: 'mip0' } };
-        const twoPhase = director.buildCameraFramePasses(cameraComponent, rt, false);
-        expect(twoPhase.middle).to.deep.equal([view.hzb.mip0Pass, view.hzbMipsPass, view.cullPhase2Pass, view.drawPass2]);
-        expect(view.drawPass1.colorOps.clear, 'no clear when the CameraFrame says so').to.equal(false);
-        view.hzb = null;
-        rt.destroy();
-        colorBuffer.destroy();
+        director.update(comp);
+        expect(reports, 'once while the deferral lasts').to.have.lengthOf(1);
+        expect(reports[0]).to.include({ rootInstancesDeferred: 3, rootInstancesUnready: 1, budgetBytes: director.world.poolBytes });
+        expect(reports[0].suggestedBudgetBytes).to.equal(director.world.poolBytes + 10 * 4);
+        expect(reports[0].indexDemandRatio).to.equal(100 / view.indexTotal());
+        expect(Object.keys(reports[0])).to.have.members(['budgetBytes', 'suggestedBudgetBytes', 'indexDemandRatio', 'indexCeiling',
+            'pagesMissing', 'poolPages', 'totalPages', 'rootInstancesDeferred', 'rootInstancesUnready', 'rootShortfallPages']);
+        view.lastRoots.rejectedInstances = 0;
+        director.update(comp);
+        view.lastRoots.rejectedInstances = 3;
+        director.update(comp);
+        expect(reports, 'a new episode reports again').to.have.lengthOf(2);
     });
 
     it('retains the page pool, residency and grown capacities across an identical rebuild', function () {
@@ -431,15 +352,18 @@ describe('MeshletDirector', function () {
         expect(world.pagePool, 'the pool buffer carried over').to.equal(prevPool);
         expect(director.residency.slotPage, 'slot state carried into the new residency').to.deep.equal(prevResidency.slotPage);
         expect(director.residency.frame).to.equal(77);
-        expect(director._visCarry.words, '60 pairs: one word of visibility bits').to.equal(1);
-        expect(director._capCarry.get(cameraComponent), 'same size: capacities carried as they were').to.deep.equal([900, 60, 30]);
+        const carry = director._carry;
+        expect(carry.visWords, '60 pairs: one word of visibility bits').to.equal(1);
+        expect(carry.visBits.has(cameraComponent)).to.equal(true);
+        expect(carry.caps.get(cameraComponent), 'same size: capacities carried as they were').to.deep.equal([900, 60, 30]);
         expect(director.views.size, 'views are recreated on the next update').to.equal(0);
 
         director.update(comp);
         const view = director.views.get(cameraComponent);
         expect(view).to.not.equal(prevView);
         expect(view.indexCapacity[0]).to.equal(Math.min(Math.max(world.indexCapacity[0], 900), world.indexWorst[0]));
-        expect(director._visCarry.byCamera.size, 'the carried bits were consumed').to.equal(0);
+        expect(carry.visBits.size, 'the carried bits were consumed').to.equal(0);
+        expect(carry.caps.size, 'and the capacities').to.equal(0);
         expect(director._retired, 'and their source buffer waits one frame').to.have.lengthOf(1);
         director.update(comp);
         expect(director._retired).to.have.lengthOf(0);
@@ -452,13 +376,21 @@ describe('MeshletDirector', function () {
 
         const bigger = makeResource(device, 40);
         director.rebuild(world => world.addStreamedResource(bigger, null, BASE_URL));
-        expect(director._capCarry.get(cameraComponent), 'pair ratio 2 x margin, capped at maxCarryScale').to.deep.equal([1800, 120, 60]);
-        expect(director._visCarry, 'a different resource: nothing to carry').to.equal(null);
+        expect(director._carry.caps.get(cameraComponent), 'pair ratio 2 x margin, capped at maxCarryScale').to.deep.equal([1800, 120, 60]);
+        expect(director._carry.visBits.size, 'a different resource: nothing to carry').to.equal(0);
 
         director.update(comp);
         director.views.get(cameraComponent).indexCapacity = [900, 60, 30];
         director.rebuild(world => world.addStreamedResource(resource, null, BASE_URL, resource.instances.slice(0, 10)));
-        expect(director._capCarry.get(cameraComponent), '120 pairs down to 30: scaled to a quarter').to.deep.equal([225, 15, 8]);
+        expect(director._carry.caps.get(cameraComponent), '120 pairs down to 30: scaled to a quarter').to.deep.equal([225, 15, 8]);
+    });
+
+    it('carries the colour mode across a rebuild', function () {
+        const resource = finalizeStreamed();
+        director.world.setColorMode(MESHLET_COLOR_MODE.MESHLET);
+        const world = director.rebuild(w => w.addStreamedResource(resource, null, BASE_URL));
+        expect(world.colorMode).to.equal(MESHLET_COLOR_MODE.MESHLET);
+        expect(world.bucketMaterials, 'the debug materials').to.not.equal(world.litMaterials);
     });
 
     it('goes idle on an empty rebuild', function () {

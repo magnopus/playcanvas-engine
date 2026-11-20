@@ -64,7 +64,7 @@ def write_hdr(path, img):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--hdr', default=os.path.expanduser('~/Downloads/JungleRuins/USD/kloppenheim_06_puresky_8k.hdr'))
+    ap.add_argument('--hdr', required=True, help='the dome HDR (JungleRuins/USD/kloppenheim_06_puresky_8k.hdr)')
     ap.add_argument('--out', required=True)
     ap.add_argument('--clamp', type=float, default=1.5, help='radiance above this moves into the sun')
     ap.add_argument('--sky-size', type=int, default=4096)

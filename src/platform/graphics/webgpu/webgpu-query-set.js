@@ -94,15 +94,8 @@ class WebgpuQuerySet {
             // timestamps in nanoseconds. Note that this array is valid only till we unmap the staging buffer.
             const srcTimings = new BigInt64Array(stagingBuffer.getMappedRange());
 
-            // A pass-boundary timestamp is not guaranteed to be written every frame. On Metal the
-            // end-of-pass sample is taken at the fragment-stage boundary, so a pass that issues no
-            // fragment work never writes it: the query then resolves either to zero (if it was
-            // never written) or to whatever old value the query last held (a query stays
-            // "available" once written, e.g. before a pass-layout change re-mapped its slot).
-            // Such a stale value can be seconds old, and letting it into the frame span pins
-            // minTime in the past - frameTime then grows by a frame's worth every frame, looking
-            // exactly like an accumulating timer. A frame's real timestamps all lie close to the
-            // frame's latest one, so anything older than this window is treated as unwritten.
+            // A pass-boundary timestamp may not be written every frame (Metal skips it for passes
+            // without fragment work), leaving zero or a stale value from an earlier frame.
             const staleWindowNs = 1000000000n; // 1 second
 
             // find the latest timestamp of the frame first, as the recency reference
@@ -124,10 +117,7 @@ class WebgpuQuerySet {
                 const begin = srcTimings[i * 2];
                 const end = srcTimings[i * 2 + 1];
 
-                // Skip pairs with an unwritten timestamp: zero is not a reading a monotonic GPU
-                // clock can produce, and a stale reading (see above) is older than any real
-                // timestamp of this frame. Their duration is reported as zero as well - a stale
-                // begin with a fresh end would otherwise yield a seconds-long pass time.
+                // unwritten pairs report zero duration and are excluded from the frame span
                 const stale = begin === 0n || end === 0n ||
                     maxTime - begin > staleWindowNs || maxTime - end > staleWindowNs;
                 timings.push(stale ? 0 : Math.max(0, Number(end - begin) * 0.000001));

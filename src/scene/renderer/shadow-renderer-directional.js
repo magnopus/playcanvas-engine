@@ -291,7 +291,7 @@ class ShadowRendererDirectional {
                 // the map region must hold this camera's fit to be reused: another camera
                 // rendering the same light last overwrote it, or the cascades were invalidated
                 const due = light._shadowCascadesInvalidated || mapCamera[cascade] !== camera ||
-                    this._cascadeDue(lightRenderData, interval, (scheduleFrame + cascade) % interval === 0, radius);
+                    this._cascadeDue(lightRenderData, interval, (scheduleFrame + cascade) % interval === 0, center, radius, _lightDir);
                 lightRenderData.cascadeRefresh = due;
                 if (!due) {
                     // keep the cached map: its shadow camera, and so its matrix, stay as fitted
@@ -444,18 +444,19 @@ class ShadowRendererDirectional {
      * @param {object} lightRenderData - The cascade's render data.
      * @param {number} interval - Frames between refreshes.
      * @param {boolean} scheduled - This frame is the cascade's turn.
-     * @param {number} radius - This frame's frustum-slice bounding sphere radius (its center is
-     * in `center`).
+     * @param {Vec3} sliceCenter - This frame's frustum-slice bounding sphere center.
+     * @param {number} radius - This frame's frustum-slice bounding sphere radius.
+     * @param {Vec3} lightDir - This frame's light direction.
      * @returns {boolean} True when the cascade refreshes.
      * @private
      */
-    _cascadeDue(lightRenderData, interval, scheduled, radius) {
+    _cascadeDue(lightRenderData, interval, scheduled, sliceCenter, radius, lightDir) {
         if (interval <= 1 || scheduled || !lightRenderData.fitValid) return true;
         const fitRadius = lightRenderData.fitRadius;
         const drift = CASCADE_REUSE_DRIFT * fitRadius;
-        return center.distance(lightRenderData.fitCenter) > drift ||
+        return sliceCenter.distance(lightRenderData.fitCenter) > drift ||
             Math.abs(radius - fitRadius) > drift ||
-            _lightDir.dot(lightRenderData.fitLightDir) < CASCADE_REUSE_LIGHT_DOT;
+            lightDir.dot(lightRenderData.fitLightDir) < CASCADE_REUSE_LIGHT_DOT;
     }
 
     // function to generate frustum split distances into the array of 4 distances
@@ -532,4 +533,4 @@ class ShadowRendererDirectional {
     }
 }
 
-export { ShadowRendererDirectional };
+export { CASCADE_REUSE_DRIFT, ShadowRendererDirectional };

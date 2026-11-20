@@ -1,24 +1,24 @@
 // @config
+//
+// The Zorah courtyard (NVIDIA RTX Kit sample geometry) as streamed meshlets (WebGPU only). The
+// export carries geometry only, no textures, so the look comes from the lighting: a shadowed sun,
+// an HDRI sky for ambient light, SSAO, and a stone / foliage / metal palette picked from the
+// material names. Fly with WASD and mouse look; Shift/Ctrl changes speed. Needs a local bake, see
+// examples/assets/meshlets/README.md.
+//
 // @flag WEBGL_DISABLED
 // @flag WEBGPU_BARE_DISABLED
 // @flag HIDDEN
 
-// The Zorah courtyard (NVIDIA RTX Kit sample geometry), streamed through the GPU-driven meshlet
-// pipeline. The export carries geometry only, no textures, so the look comes from the lighting: a
-// sun with four cascaded shadows, an HDRI sky for ambient light, contact ambient
-// occlusion, and a stone / foliage / metal palette picked from the material names. See
-// assets/meshlets/README.md for the local dataset setup.
-//
-// Fly with WASD and mouse look; Shift/Ctrl changes speed.
-//   ?scene=all|22m|default manifest in the bake folder (default: all 19 chunks; `default` is the
-//                          5-chunk scene.json, for machines with less memory)
-//   ?pool=<MiB>            geometry budget override
-//   ?tint=0                leave the materials as baked (white)
-//   ?mountains=A,B,E|all   background terrain pieces to keep (default none: the 13 km tiles flicker
-//                          as the geometry pool evicts them; `all` keeps all but the F1 sheets)
-//   ?view=start            begin at the manifest's start pose instead of the hero view
-//   ?scale=<0.25..1>       scene render scale, TAA upscales to the output (default 0.6)
-//   ?ssao=0                start with SSAO off
+// URL parameters:
+//   ?scene=all|<name>|default  manifest in the bake folder: scene.<name>.json, or scene.json for
+//                              `default` (default: all)
+//   ?pool=<MiB>                geometry budget override
+//   ?tint=0                    leave the materials as baked (white)
+//   ?mountains=A,B,E|all       background terrain pieces to keep (default none)
+//   ?view=start                begin at the manifest's start pose instead of the hero view
+//   ?scale=<0.25..1>           scene render scale, TAA upscales to the output (default 0.6)
+//   ?ssao=0                    start with SSAO off
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
@@ -118,8 +118,7 @@ const resize = () => app.resizeCanvas();
 window.addEventListener('resize', resize);
 app.on('destroy', () => window.removeEventListener('resize', resize));
 
-// the manifests' budgets are for the bake's size alone: the full scene deferred thousands of
-// instances at 10 GiB, so everything but the 5-chunk scene gets 16 GiB
+// the manifests' budgets only cover the bake's size, too little for the larger scenes
 const defaultPoolMiB = sceneName === 'default' ? scene.meshletPoolMiB ?? 4096 : 16384;
 app.systems.meshlet.poolBytes = (Number(params.get('pool')) || defaultPoolMiB) * 1024 * 1024;
 app.systems.meshlet.occlusion = true;
@@ -309,11 +308,9 @@ const tintMaterials = (resource) => {
         f32[record + 9] = roughness;
     }
 };
-// The background terrain pieces (MI_Mountains_Background_<L>1) are 13 km tiles, dropped by default:
-// their geometry does not fit the pool next to the courtyard, so they flicker as it is evicted and
-// streamed back, and the HDRI supplies the horizon instead. ?mountains=all keeps all but the two F1
-// tiles, thin sheets whose surface cuts through the courtyard, burying its floor and the lower
-// walls. ?mountains=A,B,E keeps only those letters
+// The background terrain tiles (MI_Mountains_Background_<L>1) are dropped by default, as they do
+// not fit the pool next to the courtyard and the HDRI supplies the horizon. ?mountains=all keeps all
+// but the F1 tiles, whose surface cuts through the courtyard.
 const mountainParam = (params.get('mountains') ?? 'none').toUpperCase();
 const keepMountains = new Set((mountainParam === 'ALL' ? 'A,B,C,D,E,G' : mountainParam).split(','));
 for (const asset of assets.values()) {
@@ -390,7 +387,7 @@ for (const entry of scene.entities) {
         child.addComponent('meshlet', { asset, castShadows: model.shadowCaster });
         // Blended surfaces remain inline for the ordinary sorted forward renderer.
         if (asset.resource.renders.some(render => render.resource.meshes.length > 0)) {
-            const inline = asset.resource.instantiateRenderEntity();
+            const inline = asset.resource.instantiateRenderEntity({ skipBlendedShadowCasters: true });
             styleInlineSurfaces(inline);
             child.addChild(inline);
         }
@@ -472,7 +469,7 @@ if (params.get('view') === 'start') {
     lookFrom(HERO.position, HERO.target);
 }
 
-// Cameraframe supplies the scene-depth attachment the two-phase occlusion reads, and the
+// CameraFrame supplies the scene-depth attachment the two-phase occlusion reads, and the
 // compose-pass effects that stand in for the missing material detail.
 const cameraFrame = new CameraFrame(app, camera.camera);
 cameraFrame.rendering.samples = 1;
@@ -487,9 +484,8 @@ const renderScale = math.clamp(parseFloat(params.get('scale') ?? '0.6') || 0.6, 
 cameraFrame.rendering.renderTargetScale = renderScale;
 cameraFrame.taa.upscale = renderScale < 1;
 cameraFrame.rendering.sharpness = renderScale < 1 ? 0.5 : 0;
-// contact shadows in the corners, under ledges and in the carving, from the depth the meshlets
-// write. Combine mode: the meshlet material does not sample the AO texture the 'lighting' mode
-// relies on. The default power of 6 crushes the carving's creases to black. ?ssao=0 starts off
+// SSAO in combine mode: the meshlet material does not sample the AO texture the 'lighting' mode
+// relies on. A lower power than the default keeps the carving's creases from crushing to black.
 const ssaoOn = params.get('ssao') !== '0';
 const SSAO = { radius: 0.6, intensity: 0.6, power: 1.5 };
 Object.assign(cameraFrame.ssao, {
@@ -503,7 +499,6 @@ Object.assign(cameraFrame.ssao, {
 });
 cameraFrame.update();
 app.on('destroy', () => cameraFrame.destroy());
-
 
 // orbit pivot: the world point under the screen centre, picked once when an orbit drag starts.
 // The pick runs from postrender, as meshlet draw args are cleared at the end of each frame.
@@ -643,14 +638,11 @@ app.on('update', () => {
         capacity: 0,
         ceiling: 0,
         pressure: 1,
-        maxPressure: 1,
         drawn: 0,
         resident: 0,
         slots: 0,
         missing: 0,
-        rootShortfall: 0,
-        /** @type {object[]} */
-        perWorld: []
+        rootShortfall: 0
     };
     for (const director of app.systems.meshlet.directors) {
         const view = director.views?.values().next().value;
@@ -668,30 +660,12 @@ app.on('update', () => {
         budget.capacity += view.indexTotal();
         budget.ceiling += view.indexShare > 0 ? view.indexShare : director.world.indexCeiling;
         budget.pressure = Math.max(budget.pressure, director.budget.pressureScale);
-        budget.maxPressure = director.budget.maxScale;
         budget.drawn += view.renderedMeshlets ?? 0;
         budget.resident += director.residency?.residentPages ?? 0;
         budget.slots += director.world.poolSlots ?? 0;
         budget.missing += director.residency?.lastMissingWanted ?? 0;
         budget.rootShortfall += director.residency?.rootShortfallPages ?? 0;
-        budget.perWorld.push({
-            meshlets: director.world.totalMeshlets,
-            instances: director.world.instanceCount,
-            inView: roots.candidates,
-            occluded: roots.occluded,
-            admitted: sum3(roots.admitted),
-            rejected: sum3(roots.rejected),
-            demand: view.lastDemand ? sum3(view.lastDemand.indices) : 0,
-            ceiling: view.indexShare > 0 ? view.indexShare : director.world.indexCeiling,
-            buffers: view.indexTotal(),
-            pressure: director.budget.pressureScale,
-            drawn: view.renderedMeshlets ?? 0
-        });
     }
-    // for reading from the console and profiling scripts: window.__zorahBudget / __zorahData
-    window.__zorahBudget = budget;
-    window.__zorahData = data;
-    window.__zorahCameraFrame = cameraFrame;
     const threshold = app.systems.meshlet.dagPixelThreshold;
     data.set('data.statsRoots', `admitted ${count(budget.admitted)} idx, rejected ${count(budget.rejected)} idx ` +
         `(${budget.rejectedInstances} instances missing), unready ${budget.unready}, skipped as occluded ${budget.occluded}`);

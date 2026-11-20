@@ -23,7 +23,7 @@ vec4 encodePickOutput(uint id) {
     vec4 getPickDepth() {
         float linearDepth;
         if (camera_params.w > 0.5) {
-            // orthographic: gl_FragCoord.z IS the hardware NDC z, flip for reverse-z
+            // orthographic: gl_FragCoord.z is the hardware NDC z, flip for reverse-z
             #ifdef REVERSE_Z
                 linearDepth = 1.0 - gl_FragCoord.z;
             #else

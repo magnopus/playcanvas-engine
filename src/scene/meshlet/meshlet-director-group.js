@@ -2,7 +2,7 @@ import { Debug } from '../../core/debug.js';
 import { MESHLET_BUCKET_COUNT } from './constants.js';
 import { FramePassMeshletCompute } from './frame-pass-meshlet-compute.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
-import { MeshletDirector } from './meshlet-director.js';
+import { MeshletDirector, MESHLET_DIRECTOR_SETTINGS } from './meshlet-director.js';
 import { MeshletHzb } from './meshlet-hzb.js';
 import { RenderPassMeshletDraw } from './render-pass-meshlet-draw.js';
 import { MAX_CONCURRENT_FETCHES, MeshletFetchScheduler } from './streaming/meshlet-fetch-scheduler.js';
@@ -128,8 +128,9 @@ class MeshletGroupCamera {
  *   layers; then every world's phase-2 cull runs against it before one phase-2 draw.
  *
  * Each world still has its own page pool, residency, LOD budget controller, index budget and
- * shadow views. The renderer talks to the group (it registers itself as the renderer's
- * `meshletDirector`); the component system assigns resources to the worlds.
+ * shadow views. The renderer talks to the group alone - it registers itself as the renderer's
+ * `meshletDirector` and emits every pass - even when there is one world; the component system
+ * assigns resources to the worlds.
  *
  * @ignore
  */
@@ -151,7 +152,7 @@ class MeshletDirectorGroup {
 
     /**
      * Cap on requests in flight while any world is fast-loading (see
-     * {@link MeshletDirector#fastLoad}).
+     * {@link MeshletDirector#fastLoad}). Defaults to 64.
      *
      * @type {number}
      */
@@ -170,20 +171,10 @@ class MeshletDirectorGroup {
      * @private
      */
     _settings = {
-        dagPixelThreshold: 2,
-        occlusionEnabled: true,
-        occlusionAdmission: true,
+        ...MESHLET_DIRECTOR_SETTINGS,
+        bucketThresholdScales: MESHLET_DIRECTOR_SETTINGS.bucketThresholdScales.slice(),
+        bucketRootMinScales: MESHLET_DIRECTOR_SETTINGS.bucketRootMinScales.slice(),
         cameras: /** @type {CameraComponent[]} */ ([]),
-        shadowsEnabled: false,
-        shadowThresholdScale: 4,
-        rootMinPixels: 3,
-        rootHysteresis: 0.75,
-        bucketThresholdScales: [4, 1, 1],
-        bucketRootMinScales: [1, 1, 1],
-        shadowRootMinPixels: 2,
-        shadowMatchCameraLod: false,
-        cssPixels: true,
-        fastLoad: true,
         transcode: /** @type {MeshletTranscodeFn|null} */ (null)
     };
 
@@ -223,12 +214,7 @@ class MeshletDirectorGroup {
             this.directors.pop().destroy();
         }
         while (this.directors.length < count) {
-            const director = new MeshletDirector(this.device, {
-                fetchScheduler: this.fetchScheduler,
-                cullShaders: this.cullShaders
-            });
-            director.group = this;
-            director.renderer = this.renderer;
+            const director = new MeshletDirector(this);
             this._applySettings(director);
             if (this._outline.layer) {
                 director.setOutlineLayer(this._outline.layer, this._outline.color, this._outline.hoverColor);
@@ -242,22 +228,8 @@ class MeshletDirectorGroup {
      * @private
      */
     _applySettings(director) {
-        const s = this._settings;
-        director.dagPixelThreshold = s.dagPixelThreshold;
-        director.occlusionEnabled = s.occlusionEnabled;
-        director.occlusionAdmission = s.occlusionAdmission;
-        director.cameras = s.cameras;
-        director.shadowsEnabled = s.shadowsEnabled;
-        director.shadowThresholdScale = s.shadowThresholdScale;
-        director.rootMinPixels = s.rootMinPixels;
-        director.rootHysteresis = s.rootHysteresis;
-        director.bucketThresholdScales = s.bucketThresholdScales;
-        director.bucketRootMinScales = s.bucketRootMinScales;
-        director.shadowRootMinPixels = s.shadowRootMinPixels;
-        director.shadowMatchCameraLod = s.shadowMatchCameraLod;
-        director.cssPixels = s.cssPixels;
-        director.fastLoad = s.fastLoad;
-        director.transcode = s.transcode;
+        const settings = this._settings;
+        for (const name of Object.keys(settings)) director[name] = settings[name];
     }
 
     /**
@@ -427,8 +399,10 @@ class MeshletDirectorGroup {
     }
 
     /**
-     * Cap on sidecar requests in flight across every world. See
-     * {@link MeshletDirector#maxConcurrentFetches}.
+     * Cap on sidecar requests in flight - geometry shards and texture containers across every
+     * streamed resource of every world. Defaults to 16. Requests beyond it wait in priority
+     * order (root shards, pages, texture tails, fine mips) instead of piling into the browser's
+     * request pool, which fails them outright once it overflows.
      *
      * @type {number}
      */
@@ -441,7 +415,14 @@ class MeshletDirectorGroup {
         return this._maxConcurrentFetches;
     }
 
-    /** @type {ByteCache|null} */
+    /**
+     * Persistent cache for streamed sidecar bytes - geometry pages and texture regions - or null
+     * for none. Ranges whose bytes are all stored load without a request, so re-entering a scene
+     * streams from local storage; fetched ranges are widened to the cache's chunk boundaries and
+     * stored. The cache assumes sidecar URLs are versioned (their content never changes).
+     *
+     * @type {ByteCache|null}
+     */
     set byteCache(value) {
         this.fetchScheduler.byteCache = value;
     }
@@ -653,8 +634,12 @@ class MeshletDirectorGroup {
     }
 
     /**
-     * The CameraFrame variant of {@link buildCameraPasses} - see
-     * {@link MeshletDirector#buildCameraFramePasses}. The shared passes cover every world.
+     * The CameraFrame variant of {@link buildCameraPasses}. A camera with frame passes never
+     * reaches the render-action path - the renderer schedules its `framePasses` and returns - so
+     * the meshlet passes are handed to {@link FramePassCameraFrame} instead, which splices them
+     * around its own scene pass and owns their order: `before` runs ahead of the scene's opaque
+     * layers (phase 1 also takes over the clear), `middle` between the opaque and transparent
+     * halves. The shared passes cover every world.
      *
      * @param {CameraComponent} cameraComponent - The camera being set up.
      * @param {RenderTarget} renderTarget - The CameraFrame's scene render target.
@@ -680,14 +665,23 @@ class MeshletDirectorGroup {
             state.drawPass2.setup(cameraComponent, renderTarget, lightLayer);
             middle.push(state.hzb.mip0Pass, state.hzbMipsPass, state.cullPhase2Pass, state.drawPass2);
         }
+        // the render-action path is not going to run for this camera
         state.passesAdded = true;
         return { before: [state.drawPass1], middle };
     }
 
     /**
-     * See {@link MeshletDirector#buildCameraPasses}. Emits one phase-1 draw for every world, the
-     * opaque scene passes, then - with occlusion - one HZB build, every world's phase-2 cull and
-     * one phase-2 draw, then the transparent scene passes.
+     * Called by the forward renderer while building the frame graph, in place of the camera
+     * block's single main render pass. Emits the meshlet-aware pass order:
+     *
+     *   draw P1 (owns the camera clear) -> opaque scene passes (load) ->
+     *   [HZB -> cull P2 -> draw P2] -> transparent scene passes (load)
+     *
+     * Meshlet depth is laid down first so scene opaque early-z-culls against it (and scene
+     * geometry composites correctly with meshlets), the HZB sees meshlet and scene occluders,
+     * and phase-2 disocclusion draws land before transparents and UI. One phase-1 draw covers
+     * every world, as do the HZB build and the phase-2 draw; every world's phase-2 cull runs
+     * between them.
      *
      * @param {FrameGraph} frameGraph - The frame graph being built.
      * @param {LayerComposition} layerComposition - The layer composition.
@@ -695,7 +689,9 @@ class MeshletDirectorGroup {
      * @param {number} startIndex - First render action index of the block.
      * @param {number} endIndex - Last render action index of the block.
      * @param {CameraComponent} cameraComponent - The camera of the block.
-     * @returns {boolean} True when the group emitted the block's passes.
+     * @returns {boolean} True when the group emitted the block's passes; false leaves the
+     * renderer's default path (no world drives this camera, passes already emitted this frame, or
+     * non-full-viewport clears).
      */
     buildCameraPasses(frameGraph, layerComposition, renderTarget, startIndex, endIndex, cameraComponent) {
         const state = this._cameras.get(cameraComponent);
@@ -712,6 +708,7 @@ class MeshletDirectorGroup {
         const renderer = this.renderer;
         const lightLayer = this._lightLayer();
 
+        // meshlet P1 draws first and owns the camera clear; the scene passes load on top
         const firstAction = renderActions[startIndex];
         state.drawPass1.setup(cameraComponent, renderTarget, lightLayer, {
             clearColor: firstAction.clearColor,
@@ -720,6 +717,7 @@ class MeshletDirectorGroup {
         });
         frameGraph.addPass(state.drawPass1);
 
+        // split the block at its first transparent render action
         let splitIndex = endIndex + 1;
         for (let j = startIndex; j <= endIndex; j++) {
             if (renderActions[j].transparent) {

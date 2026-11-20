@@ -38,6 +38,25 @@ const depthStep = (format, reverseZ) => {
     return 2 ** -22; // depth32float near 1, depth24plus
 };
 
+/**
+ * Loops over the source texels one destination texel reduces: its 2x2 footprint, widened to 3x3
+ * on the last row / column of an odd-sized source, which the floored destination size would
+ * otherwise drop from the pyramid. Expects `dst`, `src` (= dst * 2) and `srcSize` in scope.
+ *
+ * @param {string} texture - The source texture.
+ * @param {string} combine - WGSL folding each loaded `texel` into the result.
+ * @returns {string} The loop.
+ */
+const footprintWGSL = (texture, combine) => /* wgsl */ `
+        let extent = vec2i(2) + vec2i(select(0, 1, dst.x == (srcSize.x >> 1u) - 1 && (srcSize.x & 1) == 1),
+                                      select(0, 1, dst.y == (srcSize.y >> 1u) - 1 && (srcSize.y & 1) == 1));
+        for (var y = 0; y < extent.y; y++) {
+            for (var x = 0; x < extent.x; x++) {
+                let texel = textureLoad(${texture}, min(src + vec2i(x, y), srcSize - 1), 0);
+                ${combine}
+            }
+        }`;
+
 // mip 0 from a depth texture: the farthest of the 2x2 texels under each HZB texel, decoded to
 // linear view depth by inverting the projection (see setProjection). Reducing the raw value and
 // decoding once keeps the precision reverse-z stores near the far plane.
@@ -50,27 +69,19 @@ const mip0DepthWGSL = /* wgsl */ `
     fn fragmentMain(input : FragmentInput) -> FragmentOutput {
         var output : FragmentOutput;
         let dst = vec2i(input.position.xy);
-        let size = vec2i(textureDimensions(uDepthMap));
+        let srcSize = vec2i(textureDimensions(uDepthMap));
         let src = dst * 2;
-        // the last texel of an odd-sized source row/column has no half-res texel of its own, so
-        // the final destination texel reduces it too - otherwise it would drop out of the pyramid
-        let extent = vec2i(2) + vec2i(select(0, 1, dst.x == (size.x >> 1u) - 1 && (size.x & 1) == 1),
-                                      select(0, 1, dst.y == (size.y >> 1u) - 1 && (size.y & 1) == 1));
         #ifdef REVERSE_Z
             var farthest = 1.0;
         #else
             var farthest = 0.0;
         #endif
-        for (var y = 0; y < extent.y; y++) {
-            for (var x = 0; x < extent.x; x++) {
-                let texel = textureLoad(uDepthMap, min(src + vec2i(x, y), size - 1), 0);
+        ${footprintWGSL('uDepthMap', `
                 #ifdef REVERSE_Z
                     farthest = min(farthest, texel);
                 #else
                     farthest = max(farthest, texel);
-                #endif
-            }
-        }
+                #endif`)}
         #ifdef REVERSE_Z
             let d = max(farthest - farthest * ${REVERSE_FLOAT_STEP} - uniform.uDepthStep, 0.0);
         #else
@@ -97,17 +108,10 @@ const mip0LinearWGSL = /* wgsl */ `
     fn fragmentMain(input : FragmentInput) -> FragmentOutput {
         var output : FragmentOutput;
         let dst = vec2i(input.position.xy);
-        let size = vec2i(textureDimensions(uDepthMap));
+        let srcSize = vec2i(textureDimensions(uDepthMap));
         let src = dst * 2;
-        // see mip0DepthWGSL: the final destination texel also covers an odd source remainder
-        let extent = vec2i(2) + vec2i(select(0, 1, dst.x == (size.x >> 1u) - 1 && (size.x & 1) == 1),
-                                      select(0, 1, dst.y == (size.y >> 1u) - 1 && (size.y & 1) == 1));
         var depth = 0.0;
-        for (var y = 0; y < extent.y; y++) {
-            for (var x = 0; x < extent.x; x++) {
-                depth = max(depth, linearDepth(textureLoad(uDepthMap, min(src + vec2i(x, y), size - 1), 0).x));
-            }
-        }
+        ${footprintWGSL('uDepthMap', 'depth = max(depth, linearDepth(texel.x));')}
         output.color = vec4f(depth, 0.0, 0.0, 1.0);
         return output;
     }
@@ -130,19 +134,64 @@ const mipReduceWGSL = /* wgsl */ `
         }
         let srcSize = vec2i(textureDimensions(srcMip));
         let src = dst * 2;
-        // mip sizes floor, so an odd source row/column would otherwise drop out of the pyramid:
-        // the final destination texel reduces the extra one as well
-        let extent = vec2i(2) + vec2i(select(0, 1, dst.x == dstSize.x - 1 && (srcSize.x & 1) == 1),
-                                      select(0, 1, dst.y == dstSize.y - 1 && (srcSize.y & 1) == 1));
         var depth = 0.0;
-        for (var y = 0; y < extent.y; y++) {
-            for (var x = 0; x < extent.x; x++) {
-                depth = max(depth, textureLoad(srcMip, min(src + vec2i(x, y), srcSize - 1), 0).x);
-            }
-        }
+        ${footprintWGSL('srcMip', 'depth = max(depth, texel.x);')}
         textureStore(dstMip, dst, vec4f(depth, 0.0, 0.0, 1.0));
     }
 `;
+
+/**
+ * The pass building mip 0 of a {@link MeshletHzb}. It resolves the depth source as it executes,
+ * and when there is none - a frame rebuilt this frame has no depth yet - draws nothing and keeps
+ * the pyramid's previous contents rather than clearing them.
+ *
+ * @ignore
+ */
+class MeshletHzbMip0Pass extends RenderPassShaderQuad {
+    /** @type {MeshletHzb} */
+    hzb;
+
+    /** @type {Texture|null} - the source resolved for this frame, null to skip. */
+    _texture = null;
+
+    /**
+     * @param {GraphicsDevice} device - The graphics device.
+     * @param {MeshletHzb} hzb - The pyramid this pass builds mip 0 of.
+     */
+    constructor(device, hzb) {
+        super(device);
+        this.name = 'MeshletHzbMip0';
+        this.hzb = hzb;
+        const scope = device.scope;
+        this.depthMapId = scope.resolve('uDepthMap');
+        this.reciprocalScaleId = scope.resolve('uReciprocalScale');
+        this.depthDecodeId = scope.resolve('uDepthDecode');
+        this.depthStepId = scope.resolve('uDepthStep');
+    }
+
+    before() {
+        const hzb = this.hzb;
+        this._texture = hzb._source ? hzb._source() : hzb._depthTexture;
+        // clearing skips loading what the quad overwrites; with no source, load to keep the old pyramid
+        this.colorOps.clear = !!this._texture;
+    }
+
+    execute() {
+        const texture = this._texture;
+        if (!texture) return;
+        const hzb = this.hzb;
+        this.depthMapId.setValue(texture);
+        if (hzb.linear) {
+            const step = texture.format === PIXELFORMAT_R16F ? RECIPROCAL_STEP_R16F : RECIPROCAL_STEP_R32F;
+            this.reciprocalScaleId.setValue(1 - step);
+        } else {
+            this.depthDecodeId.setValue(hzb.depthDecode);
+            this.depthStepId.setValue(depthStep(texture.format, this.device.isReverseZ));
+        }
+        super.execute();
+        hzb.valid = true;
+    }
+}
 
 /**
  * A max-depth hierarchical Z pyramid built from a scene depth source: a half-resolution R32F mip
@@ -178,6 +227,14 @@ class MeshletHzb {
     linear = false;
 
     /**
+     * False from the time the pyramid is (re)created until mip 0 has first been built into it:
+     * until then it holds no depth, and an occlusion test against it would hide everything.
+     *
+     * @type {boolean}
+     */
+    valid = false;
+
+    /**
      * Decodes a depth texture value d into view depth as (x - d * y) / (z - d * w).
      *
      * @type {Float32Array}
@@ -189,7 +246,7 @@ class MeshletHzb {
      * CameraFrame caches the pass objects it splices in, so a resize re-targets this pass rather
      * than replacing it.
      *
-     * @type {RenderPassShaderQuad|null}
+     * @type {MeshletHzbMip0Pass|null}
      */
     mip0Pass = null;
 
@@ -329,6 +386,7 @@ class MeshletHzb {
         this.width = w;
         this.height = h;
         this.linear = linear;
+        this.valid = false;
         this.mipCount = Math.floor(Math.log2(Math.max(w, h))) + 1;
 
         this.texture = new Texture(device, {
@@ -352,33 +410,10 @@ class MeshletHzb {
         });
 
         // mip 0 quad pass - created once, re-targeted on every resize
-        if (!this.mip0Pass) {
-            const pass = new RenderPassShaderQuad(device);
-            pass.name = 'MeshletHzbMip0';
-            const self = this;
-            const superExecute = pass.execute.bind(pass);
-            pass.execute = function () {
-                // a frame rebuilt this frame has no depth yet to reduce - skip rather than bind a
-                // destroyed texture; the pyramid then keeps last frame's contents
-                const texture = self._source ? self._source() : self._depthTexture;
-                if (!texture) return;
-                const scope = device.scope;
-                scope.resolve('uDepthMap').setValue(texture);
-                if (self.linear) {
-                    const step = texture.format === PIXELFORMAT_R16F ? RECIPROCAL_STEP_R16F : RECIPROCAL_STEP_R32F;
-                    scope.resolve('uReciprocalScale').setValue(1 - step);
-                } else {
-                    scope.resolve('uDepthDecode').setValue(self.depthDecode);
-                    scope.resolve('uDepthStep').setValue(depthStep(texture.format, device.isReverseZ));
-                }
-                superExecute();
-            };
-            this.mip0Pass = pass;
-        }
+        this.mip0Pass ??= new MeshletHzbMip0Pass(device, this);
         const pass = this.mip0Pass;
         pass.shader = this._mip0Shader(linear);
         pass.init(this._mip0Target);
-        // the quad writes every texel, so never load the previous contents
         pass.colorOps.clear = true;
         pass.colorOps.store = true;
 

@@ -1,9 +1,13 @@
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import {
-    MESHLET_CUT_ROOT_CHUNK, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT,
-    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_SLOPPY, MESHLET_FLAG_TWO_SIDED
+    MESHLET_CUT_ROOT_CHUNK, MESHLET_DATA as M, MESHLET_DATA_U32S, MESHLET_NO_PARENT, MESHLET_FLAG_SLOPPY
 } from './constants.js';
+import { bucketOfMeshletFlags } from './meshlet-material-table.js';
+
+/**
+ * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
+ */
 
 // fields every member of a coarse group shares with its representative
 const GROUP_FIELDS = [M.CLUSTER_ERROR, M.GROUP_SPHERE, M.GROUP_SPHERE + 1, M.GROUP_SPHERE + 2, M.GROUP_SPHERE + 3];
@@ -170,7 +174,8 @@ class U32Builder {
  */
 
 /**
- * @param {Uint32Array|MeshletRecordSource} meshlets - Whole-world records, or a per-primitive source.
+ * @param {Uint32Array|MeshletRecordSource} meshlets - Whole-world records (the tables' tests
+ * build from one array), or a per-primitive source.
  * @returns {MeshletRecordSource} A per-primitive source.
  */
 function recordSource(meshlets) {
@@ -185,7 +190,28 @@ function recordSource(meshlets) {
 /** GPU tables shared by every view's resident, capacity-bounded cut. @ignore */
 class MeshletCutData {
     /**
-     * @param {import('../../platform/graphics/graphics-device.js').GraphicsDevice} device - Device.
+     * Per cut stage, its group LOD level (coarsest first).
+     *
+     * @type {number[]}
+     */
+    stageLevels;
+
+    /**
+     * Global pages of the playable floor (see {@link collectFloorPages}), roots included,
+     * coarsest first - the order to load them in when the pool cannot hold them all.
+     *
+     * @type {number[]}
+     */
+    floorPages;
+
+    /** @type {StorageBuffer} - per instance its root header offset, then the group rows. */
+    groups;
+
+    /** @type {StorageBuffer} - per meshlet its parent and birth group. */
+    selectionTopology;
+
+    /**
+     * @param {GraphicsDevice} device - Device.
      * @param {Uint32Array|MeshletRecordSource} meshlets - World records, whole or one primitive at
      * a time; reserved words receive primitive-local birth representatives.
      * @param {{ count: number, first: (instance: number) => number, meshletCount: (instance: number) => number }} instances - The
@@ -195,11 +221,9 @@ class MeshletCutData {
         const records = recordSource(meshlets);
         const words = new U32Builder();
         const levelSet = new Set();
+        // per primitive (by its first meshlet), its root header offset
         const primitives = new Map();
-        const rootPages = new Set();
         const floorPages = new Map();
-        this.rootIndices = [0, 0, 0];
-        this.rootRecords = 0;
         // each meshlet's two cut links (parent and birth group), contiguous so the cut emit reads
         // them without fetching the 128-byte geometry records
         const topology = new Uint32Array(records.count * 2);
@@ -209,11 +233,10 @@ class MeshletCutData {
         for (let instance = 0; instance < instanceCount; instance++) {
             const first = instances.first(instance);
             const count = instances.meshletCount(instance);
-            let primitive = primitives.get(first);
-            if (!primitive) {
+            let rootOffset = primitives.get(first);
+            if (rootOffset === undefined) {
                 const source = records.get(first, count);
                 const { groups, roots } = buildMeshletGroups(source);
-                for (const root of roots) rootPages.add(source[root * MESHLET_DATA_U32S + M.PAGE]);
                 collectFloorPages(source, groups, floorPages);
                 for (let m = 0; m < count; m++) source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP] = MESHLET_NO_PARENT;
                 const costs = (members) => {
@@ -297,9 +320,8 @@ class MeshletCutData {
                 const rootCost = costs(roots);
                 const pages = new Set();
                 for (const root of roots) pages.add(source[root * MESHLET_DATA_U32S + M.PAGE]);
-                const flags = source[M.FLAGS];
-                const bucket = flags & MESHLET_FLAG_ALPHA_MASKED ? 2 : (flags & MESHLET_FLAG_TWO_SIDED ? 1 : 0);
-                const rootOffset = words.length;
+                const bucket = bucketOfMeshletFlags(source[M.FLAGS]);
+                rootOffset = words.length;
                 // root header: word 5 carries the draw bucket (there is no coarser cost to hold),
                 // so the root admission needs no meshlet record. After the pages: the tasks that
                 // depend on the roots alone, which the admission enqueues. Last, the roots in
@@ -320,18 +342,10 @@ class MeshletCutData {
                     topology[(first + m) * 2 + 1] = source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP];
                 }
                 records.done(first, source);
-                primitive = { rootOffset, rootCost, bucket };
-                primitives.set(first, primitive);
+                primitives.set(first, rootOffset);
             }
-            words.data[instance] = primitive.rootOffset;
-            this.rootIndices[primitive.bucket] += primitive.rootCost[0];
-            this.rootRecords += primitive.rootCost[1];
+            words.data[instance] = rootOffset;
         }
-        /**
-         * Per cut stage, its group LOD level (coarsest first).
-         *
-         * @type {number[]}
-         */
         this.stageLevels = Array.from(levelSet).sort((a, b) => b - a);
         const create = (values) => {
             const buffer = new StorageBuffer(device, Math.max(values.byteLength, 16), BUFFERUSAGE_COPY_DST);
@@ -341,13 +355,6 @@ class MeshletCutData {
         this.groups = create(words.view());
         this.selectionTopology = new StorageBuffer(device, Math.max(topology.byteLength, 16), BUFFERUSAGE_COPY_DST);
         if (topology.length) this.selectionTopology.write(0, topology);
-        this.rootPages = Array.from(rootPages).sort((a, b) => a - b);
-        /**
-         * Global pages of the playable floor (see {@link collectFloorPages}), roots included,
-         * coarsest first - the order to load them in when the pool cannot hold them all.
-         *
-         * @type {number[]}
-         */
         this.floorPages = Array.from(floorPages.keys()).sort((a, b) => (floorPages.get(b) - floorPages.get(a)) || (a - b));
     }
 

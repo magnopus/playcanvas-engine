@@ -12,13 +12,13 @@ export default /* glsl */`
         return fract(m.z * fract(dot(w, m.xy)));
     }
 
-    // A sample blends when it lies on the centre pixel's surface: its depth is compared with the
-    // depth extrapolated along the surface's slope, relative to the depth. Absolute units blended a
-    // column with the wall a metre behind it at any distance (a halo around every silhouette), and
-    // a flat test rejects a sloped or curved surface's own neighbours, leaving the sampling noise.
-    // Relative to the plane, a sample about 5% of the distance off it no longer blends.
+    // inverse of the relative depth difference at which a sample stops blending (5%)
+    const float INV_DEPTH_TOLERANCE = 20.0;
+
+    // A sample blends when it lies on the centre pixel's surface: its depth is compared, relative
+    // to the depth, with the depth extrapolated along the surface's slope.
     float bilateralWeight(in float expected, in float sampleDepth) {
-        float diff = (sampleDepth - expected) / max(expected, 1e-4) * 20.0;
+        float diff = (sampleDepth - expected) / max(expected, 1e-4) * INV_DEPTH_TOLERANCE;
         return max(0.0, 1.0 - diff * diff);
     }
 

@@ -1,6 +1,10 @@
 import { Debug } from '../../../core/debug.js';
 
 /**
+ * @import { ByteCache } from '../../../platform/net/byte-cache.js'
+ */
+
+/**
  * Fetch priorities, lowest first. Root shards gate rendering anything, geometry pages gate the
  * LOD cut, texture tails gate a texture showing at all, fine mips only sharpen one.
  */
@@ -85,7 +89,7 @@ class MeshletFetchScheduler {
      * stored is answered from it without queueing; fetched ranges are widened to the cache's
      * chunk boundaries and stored in it.
      *
-     * @type {import('../../../platform/net/byte-cache.js').ByteCache|null}
+     * @type {ByteCache|null}
      */
     byteCache = null;
 

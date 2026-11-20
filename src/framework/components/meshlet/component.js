@@ -1,3 +1,4 @@
+import { Debug } from '../../../core/debug.js';
 import { Mat4 } from '../../../core/math/mat4.js';
 import { AssetReference } from '../../asset/asset-reference.js';
 import { Component } from '../component.js';
@@ -24,8 +25,8 @@ import { Component } from '../component.js';
  */
 
 /**
- * The MeshletComponent renders a streamed meshlet asset (`MAG_meshlets_gpu` /
- * `MAG_meshlets_stream` v2, baked by gltf-tools) through the GPU-driven meshlet pipeline:
+ * The MeshletComponent renders a streamed meshlet asset (a glTF using the `MAG_meshlets_gpu` and
+ * `MAG_meshlets_stream` v2 extensions) through the GPU-driven meshlet pipeline:
  * per-cluster DAG LOD, on-demand geometry page streaming, optional two-phase HZB occlusion
  * culling. WebGPU only.
  *
@@ -95,7 +96,12 @@ class MeshletComponent extends Component {
      */
     _playableWaiters = [];
 
-    /** @type {number} - progress last reported through {@link EVENT_PROGRESS}. @ignore */
+    /**
+     * Progress last reported through {@link EVENT_PROGRESS}.
+     *
+     * @type {number}
+     * @ignore
+     */
     _reportedProgress = -1;
 
     /**
@@ -219,6 +225,7 @@ class MeshletComponent extends Component {
 
         // the entity reports its own world-transform changes, so the per-frame sync visits
         // only moved components rather than polling every one
+        Debug.assert(!entity._worldDirtyListener, 'MeshletComponent: the entity already has a world dirty listener');
         entity._worldDirtyListener = this;
     }
 
@@ -304,6 +311,11 @@ class MeshletComponent extends Component {
         this.system._markDirty();
     }
 
+    /**
+     * Gets the meshlet resource set directly.
+     *
+     * @type {MeshletResource|null}
+     */
     get resource() {
         return this._resource;
     }
@@ -320,6 +332,11 @@ class MeshletComponent extends Component {
         this.system._markDirty();
     }
 
+    /**
+     * Gets the URL directory page streaming resolves the manifest's blob URIs against.
+     *
+     * @type {string|null}
+     */
     get baseUrl() {
         return this._baseUrl;
     }
@@ -415,7 +432,7 @@ class MeshletComponent extends Component {
      * @type {MeshletStreamStatus}
      */
     get streamStatus() {
-        return this.system._componentStatus(this);
+        return this.system._playable.componentStatus(this);
     }
 
     /**
@@ -442,7 +459,7 @@ class MeshletComponent extends Component {
         if (status.playable) return Promise.resolve(status);
         return new Promise((resolve) => {
             this._playableWaiters.push(resolve);
-            this.system._watchPlayable(this);
+            this.system._playable.watch(this);
         });
     }
 
@@ -461,7 +478,7 @@ class MeshletComponent extends Component {
 
     onBeforeRemove() {
         if (this.entity._worldDirtyListener === this) this.entity._worldDirtyListener = null;
-        this.system._unwatchPlayable(this);
+        this.system._playable.unwatch(this);
         this._settlePlayable({ playable: false, failed: true, progress: 0, totalBytes: 0, loadedBytes: 0 });
         this.asset = null;
         this._resource = null;

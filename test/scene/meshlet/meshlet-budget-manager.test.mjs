@@ -74,4 +74,48 @@ describe('MeshletBudgetManager', function () {
         for (let i = 0; i < 500; i++) manager.update(null, 1);
         expect(manager.pressureScale).to.equal(manager.maxScale);
     });
+
+    it('takes residency deltas against fresh counters after a reset', function () {
+        const manager = new MeshletBudgetManager();
+        const residency = makeResidency();
+        residency.evictedPages = 100;
+        manager.update(residency, 0);
+        const scale = manager.pressureScale;
+        manager.reset();
+        // a rebuilt world's residency counts from zero: 3 evictions are 3, not -97
+        const rebuilt = makeResidency();
+        rebuilt.evictedPages = manager.churnTolerance + 1;
+        manager.update(rebuilt, 0);
+        expect(manager.pressureScale).to.be.closeTo(scale * manager.raiseSlow, 1e-9);
+    });
+
+    it('reports an infeasible budget after a streak of pinned, short frames', function () {
+        const manager = new MeshletBudgetManager();
+        expect(manager.checkFeasible(2, 0, 2), 'not pinned at maxScale').to.equal(false);
+        expect(manager.checkFeasible(2, 0, 2)).to.equal(false);
+        manager.pressureScale = manager.maxScale;
+        expect(manager.checkFeasible(0.5, 3, 2)).to.equal(false);
+        expect(manager.checkFeasible(0.5, 3, 2), 'pages short for 2 frames').to.equal(true);
+        expect(manager.checkFeasible(2, 0, 2), 'the streak restarts after a report').to.equal(false);
+    });
+
+    it('caps a shadow face\'s index share at its texels', function () {
+        const manager = new MeshletBudgetManager();
+        const view = (demand, extra = {}) => ({
+            indexShare: 0,
+            indexDemand: () => demand,
+            indexPressure() {
+                return demand / this.indexShare;
+            },
+            ...extra
+        });
+        const camera = view(100);
+        const face = view(5000, { pressureScale: 1, light: { _shadowResolution: 16 }, renderData: { shadowViewport: { z: 0.5, w: 0.5 } } });
+        manager.distributeIndexBudget(10000, new Map([[{}, camera]]), [face], 2);
+        expect(face.indexShare, '2 indices for each of its 8x8 texels').to.equal(128);
+        expect(manager.shadowIndexRatio).to.be.closeTo(5000 / 128, 1e-9);
+        manager.updateShadowPressure([face]);
+        expect(face.pressureScale).to.be.above(1);
+        expect(manager.shadowPressureScale).to.equal(face.pressureScale);
+    });
 });

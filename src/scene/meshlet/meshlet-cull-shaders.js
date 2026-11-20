@@ -13,6 +13,23 @@ import {
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  */
 
+// the compiled shaders by property name; MeshletCuller creates its computes from these names
+const SHADERS = {
+    cellCull: cellCullWGSL,
+    cutQueue: meshletCutQueueWGSL,
+    cutQueueArgs: meshletCutQueueArgsWGSL,
+    cutEmit: meshletCutEmitWGSL,
+    rootClassify: meshletRootClassifyWGSL,
+    rootBandArgs: meshletRootBandArgsWGSL,
+    rootScatter: meshletRootScatterWGSL,
+    rootAdmit: meshletRootAdmitWGSL,
+    dispatchArgs: dispatchArgsWGSL,
+    meshletCull: meshletCullWGSL,
+    finalizeArgs: finalizeArgsWGSL,
+    indexWrite: indexWriteWGSL,
+    resetPhase2: resetPhase2WGSL
+};
+
 /**
  * The compiled cull compute shaders, plus the placeholder HZB texture bound when no HZB is
  * active. These are stateless - all per-view state rides on the {@link Compute} instances - so
@@ -25,25 +42,13 @@ class MeshletCullShaders {
      * @param {GraphicsDevice} device - The graphics device.
      */
     constructor(device) {
-        const make = (/** @type {string} */ name, /** @type {string} */ code) => new Shader(device, {
-            name: `Meshlet${name}`,
-            shaderLanguage: SHADERLANGUAGE_WGSL,
-            cshader: code
-        });
-
-        this.cellCull = make('CellCull', cellCullWGSL);
-        this.cutQueue = make('CutQueue', meshletCutQueueWGSL);
-        this.cutQueueArgs = make('CutQueueArgs', meshletCutQueueArgsWGSL);
-        this.cutEmit = make('CutEmit', meshletCutEmitWGSL);
-        this.rootClassify = make('RootClassify', meshletRootClassifyWGSL);
-        this.rootBandArgs = make('RootBandArgs', meshletRootBandArgsWGSL);
-        this.rootScatter = make('RootScatter', meshletRootScatterWGSL);
-        this.rootAdmit = make('RootAdmit', meshletRootAdmitWGSL);
-        this.dispatchArgs = make('DispatchArgs', dispatchArgsWGSL);
-        this.meshletCull = make('MeshletCull', meshletCullWGSL);
-        this.finalizeArgs = make('FinalizeArgs', finalizeArgsWGSL);
-        this.indexWrite = make('IndexWrite', indexWriteWGSL);
-        this.resetPhase2 = make('ResetPhase2', resetPhase2WGSL);
+        for (const [name, code] of Object.entries(SHADERS)) {
+            this[name] = new Shader(device, {
+                name: `Meshlet${name[0].toUpperCase()}${name.slice(1)}`,
+                shaderLanguage: SHADERLANGUAGE_WGSL,
+                cshader: code
+            });
+        }
 
         // bound when no HZB is active (the shader always declares the binding)
         this.dummyHzb = new Texture(device, {
@@ -52,20 +57,12 @@ class MeshletCullShaders {
     }
 
     destroy() {
-        this.cellCull?.destroy();
-        this.cutQueue?.destroy();
-        this.cutQueueArgs?.destroy();
-        this.cutEmit?.destroy();
-        this.rootClassify?.destroy();
-        this.rootBandArgs?.destroy();
-        this.rootScatter?.destroy();
-        this.rootAdmit?.destroy();
-        this.dispatchArgs?.destroy();
-        this.meshletCull?.destroy();
-        this.finalizeArgs?.destroy();
-        this.indexWrite?.destroy();
-        this.resetPhase2?.destroy();
+        for (const name of Object.keys(SHADERS)) {
+            this[name]?.destroy();
+            this[name] = null;
+        }
         this.dummyHzb?.destroy();
+        this.dummyHzb = null;
     }
 }
 

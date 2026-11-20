@@ -1,10 +1,12 @@
 import {
-    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_CUT_ROOT_CHUNK,
-    MESHLET_CUT_ROOT_FLAG, MESHLET_DISPATCH_WIDTH,
-    MESHLET_ROOT_BANDS, OBJECT_FLAG_HIDDEN,
-    OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW, PAGE_NOT_RESIDENT, PAGE_REQUEST
+    CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, CUT_BUDGET, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_CUT_ROOT_CHUNK,
+    MESHLET_CUT_ROOT_FLAG, MESHLET_LIST_WORKGROUP, MESHLET_ROOT_BANDS, OBJECT_BUCKET_SHIFT, OBJECT_FLAG_HIDDEN,
+    OBJECT_FLAG_NO_SHADOW
 } from '../constants.js';
-import { meshletCullVolumeWGSL, meshletHzbVisibleWGSL, meshletVisibleCellWGSL } from './meshlet-cull-wgsl.js';
+import {
+    meshletBucketWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL, meshletHzbVisibleWGSL,
+    meshletRequestPagesWGSL, meshletVisibleCellWGSL
+} from './meshlet-cull-common-wgsl.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
 // band index in the top bits of a root list entry, instance id below
@@ -18,8 +20,9 @@ const INSTANCE_MASK = (1 << BAND_SHIFT) - 1;
  * list for admission. When last frame's HZB is valid, instances wholly behind it are dropped
  * too: admission reserves index and record capacity for every root it takes, before any
  * cluster is tested for occlusion, so a hidden instance would otherwise spend the budget a
- * visible one needs to refine. An instance that stops being hidden is admitted a frame later. An instance admitted last frame is promoted one band (hysteresis), so
- * admission does not flicker at the budget's edge.
+ * visible one needs to refine. An instance that stops being hidden is admitted a frame later.
+ * An instance admitted last frame is promoted one band (hysteresis), so admission does not
+ * flicker at the budget's edge.
  *
  * @ignore
  */
@@ -30,6 +33,8 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
     uniform prevBase: u32;
     // 1 when the previous region holds a real previous frame
     uniform hasPrevious: u32;
+    // word base of the band-sorted copy, which follows this classify-order list
+    uniform sortedBase: u32;
     ${meshletObjectDataWGSL}
     var<storage, read> cullParams: array<vec4f>;
     var<storage, read> claimBits: array<u32>;
@@ -44,6 +49,7 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
 
     ${meshletHzbVisibleWGSL}
 
+    ${meshletDispatchGroupWGSL}
     ${meshletVisibleCellWGSL}
     ${meshletCullVolumeWGSL}
 
@@ -97,7 +103,7 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
             band = max(band, 1u) - 1u;
         }
         let slot = atomicAdd(&counters[${MESHLET_COUNTER.ROOT_CANDIDATES}u], 1u);
-        if (slot < arrayLength(&rootList)) {
+        if (slot < uniform.sortedBase) {
             rootList[slot] = instance | (band << ${BAND_SHIFT}u);
             atomicAdd(&rootBands[band], 1u);
         }
@@ -117,6 +123,8 @@ export const meshletRootBandArgsWGSL = /* wgsl */ `
     var<storage, read_write> rootBands: array<u32>;
     var<storage, read_write> indirectDispatch: array<u32>;
 
+    ${meshletDispatchArgsWGSL}
+
     @compute @workgroup_size(1)
     fn main() {
         var start = 0u;
@@ -124,11 +132,7 @@ export const meshletRootBandArgsWGSL = /* wgsl */ `
             let count = rootBands[band];
             rootBands[${2 * MESHLET_ROOT_BANDS}u + band] = start;
             start += count;
-            let groups = (count + 63u) / 64u;
-            let base = (uniform.firstSlot + band) * ${INDIRECT_DISPATCH_U32S}u;
-            indirectDispatch[base + 0u] = min(groups, ${MESHLET_DISPATCH_WIDTH}u);
-            indirectDispatch[base + 1u] = (groups + ${MESHLET_DISPATCH_WIDTH - 1}u) / ${MESHLET_DISPATCH_WIDTH}u;
-            indirectDispatch[base + 2u] = 1u;
+            meshletWriteDispatch(uniform.firstSlot + band, (count + ${MESHLET_LIST_WORKGROUP - 1}u) / ${MESHLET_LIST_WORKGROUP}u);
         }
     }
 `;
@@ -146,9 +150,11 @@ export const meshletRootScatterWGSL = /* wgsl */ `
     var<storage, read_write> rootList: array<u32>;
     var<storage, read_write> rootBands: array<atomic<u32>>;
 
-    @compute @workgroup_size(64)
+    ${meshletDispatchGroupWGSL}
+
+    @compute @workgroup_size(${MESHLET_LIST_WORKGROUP})
     fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
-        let index = (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * 64u + lane.x;
+        let index = meshletGroupIndex(group) * ${MESHLET_LIST_WORKGROUP}u + lane.x;
         if (index >= min(atomicLoad(&counters[${MESHLET_COUNTER.ROOT_CANDIDATES}u]), uniform.sortedBase)) { return; }
         let entry = rootList[index];
         let band = entry >> ${BAND_SHIFT}u;
@@ -173,9 +179,7 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     // word base of this frame's persistent admission bits (see claimPersistBase)
     uniform nextBase: u32;
     uniform recordCapacity: u32;
-    uniform indexCapacity0: u32;
-    uniform indexCapacity1: u32;
-    uniform indexCapacity2: u32;
+    ${meshletBucketWGSL}
     // word base of the band-sorted root list
     uniform sortedBase: u32;
     uniform queueCapacity: u32;
@@ -187,31 +191,25 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     var<storage, read> residency: array<u32>;
     var<storage, read_write> requests: array<atomic<u32>>;
     var<storage, read_write> claimBits: array<atomic<u32>>;
-    // used indices per bucket, used records, rejected record demand, then the cut queue
-    // entries admitted roots have claimed
+    // CUT_BUDGET.*
     var<storage, read_write> cutBudget: array<atomic<u32>>;
     var<storage, read_write> counters: array<atomic<u32>>;
     var<storage, read> rootList: array<u32>;
     var<storage, read> rootBands: array<u32>;
 
-    @compute @workgroup_size(64)
+    ${meshletRequestPagesWGSL}
+    ${meshletDispatchGroupWGSL}
+
+    @compute @workgroup_size(${MESHLET_LIST_WORKGROUP})
     fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
-        let index = (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * 64u + lane.x;
+        let index = meshletGroupIndex(group) * ${MESHLET_LIST_WORKGROUP}u + lane.x;
         if (index >= rootBands[uniform.rootBand]) { return; }
         let entry = rootList[uniform.sortedBase + rootBands[${2 * MESHLET_ROOT_BANDS}u + uniform.rootBand] + index];
         let instance = entry & ${INSTANCE_MASK}u;
         let offset = cutGroups[instance];
         let pageStart = cutGroups[offset + 2u];
         let pageCount = cutGroups[offset + 3u];
-        var ready = true;
-        for (var c = 0u; c < pageCount; c++) {
-            let page = cutGroups[pageStart + c];
-            let resident = residency[page] != ${PAGE_NOT_RESIDENT}u;
-            let mark = select(${PAGE_REQUEST.MISSING}u, ${PAGE_REQUEST.USED}u, resident);
-            if (atomicLoad(&requests[page]) < mark) { atomicMax(&requests[page], mark); }
-            ready = ready && resident;
-        }
-        if (!ready) {
+        if (!meshletRequestPages(pageStart, pageCount)) {
             atomicAdd(&counters[${MESHLET_COUNTER.ROOT_UNREADY_INSTANCES}u], 1u);
             return;
         }
@@ -219,15 +217,15 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         let indices = cutGroups[offset + 4u];
         let bucket = cutGroups[offset + 5u];
         let records = cutGroups[offset + 6u];
-        let capacity = select(select(uniform.indexCapacity0, uniform.indexCapacity1, bucket == 1u), uniform.indexCapacity2, bucket == 2u);
+        let capacity = meshletBucketCapacity(bucket);
         // Roots stop at their share of each capacity. Bands admit largest on screen first, so
         // what does not fit is the far tail - and the rest stays free for the cut to refine the
         // near instances, rather than every instance in view sitting at its coarsest level.
         let indexLimit = u32(f32(capacity) * uniform.rootShare);
         let recordLimit = u32(f32(uniform.recordCapacity) * uniform.rootShare);
         atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indices);
-        let indexBefore = atomicAdd(&cutBudget[bucket], indices);
-        let recordBefore = atomicAdd(&cutBudget[3u], records);
+        let indexBefore = atomicAdd(&cutBudget[${CUT_BUDGET.INDICES_BASE}u + bucket], indices);
+        let recordBefore = atomicAdd(&cutBudget[${CUT_BUDGET.RECORDS}u], records);
         // the root-owned task list follows the root page list, then the root lists for the
         // emit pass (see meshletCutEmitWGSL)
         let ownedStart = pageStart + pageCount;
@@ -238,20 +236,20 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         // An admitted instance must get its queue entries - dropping them afterwards would leave
         // it charged for roots it never draws - so they are charged here with the rest. A charge
         // is a tally, undone on rejection like the others; the entries themselves are appended
-        // only once admitted, so their total never passes the limit. (Reserving the ranges
-        // directly needs a compare-exchange loop, which serialises every instance in view on
-        // one counter.)
-        let queueBefore = atomicAdd(&cutBudget[5u], queueNeed);
+        // only once admitted, so their total never passes the limit. Reserving the ranges
+        // directly would need a compare-exchange loop, serialising every instance in view on one
+        // counter.
+        let queueBefore = atomicAdd(&cutBudget[${CUT_BUDGET.QUEUE}u], queueNeed);
         let queueFits = queueBefore + queueNeed <= u32(f32(uniform.queueCapacity) * uniform.rootShare);
         if (!queueFits) {
             atomicAdd(&counters[${MESHLET_COUNTER.CUT_QUEUE_REJECTED}u], queueNeed);
         }
         let fits = queueFits && indexBefore + indices <= indexLimit && recordBefore + records <= recordLimit;
         if (!fits) {
-            atomicSub(&cutBudget[5u], queueNeed);
-            atomicSub(&cutBudget[bucket], indices);
-            atomicSub(&cutBudget[3u], records);
-            atomicAdd(&cutBudget[4u], records);
+            atomicSub(&cutBudget[${CUT_BUDGET.QUEUE}u], queueNeed);
+            atomicSub(&cutBudget[${CUT_BUDGET.INDICES_BASE}u + bucket], indices);
+            atomicSub(&cutBudget[${CUT_BUDGET.RECORDS}u], records);
+            atomicAdd(&cutBudget[${CUT_BUDGET.REJECTED_RECORDS}u], records);
             atomicAdd(&counters[${MESHLET_COUNTER.ROOT_REJECTED_BASE}u + bucket], indices);
             atomicAdd(&counters[${MESHLET_COUNTER.ROOT_REJECTED_INSTANCES}u], 1u);
             return;

@@ -1,7 +1,7 @@
 """Write zorah/scene.json (a magnopus-web-renderer render-test scene description, like caldera's) for
 every baked Zorah chunk.
 
-Usage: python3 manifest.py [chunk_dir] [bake_dir]
+Usage: python3 manifest.py <chunk_dir> <bake_dir>
     chunk_dir  the split source chunks (tools/split-meshopt-chunks.js), for world bounds
     bake_dir   the streamed-meshlet bakes, chunk_NNN.streamed.glb; scene.json is written here
 
@@ -21,9 +21,10 @@ import sys
 
 import numpy as np
 
-ZORAH = os.path.expanduser('~/Downloads/zorah_main_public.v2.gltf')
-CHUNKS = sys.argv[1] if len(sys.argv) > 1 else f'{ZORAH}/mesh_chunks'
-OUT = sys.argv[2] if len(sys.argv) > 2 else f'{ZORAH}/streamed_meshlets_v4'
+if len(sys.argv) < 3:
+    sys.exit('usage: python3 manifest.py <chunk_dir> <bake_dir>')
+CHUNKS = sys.argv[1]
+OUT = sys.argv[2]
 # path of OUT under the render-test's /meshlets/
 PREFIX = 'zorah'
 BUDGET = int(float(os.environ.get('ZORAH_MESHLET_BUDGET', 10e6)))

@@ -1,7 +1,9 @@
 import { expect } from 'chai';
+import { restore, stub } from 'sinon';
 
-import { createMeshlets, hasMeshletExtension, magMeshlets } from '../../../src/framework/parsers/glb/extensions/mag-meshlets.js';
+import { createMeshlets, hasMeshletExtension, magMeshlets, restoreMeshletRecords } from '../../../src/framework/parsers/glb/extensions/mag-meshlets.js';
 import { GlbParser } from '../../../src/framework/parsers/glb-parser.js';
+import { http } from '../../../src/platform/net/http.js';
 import { MATERIAL_RECORD_U32S, MESHLET_DATA_U32S, PAGE_TABLE_FIELDS } from '../../../src/scene/meshlet/constants.js';
 import { MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
 import { createApp } from '../../app.mjs';
@@ -267,6 +269,85 @@ describe('MAG_meshlets extensions', function () {
             expect(hasMeshletExtension(gltf.meshes[0].primitives[0])).to.equal(true);
             expect(hasMeshletExtension({ attributes: {} })).to.equal(false);
             expect(hasMeshletExtension(undefined)).to.equal(false);
+        });
+    });
+
+    describe('restoreMeshletRecords', function () {
+
+        // packs a buildAsset() document into a GLB whose binary chunk holds its buffer 0
+        const toGlb = (gltf, bufferViews) => {
+            const bin = new Uint8Array(bufferViews[0].buffer);
+            const doc = { ...gltf, buffers: [{ byteLength: bin.byteLength }] };
+            const text = JSON.stringify(doc);
+            const json = new TextEncoder().encode(text.padEnd(Math.ceil(text.length / 4) * 4, ' '));
+            const binLength = Math.ceil(bin.byteLength / 4) * 4;
+            const glb = new ArrayBuffer(12 + 8 + json.byteLength + 8 + binLength);
+            const view = new DataView(glb);
+            view.setUint32(0, 0x46546C67, true);
+            view.setUint32(4, 2, true);
+            view.setUint32(8, glb.byteLength, true);
+            view.setUint32(12, json.byteLength, true);
+            view.setUint32(16, 0x4E4F534A, true);
+            new Uint8Array(glb, 20, json.byteLength).set(json);
+            view.setUint32(20 + json.byteLength, binLength, true);
+            view.setUint32(24 + json.byteLength, 0x004E4942, true);
+            new Uint8Array(glb, 28 + json.byteLength, bin.byteLength).set(bin);
+            return glb;
+        };
+
+        const serve = (glb) => {
+            stub(http, 'get').callsFake((url, options, callback) => callback(null, glb));
+        };
+
+        afterEach(function () {
+            restore();
+        });
+
+        it('restores released records as copies detached from the fetched file', async function () {
+            const { gltf, bufferViews } = buildAsset();
+            const resource = createMeshlets(null, gltf, bufferViews);
+            const expected = resource.primitives[0].meshletData.slice();
+            resource.releaseRecords();
+
+            const glb = toGlb(gltf, bufferViews);
+            serve(glb);
+            await restoreMeshletRecords('a.glb', resource, 'include');
+
+            const records = resource.primitives[0].meshletData;
+            expect(records).to.deep.equal(expected);
+            expect(records.buffer).to.not.equal(glb);
+            expect(records.buffer.byteLength).to.equal(records.byteLength);
+            expect(http.get.firstCall.args[1].withCredentials).to.equal(true);
+        });
+
+        it('fails for records in a compressed buffer view', async function () {
+            const { gltf, bufferViews } = buildAsset();
+            const resource = createMeshlets(null, gltf, bufferViews);
+            resource.releaseRecords();
+
+            const meshletView = gltf.accessors[gltf.meshes[0].primitives[0].extensions.MAG_meshlets_gpu.accessors.meshletData].bufferView;
+            gltf.bufferViews[meshletView].extensions = { EXT_meshopt_compression: {} };
+            serve(toGlb(gltf, bufferViews));
+
+            let error = null;
+            await restoreMeshletRecords('a.glb', resource).catch((err) => {
+                error = err;
+            });
+            expect(error).to.be.an('error');
+            expect(resource.recordsResident).to.equal(false);
+        });
+
+        it('fails for a file that is not a GLB', async function () {
+            const { gltf, bufferViews } = buildAsset();
+            const resource = createMeshlets(null, gltf, bufferViews);
+            resource.releaseRecords();
+            serve(new TextEncoder().encode(JSON.stringify(gltf)).buffer);
+
+            let error = null;
+            await restoreMeshletRecords('a.gltf', resource).catch((err) => {
+                error = err;
+            });
+            expect(error).to.be.an('error');
         });
     });
 

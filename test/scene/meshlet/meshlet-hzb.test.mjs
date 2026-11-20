@@ -6,6 +6,7 @@ import { PIXELFORMAT_R32F } from '../../../src/platform/graphics/constants.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import { Camera } from '../../../src/scene/camera.js';
+import { RenderPassShaderQuad } from '../../../src/scene/graphics/render-pass-shader-quad.js';
 import { MeshletHzb } from '../../../src/scene/meshlet/meshlet-hzb.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
@@ -28,6 +29,48 @@ describe('MeshletHzb', function () {
                 expect(hzb.height).to.equal(hzb.texture.height);
             }
         } finally {
+            hzb.destroy();
+            depth.destroy();
+            device.destroy();
+            jsdomTeardown();
+        }
+    });
+
+    it('is valid only once mip 0 has been built into the current pyramid', function () {
+        jsdomSetup();
+        const device = new NullGraphicsDevice(document.createElement('canvas'));
+        device.supportsCompute = true;
+        device.createComputeImpl = () => ({ destroy() {} });
+        const depth = new Texture(device, { width: 64, height: 64, format: PIXELFORMAT_R32F });
+        const hzb = new MeshletHzb(device);
+        stub(hzb, '_mip0Shader').returns(null);
+        const draw = stub(RenderPassShaderQuad.prototype, 'execute');
+        try {
+            let source = null;
+            hzb.resize(depth, 64, 64, true, () => source);
+            const pass = hzb.mip0Pass;
+            expect(hzb.valid, 'a new pyramid holds nothing').to.equal(false);
+
+            // no depth source this frame: nothing drawn, and the old contents are kept, not cleared
+            pass.before();
+            pass.execute();
+            expect(draw.called).to.equal(false);
+            expect(pass.colorOps.clear).to.equal(false);
+            expect(hzb.valid).to.equal(false);
+
+            source = depth;
+            pass.before();
+            pass.execute();
+            expect(draw.calledOnce).to.equal(true);
+            expect(pass.colorOps.clear, 'the quad writes every texel').to.equal(true);
+            expect(hzb.valid).to.equal(true);
+
+            hzb.resize(depth, 64, 64, true, () => source);
+            expect(hzb.valid, 'same size: the pyramid is kept').to.equal(true);
+            hzb.resize(depth, 128, 64, true, () => source);
+            expect(hzb.valid, 'recreated').to.equal(false);
+        } finally {
+            draw.restore();
             hzb.destroy();
             depth.destroy();
             device.destroy();

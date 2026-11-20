@@ -1,5 +1,6 @@
 import {
-    MATERIAL_TEXTURE_SLOTS, PAGE_FLAG_WIDE_POSITIONS, PAGE_HEADER, PAGE_HEADER_BYTES
+    MATERIAL_TEXTURE_SLOTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HAS_TANGENTS, PAGE_FLAG_WIDE_POSITIONS, PAGE_HEADER,
+    PAGE_HEADER_BYTES
 } from '../constants.js';
 
 /**
@@ -94,7 +95,7 @@ export const MESHLET_RECORD_STRUCT = [
 
 /** @type {StructFields} */
 export const MESHLET_TEX_RESIDENCY_STRUCT = [
-    ['slotFamilyBias', 'u32', 'fineSlotLayer:16 (0xFFFF = tail only) | family:8 | sizeBias:8'],
+    ['slotFamilyBias', 'u32', 'fineSlotLayer:16 (0xFFFF = tail only) | family:2 | tailStart:6 | sizeBias:8'],
     ['minLodTailLayer', 'u32', 'minLod:16 (source mips, 0x7FFF = nothing resident) | tailLayer:16']
 ];
 
@@ -209,13 +210,12 @@ export const meshletDecodeDrawIndexWGSL = /* wgsl */ `
 `;
 
 /**
- * `meshletDecodeOct16(word)`: octahedral normal, snorm16 x | snorm16 y << 16.
+ * `meshletDecodeOct16(word)`: octahedral normal, snorm16 x | snorm16 y << 16. Also declares
+ * `meshletOctDecode(x, y)`, the octahedral unfold the tangent decode shares.
  */
 export const meshletDecodeOct16WGSL = /* wgsl */ `
-    fn meshletDecodeOct16(word : u32) -> vec3f {
-        let sx = f32(i32(word << 16u) >> 16u) / 32767.0;
-        let sy = f32(i32(word & 0xFFFF0000u) >> 16u) / 32767.0;
-        var n = vec3f(sx, sy, 1.0 - abs(sx) - abs(sy));
+    fn meshletOctDecode(x : f32, y : f32) -> vec3f {
+        var n = vec3f(x, y, 1.0 - abs(x) - abs(y));
         if (n.z < 0.0) {
             let px = (1.0 - abs(n.y)) * select(-1.0, 1.0, n.x >= 0.0);
             let py = (1.0 - abs(n.x)) * select(-1.0, 1.0, n.y >= 0.0);
@@ -223,23 +223,36 @@ export const meshletDecodeOct16WGSL = /* wgsl */ `
         }
         return normalize(n);
     }
+
+    fn meshletDecodeOct16(word : u32) -> vec3f {
+        return meshletOctDecode(f32(i32(word << 16u) >> 16u) / 32767.0, f32(i32(word & 0xFFFF0000u) >> 16u) / 32767.0);
+    }
 `;
 
 /**
  * `meshletDecodeTangent(word)`: oct16_sign tangent - snorm15 x | snorm15 y << 15 | bitangent
- * sign << 30. Returns xyz = tangent, w = bitangent sign.
+ * sign << 30. Returns xyz = tangent, w = bitangent sign. Requires meshletDecodeOct16WGSL.
  */
 export const meshletDecodeTangentWGSL = /* wgsl */ `
     fn meshletDecodeTangent(word : u32) -> vec4f {
-        let sx = f32((i32(word << 17u)) >> 17u) / 16383.0;
-        let sy = f32((i32(word << 2u)) >> 17u) / 16383.0;
-        var n = vec3f(sx, sy, 1.0 - abs(sx) - abs(sy));
-        if (n.z < 0.0) {
-            let px = (1.0 - abs(n.y)) * select(-1.0, 1.0, n.x >= 0.0);
-            let py = (1.0 - abs(n.x)) * select(-1.0, 1.0, n.y >= 0.0);
-            n = vec3f(px, py, n.z);
-        }
-        return vec4f(normalize(n), select(1.0, -1.0, (word & 0x40000000u) != 0u));
+        let tangent = meshletOctDecode(f32((i32(word << 17u)) >> 17u) / 16383.0, f32((i32(word << 2u)) >> 17u) / 16383.0);
+        return vec4f(tangent, select(1.0, -1.0, (word & 0x40000000u) != 0u));
+    }
+`;
+
+/**
+ * `meshletNormalMatrix(modelMatrix)`: the cofactor of the upper 3x3 - the inverse transpose up to
+ * scale, so normals stay perpendicular under non-uniform scale - negated when the determinant is,
+ * so mirrored instances keep their normals facing out.
+ */
+export const meshletNormalMatrixWGSL = /* wgsl */ `
+    fn meshletNormalMatrix(modelMatrix : mat4x4f) -> mat3x3f {
+        let m0 = modelMatrix[0].xyz;
+        let m1 = modelMatrix[1].xyz;
+        let m2 = modelMatrix[2].xyz;
+        let c0 = cross(m1, m2);
+        let s = select(1.0, -1.0, dot(m0, c0) < 0.0);
+        return mat3x3f(c0 * s, cross(m2, m0) * s, cross(m0, m1) * s);
     }
 `;
 
@@ -299,5 +312,40 @@ export const meshletPageLayoutWGSL = /* wgsl */ `
     // instance's resource carries colours
     fn meshletPageColor(pageLayout : MeshletPageLayout, vertex : u32) -> vec4f {
         return unpack4x8unorm(pagePool[pageLayout.colorBase + vertex]);
+    }
+`;
+
+/**
+ * `meshletFetchVertex(drawIndex, pageSizeWords)`: the vertex pull every meshlet vertex stage
+ * starts with - decodes a drawn index, finds its record's instance and meshlet, lays out the
+ * meshlet's resident page for the instance's resource and reads the page vertex the corner
+ * refers to. Requires meshletStructsWGSL, meshletDecodeDrawIndexWGSL, meshletPageLayoutWGSL and
+ * the `records`, `meshletData`, `objectData`, `residency` and `pagePool` buffers.
+ */
+export const meshletFetchVertexWGSL = /* wgsl */ `
+    struct MeshletVertex {
+        instance : u32,
+        meshlet : u32,
+        primitive : MeshletPrimitiveData,
+        hasTangents : bool,
+        hasColors : bool,
+        pageLayout : MeshletPageLayout,
+        vertex : u32              // page vertex index
+    };
+
+    fn meshletFetchVertex(drawIndex : u32, pageSizeWords : u32) -> MeshletVertex {
+        let decoded = meshletDecodeDrawIndex(drawIndex);
+        var v : MeshletVertex;
+        v.instance = records[decoded.x].instance;
+        v.meshlet = records[decoded.x].meshlet;
+        // per-primitive page attribute layout and position grid (resources may differ)
+        v.primitive = meshletPrimitiveData(v.instance);
+        let flags = objectData[v.instance].flags;
+        v.hasTangents = (flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
+        v.hasColors = (flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
+        let pageBase = residency[meshletData[v.meshlet].page] * pageSizeWords;
+        v.pageLayout = meshletPageLayout(pageBase, v.hasTangents, v.primitive.uvFloatsPerVertex, v.hasColors);
+        v.vertex = pagePool[v.pageLayout.meshletVertexBase + meshletData[v.meshlet].verticesOffset + decoded.y];
+        return v;
     }
 `;

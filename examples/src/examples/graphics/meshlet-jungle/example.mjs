@@ -1,13 +1,14 @@
 // @config
+//
+// The JungleRuins scene as streamed meshlets (WebGPU only): an 8 km terrain under millions of
+// scattered trees and plants, with the pyramid and the banyan forest at its core. Each group
+// (terrain, static, trees, plants) is its own bake, and every scatter is one prototype mesh with
+// an EXT_mesh_gpu_instancing node, so all copies of a plant share one set of pages. Needs a local
+// bake, see examples/assets/meshlets/README.md.
+//
 // @flag WEBGL_DISABLED
 // @flag WEBGPU_BARE_DISABLED
 // @flag HIDDEN
-
-// The JungleRuins scene as streamed meshlets: an 8 km terrain under millions of scattered trees,
-// saplings and seedlings, with the pyramid and the banyan forest in the 1 km cinematic core. Each
-// group (terrain, static, trees, plants) is its own bake; every scatter is one prototype mesh
-// with an EXT_mesh_gpu_instancing node, so all copies of a plant share one set of pages. See
-// examples/utils/jungle/usd2glb.py for building the assets.
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
@@ -28,6 +29,7 @@ import {
     Keyboard,
     LightComponentSystem,
     math,
+    MESHLET_COLOR_MODE,
     MeshletComponentSystem,
     Mouse,
     Picker,
@@ -55,7 +57,7 @@ import { data, deviceType } from 'examples/context';
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
-// KTX2 textures in the bake are Basis-compressed, so the Basis transcoder must be ready before load
+// streamed textures are KTX2 / Basis
 basisInitialize({
     glueUrl: './assets/wasm/basis/basis.wasm.js',
     wasmUrl: './assets/wasm/basis/basis.wasm.wasm',
@@ -74,7 +76,7 @@ const BASE = params.get('base') ?? './assets/meshlets/jungle/';
 const manifest = await fetch(`${BASE}jungle_scene.json`).then(r => r.json());
 // ?groups=terrain,trees loads only those
 const only = params.get('groups')?.split(',');
-// ?moss=0 leaves the pyramid's moss out: about 2M instances, most of the scatter's cost
+// ?moss=0 leaves the pyramid's moss out, most of the scatter's cost
 const groups = manifest.groups.filter(g => (!only || only.includes(g.name)) && !(g.name === 'moss' && params.get('moss') === '0'));
 
 const device = await createGraphicsDevice(canvas, {
@@ -215,21 +217,30 @@ app.init(createOptions);
 // the engine chunks are registered by app.init; patch them before anything compiles
 if (canopy) {
     const chunks = ShaderChunks.get(device, 'wgsl');
+    // the patches anchor on engine chunk text, so warn when an engine change moves it
+    const patchChunk = (name, search, replacement, suffix = '') => {
+        const source = chunks.get(name);
+        if (!source.includes(search)) {
+            console.warn(`meshlet-jungle: '${search.trim()}' not found in shader chunk ${name}, canopy lighting is not applied`);
+            return;
+        }
+        chunks.set(name, source.replace(search, replacement) + suffix);
+    };
     chunks.set('litUserDeclarationPS', canopyVisibilityWGSL);
-    chunks.set('lightFunctionLightPS', chunks.get('lightFunctionLightPS').replace('    // Relief self shadowing', `
+    patchChunk('lightFunctionLightPS', '    // Relief self shadowing', `
     #if LIGHT{i}TYPE == DIRECTIONAL
         dAtten = dAtten * canopySunVisibility();
     #endif
 
-    // Relief self shadowing`));
-    chunks.set('ambientPS', `${chunks.get('ambientPS').replace('fn addAmbient(', 'fn addAmbientOpen(')}
+    // Relief self shadowing`);
+    patchChunk('ambientPS', 'fn addAmbient(', 'fn addAmbientOpen(', `
 fn addAmbient(worldNormal: vec3f) {
     addAmbientOpen(worldNormal);
     dDiffuseLight = dDiffuseLight * (canopySkyVisibility() * uniform.canopyEnvScale);
 }
 `);
     for (const name of ['reflectionEnvPS', 'reflectionEnvHQPS']) {
-        chunks.set(name, `${chunks.get(name).replace('fn addReflection(', 'fn addReflectionOpen(')}
+        patchChunk(name, 'fn addReflection(', 'fn addReflectionOpen(', `
 fn addReflection(reflDir: vec3f, gloss: f32) {
     addReflectionOpen(reflDir, gloss);
     dReflection = vec4f(dReflection.rgb * (canopySkyVisibility() * uniform.canopyEnvScale), dReflection.a);
@@ -428,9 +439,8 @@ data.on('data.canopyK:set', updateCanopy);
 data.on('data.canopySun:set', updateCanopy);
 data.on('data.canopySky:set', updateCanopy);
 
-// sun / sky / exposure, live from the panel. The dome HDR alone gives a dusk-like key light: its
-// glow carries ~0.3 against ~0.7 of sky, while the reference renders show a clear-day sun with
-// hard shadows, so the default sun is boosted to about twice the sky on the ground.
+// sun / sky / exposure, live from the panel. The dome HDR alone gives a dusk-like key light, so
+// the default sun is boosted to match the clear-day reference renders.
 const envScale = new Float32Array(1);
 const updateLighting = () => {
     light.light.intensity = data.get('data.sun');
@@ -464,8 +474,7 @@ let statFrames = 0;
 app.on('framerender', () => {
     const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
     if (!directors.length) return;
-    const visualization = data.get('data.visualization');
-    const colorMode = visualization === 'meshlet' ? 2 : 0;
+    const colorMode = data.get('data.visualization') === 'meshlet' ? MESHLET_COLOR_MODE.MESHLET : MESHLET_COLOR_MODE.LIT;
     let meshlets = 0, indices = 0, resident = 0, pages = 0, instances = 0, demand = false;
     for (const director of directors) {
         director.world.setColorMode(colorMode);

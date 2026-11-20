@@ -59,15 +59,14 @@ describe('IndexBuffer', function () {
             expect(ib.lock()).to.equal(indices);
         });
 
-        it('does not upload on restoreContext when there is no CPU copy to restore from', function () {
+        it('recreates the GPU buffer on restoreContext when there is no CPU copy', function () {
             const ib = new IndexBuffer(device, INDEXFORMAT_UINT32, 4, BUFFER_STATIC, undefined, { gpuOnly: true });
             let unlocks = 0;
             ib.impl.unlock = () => unlocks++;
-            ib.restoreContext();
-            expect(unlocks).to.equal(0);
-            ib.lock();
+            ib.loseContext();
             ib.restoreContext();
             expect(unlocks).to.equal(1);
+            expect(ib.storage).to.equal(null);
         });
     });
 
@@ -182,6 +181,17 @@ describe('WebglBuffer.unlock', function () {
         // a later unlock with still no CPU copy is a no-op
         buffer.unlock({ gl }, BUFFER_STATIC, TARGET, null, undefined, undefined, 64);
         expect(calls).to.have.lengthOf(1);
+    });
+
+    it('reallocates from byteSize after a context loss when there is no CPU copy', function () {
+        const { gl, calls } = makeGl();
+        const buffer = new WebglBuffer();
+        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, null, undefined, undefined, 64);
+        buffer.loseContext();
+        expect(buffer.initialized).to.equal(false);
+        buffer.unlock({ gl }, BUFFER_STATIC, TARGET, null, undefined, undefined, 64);
+        expect(buffer.initialized).to.equal(true);
+        expect(calls).to.deep.equal([['bufferData', 64, gl.STATIC_DRAW], ['bufferData', 64, gl.STATIC_DRAW]]);
     });
 
     it('uploads the CPU copy on creation and on later unlocks', function () {

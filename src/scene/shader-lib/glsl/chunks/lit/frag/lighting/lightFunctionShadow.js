@@ -49,8 +49,8 @@ export default /* glsl */`
                     #endif
                 #else
                     #ifdef REVERSE_Z
-                        // reverse-z: 1=near light, 0=far. Push receiver TOWARDS light (greater z)
-                        // so the GREATER hardware compare reports lit against its own surface.
+                        // reverse-z stores 1 nearest the light: offset the receiver towards the
+                        // light so the greater-than compare reports its own surface as lit
                         positionInShadowSpace.z = saturate(positionInShadowSpace.z) + 0.0001;
                     #else
                         positionInShadowSpace.z = saturate(positionInShadowSpace.z) - 0.0001;
@@ -63,8 +63,7 @@ export default /* glsl */`
                     positionInShadowSpace.xy /= positionInShadowSpace.w;
                     positionInShadowSpace.z = length(lightDir) * shadowParams.w;
                     #ifdef REVERSE_Z
-                        // stored values are 1 - norm_dist (see modified-depth path in litShadowMain).
-                        // Flip the receiver to the same convention.
+                        // the shadow map stores 1 - normalized distance (see litShadowMain)
                         positionInShadowSpace.z = 1.0 - positionInShadowSpace.z;
                     #endif
                 #endif

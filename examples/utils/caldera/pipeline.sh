@@ -13,11 +13,14 @@ export CALDERA_RAW=${CALDERA_RAW:-$PWD/caldera-raw}
 RAW=$CALDERA_RAW
 OUT=$HERE/../../assets/meshlets/caldera
 TOOLS=${GLTF_TOOLS:?set GLTF_TOOLS to the gltf-tools checkout}
-mkdir -p $OUT
+mkdir -p $RAW $OUT
+free_gb() { df -g $1 | awk 'NR==2 {print $4}'; }
 for r in "$@"; do
     echo "== $r $(date +%T)"
-    free_gb=$(df -g ${RAW:h} | awk 'NR==2 {print $4}')
-    if (( free_gb < 3 )); then echo "STOPPING: only ${free_gb} GB free before $r"; break; fi
+    # the raw GLB and the bake can sit on different volumes; both need room
+    raw_free=$(free_gb $RAW)
+    out_free=$(free_gb $OUT)
+    if (( raw_free < 3 || out_free < 3 )); then echo "STOPPING: only ${raw_free} GB (raw) / ${out_free} GB (bake) free before $r"; break; fi
     if [[ -z "${CLUTTER_ONLY:-}" ]]; then
     # the previous bake goes first: disk is the constraint, and it is being replaced
     [[ -z "${NOBAKE:-}" ]] && rm -rf $OUT/caldera_$r.glb $OUT/caldera_${r}_meshlets $OUT/caldera_${r}_textures
@@ -48,6 +51,6 @@ for r in "$@"; do
             [[ -f $OUT/$c.glb && -z "${KEEPRAW:-}" ]] && rm -f $RAW/$c.glb
         fi
     fi
-    df -h ~ | tail -1 | awk '{print "  disk free", $4}'
+    df -h $OUT | tail -1 | awk '{print "  disk free", $4}'
 done
 echo "PIPELINE DONE $(date +%T)"

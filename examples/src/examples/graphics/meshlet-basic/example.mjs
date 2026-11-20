@@ -1,12 +1,14 @@
 // @config
+//
+// A streamed meshlet asset (WebGPU only): geometry pages stream in on demand as the GPU-driven cut
+// refines. Fly (WASD + mouse look, Shift/Ctrl for speed) or orbit and pan to watch residency
+// change; toggle occlusion to compare with and without two-phase HZB culling.
+//
+// `?asset=magoffice` loads a local office bake instead of the bunny, see
+// examples/assets/meshlets/README.md.
+//
 // @flag WEBGL_DISABLED
 // @flag WEBGPU_BARE_DISABLED
-
-// Load a local test asset as a container and stream its
-// geometry pages on demand. Fly (WASD + mouse look, Shift/Ctrl for speed) or orbit and pan to inspect
-// residency transitions; toggle occlusion to exercise CameraFrame's scene-depth attachment and
-// two-phase HZB path.
-// See assets/meshlets/README.md for the local asset setup.
 
 import {
     AppBase,
@@ -21,6 +23,7 @@ import {
     FILLMODE_FILL_WINDOW,
     Keyboard,
     LightComponentSystem,
+    MESHLET_COLOR_MODE,
     MeshletComponentSystem,
     Mouse,
     RenderComponentSystem,
@@ -53,7 +56,7 @@ const requestedAsset = params.get('asset') ?? '';
 const assetName = Object.hasOwn(models, requestedAsset) ? requestedAsset : 'bunny';
 const selectedModel = models[assetName];
 
-// The office has streamed KTX2 textures and inline transparent meshes.
+// streamed textures are KTX2 / Basis
 basisInitialize({
     glueUrl: './assets/wasm/basis/basis.wasm.js',
     wasmUrl: './assets/wasm/basis/basis.wasm.wasm',
@@ -106,7 +109,7 @@ model.addComponent('meshlet', { asset: assets.model });
 // The parser skips streamed placeholders on the regular path. Instantiate the remaining
 // geometry too: alpha-blended windows stay inline so the forward renderer can sort them.
 if (assets.model.resource.renders.some((asset) => asset.resource.meshes.length > 0)) {
-    model.addChild(assets.model.resource.instantiateRenderEntity());
+    model.addChild(assets.model.resource.instantiateRenderEntity({ skipBlendedShadowCasters: true }));
 }
 app.root.addChild(model);
 
@@ -147,14 +150,7 @@ const shaderPasses = {
 };
 // Two-phase HZB occlusion builds its pyramid from the CameraFrame's single-sample scene depth.
 app.systems.meshlet.occlusion = true;
-data.set('data', { asset: assetName, visualization: 'material', occlusion: true, threshold: 1, stats: '' });
-data.on('data.asset:set', (value) => {
-    if (value === assetName || !Object.hasOwn(models, value)) return;
-    // Reload releases the previous world's page and texture pools before loading another asset.
-    const url = new URL(location.href);
-    url.searchParams.set('asset', value);
-    location.assign(url.href);
-});
+data.set('data', { visualization: 'material', occlusion: true, threshold: 1, stats: '' });
 data.on('data.visualization:set', (value) => {
     camera.camera.setShaderPass(shaderPasses[value]);
 });
@@ -174,13 +170,10 @@ app.on('framerender', () => {
     if (!world?.finalized) {
         return;
     }
-    // The views read their counters back each frame to size their buffers; reuse them. The
-    // index demand covers the whole LOD cut before occlusion, so it does not change when
-    // occlusion is toggled - the drawn meshlet count does. An asset past maxWorldMeshlets is
-    // split across several worlds, so their stats are summed.
+    // the index demand covers the LOD cut before occlusion; an asset past maxWorldMeshlets is
+    // split across several worlds, so their stats are summed
     const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
-    const visualization = data.get('data.visualization');
-    const colorMode = visualization === 'meshlet' ? 2 : 0;
+    const colorMode = data.get('data.visualization') === 'meshlet' ? MESHLET_COLOR_MODE.MESHLET : MESHLET_COLOR_MODE.LIT;
     let meshlets = 0, indices = 0, resident = 0, pages = 0, demand = false;
     for (const director of directors) {
         director.world.setColorMode(colorMode);

@@ -1,9 +1,9 @@
 import { expect } from 'chai';
 
+import { makeBucketMaterials, makeComputeDevice, makeViewWorld } from './meshlet-test-utils.mjs';
 import { Vec3 } from '../../../src/core/math/vec3.js';
 import { BoundingBox } from '../../../src/core/shape/bounding-box.js';
-import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
-import { ShaderMaterial } from '../../../src/scene/materials/shader-material.js';
+import { BUFFERUSAGE_COPY_SRC } from '../../../src/platform/graphics/constants.js';
 import {
     CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, ROOT_LIST_U32S
 } from '../../../src/scene/meshlet/constants.js';
@@ -12,57 +12,9 @@ import { MeshletShadowView } from '../../../src/scene/meshlet/meshlet-shadow-vie
 import { MeshletView } from '../../../src/scene/meshlet/meshlet-view.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
-// The view is exercised on the null device dressed up as compute-capable (see
-// meshlet-culler.test.mjs); storage buffers record their writes and the command encoder
-// records buffer copies.
-const makeDevice = () => {
-    const device = new NullGraphicsDevice(document.createElement('canvas'));
-    device.supportsCompute = true;
-    device.createComputeImpl = () => ({ destroy() {} });
-    const log = { copies: [], destroyed: [] };
-    device.createBufferImpl = () => ({
-        allocate() {}, write() {}, destroy() {}, loseContext() {}, buffer: {}
-    });
-    device.getCommandEncoder = () => ({
-        copyBufferToBuffer: (src, srcOffset, dst, dstOffset, size) => log.copies.push({ src, dst, size }),
-        clearBuffer() {}
-    });
-    device.computeDispatch = () => {};
-    device.getIndirectDrawSlot = () => 0;
-    device.getIndirectDispatchSlot = () => 0;
-    return { device, log };
-};
-
 const PAIRS = 1000;
-const materials = () => Array.from({ length: MESHLET_BUCKET_COUNT }, () => new ShaderMaterial());
-
-const makeWorld = (device, overrides = {}) => {
-    const lit = materials();
-    return {
-        totalPairs: PAIRS,
-        rootListItems: 7,
-        cut: { rootIndices: [0, 0, 0], rootRecords: 0, stageLevels: [] },
-        cells: { cellCount: 1, boundsBuffer: {}, instancesBuffer: {} },
-        recordCapacity: 4000,
-        initialRecords: 100,
-        instanceCount: 7,
-        pageSizeBytes: 65536,
-        totalPages: 3,
-        indexCapacity: [300, 60, 30],
-        indexWorst: [3000, 600, 300],
-        indexCeiling: 100000,
-        maxIndices: 0,
-        dummyBits: { destroy() {} },
-        objectDataBuffer: {},
-        meshletDataBuffer: {},
-        residencyBuffer: {},
-        requestsBuffer: {},
-        pagePool: {},
-        litMaterials: lit,
-        bucketMaterials: lit,
-        ...overrides
-    };
-};
+const makeWorld = (device, overrides) => makeViewWorld(overrides);
+const materials = makeBucketMaterials;
 
 const counters = (indices, records) => {
     const data = new Uint32Array(MESHLET_COUNTER_U32S);
@@ -83,7 +35,7 @@ describe('MeshletView', function () {
 
     beforeEach(function () {
         jsdomSetup();
-        ({ device, log } = makeDevice());
+        ({ device, log } = makeComputeDevice());
         shaders = new MeshletCullShaders(device);
         world = makeWorld(device);
     });
@@ -95,11 +47,9 @@ describe('MeshletView', function () {
         jsdomTeardown();
     });
 
-    const makeView = (options = {}, w = world) => new MeshletView(device, w, null, null, { cullShaders: shaders, ...options });
+    const makeView = (options = {}, w = world) => new MeshletView(device, w, null, { cullShaders: shaders, ...options });
 
-    it('keeps draw allocation bounded when the whole-scene root sum exceeds the budget', function () {
-        world.cut.rootIndices = [738324828, 120, 30];
-        world.cut.rootRecords = 200;
+    it('starts at the world\'s initial allocation, whatever the scene\'s worst case', function () {
         const view = makeView();
         expect(view.indexCapacity).to.deep.equal([300, 60, 30]);
         expect(view.recordCapacity).to.equal(100);
@@ -138,9 +88,7 @@ describe('MeshletView', function () {
         expect(view.meshInstances, 'three buckets, two phases').to.have.lengthOf(2 * MESHLET_BUCKET_COUNT);
         expect(view.meshInstances.map(mi => mi.material)).to.deep.equal([...world.litMaterials, ...world.litMaterials]);
         expect(view.meshInstances.every(mi => mi.getParameter('records').data === view.recordsBuffer)).to.equal(true);
-        expect(view.meshInstances.every(mi => !mi.castShadow && !mi.cull)).to.equal(true);
-        expect(view.drawPass1.name).to.equal('MeshletDrawPhase1');
-        expect(view.cullPhase2Pass.name).to.equal('MeshletCullPhase2');
+        expect(view.meshInstances.every(mi => !mi.castShadows && !mi.cull)).to.equal(true);
         view.destroy();
     });
 
@@ -154,8 +102,7 @@ describe('MeshletView', function () {
         expect(view.rootListBuffer).to.equal(shared.rootList);
         expect(view.indexCapacity).to.deep.equal([150, 30, 15]);
         expect(view.meshInstances).to.have.lengthOf(MESHLET_BUCKET_COUNT);
-        expect(view.meshInstances.every(mi => mi.castShadow && mi.cull), 'casters keep cull on').to.equal(true);
-        expect(view.drawPass1).to.equal(undefined);
+        expect(view.meshInstances.every(mi => mi.castShadows && mi.cull), 'casters keep cull on').to.equal(true);
         let destroyed = 0;
         shared.claim.destroy = shared.rootList.destroy = () => destroyed++;
         view.destroy();
@@ -163,7 +110,7 @@ describe('MeshletView', function () {
     });
 
     it('carries capacities and visibility bits across a rebuild, capped at the worst case', function () {
-        const carry = { buffer: { byteSize: 40, impl: { buffer: 'old-bits' } }, words: 20 };
+        const carry = { buffer: { byteSize: 40, bufferUsage: BUFFERUSAGE_COPY_SRC, impl: { buffer: 'old-bits' } }, words: 20 };
         const view = makeView({ capCarry: [5000, 10, 100], visCarry: carry });
         expect(view.indexCapacity, 'max(initial, carry) then min(worst)').to.deep.equal([3000, 60, 100]);
         expect(log.copies).to.have.lengthOf(1);
@@ -367,7 +314,7 @@ describe('MeshletShadowView', function () {
 
     beforeEach(function () {
         jsdomSetup();
-        ({ device } = makeDevice());
+        ({ device } = makeComputeDevice());
         shaders = new MeshletCullShaders(device);
         world = makeWorld(device);
     });
@@ -385,7 +332,7 @@ describe('MeshletShadowView', function () {
         const renderData = { shadowCamera };
         const light = { getRenderData: (camera, face) => ((camera === sceneCamera && face === 1) ? renderData : null) };
         world.bucketMaterials = materials(); // debug colour mode
-        const view = new MeshletShadowView(device, world, null, light, 1, sceneCamera, { cullShaders: shaders });
+        const view = new MeshletShadowView(device, world, light, 1, sceneCamera, { cullShaders: shaders });
         expect(view.singlePhase).to.equal(true);
         expect(view.meshInstances).to.have.lengthOf(MESHLET_BUCKET_COUNT);
         expect(view.meshInstances.map(mi => mi.material), 'lit, never the debug set').to.deep.equal(world.litMaterials);

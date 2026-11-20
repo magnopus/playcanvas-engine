@@ -1,71 +1,28 @@
 import { expect } from 'chai';
 import { stub } from 'sinon';
 
+import { makeMeshletResource, TEST_MESHLETS, TEST_PAGE_BYTES, TEST_TRIANGLES } from './meshlet-test-utils.mjs';
 import { Mat4 } from '../../../src/core/math/mat4.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import {
-    MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_FLAG_UNLIT, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
+    MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_FLAG_UNLIT, MATERIAL_RECORD, MATERIAL_SLOT_ABSENT,
     MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COLOR_MODE, MESHLET_DATA,
     MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA, OBJECT_DATA_U32S, PRIMITIVE_DATA,
-    OBJECT_FLAG_HIDDEN, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS
+    OBJECT_FLAG_HIDDEN, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT
 } from '../../../src/scene/meshlet/constants.js';
-import { MeshletPrimitive, MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
 import { MeshletWorld } from '../../../src/scene/meshlet/meshlet-world.js';
 import { MeshletTextures } from '../../../src/scene/meshlet/textures/meshlet-textures.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
-const PAGE_BYTES = 256;
-const MESHLETS = 3;
-const TRIANGLES = 10;
+const PAGE_BYTES = TEST_PAGE_BYTES;
+const MESHLETS = TEST_MESHLETS;
+const TRIANGLES = TEST_TRIANGLES;
 
-// a resident resource of one primitive, MESHLETS meshlets of TRIANGLES triangles spread over two
-// pages, with an optional baked material record whose flags select the draw bucket
-const makeResource = (device, { materialFlags = null, instances = 2, scale = 1 } = {}) => {
-    const prim = new MeshletPrimitive();
-    prim.meshletData = new Uint32Array(MESHLETS * MESHLET_DATA_U32S);
-    for (let m = 0; m < MESHLETS; m++) {
-        prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.PARENT] = 0xFFFFFFFF;
-        prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.TRIANGLE_COUNT] = TRIANGLES;
-        prim.meshletData[m * MESHLET_DATA_U32S + MESHLET_DATA.PAGE] = m % 2;
-    }
-    prim.meshletDataF32 = new Float32Array(prim.meshletData.buffer);
-    prim.meshletCount = MESHLETS;
-    prim.uvChannelMask = 1;
-    prim.vertexCount = 12;
-    prim.lods = [];
-    prim.aabbCenter = [1, 2, 3];
-    prim.aabbHalfExtents = [1, 1, 1];
-    prim.materialIndex = 0;
-    prim.baseColorFactor = [0.5, 0.25, 1, 1];
-    prim.meshIndex = 0;
-    prim.primIndex = 0;
-
-    const pageTable = new Uint32Array(2 * PAGE_TABLE_FIELDS);
-    pageTable[1 * PAGE_TABLE_FIELDS + PAGE_TABLE.OFFSET_LO] = PAGE_BYTES;
-    const manifest = {
-        blobs: [{ uri: 'pages_roots.dat', byteLength: 2 * PAGE_BYTES }],
-        pageTable,
-        pageCount: 2,
-        rootPages: [0],
-        attributeLayout: { uvComponents: 1, tangents: false },
-        pageSizeBytes: PAGE_BYTES,
-        pageAlignment: 256,
-        positionGrid: { origin: [0.5, 0, 0], step: 0.01, bits: 16 }
-    };
-    const placements = Array.from({ length: instances }, (_, i) => {
-        const matrix = new Float32Array(16);
-        matrix[0] = scale; matrix[5] = scale; matrix[10] = scale; matrix[15] = 1;
-        matrix[12] = i * 10;   // translate each instance along x
-        return { primIndex: 0, matrix };
-    });
-    const resource = new MeshletResource(device, [prim], manifest, placements);
-    if (materialFlags !== null) {
-        resource.materialTable = new Uint32Array(MATERIAL_RECORD_U32S);
-        resource.materialTable[MATERIAL_RECORD.FLAGS] = materialFlags;
-        resource.materialCount = 1;
-    }
-    return { resource, shards: [new ArrayBuffer(2 * PAGE_BYTES)] };
-};
+// a resident resource (see makeMeshletResource) with its shard
+const makeResource = (device, options) => ({
+    resource: makeMeshletResource(device, options),
+    shards: [new ArrayBuffer(2 * PAGE_BYTES)]
+});
 
 describe('MeshletWorld', function () {
 
@@ -158,7 +115,7 @@ describe('MeshletWorld', function () {
             world.finalize();
             expect(world.poolSlots).to.equal(3);
             expect(world.pagePool.byteSize).to.equal(PAGE_BYTES * 3);
-            expect(world.maxPoolSlots(device)).to.equal(3);
+            expect(world.maxPoolSlots()).to.equal(3);
         } finally {
             world.destroy();
         }
@@ -241,6 +198,14 @@ describe('MeshletWorld', function () {
             expect(world.indexCapacity).to.deep.equal(world.indexWorst);
             // resident: page p sits in pool slot p
             expect(Array.from(uploaded(world.residencyBuffer))).to.deep.equal([0, 1, 2, 3]);
+            world.destroy();
+        });
+
+        it('collects the global root pages of every placement, one resource added twice included', function () {
+            const twice = makeResource(device, { instances: 1 });
+            const world = build(new MeshletWorld(device), twice, twice);
+            // every meshlet is a root, over local pages 0 and 1; the second add starts at page 2
+            expect(world.rootPages).to.deep.equal([0, 1, 2, 3]);
             world.destroy();
         });
 

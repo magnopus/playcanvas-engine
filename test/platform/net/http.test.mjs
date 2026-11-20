@@ -474,6 +474,16 @@ describe('Http', function () {
             expect(data.byteLength).to.be.above(0);
         });
 
+        it('does not store an XML response, which a cache hit could not return as a document', async function () {
+            const url = 'http://localhost/test.xml';
+            const text = '<a>1</a>';
+            http._storeInCache(url, { responseType: '', response: text, responseText: text }, Http.ContentType.XML);
+            http._storeInCache(`${url}.txt`, { responseType: '', response: text, responseText: text }, 'text/plain');
+            await settle();
+            expect(cache.hasFile(url)).to.equal(false);
+            expect(cache.hasFile(`${url}.txt`)).to.equal(true);
+        });
+
         it('does not store a failed response', async function () {
             await get('/someurl.json').catch(() => {});
             await settle();

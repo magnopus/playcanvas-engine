@@ -16,6 +16,8 @@ export default /* glsl */`
 
 void main(void) {
 
+    #include "litEngineMainStartPS"
+
     #ifdef CLIP_PLANES
         applyClipPlanes(vPositionW);
     #endif
@@ -83,6 +85,7 @@ void main(void) {
         #endif
     #endif
 
+    #include "litEngineMainEndPS"
     #include "litUserMainEndPS"
 }
 `;

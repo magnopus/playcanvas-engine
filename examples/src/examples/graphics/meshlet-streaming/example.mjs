@@ -1,14 +1,14 @@
 // @config
+//
+// Streamed meshlet rendering (WebGPU only): the Bistro streams on demand over HTTP Range requests
+// from its pinned root pages. The GPU cull marks the pages its LOD cut needs, missing clusters
+// render their nearest resident ancestor, and the scene refines coarse to fine with no holes. A
+// grid of Stanford bunnies (a separately baked asset sharing the world) sits in the street.
+// Toggle two-phase HZB occlusion and watch the triangle count drop when buildings occlude the
+// street. Needs a local Bistro bake, see examples/assets/meshlets/README.md.
+//
 // @flag WEBGL_DISABLED
-// @flag HIDDEN
 // @flag HIDDEN_IN_DEV
-
-// GPU-driven meshlet rendering: the Bistro (100k meshlets, 166 MB of geometry pages) streams on
-// demand over HTTP Range requests from its pinned root pages - the GPU cull pass marks the
-// pages its LOD cut needs, missing clusters render their nearest resident ancestor, and the
-// scene refines coarse to fine with no holes. A grid of Stanford bunnies (a separately baked
-// asset sharing the world) sits in the street. Two-phase HZB occlusion culling can be toggled:
-// watch the triangles-drawn counter drop when the buildings occlude the street behind them.
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
@@ -28,6 +28,7 @@ import {
     FILTER_NEAREST,
     LightComponentSystem,
     Mat4,
+    MESHLET_COLOR_MODE,
     MeshletComponentSystem,
     PIXELFORMAT_BGRA8,
     PIXELFORMAT_DEPTH,
@@ -51,7 +52,7 @@ import { data, deviceType } from 'examples/context';
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
-// the Bistro's streamed textures are KTX2/Basis - initialize the transcoder
+// streamed textures are KTX2 / Basis
 basisInitialize({
     glueUrl: './assets/wasm/basis/basis.wasm.js',
     wasmUrl: './assets/wasm/basis/basis.wasm.wasm',
@@ -100,18 +101,15 @@ app.setCanvasResolution(RESOLUTION_AUTO);
 app.start();
 app.resizeCanvas();
 
-// the example runs in an iframe and the example browser does not forward its query string, so
-// merge the top window's params in (lowest priority) - the ?flags then work on the outer
-// /#/graphics/meshlet-streaming URL as well as on the /iframe/ one
+// the example browser does not forward its query string to this iframe, so the top window's
+// params are merged in at lowest priority
 const params = new URLSearchParams(location.search);
 try {
-    if (window.top !== window) {
-        new URLSearchParams(window.top.location.search).forEach((value, key) => {
-            if (!params.has(key)) params.set(key, value);
-        });
-    }
-} catch (_e) {
-    // cross-origin parent - this frame's own params only
+    new URLSearchParams(window.top.location.search).forEach((value, key) => {
+        if (!params.has(key)) params.set(key, value);
+    });
+} catch {
+    // cross-origin parent: this frame's own params only
 }
 
 // GPU timing (whole-frame cost in the stats panel, per-pass breakdown in the console) only with
@@ -126,7 +124,7 @@ const bistroResource = assets.bistro.resource.meshlets[0];
 const bunnyResource = assets.bunny.resource.meshlets[0];
 
 data.set('data', {
-    colorMode: parseInt(params.get('color') ?? '0', 10),
+    colorMode: Number(params.get('color') ?? MESHLET_COLOR_MODE.LIT),
     gridSize: parseInt(params.get('grid') ?? '4', 10),
     threshold: parseFloat(params.get('threshold') ?? '1'),
     occlusion: params.get('occlusion') !== '0',
@@ -137,9 +135,7 @@ data.set('data', {
     occluder: params.get('occluder') !== '0',
     bunnies: true,
     texPoolMb: parseInt(params.get('texpool') ?? '96', 10),
-    // Geometry VRAM budget - the WHOLE geometry side, not just the page pool. The Bistro needs
-    // ~300 MB of pages alone; 128 (the old page-pool-only default) leaves it thousands of pages
-    // short, which shows as holes rather than lower detail.
+    // geometry VRAM budget: covers all meshlet geometry buffers, not just the page pool
     geoPoolMb: parseInt(params.get('geopool') ?? '512', 10),
     shadows: params.get('shadows') !== '0',
     cascades: Math.max(1, Math.min(4, parseInt(params.get('cascades') ?? '2', 10))),
@@ -168,15 +164,9 @@ director.onBudgetExceeded = (info) => {
         `budget too small: ${info.pagesMissing} pages short, try ${Math.ceil(info.suggestedBudgetBytes / 1048576)} MB`
     );
 };
-// debug hook: the director is reachable from the console / headless probes
-window.__meshletDirector = director;
-window.__data = data; // ...and the panel observer, so the controls can be driven headlessly
 
-// The bunny field is a fixed-width column of rows that grows AWAY from the camera: its front
-// row is pinned to the street, and raising the count adds rows down the street rather than
-// spreading outwards. That keeps the nearest bunny at a fixed distance, so the occluder wall
-// in front of it neither creeps towards the camera nor swells to fill the screen as the
-// count rises - only the field's (shrinking) angular extent changes.
+// The bunny field is a fixed-width column of rows that grows away from the camera, so the nearest
+// bunny, and the occluder wall in front of it, stay at a fixed distance as the count rises.
 const BUNNY_SCALE = 15;
 const BUNNY_SPACING = 2.6;
 const BUNNY_HEIGHT = BUNNY_SCALE * 0.15;
@@ -331,8 +321,8 @@ refSphere.setLocalScale(2, 2, 2);
 refSphere.setLocalPosition(streetCenter.x + 8, 2, streetCenter.z + 4);
 app.root.addChild(refSphere);
 
-// transparent test slab straddling the street - verifies draw ordering: it must composite
-// OVER the meshlets behind it and UNDER anything in front (meshlets draw before transparents)
+// transparent slab straddling the street, to check draw ordering: it composites over the
+// meshlets behind it and under anything in front (meshlets draw before transparents)
 const slabMaterial = new StandardMaterial();
 slabMaterial.diffuse.set(0.2, 0.6, 1.0);
 slabMaterial.blendType = BLEND_NORMAL;
@@ -344,13 +334,10 @@ slab.setLocalScale(14, 8, 0.4);
 slab.setLocalPosition(streetCenter.x, 4, streetCenter.z - 6);
 app.root.addChild(slab);
 
-// occluder wall - a REGULAR render component, not a meshlet. The meshlet pass order draws
-// meshlet depth first, then the scene's opaque geometry, and only then builds the HZB, so
-// ordinary scene meshes occlude meshlets too. This one slides across in front of the bunny
-// grid: with occlusion on, the whole grid stops being drawn a frame later; with it off, every
-// bunny still pays full vertex and pixel cost behind the wall.
-// unlit on purpose: the wall is a measuring instrument, and a lit surface covering this much
-// of the screen would cost more to shade than the bunnies it hides save
+// Occluder wall: a regular render component, not a meshlet. The HZB is built after the scene's
+// opaque geometry, so ordinary meshes occlude meshlets too. It slides across in front of the
+// bunny grid; with occlusion on, the grid stops being drawn a frame later. Unlit, so shading the
+// wall does not cost more than the bunnies it hides save.
 const wallMaterial = new StandardMaterial();
 wallMaterial.useLighting = false;
 wallMaterial.diffuse.set(0, 0, 0);
@@ -446,10 +433,8 @@ app.on('update', (dt) => {
         _wallRight.cross(_wallDir, Vec3.UP).normalize();
         _wallUp.cross(_wallRight, _wallDir).normalize();
 
-        // The field is deep, not a point: the wall must stand clear of its NEAREST corner or
-        // the front rows end up in front of it and can never be occluded. Size then comes from
-        // projecting every corner onto the wall plane, which covers the whole field exactly -
-        // and because the field grows away from the camera, adding rows barely moves it.
+        // the wall stands clear of the field's nearest corner, or the front rows would be in
+        // front of it, and is sized by projecting every corner onto its plane
         let nearFwd = Infinity;
         for (const c of fieldCorners) {
             _tmpVec.sub2(c, camPos);
@@ -470,7 +455,7 @@ app.on('update', (dt) => {
         halfH *= 1.08;
 
         // dwell open / dwell closed: a sine pushed past +-1 and clamped. ?wall=closed|open
-        // parks it, which is how the occlusion win is measured with a steady counter.
+        // parks it, for a steady triangle count.
         const cover =
             wallMode === 'closed'
                 ? 1
@@ -525,7 +510,7 @@ app.on('update', (dt) => {
     if (view?.lastDemand && ++statFrames % 30 === 0) {
         const tris = Math.round(view.lastDemand.indices.reduce((a, b) => a + b, 0) / 3);
         const res = director.residency;
-        const gpuMs = device.gpuProfiler._frameTime;
+        const gpuMs = device.gpuProfiler.frameTime ?? 0;
         data.set(
             'data.stats',
             `${(tris / 1e6).toFixed(2)}M tris${gpuMs > 0 ? `, ${gpuMs.toFixed(2)} ms GPU` : ''}, ` +
@@ -544,8 +529,8 @@ app.on('update', (dt) => {
         // pressure scale (the quality cost of fitting the budget; 1 = full quality)
         const mb = (b) => (b / 1048576).toFixed(0);
         const pageBytes = director.world.pageSizeBytes;
-        // whole geometry budget, not just the page pool - storage + index buffers is what the
-        // meshlet pipeline actually holds for geometry
+        // storage + index buffers is what the meshlet pipeline holds for geometry; read from the
+        // device's private VRAM counters, as there is no public equivalent
         const geoUsed = device._vram.sb + device._vram.ib;
         const geoMax = director.world.poolBytes;
         const pool = (res ? res.residentPages : 0) * pageBytes;

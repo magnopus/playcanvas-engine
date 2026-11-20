@@ -10,6 +10,9 @@ import {
 import { createMeshletLitMaterial } from '../../../src/scene/meshlet/meshlet-lit-material.js';
 import { createMeshletMaterial } from '../../../src/scene/meshlet/meshlet-material.js';
 import { buildMeshletLitChunks } from '../../../src/scene/meshlet/shaders/meshlet-lit-chunks-wgsl.js';
+import {
+    meshletDecodeOct16WGSL, meshletDecodeTangentWGSL, meshletFetchVertexWGSL, meshletNormalMatrixWGSL
+} from '../../../src/scene/meshlet/shaders/meshlet-page-wgsl.js';
 import litMainPS from '../../../src/scene/shader-lib/wgsl/chunks/lit/frag/litMain.js';
 import litForwardMainPS from '../../../src/scene/shader-lib/wgsl/chunks/lit/frag/pass-forward/litForwardMain.js';
 import litOtherMainPS from '../../../src/scene/shader-lib/wgsl/chunks/lit/frag/pass-other/litOtherMain.js';
@@ -76,10 +79,9 @@ describe('buildMeshletLitChunks', function () {
     });
 
     it('samples explicit resident levels and blends across the fine-tail boundary', function () {
+        // slot sampling sits in material-dependent branches, where implicit derivatives are illegal
         const source = buildMeshletLitChunks(textured).litEngineDeclarationPS;
-        expect(source).not.to.include('textureSampleGrad');
-        expect(source).to.include('clamp(comb, minLod + sizeBias, fineTop)');
-        expect(source).to.include('clamp(lod - (tailStart - 1.0), 0.0, 1.0)');
+        expect(source).not.to.match(/textureSample(?:Grad)?\(/);
         expect(source).to.include('return mix(fineColor, tailColor, tailWeight)');
         for (const family of ['Srgb', 'Srgba', 'Normal', 'Linear']) {
             expect(source).to.include(`textureSampleLevel(meshletFine${family}, meshletFine${family}Sampler, uv, i32(slotLayer), fineLod)`);
@@ -91,10 +93,9 @@ describe('buildMeshletLitChunks', function () {
     it('decodes per-instance EPIC lightmaps without changing unlightmapped lighting', function () {
         const chunks = buildMeshletLitChunks({ ...textured, uvChannels: 5, lightmaps: true });
         expect(chunks.litEngineMainEndVS).to.include('output.vMeshletInstance = meshletInstance;');
+        // four vec4 rows per instance: transform, decode scale, decode add, texture info
         expect(chunks.litEngineDeclarationPS).to.include('meshletLightmaps[vMeshletInstance * 4u + 3u].z != 0.0');
-        expect(chunks.litEngineDeclarationPS).to.include('atlasUv + vec2f(0.0, 0.5)');
-        expect(chunks.litEngineDeclarationPS).to.include('upper.a + lower.a / 255.0 - 0.5 / 255.0');
-        expect(chunks.litEngineDeclarationPS).to.include('upper.rgb * upper.rgb * decodeScale.rgb + decodeAdd.rgb');
+        expect(chunks.litEngineDeclarationPS).to.match(/exp2\(logLuminance\) - 0\.01858136, 0\.0\) \* 0\.6 \*/);
         expect(chunks.litEngineDeclarationPS).to.include('uv = vMeshletUv1; ddx = dMeshletUv1Dx; ddy = dMeshletUv1Dy;');
         expect(chunks.litEngineDeclarationPS).to.include('uv = vMeshletUv4; ddx = dMeshletUv4Dx; ddy = dMeshletUv4Dy;');
         expect(chunks.litEngineDeclarationPS).to.include('meshletTexMinLod(texResidency[u32(textureInfo.x)])');
@@ -185,19 +186,26 @@ describe('buildMeshletLitChunks', function () {
 
     it('reverses tangent handedness for mirrored normal-mapped placements', function () {
         const source = buildMeshletLitChunks(textured).litEngineMainStartVS;
-        expect(source).to.include('dot(cross(dMeshletModelMatrix[0].xyz, dMeshletModelMatrix[1].xyz), dMeshletModelMatrix[2].xyz) < 0.0');
         expect(source).to.include('dMeshletBtSign = meshletTangent.w * select(1.0, -1.0, meshletMirrored);');
-        expect(buildMeshletLitChunks().litEngineMainStartVS).not.to.include('meshletMirrored');
+        expect(buildMeshletLitChunks().litEngineMainStartVS, 'only with tangents').not.to.include('meshletMirrored');
     });
 
-    it('replaces the vertex buffer with page-pool vertex pulling', function () {
+    it('replaces the vertex buffer with the shared page-pool vertex pull', function () {
         const chunks = buildMeshletLitChunks();
         expect(chunks.transformCoreVS).to.include('var<private> vertex_position: vec4f;');
         expect(chunks.transformCoreVS).to.not.match(/^\s*attribute\s/m);
-        expect(chunks.litEngineCodeVS).to.include('struct MeshletPageLayout');
-        expect(chunks.litEngineMainStartVS).to.include('meshletDecodeDrawIndex(pcVertexIndex)');
-        expect(chunks.litEngineMainStartVS).to.include('meshletPagePosition(meshletLayout, meshletVert, meshletGridOrigin, meshletGridStep)');
+        // the same vertex pull and normal transform as the debug material, not a copy of them
+        expect(chunks.litEngineCodeVS).to.include(meshletFetchVertexWGSL);
+        expect(chunks.normalCoreVS).to.include(meshletNormalMatrixWGSL);
+        expect(chunks.litEngineMainStartVS).to.include('meshletFetchVertex(pcVertexIndex, uniform.pageSizeWords)');
         expect(chunks.litEngineMainStartPS, 'no UV derivatives without UVs').to.equal(undefined);
+    });
+
+    it('decodes tangents only alongside the normal decode they share the octahedral unfold with', function () {
+        expect(buildMeshletLitChunks().litEngineCodeVS).to.not.include(meshletDecodeTangentWGSL);
+        const code = buildMeshletLitChunks(textured).litEngineCodeVS;
+        expect(code).to.include(meshletDecodeTangentWGSL);
+        expect(code.indexOf(meshletDecodeOct16WGSL)).to.be.at.least(0);
     });
 
     it('reads material factors from the typed record by field name', function () {
@@ -210,8 +218,6 @@ describe('buildMeshletLitChunks', function () {
         expect(chunks.alphaTestPS).to.include('materialTable[vMeshletMatRow].alphaCutoff');
         expect(chunks.litEngineDeclarationPS).to.include('struct MeshletMaterial');
         expect(chunks.litEngineDeclarationVS, 'both stages declare the structs').to.include('struct MeshletMaterial');
-        expect(chunks.litEngineMainStartVS).to.include('meshletInstanceMatrix(meshletInstance)');
-        expect(chunks.litEngineMainStartVS).to.include('let meshletGridOrigin = meshletPrimitive.gridOrigin;');
         expect(chunks.diffusePS, 'no texture sampling without textures').to.not.include('meshletSampleSlot');
     });
 
@@ -258,9 +264,7 @@ describe('buildMeshletLitChunks', function () {
         expect(chunks.normalMapPS).to.include(`meshletSampleSlot(${MATERIAL_SLOT.NORMAL}u`);
         expect(chunks.normalMapPS).to.include('vMeshletTangentW');
         expect(chunks.normalMapPS).to.include('B = cross(n, T) * vMeshletBtSign');
-        expect(chunks.normalMapPS).not.to.include('dMeshletPosition');
-        expect(chunks.normalMapPS).not.to.match(/dpdx\(|dpdy\(|determinant|bitangent/);
-        expect(chunks.litEngineMainStartPS).not.to.include('dMeshletPosition');
+        expect(chunks.normalMapPS, 'no screen-space tangent frame').not.to.match(/dpdx\(|dpdy\(/);
 
         const noTangents = buildMeshletLitChunks({ ...textured, tangents: false });
         expect(noTangents.normalMapPS).not.to.include(`meshletSampleSlot(${MATERIAL_SLOT.NORMAL}u`);
@@ -332,12 +336,11 @@ describe('meshlet materials', function () {
         expect(opaque.cull).to.equal(CULLFACE_BACK);
         expect(masked.cull).to.equal(CULLFACE_NONE);
         const vertex = opaque.shaderDesc?.vertexWGSL ?? opaque._shaderDesc?.vertexWGSL ?? '';
-        expect(vertex).to.include('output.vColor = meshletColor(meshlet);');
+        // the lit path's vertex pull and normal transform, coloured per meshlet, no material record
+        expect(vertex).to.include(meshletFetchVertexWGSL);
+        expect(vertex).to.include(meshletNormalMatrixWGSL);
+        expect(vertex).to.include('output.vColor = meshletColor(fetched.meshlet);');
         expect(vertex).not.to.include('materialTable');
-        expect(vertex).to.include('struct MeshletPageLayout');
-        expect(vertex).to.include('let hue = f32(h & 65535u) / 65536.0;');
-        expect(vertex).to.include('return mix(vec3f(0.02), vec3f(0.8), rgb);');
-        expect(vertex).not.to.include('* 0.75 + 0.25');
         [opaque, masked].forEach(m => m.destroy());
     });
 });

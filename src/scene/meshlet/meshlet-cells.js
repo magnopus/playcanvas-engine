@@ -29,9 +29,8 @@ const INDEX_SCALE = 2 ** INDEX_BITS;
 // Instances are grouped by class before position, so a cell's members are within 2x of each
 // other's size. A cell's sphere encloses its largest member and the cell cull's size test uses
 // that member's radius, so one large instance in a cell of small ones would keep all of them
-// visible to every view that sees it - a 1 km terrain tile among crates, or a boulder among
-// pebbles: with coarse classes, a far cell of clutter survives the size cut on its one big
-// member and every small one is still classified each frame.
+// visible to every view that sees it: a far cell of clutter would survive the size cut on its
+// one big member, and every small one would still be classified each frame.
 const CLASS_MIN_LOG2 = -8;
 const CLASS_COUNT = 24;
 

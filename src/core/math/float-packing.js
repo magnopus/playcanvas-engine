@@ -81,6 +81,28 @@ class FloatPacking {
     }
 
     /**
+     * Unpacks a 16-bit half-float representation, as written by {@link float2Half}, to a float.
+     *
+     * @param {number} value - The 16-bit half-float representation as an integer.
+     * @returns {number} The float value.
+     * @example
+     * const value = FloatPacking.half2Float(0x3e00); // 1.5
+     */
+    static half2Float(value) {
+        const sign = (value & 0x8000) ? -1 : 1;
+        const e = (value >> 10) & 0x1f;
+        const m = value & 0x3ff;
+        if (e === 0) {
+            // zero or denormal
+            return sign * m * (2 ** -24);
+        }
+        if (e === 31) {
+            return m ? NaN : sign * Infinity;
+        }
+        return sign * (1 + m / 1024) * (2 ** (e - 15));
+    }
+
+    /**
      * Converts bits of a 32-bit float into RGBA8 format and stores the result in a provided color.
      * The float can be reconstructed in shader using the uintBitsToFloat instruction.
      *

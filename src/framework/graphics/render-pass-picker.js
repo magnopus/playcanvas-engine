@@ -52,7 +52,12 @@ class RenderPassPicker extends RenderPass {
     /** @type {Map<number, MeshInstance|null>} */
     _pickMeshInstances = new Map();
 
-    /** @type {boolean} - meshlet geometry is world-wide, so it is added once per pick, not per layer. */
+    /**
+     * Whether meshlet geometry was added to this pick: it is world-wide, so it is added once per
+     * pick, not per layer.
+     *
+     * @type {boolean}
+     */
     _meshletAdded = false;
 
     /**

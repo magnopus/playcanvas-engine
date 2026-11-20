@@ -245,6 +245,7 @@ export { GSplatSogData } from './scene/gsplat/gsplat-sog-data.js';
 export { MeshletDirector } from './scene/meshlet/meshlet-director.js';
 export { MeshletResource } from './scene/meshlet/meshlet-resource.js';
 export { MeshletWorld } from './scene/meshlet/meshlet-world.js';
+export { MESHLET_COLOR_MODE } from './scene/meshlet/constants.js';
 export { GSplatSogResource } from './scene/gsplat/gsplat-sog-resource.js';
 
 // FRAMEWORK

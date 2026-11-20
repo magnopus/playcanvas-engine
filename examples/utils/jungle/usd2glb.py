@@ -41,7 +41,9 @@ from pxr import Usd, UsdGeom, UsdShade
 
 Image.MAX_IMAGE_PIXELS = None
 
-SCENE = os.environ.get('JUNGLE_USD', os.path.expanduser('~/Downloads/JungleRuins/USD/JungleRuins_Karma.usda'))
+SCENE = os.environ.get('JUNGLE_USD')
+if not SCENE:
+    sys.exit('set JUNGLE_USD to the JungleRuins scene (JungleRuins/USD/JungleRuins_Karma.usda)')
 
 # USD (x, y, z) cm, Z-up -> glTF (x, z, -y) m
 CONV = np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]], dtype=np.float64)

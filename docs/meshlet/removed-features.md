@@ -1,8 +1,10 @@
 # Meshlet features removed to shrink the pipeline
 
-These features were cut to reduce the meshlet code to its core. The full implementations live on
-the branch `feat/gpu-driven-final-before-cutting-features`. Each section covers what the feature
-did, where it lived, and what we would do differently if it comes back.
+These features were cut to reduce the meshlet code to its core. The full implementations are at
+commit `9514252900726bb366a25d9da33b2339c04bc42a` (tag `meshlet-before-feature-cut`, originally the
+local branch `feat/gpu-driven-final-before-cutting-features`). Check them out with
+`git checkout meshlet-before-feature-cut`, or by the SHA if the tag is not present. Each section
+covers what the feature did, where it lived, and what we would do differently if it comes back.
 
 ---
 

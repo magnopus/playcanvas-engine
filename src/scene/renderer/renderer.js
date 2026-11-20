@@ -53,6 +53,7 @@ import { MAX_CLIP_PLANES } from '../clip-planes.js';
  * @import { Scene } from '../scene.js'
  * @import { Shader } from '../../platform/graphics/shader.js'
  * @import { GSplatDirector } from '../gsplat-unified/gsplat-director.js'
+ * @import { MeshletDirectorGroup } from '../meshlet/meshlet-director-group.js'
  */
 
 let _skinUpdateIndex = 0;
@@ -346,10 +347,9 @@ class Renderer {
     gsplatDirector = null;
 
     /**
-     * A meshlet director for GPU-driven meshlet rendering - one director, or a group driving
-     * several meshlet worlds as one pipeline.
+     * The meshlet director group driving GPU-driven meshlet rendering, if any.
      *
-     * @type {import('../meshlet/meshlet-director.js').MeshletDirector|import('../meshlet/meshlet-director-group.js').MeshletDirectorGroup|null}
+     * @type {MeshletDirectorGroup|null}
      */
     meshletDirector = null;
 

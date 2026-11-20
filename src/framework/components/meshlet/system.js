@@ -1,11 +1,14 @@
 import { Debug } from '../../../core/debug.js';
 import { basisTranscode } from '../../handlers/basis.js';
-import { MESHLET_DATA_U32S } from '../../../scene/meshlet/constants.js';
 import { MeshletDirectorGroup } from '../../../scene/meshlet/meshlet-director-group.js';
-import { magMeshlets, restoreMeshletRecords } from '../../parsers/glb/extensions/mag-meshlets.js';
+import { magMeshlets } from '../../parsers/glb/extensions/mag-meshlets.js';
 import { registerGlbResourceExtension, unregisterGlbResourceExtension } from '../../parsers/glb-resource-extension.js';
 import { ComponentSystem } from '../system.js';
 import { MeshletComponent } from './component.js';
+import { MESHLET_DEFAULTS } from './meshlet-defaults.js';
+import { MeshletPlayableTracker } from './meshlet-playable-tracker.js';
+import { MeshletRecordStore } from './meshlet-record-store.js';
+import { applyWorldSettings, buildPartition, groupComponents, planWorlds, worldMeshletLimit } from './meshlet-world-planner.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
@@ -13,17 +16,10 @@ import { MeshletComponent } from './component.js';
  * @import { ByteCache } from '../../../platform/net/byte-cache.js'
  * @import { CameraComponent } from '../camera/component.js'
  * @import { MeshletDirector } from '../../../scene/meshlet/meshlet-director.js'
+ * @import { MeshletPartitionState, MeshletWorldSettings } from './meshlet-world-planner.js'
  */
 
 const _properties = ['asset', 'resource', 'baseUrl', 'castShadows'];
-
-// shared component statuses for the states with nothing to measure
-const STATUS_NO_GROUP = Object.freeze({ playable: true, failed: false, progress: 1, totalBytes: 0, loadedBytes: 0 });
-const STATUS_NOT_PLACED = Object.freeze({ playable: false, failed: false, progress: 0, totalBytes: 0, loadedBytes: 0 });
-
-// draw indices a fresh world's views start with; demand grows them from there
-const INITIAL_DRAW_INDICES = 2 * 1024 * 1024;
-
 
 // how long a split scene must go without a rebuild before its worlds' records are released
 const RECORD_RELEASE_DELAY_MS = 5000;
@@ -92,60 +88,31 @@ class MeshletComponentSystem extends ComponentSystem {
      */
     _containerHandler = null;
 
-    /**
-     * The meshlet pipeline - one director per world - or null on non-WebGPU devices. Created on
-     * first use: the first component added, or the first access to a pipeline setting, so an
-     * application without meshlets pays nothing for it.
-     *
-     * @type {MeshletDirectorGroup|null}
-     * @ignore
-     */
-    get group() {
-        return this._initialized ? this._group : this._initialize();
-    }
-
-    /**
-     * The first world's meshlet director, or null on non-WebGPU devices. A scene within
-     * {@link maxWorldMeshlets} has only this one; see {@link directors} for all of them.
-     *
-     * @type {MeshletDirector|null}
-     * @ignore
-     */
-    get director() {
-        return this.group?.directors[0] ?? null;
-    }
-
-    /**
-     * Every world's meshlet director, empty on non-WebGPU devices.
-     *
-     * @type {MeshletDirector[]}
-     * @ignore
-     */
-    get directors() {
-        return this.group?.directors ?? [];
-    }
-
     /** @private */
     _dirty = false;
 
-    /** @type {number} - ms timestamp of the first unserved dirty mark, 0 when clean. @private */
-    _dirtySince = 0;
-
-    /** @type {number} - ms timestamp of the latest dirty mark. @private */
-    _dirtyLast = 0;
-
-    /** @type {boolean} - {@link playable} as of the last frame, to fire on transitions. @private */
-    _wasPlayable = true;
-
     /**
-     * Components with {@link MeshletComponent#whenPlayable} waiters, polled each frame.
+     * Timestamp in milliseconds of the first unserved dirty mark, 0 when clean.
      *
-     * @type {Set<MeshletComponent>}
+     * @type {number}
      * @private
      */
-    _playableWatch = new Set();
+    _dirtySince = 0;
 
-    /** @type {number} - world rebuilds performed so far (a load-pattern statistic). */
+    /**
+     * Timestamp in milliseconds of the latest dirty mark.
+     *
+     * @type {number}
+     * @private
+     */
+    _dirtyLast = 0;
+
+    /**
+     * World rebuilds performed so far.
+     *
+     * @type {number}
+     * @ignore
+     */
     rebuildCount = 0;
 
     /** @private */
@@ -195,59 +162,58 @@ class MeshletComponentSystem extends ComponentSystem {
     /** @private */
     _suspended = false;
 
-    /** @private */
-    _poolBytes = 256 * 1024 * 1024;
-
-    /** @private */
-    _texturePoolBytes = 96 * 1024 * 1024;
-
-    /** @private */
-    _maxFineTextureSize = 2048;
-
-    /** @private */
-    _maxDrawIndices = 0;
-
-    /** @private */
-    _maxWorldMeshlets = 12 * 1024 * 1024;
+    /**
+     * The world budgets and limits, applied on the next rebuild.
+     *
+     * @type {MeshletWorldSettings}
+     * @private
+     */
+    _worldSettings = {
+        poolBytes: MESHLET_DEFAULTS.poolBytes,
+        texturePoolBytes: MESHLET_DEFAULTS.texturePoolBytes,
+        maxFineTextureSize: MESHLET_DEFAULTS.maxFineTextureSize,
+        maxDrawIndices: MESHLET_DEFAULTS.maxDrawIndices,
+        maxWorldMeshlets: MESHLET_DEFAULTS.maxWorldMeshlets
+    };
 
     /**
-     * Per world, what it was last built with (resource groups and their components, budgets,
-     * settings), so a rebuild can leave unchanged worlds alone.
+     * Per world, what it was last built with, so a rebuild can leave unchanged worlds alone.
      *
-     * @type {object[]}
+     * @type {MeshletPartitionState[]}
      * @private
      */
     _partitionStates = [];
 
     /**
-     * Where each resource whose records were released reloads them from.
+     * Releases settled resources' meshlet records and fetches them back on demand.
      *
-     * @type {Map<object, { url: string, credentials: RequestCredentials|null }>}
-     * @private
+     * @type {MeshletRecordStore}
+     * @ignore
      */
-    _recordSources = new Map();
+    _records;
 
     /**
-     * Record restores in flight (or waiting to retry after a failure), by resource. Planning
-     * waits while any are pending.
+     * Tracks when the content and the components waited on become playable.
      *
-     * @type {Map<object, Promise<void>>}
-     * @private
+     * @type {MeshletPlayableTracker}
+     * @ignore
      */
-    _restoring = new Map();
+    _playable;
 
     /**
-     * Consecutive restore failures, by resource, for the retry backoff.
+     * performance.now() of the last world rebuild.
      *
-     * @type {Map<object, number>}
+     * @type {number}
      * @private
      */
-    _restoreFailures = new Map();
-
-    /** @type {number} - performance.now() of the last world rebuild. @private */
     _lastRebuild = 0;
 
-    /** @type {number} - {@link _lastRebuild} as of the last record release. @private */
+    /**
+     * {@link _lastRebuild} as of the last record release.
+     *
+     * @type {number}
+     * @private
+     */
     _recordsReleasedAt = -1;
 
     /**
@@ -262,6 +228,10 @@ class MeshletComponentSystem extends ComponentSystem {
         this.id = 'meshlet';
         this.ComponentType = MeshletComponent;
 
+        // a settled restore re-plans the rebuild that waited for it
+        this._records = new MeshletRecordStore(() => this._markDirty());
+        this._playable = new MeshletPlayableTracker(this);
+
         // Resource handlers are created before component systems, so register glTF meshlet support
         // here to keep its resource implementation tree-shakeable when this system is omitted.
         const containerHandler = app.loader.getHandler('container');
@@ -270,6 +240,39 @@ class MeshletComponentSystem extends ComponentSystem {
         }
 
         this.on('beforeremove', this.onBeforeRemove, this);
+    }
+
+    /**
+     * The meshlet pipeline - one director per world - or null on non-WebGPU devices. Created on
+     * first use: the first component added, or the first access to a pipeline setting, so an
+     * application without meshlets pays nothing for it.
+     *
+     * @type {MeshletDirectorGroup|null}
+     * @ignore
+     */
+    get group() {
+        return this._initialized ? this._group : this._initialize();
+    }
+
+    /**
+     * The first world's meshlet director, or null on non-WebGPU devices. A scene within
+     * {@link maxWorldMeshlets} has only this one; see {@link directors} for all of them.
+     *
+     * @type {MeshletDirector|null}
+     * @ignore
+     */
+    get director() {
+        return this.group?.directors[0] ?? null;
+    }
+
+    /**
+     * Every world's meshlet director, empty on non-WebGPU devices.
+     *
+     * @type {MeshletDirector[]}
+     * @ignore
+     */
+    get directors() {
+        return this.group?.directors ?? [];
     }
 
     /**
@@ -283,7 +286,8 @@ class MeshletComponentSystem extends ComponentSystem {
         const app = this.app;
         if (app.graphicsDevice.isWebGPU) {
             const group = new MeshletDirectorGroup(app.graphicsDevice);
-            this._applyWorldSettings(group.directors[0].world, this._poolBytes, this._texturePoolBytes);
+            const settings = this._worldSettings;
+            applyWorldSettings(group.directors[0].world, settings, settings.poolBytes, settings.texturePoolBytes);
             group.bindRenderer(app.renderer);
             // streamed textures are KTX2; the scene layer cannot import the Basis handler, so
             // the transcoder is injected here (basisInitialize() decides the worker options)
@@ -296,6 +300,20 @@ class MeshletComponentSystem extends ComponentSystem {
             Debug.warnOnce('MeshletComponentSystem: meshlet rendering requires WebGPU; meshlet components will not render.');
         }
         return this._group;
+    }
+
+    /**
+     * Sets a world setting, rebuilding the worlds when it changes.
+     *
+     * @param {'poolBytes'|'texturePoolBytes'|'maxFineTextureSize'|'maxDrawIndices'|'maxWorldMeshlets'} name - The setting.
+     * @param {number} value - Its new value.
+     * @private
+     */
+    _setWorldSetting(name, value) {
+        if (this._worldSettings[name] !== value) {
+            this._worldSettings[name] = value;
+            if (this._group) this._markDirty();
+        }
     }
 
     /**
@@ -314,6 +332,11 @@ class MeshletComponentSystem extends ComponentSystem {
         if (!value && this._group) this._markDirty();
     }
 
+    /**
+     * Gets whether the system skips building and syncing meshlet worlds.
+     *
+     * @type {boolean}
+     */
     get suspended() {
         return this._suspended;
     }
@@ -327,14 +350,16 @@ class MeshletComponentSystem extends ComponentSystem {
      * @type {number}
      */
     set poolBytes(value) {
-        if (this._poolBytes !== value) {
-            this._poolBytes = value;
-            if (this._group) this._markDirty();
-        }
+        this._setWorldSetting('poolBytes', value);
     }
 
+    /**
+     * Gets the geometry page pool byte budget.
+     *
+     * @type {number}
+     */
     get poolBytes() {
-        return this._poolBytes;
+        return this._worldSettings.poolBytes;
     }
 
     /**
@@ -346,18 +371,20 @@ class MeshletComponentSystem extends ComponentSystem {
      * @type {number}
      */
     set texturePoolBytes(value) {
-        if (this._texturePoolBytes !== value) {
-            this._texturePoolBytes = value;
-            if (this._group) this._markDirty();
-        }
-    }
-
-    get texturePoolBytes() {
-        return this._texturePoolBytes;
+        this._setWorldSetting('texturePoolBytes', value);
     }
 
     /**
-     * The most meshlets one world holds. A world keeps every meshlet record of its content
+     * Gets the fine-texture slot-pool byte budget.
+     *
+     * @type {number}
+     */
+    get texturePoolBytes() {
+        return this._worldSettings.texturePoolBytes;
+    }
+
+    /**
+     * Sets the most meshlets one world holds. A world keeps every meshlet record of its content
      * resident in one buffer (with its LOD-cut tables alongside, ~190 bytes a meshlet), which
      * must fit what the browser allocates and WebGPU binds; content past this is split across
      * further worlds, each with its own share of the budgets and its own cull passes. Clamped
@@ -367,34 +394,37 @@ class MeshletComponentSystem extends ComponentSystem {
      * @type {number}
      */
     set maxWorldMeshlets(value) {
-        value = Math.max(1, Math.floor(value));
-        if (this._maxWorldMeshlets !== value) {
-            this._maxWorldMeshlets = value;
-            if (this._group) this._markDirty();
-        }
-    }
-
-    get maxWorldMeshlets() {
-        return this._maxWorldMeshlets;
+        this._setWorldSetting('maxWorldMeshlets', Math.max(1, Math.floor(value)));
     }
 
     /**
-     * Largest texture size streamed at full resolution. A family's fine slots are sized to its
-     * largest texture, so one very large texture would make every slot that large; textures
-     * above this size stream down to it. Takes effect on the next world rebuild. Defaults to
-     * 2048.
+     * Gets the most meshlets one world holds.
+     *
+     * @type {number}
+     */
+    get maxWorldMeshlets() {
+        return this._worldSettings.maxWorldMeshlets;
+    }
+
+    /**
+     * Sets the largest texture size streamed at full resolution. A family's fine slots are sized
+     * to its largest texture, so one very large texture would make every slot that large;
+     * textures above this size stream down to it. Takes effect on the next world rebuild.
+     * Defaults to 2048.
      *
      * @type {number}
      */
     set maxFineTextureSize(value) {
-        if (this._maxFineTextureSize !== value) {
-            this._maxFineTextureSize = value;
-            if (this._group) this._markDirty();
-        }
+        this._setWorldSetting('maxFineTextureSize', value);
     }
 
+    /**
+     * Gets the largest texture size streamed at full resolution.
+     *
+     * @type {number}
+     */
     get maxFineTextureSize() {
-        return this._maxFineTextureSize;
+        return this._worldSettings.maxFineTextureSize;
     }
 
     /**
@@ -406,19 +436,21 @@ class MeshletComponentSystem extends ComponentSystem {
      * @type {number}
      */
     set maxDrawIndices(value) {
-        if (this._maxDrawIndices !== value) {
-            this._maxDrawIndices = value;
-            if (this._group) this._markDirty();
-        }
-    }
-
-    get maxDrawIndices() {
-        return this._maxDrawIndices;
+        this._setWorldSetting('maxDrawIndices', value);
     }
 
     /**
-     * Cap on sidecar requests (geometry shards, texture containers) in flight across every
-     * streamed asset; the rest wait in priority order. Defaults to 16.
+     * Gets the ceiling on the draw index buffer, in indices (0 = unbounded).
+     *
+     * @type {number}
+     */
+    get maxDrawIndices() {
+        return this._worldSettings.maxDrawIndices;
+    }
+
+    /**
+     * Sets the cap on sidecar requests (geometry shards, texture containers) in flight across
+     * every streamed asset; the rest wait in priority order. Defaults to 16.
      *
      * @type {number}
      */
@@ -426,14 +458,18 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.maxConcurrentFetches = value;
     }
 
+    /**
+     * Gets the cap on sidecar requests in flight.
+     *
+     * @type {number}
+     */
     get maxConcurrentFetches() {
-        return this._group?.maxConcurrentFetches ?? 16;
+        return this._group?.maxConcurrentFetches ?? MESHLET_DEFAULTS.maxConcurrentFetches;
     }
 
     /**
-     * Persistent cache for streamed geometry pages and texture regions, or null for none. See
-     * `MeshletDirector#byteCache`. The same cache can be shared with
-     * {@link ResourceLoader#byteCache}.
+     * Sets the persistent cache for streamed geometry pages and texture regions, or null for
+     * none. The same cache can be shared with {@link ResourceLoader#byteCache}.
      *
      * @type {ByteCache|null}
      */
@@ -441,6 +477,11 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.byteCache = value;
     }
 
+    /**
+     * Gets the persistent cache for streamed geometry pages and texture regions.
+     *
+     * @type {ByteCache|null}
+     */
     get byteCache() {
         return this._group?.byteCache ?? null;
     }
@@ -455,13 +496,18 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.dagPixelThreshold = value;
     }
 
+    /**
+     * Gets the screen-space error threshold in pixels for the DAG LOD cut.
+     *
+     * @type {number}
+     */
     get dagPixelThreshold() {
-        return this._group?.dagPixelThreshold ?? 2;
+        return this._group?.dagPixelThreshold ?? MESHLET_DEFAULTS.dagPixelThreshold;
     }
 
     /**
-     * The fraction of {@link rootMinPixels} an instance already drawn may shrink to before it is
-     * dropped, so instances do not pop at the cut while the camera moves. Defaults to 0.75.
+     * Sets the fraction of {@link rootMinPixels} an instance already drawn may shrink to before
+     * it is dropped, so instances do not pop at the cut while the camera moves. Defaults to 0.75.
      *
      * @type {number}
      */
@@ -469,12 +515,17 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.rootHysteresis = value;
     }
 
+    /**
+     * Gets the fraction of {@link rootMinPixels} an instance already drawn may shrink to.
+     *
+     * @type {number}
+     */
     get rootHysteresis() {
-        return this._group?.rootHysteresis ?? 0.75;
+        return this._group?.rootHysteresis ?? MESHLET_DEFAULTS.rootHysteresis;
     }
 
     /**
-     * Per draw bucket - opaque, opaque two-sided, alpha-masked - a multiplier on
+     * Sets, per draw bucket - opaque, opaque two-sided, alpha-masked - a multiplier on
      * {@link dagPixelThreshold}. Solid geometry can take a much coarser cut than foliage, whose
      * simplified levels thin out rather than coarsen. Defaults to [4, 1, 1]: solid geometry at
      * four times {@link dagPixelThreshold}, foliage at it.
@@ -488,12 +539,17 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.bucketThresholdScales = value;
     }
 
+    /**
+     * Gets the per draw bucket multipliers on {@link dagPixelThreshold}.
+     *
+     * @type {number[]}
+     */
     get bucketThresholdScales() {
-        return this._group?.bucketThresholdScales ?? [4, 1, 1];
+        return this._group?.bucketThresholdScales ?? MESHLET_DEFAULTS.bucketThresholdScales.slice();
     }
 
     /**
-     * Per draw bucket - opaque, opaque two-sided, alpha-masked - a multiplier on
+     * Sets, per draw bucket - opaque, opaque two-sided, alpha-masked - a multiplier on
      * {@link rootMinPixels}. Defaults to [1, 1, 1].
      *
      * @type {number[]}
@@ -502,8 +558,13 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.bucketRootMinScales = value;
     }
 
+    /**
+     * Gets the per draw bucket multipliers on {@link rootMinPixels}.
+     *
+     * @type {number[]}
+     */
     get bucketRootMinScales() {
-        return this._group?.bucketRootMinScales ?? [1, 1, 1];
+        return this._group?.bucketRootMinScales ?? MESHLET_DEFAULTS.bucketRootMinScales.slice();
     }
 
     /**
@@ -517,8 +578,13 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.occlusionEnabled = value;
     }
 
+    /**
+     * Gets whether two-phase HZB occlusion culling is enabled.
+     *
+     * @type {boolean}
+     */
     get occlusion() {
-        return this._group?.occlusionEnabled ?? false;
+        return this._group?.occlusionEnabled ?? MESHLET_DEFAULTS.occlusion;
     }
 
     /**
@@ -534,8 +600,13 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.occlusionAdmission = value;
     }
 
+    /**
+     * Gets whether root admission skips instances hidden behind last frame's depth.
+     *
+     * @type {boolean}
+     */
     get occlusionAdmission() {
-        return this._group?.occlusionAdmission ?? true;
+        return this._group?.occlusionAdmission ?? MESHLET_DEFAULTS.occlusionAdmission;
     }
 
     /**
@@ -548,6 +619,11 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.cameraComponent = value;
     }
 
+    /**
+     * Gets the camera meshlets are culled and drawn for.
+     *
+     * @type {CameraComponent|null}
+     */
     get camera() {
         return this._group?.cameraComponent ?? null;
     }
@@ -564,12 +640,17 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.cameras = value ?? [];
     }
 
+    /**
+     * Gets the cameras meshlets are culled and drawn for.
+     *
+     * @type {CameraComponent[]}
+     */
     get cameras() {
         return this._group?.cameras ?? [];
     }
 
     /**
-     * Whether the pipeline runs shadow passes - directional cascades and local (spot / omni)
+     * Sets whether the pipeline runs shadow passes - directional cascades and local (spot / omni)
      * shadow faces. Off by default: every shadow face costs one extra cull pass per frame. Which
      * instances cast is per component ({@link MeshletComponent#castShadows}).
      *
@@ -579,13 +660,19 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.shadowsEnabled = !!value;
     }
 
+    /**
+     * Gets whether the pipeline runs shadow passes.
+     *
+     * @type {boolean}
+     */
     get shadows() {
-        return this._group?.shadowsEnabled ?? false;
+        return this._group?.shadowsEnabled ?? MESHLET_DEFAULTS.shadows;
     }
 
     /**
-     * Multiplier on {@link dagPixelThreshold} for shadow views. Shadow-map texels are coarser
-     * than screen pixels, so casters can use a coarser LOD cut than the camera. Defaults to 4.
+     * Sets the multiplier on {@link dagPixelThreshold} for shadow views. Shadow-map texels are
+     * coarser than screen pixels, so casters can use a coarser LOD cut than the camera. Defaults
+     * to 4.
      *
      * @type {number}
      */
@@ -593,16 +680,21 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.shadowThresholdScale = value;
     }
 
+    /**
+     * Gets the multiplier on {@link dagPixelThreshold} for shadow views.
+     *
+     * @type {number}
+     */
     get shadowThresholdScale() {
-        return this._group?.shadowThresholdScale ?? 4;
+        return this._group?.shadowThresholdScale ?? MESHLET_DEFAULTS.shadowThresholdScale;
     }
 
     /**
-     * Projected size on screen, in pixels, below which an instance is not drawn. Every drawn
-     * instance costs at least its coarsest level, so wide views of worlds with very many small
-     * placements are bound by that floor; raising this trades sub-pixel scatter for speed. An
-     * instance already drawn stays until it is half this size, to avoid popping. 0 draws every
-     * visible instance. Defaults to 3.
+     * Sets the projected size on screen, in pixels, below which an instance is not drawn. Every
+     * drawn instance costs at least its coarsest level, so wide views of worlds with very many
+     * small placements are bound by that floor; raising this trades sub-pixel scatter for speed.
+     * An instance already drawn stays until it shrinks to {@link rootHysteresis} of this size, to
+     * avoid popping. 0 draws every visible instance. Defaults to 3.
      *
      * @type {number}
      */
@@ -610,8 +702,13 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.rootMinPixels = value;
     }
 
+    /**
+     * Gets the projected size on screen, in pixels, below which an instance is not drawn.
+     *
+     * @type {number}
+     */
     get rootMinPixels() {
-        return this._group?.rootMinPixels ?? 3;
+        return this._group?.rootMinPixels ?? MESHLET_DEFAULTS.rootMinPixels;
     }
 
     /**
@@ -627,15 +724,20 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.cssPixels = value;
     }
 
+    /**
+     * Gets whether the screen-space thresholds are measured in CSS pixels.
+     *
+     * @type {boolean}
+     */
     get cssPixels() {
-        return this._group?.cssPixels ?? true;
+        return this._group?.cssPixels ?? MESHLET_DEFAULTS.cssPixels;
     }
 
     /**
-     * Projected size on screen, in pixels, below which an instance casts no meshlet shadow.
-     * Far-reaching shadow cascades cover most of the world, and every caster they admit costs at
-     * least its coarsest level; skipping casters this small keeps them from taking the index
-     * budget the camera needs. 0 lets every visible instance cast. Defaults to 2.
+     * Sets the projected size on screen, in pixels, below which an instance casts no meshlet
+     * shadow. Far-reaching shadow cascades cover most of the world, and every caster they admit
+     * costs at least its coarsest level; skipping casters this small keeps them from taking the
+     * index budget the camera needs. 0 lets every visible instance cast. Defaults to 2.
      *
      * @type {number}
      */
@@ -643,11 +745,128 @@ class MeshletComponentSystem extends ComponentSystem {
         if (this.group) this.group.shadowRootMinPixels = value;
     }
 
+    /**
+     * Gets the projected size on screen, in pixels, below which an instance casts no meshlet
+     * shadow.
+     *
+     * @type {number}
+     */
     get shadowRootMinPixels() {
-        return this._group?.shadowRootMinPixels ?? 2;
+        return this._group?.shadowRootMinPixels ?? MESHLET_DEFAULTS.shadowRootMinPixels;
     }
 
-    initializeComponentData(component, data, properties) {
+    /**
+     * Sets whether to load as fast as possible until {@link playable}, then stream at the smooth
+     * budgeted pace. Frames may stutter while fast-loading, so cover it with a loading screen;
+     * set false to always stream smoothly. Defaults to true.
+     *
+     * @type {boolean}
+     */
+    set fastLoad(value) {
+        if (this.group) this.group.fastLoad = !!value;
+    }
+
+    /**
+     * Gets whether to load as fast as possible until {@link playable}.
+     *
+     * @type {boolean}
+     */
+    get fastLoad() {
+        return this._group?.fastLoad ?? MESHLET_DEFAULTS.fastLoad;
+    }
+
+    /**
+     * Sets how long component changes must go quiet before the world rebuilds, in milliseconds.
+     * Assets loading in a burst then cost a few rebuilds instead of one each (every rebuild
+     * re-finalizes the whole world and re-streams what it cannot carry over). Defaults to 250.
+     *
+     * @type {number}
+     */
+    set rebuildQuietMs(value) {
+        this._rebuildQuietMs = Math.max(0, value);
+    }
+
+    /**
+     * Gets how long component changes must go quiet before the world rebuilds, in milliseconds.
+     *
+     * @type {number}
+     */
+    get rebuildQuietMs() {
+        return this._rebuildQuietMs;
+    }
+
+    /**
+     * Sets the longest a pending rebuild waits for the changes to go quiet, in milliseconds, so a
+     * steady trickle of assets still shows up. Defaults to 2000.
+     *
+     * @type {number}
+     */
+    set rebuildMaxWaitMs(value) {
+        this._rebuildMaxWaitMs = Math.max(0, value);
+    }
+
+    /**
+     * Gets the longest a pending rebuild waits for the changes to go quiet, in milliseconds.
+     *
+     * @type {number}
+     */
+    get rebuildMaxWaitMs() {
+        return this._rebuildMaxWaitMs;
+    }
+
+    /**
+     * Whether the meshlet content can be shown: no component is waiting for its asset to load,
+     * no world rebuild is pending, and the streamed geometry and texture tails are resident down
+     * to the playable floor - the coarsest LOD free of sloppy simplification. True when there is
+     * no meshlet content, or no WebGPU.
+     *
+     * @type {boolean}
+     */
+    get playable() {
+        return this._playable.isPlayable(true);
+    }
+
+    /**
+     * Resolves once the meshlet content is {@link playable} - at once if it already is. Call
+     * after the scene's components are created, so a rebuild for them is already pending.
+     *
+     * @returns {Promise<void>} Resolves when playable.
+     * @example
+     * await app.systems.meshlet.whenPlayable();
+     * hideLoadingScreen();
+     */
+    whenPlayable() {
+        if (this.playable) return Promise.resolve();
+        return new Promise((resolve) => {
+            this.once(MeshletComponentSystem.EVENT_PLAYABLE, () => resolve());
+        });
+    }
+
+    /**
+     * Rebuilds the world now if changes are pending, regardless of the quiet window.
+     */
+    flushRebuild() {
+        if (this._group && this._dirty && !this._suspended) this._rebuild();
+    }
+
+    /**
+     * Runs `callback` with every placed resource's CPU meshlet records in memory. A scene
+     * releases its records once it settles, and a reader of them - a ray tracer building a scene
+     * from the meshlets - would find them null. The released records are fetched back first,
+     * and dropped again afterwards, with no world rebuild in between: only the records this call
+     * restored are released, so a build that needed them in the meantime is not disturbed.
+     *
+     * Holds the whole scene's records at once while it runs (128 bytes per meshlet).
+     *
+     * @template T
+     * @param {() => (T|Promise<T>)} callback - Reads the records.
+     * @returns {Promise<T>} What the callback returns.
+     */
+    withMeshletRecords(callback) {
+        return this._records.withRecords(callback);
+    }
+
+    initializeComponentData(component, data) {
         if (!this._initialized) this._initialize();
 
         for (let i = 0; i < _properties.length; i++) {
@@ -674,35 +893,6 @@ class MeshletComponentSystem extends ComponentSystem {
         component.onBeforeRemove();
     }
 
-    /**
-     * How long component changes must go quiet before the world rebuilds, in milliseconds.
-     * Assets loading in a burst then cost a few rebuilds instead of one each (every rebuild
-     * re-finalizes the whole world and re-streams what it cannot carry over). Defaults to 250.
-     *
-     * @type {number}
-     */
-    set rebuildQuietMs(value) {
-        this._rebuildQuietMs = Math.max(0, value);
-    }
-
-    get rebuildQuietMs() {
-        return this._rebuildQuietMs;
-    }
-
-    /**
-     * Longest a pending rebuild waits for the changes to go quiet, in milliseconds, so a steady
-     * trickle of assets still shows up. Defaults to 2000.
-     *
-     * @type {number}
-     */
-    set rebuildMaxWaitMs(value) {
-        this._rebuildMaxWaitMs = Math.max(0, value);
-    }
-
-    get rebuildMaxWaitMs() {
-        return this._rebuildMaxWaitMs;
-    }
-
     /** @ignore */
     _markDirty() {
         const now = performance.now();
@@ -714,120 +904,11 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
-     * Whether the meshlet content can be shown: no component is waiting for its asset to load,
-     * no world rebuild is pending, and the streamed geometry and texture tails are resident down
-     * to the playable floor - the coarsest LOD free of sloppy simplification (see
-     * `MeshletDirector#playable`). True when there is no meshlet content, or no WebGPU.
-     *
-     * @type {boolean}
-     */
-    get playable() {
-        return this._isPlayable(true);
-    }
-
-    /**
-     * @param {boolean} scanAssets - Check every component for a loading asset.
-     * @returns {boolean} Whether the content is playable.
-     * @private
-     */
-    _isPlayable(scanAssets) {
-        const group = this._group;
-        if (!group) return true;
-        if (this._dirty) return false;
-        // a world with nothing in it is never finalized, and has nothing to stream
-        if (!group.playable) return false;
-        return !scanAssets || !this._hasPendingAssets();
-    }
-
-    /**
-     * Resolves once the meshlet content is {@link playable} - at once if it already is. Call
-     * after the scene's components are created, so a rebuild for them is already pending.
-     *
-     * @returns {Promise<void>} Resolves when playable.
-     * @example
-     * await app.systems.meshlet.whenPlayable();
-     * hideLoadingScreen();
-     */
-    whenPlayable() {
-        if (this.playable) return Promise.resolve();
-        return new Promise((resolve) => {
-            this.once(MeshletComponentSystem.EVENT_PLAYABLE, () => resolve());
-        });
-    }
-
-    /**
-     * Load as fast as possible until {@link playable}, then stream at the smooth budgeted pace.
-     * Frames may stutter while fast-loading, so cover it with a loading screen; set false to
-     * always stream smoothly. Defaults to true. See `MeshletDirector#fastLoad`.
-     *
-     * @type {boolean}
-     */
-    set fastLoad(value) {
-        if (this.group) this.group.fastLoad = !!value;
-    }
-
-    get fastLoad() {
-        return this._group?.fastLoad ?? true;
-    }
-
-    /**
-     * @param {MeshletComponent} component - The component.
-     * @returns {import('./component.js').MeshletStreamStatus} Its load state.
-     * @ignore
-     */
-    _componentStatus(component) {
-        if (!this._group) return STATUS_NO_GROUP;
-        const director = this._group.directors[component._partition];
-        const resource = component._effectiveResource;
-        // not placed yet: the asset is loading, or the rebuild that adds it has not run
-        if (!resource || !director || component._placementIndex < 0 || component._placedResource !== resource) {
-            return STATUS_NOT_PLACED;
-        }
-        return director.resourceStatus(resource) ?? STATUS_NOT_PLACED;
-    }
-
-    /**
-     * @param {MeshletComponent} component - A component with playable waiters.
-     * @ignore
-     */
-    _watchPlayable(component) {
-        this._playableWatch.add(component);
-    }
-
-    /**
-     * @param {MeshletComponent} component - The component.
-     * @ignore
-     */
-    _unwatchPlayable(component) {
-        this._playableWatch.delete(component);
-    }
-
-    /**
-     * Reports progress to, and settles, the components being waited on.
-     *
-     * @private
-     */
-    _updatePlayableWatch() {
-        for (const component of this._playableWatch) {
-            const status = this._componentStatus(component);
-            if (status.playable) {
-                this._playableWatch.delete(component);
-                component.fire(MeshletComponent.EVENT_PROGRESS, 1, status.totalBytes);
-                component.fire(MeshletComponent.EVENT_PLAYABLE, status);
-                component._settlePlayable(status);
-            } else if (status.progress !== component._reportedProgress) {
-                component._reportedProgress = status.progress;
-                component.fire(MeshletComponent.EVENT_PROGRESS, status.progress, status.totalBytes);
-            }
-        }
-    }
-
-    /**
      * Whether an enabled component's asset is still loading (its resource cannot join the world
      * yet).
      *
      * @returns {boolean} True while any such asset is loading.
-     * @private
+     * @ignore
      */
     _hasPendingAssets() {
         for (const guid in this.store) {
@@ -840,17 +921,23 @@ class MeshletComponentSystem extends ComponentSystem {
     }
 
     /**
-     * Rebuilds the world now if changes are pending, regardless of the quiet window.
+     * Every component of the system.
+     *
+     * @yields {MeshletComponent} A component.
+     * @private
      */
-    flushRebuild() {
-        if (this._group && this._dirty && !this._suspended) this._rebuild();
+    *_components() {
+        for (const guid in this.store) {
+            const component = this.store[guid].entity.meshlet;
+            if (component) yield component;
+        }
     }
 
     /** @private */
     _onFrameRender() {
         if (!this._group || this._suspended) return;
         // a rebuild waiting on record restores re-plans once they settle
-        if (this._dirty && !this._restoring.size) {
+        if (this._dirty && !this._records.restoring) {
             const now = performance.now();
             const quiet = now - this._dirtyLast >= this._rebuildQuietMs;
             const overdue = now - this._dirtySince >= this._rebuildMaxWaitMs;
@@ -864,97 +951,25 @@ class MeshletComponentSystem extends ComponentSystem {
         this._syncTransforms();
         this._releaseSettledRecords();
 
-        // the director's state is from last frame's update: a transition fires one frame late.
-        // Once playable, a new asset marks the system dirty when assigned, so the per-component
-        // asset scan only runs while waiting.
-        const playable = this._isPlayable(!this._wasPlayable);
-        if (playable !== this._wasPlayable) {
-            this._wasPlayable = playable;
-            if (playable) this.fire(MeshletComponentSystem.EVENT_PLAYABLE);
-        }
-        if (this._playableWatch.size) this._updatePlayableWatch();
+        if (this._playable.updatePlayable()) this.fire(MeshletComponentSystem.EVENT_PLAYABLE);
+        this._playable.updateWatch();
     }
 
     /** @private */
     _rebuild() {
-        // group components by (resource, baseUrl): each unique resource is added once, with a
-        // merged instance list - N components share one set of pages, records and textures.
-        // Disabled components are included (hidden via the per-instance hide bit) so a later
-        // enable is a buffer write, not a rebuild.
-        /** @type {Array<{ resource: object, baseUrl: string, fetchOptions: object, components: MeshletComponent[] }>} */
-        const groups = [];
-        // resource -> baseUrl -> group
-        /** @type {Map<object, Map<string, object>>} */
-        const groupIndex = new Map();
-        for (const guid in this.store) {
-            const component = this.store[guid].entity.meshlet;
-            if (!component) continue;
-            // a component no world places is reset to -1 after the build, so the sync skips it
-            if (!component._effectiveResource) continue;
-            if (!component._effectiveBaseUrl) {
-                Debug.warnOnce('MeshletComponent: no stream base URL - assign an asset with an http(s) file URL (not a blob: or data: URL), or set baseUrl with the resource.');
-                continue;
-            }
-            const resource = component._effectiveResource;
-            const baseUrl = component._effectiveBaseUrl;
-            let byUrl = groupIndex.get(resource);
-            if (!byUrl) {
-                byUrl = new Map();
-                groupIndex.set(resource, byUrl);
-            }
-            let group = byUrl.get(baseUrl);
-            if (!group) {
-                group = { resource, baseUrl, fetchOptions: component._effectiveFetchOptions, components: [] };
-                byUrl.set(baseUrl, group);
-                groups.push(group);
-            }
-            group.components.push(component);
-        }
-
-        // Pack the groups into worlds in order, starting a new world when the next resource
-        // would take the current one past the meshlet limit. A resource larger than the limit
-        // gets a world of its own.
-        const limit = this._worldMeshletLimit();
-        const partitions = [{ groups: [], meshlets: 0, texturedMeshlets: 0 }];
-        for (const group of groups) {
-            const meshlets = group.resource.totalMeshlets;
-            let partition = partitions[partitions.length - 1];
-            if (partition.groups.length && partition.meshlets + meshlets > limit) {
-                partition = { groups: [], meshlets: 0, texturedMeshlets: 0 };
-                partitions.push(partition);
-            }
-            partition.groups.push(group);
-            partition.meshlets += meshlets;
-            if (group.resource.textureManifest) partition.texturedMeshlets += meshlets;
-        }
-        let totalMeshlets = 0;
-        let totalTextured = 0;
-        for (const p of partitions) {
-            totalMeshlets += p.meshlets;
-            totalTextured += p.texturedMeshlets;
-        }
-
-        // Budget shares and what each world keeps, decided before anything is built: a world
-        // that must rebuild needs its resources' records, and records released after an earlier
-        // build are fetched back first - the rebuild stays pending (dirty) until they arrive.
+        const settings = this._worldSettings;
+        const limit = worldMeshletLimit(this.app.graphicsDevice, settings.maxWorldMeshlets);
         const previous = this._partitionStates;
-        const plans = partitions.map((partition, pi) => {
-            const poolBytes = partitions.length > 1 && this._poolBytes > 0 ?
-                Math.floor(this._poolBytes * partition.meshlets / Math.max(totalMeshlets, 1)) :
-                this._poolBytes;
-            const texturePoolBytes = partitions.length > 1 ?
-                Math.floor(this._texturePoolBytes * partition.texturedMeshlets / Math.max(totalTextured, 1)) :
-                this._texturePoolBytes;
-            const state = { groups: partition.groups.map(g => ({ ...g, components: g.components.slice() })), poolBytes, texturePoolBytes, settings: this._worldSettingsKey() };
-            const director = this._group.directors[pi];
-            return { partition, state, keep: !!director && this._canKeepPartition(previous[pi], state, director) };
-        });
+        const { plans, totalMeshlets } = planWorlds(groupComponents(this._components()), settings, limit, previous, this._group.directors);
+
+        // a world that must rebuild needs its resources' records: records released after an
+        // earlier build are fetched back first, and the rebuild stays pending until they arrive
         let restoring = false;
         for (const plan of plans) {
             if (plan.keep) continue;
-            for (const group of plan.partition.groups) {
+            for (const group of plan.groups) {
                 if (!group.resource.recordsResident) {
-                    this._restoreRecords(group.resource);
+                    this._records.restore(group.resource);
                     restoring = true;
                 }
             }
@@ -974,17 +989,13 @@ class MeshletComponentSystem extends ComponentSystem {
         const placedResources = new Set();
         const states = [];
         let rebuilt = 0;
-        this._group.resize(partitions.length);
-        for (let pi = 0; pi < partitions.length; pi++) {
-            // budgets are divided by meshlet count: the fixed per-meshlet tables dominate a
-            // world's cost, and its page count follows its meshlets
-            const { partition, state, keep } = plans[pi];
-            const { poolBytes, texturePoolBytes } = state;
-            const director = this._group.directors[pi];
+        this._group.resize(plans.length);
+        for (let pi = 0; pi < plans.length; pi++) {
+            const { groups, state, keep } = plans[pi];
             if (keep) {
                 // unchanged content and budget: the world, its streaming and its placements stay
                 states.push(previous[pi]);
-                for (const g of partition.groups) {
+                for (const g of groups) {
                     for (const component of g.components) {
                         placed.add(component);
                         components.push(component);
@@ -993,11 +1004,11 @@ class MeshletComponentSystem extends ComponentSystem {
                 continue;
             }
             rebuilt++;
-            director.rebuild((world) => {
-                this._applyWorldSettings(world, poolBytes, texturePoolBytes);
-                this._buildPartition(world, partition.groups, pi, components);
+            this._group.directors[pi].rebuild((world) => {
+                applyWorldSettings(world, settings, state.poolBytes, state.texturePoolBytes);
+                buildPartition(world, groups, pi, components);
             });
-            for (const g of partition.groups) {
+            for (const g of groups) {
                 placedResources.add(g.resource);
                 for (const component of g.components) placed.add(component);
             }
@@ -1005,13 +1016,7 @@ class MeshletComponentSystem extends ComponentSystem {
         }
         this._lastRebuild = performance.now();
         this._partitionStates = states;
-        // forget the record sources of resources no world places any more, so they can be freed
-        for (const resource of this._recordSources.keys()) {
-            if (!placedResources.has(resource) && !this._restoring.has(resource)) {
-                this._recordSources.delete(resource);
-                this._restoreFailures.delete(resource);
-            }
-        }
+        this._records.retain(placedResources);
         // components no longer in any world (removed asset, no base URL) stop syncing
         for (const component of this._activeComponents) {
             if (!placed.has(component)) {
@@ -1020,223 +1025,29 @@ class MeshletComponentSystem extends ComponentSystem {
             }
         }
         this._group.assignInstanceOffsets();
-        if (partitions.length > 1) {
-            Debug.log(`MeshletComponentSystem: ${totalMeshlets} meshlets in ${partitions.length} worlds (limit ${limit} each), ${rebuilt} rebuilt.`);
+        if (plans.length > 1) {
+            Debug.log(`MeshletComponentSystem: ${totalMeshlets} meshlets in ${plans.length} worlds (limit ${limit} each), ${rebuilt} rebuilt.`);
         }
         this._activeComponents = components;
-    }
-
-    /**
-     * Whether a world can keep its current build: the same resource groups with the same
-     * components in the same order, the same world settings, and a built world. Its budget
-     * share is not compared: shares follow the scene total, which every added resource moves,
-     * and rebuilding every world (re-fetching released records) for a slightly different page
-     * pool would cost far more than the pool difference. A kept world keeps the share it was
-     * built with; changing the budget setting itself rebuilds them all.
-     *
-     * @param {object|undefined} previous - The partition's state at its last build.
-     * @param {object} next - The state it would be built with now.
-     * @param {MeshletDirector} director - The partition's director.
-     * @returns {boolean} True when the world needs no rebuild.
-     * @private
-     */
-    _canKeepPartition(previous, next, director) {
-        if (!previous || !director.world.finalized) return false;
-        if (previous.settings !== next.settings) return false;
-        if (previous.groups.length !== next.groups.length) return false;
-        for (let i = 0; i < next.groups.length; i++) {
-            const a = previous.groups[i], b = next.groups[i];
-            if (a.resource !== b.resource || a.baseUrl !== b.baseUrl || a.components.length !== b.components.length) return false;
-            for (let c = 0; c < b.components.length; c++) {
-                if (a.components[c] !== b.components[c]) return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * @returns {string} The world settings a partition is built with, other than its budgets.
-     * @private
-     */
-    _worldSettingsKey() {
-        return `${this._poolBytes}|${this._texturePoolBytes}|${this._maxFineTextureSize}|${this._maxDrawIndices}`;
     }
 
     /**
      * Once the scene has settled - no asset loading, no rebuild pending, none for
      * RECORD_RELEASE_DELAY_MS - drops the resources' own copies of their meshlet records (nearly
      * all of each GLB) for every world: each world has uploaded its own. A later rebuild of a
-     * world (a resource added to it, its budget share moved) fetches its records back first (see
-     * _restoreRecords). Releasing earlier, while assets still arrive, only has them fetched
-     * straight back.
+     * world fetches its records back first. Releasing earlier, while assets still arrive, only
+     * has them fetched straight back.
      *
      * @private
      */
     _releaseSettledRecords() {
         const states = this._partitionStates;
-        if (!states.length || this._dirty || this._restoring.size) return;
+        if (!states.length || this._dirty || this._records.restoring) return;
         if (performance.now() - this._lastRebuild < RECORD_RELEASE_DELAY_MS) return;
         if (this._recordsReleasedAt === this._lastRebuild || this._hasPendingAssets()) return;
         this._recordsReleasedAt = this._lastRebuild;
         for (let pi = 0; pi < states.length; pi++) {
-            for (const group of states[pi].groups) this._releaseRecords(group);
-        }
-    }
-
-    /**
-     * Releases a resource group's meshlet records when they can be fetched back: the resource
-     * came from an asset with a file URL. A direct resource has nowhere to reload from.
-     *
-     * @param {{ resource: object, components: MeshletComponent[] }} group - The group.
-     * @private
-     */
-    _releaseRecords(group) {
-        const component = group.components[0];
-        const url = component._assetReference.asset?.getFileUrl();
-        if (!url || !group.resource.recordsResident) return;
-        this._recordSources.set(group.resource, { url, credentials: component._effectiveFetchOptions?.credentials ?? null });
-        group.resource.releaseRecords();
-    }
-
-    /**
-     * Runs `callback` with every placed resource's CPU meshlet records in memory. A scene
-     * releases its records once it settles (see
-     * {@link _releaseSettledRecords}), and a reader of them - a ray tracer building a scene from
-     * the meshlets - would find them null. The released records are fetched back first, and
-     * dropped again afterwards, with no world rebuild in between: only the records this call
-     * restored are released, so a build that needed them in the meantime is not disturbed.
-     *
-     * Holds the whole scene's records at once while it runs (128 bytes per meshlet).
-     *
-     * @template T
-     * @param {() => (T|Promise<T>)} callback - Reads the records.
-     * @returns {Promise<T>} What the callback returns.
-     */
-    async withMeshletRecords(callback) {
-        const restored = [];
-        const pending = [];
-        for (const [resource, source] of this._recordSources) {
-            if (resource.recordsResident || resource.primitives.length === 0) continue;
-            restored.push(resource);
-            pending.push(restoreMeshletRecords(source.url, resource, source.credentials));
-        }
-        try {
-            await Promise.all(pending);
-            return await callback();
-        } finally {
-            for (const resource of restored) {
-                // a rebuild that fetched them itself may have taken them over
-                if (!this._restoring.has(resource)) resource.releaseRecords();
-            }
-        }
-    }
-
-    /**
-     * Starts fetching a released resource's records back, once.
-     *
-     * @param {object} resource - The MeshletResource.
-     * @private
-     */
-    _restoreRecords(resource) {
-        if (this._restoring.has(resource)) return;
-        const source = this._recordSources.get(resource);
-        if (!source) {
-            Debug.error('MeshletComponentSystem: a resource\'s meshlet records were released with no source to restore them from.');
-            return;
-        }
-        const settle = () => {
-            if (!this._group) return;
-            this._restoring.delete(resource);
-            this._markDirty();
-        };
-        const promise = restoreMeshletRecords(source.url, resource, source.credentials).then(() => {
-            this._restoreFailures.delete(resource);
-            settle();
-        }, (err) => {
-            // the world keeps its last build; the rebuild retries the restore after a backoff
-            const failures = (this._restoreFailures.get(resource) ?? 0) + 1;
-            this._restoreFailures.set(resource, failures);
-            const delayMs = Math.min(1000 * 2 ** (failures - 1), 30000);
-            Debug.error(`MeshletComponentSystem: restoring meshlet records from ${source.url} failed, retrying in ${delayMs} ms`, err);
-            return new Promise((resolve) => {
-                setTimeout(resolve, delayMs);
-            }).then(settle);
-        });
-        this._restoring.set(resource, promise);
-    }
-
-    /**
-     * The meshlet limit per world: {@link maxWorldMeshlets}, clamped so a world's meshlet records
-     * fit one storage binding.
-     *
-     * @returns {number} Meshlets per world.
-     * @private
-     */
-    _worldMeshletLimit() {
-        // WebGPU devices expose their adapter limits; others have none to clamp to
-        const device = /** @type {{ limits?: { maxBufferSize?: number, maxStorageBufferBindingSize?: number } }} */ (/** @type {unknown} */ (this.app.graphicsDevice));
-        const limits = device.limits ?? {};
-        const bytes = Math.min(
-            limits.maxBufferSize ?? Number.MAX_SAFE_INTEGER,
-            limits.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER
-        );
-        return Math.max(Math.min(this._maxWorldMeshlets, Math.floor(bytes / (MESHLET_DATA_U32S * 4))), 1);
-    }
-
-    /**
-     * Applies the system's world settings to a world about to be built.
-     *
-     * @param {import('../../../scene/meshlet/meshlet-world.js').MeshletWorld} world - The world.
-     * @param {number} poolBytes - The world's share of the geometry budget.
-     * @param {number} texturePoolBytes - The world's share of the texture budget.
-     * @private
-     */
-    _applyWorldSettings(world, poolBytes, texturePoolBytes) {
-        world.poolBytes = poolBytes;
-        world.texturePoolBytes = texturePoolBytes;
-        world.maxFineTextureSize = this._maxFineTextureSize;
-        world.initialIndices = INITIAL_DRAW_INDICES;
-        world.maxIndices = this._maxDrawIndices;
-    }
-
-    /**
-     * Adds one world's resource groups, placing their components in it.
-     *
-     * @param {import('../../../scene/meshlet/meshlet-world.js').MeshletWorld} world - The world.
-     * @param {Array<{ resource: object, baseUrl: string, fetchOptions: object, components: MeshletComponent[] }>} groups - The world's groups.
-     * @param {number} partition - The world's index in the group.
-     * @param {MeshletComponent[]} components - Receives the placed components.
-     * @private
-     */
-    _buildPartition(world, groups, partition, components) {
-        for (let gi = 0; gi < groups.length; gi++) {
-            const { resource, baseUrl, fetchOptions, components: members } = groups[gi];
-            const per = resource.instances.count;
-
-            // one placement per group: the resource's instance list repeated once per member
-            // (one root transform each), so each member owns a run of the placement's instances
-            // The build bakes each member's current transform and the default state (shown,
-            // casting), so the first sync after it only rewrites what actually differs - not
-            // every row of a world of millions of instances.
-            const transforms = [];
-            for (let mi = 0; mi < members.length; mi++) {
-                const component = members[mi];
-                component._partition = partition;
-                component._placementIndex = gi;
-                component._placedResource = resource;
-                component._subBase = mi * per;
-                component._subCount = per;
-                const wt = component.entity.getWorldTransform();
-                component._lastTransform.copy(wt);
-                component._transformDirty = false;
-                transforms.push(component._lastTransform);
-                component._hiddenApplied = false;
-                component._castShadowsApplied = true;
-                component.onWorldDirty();
-                component._queueState();
-                components.push(component);
-            }
-            world.addStreamedResource(resource, transforms, baseUrl, null, fetchOptions);
+            for (const group of states[pi].groups) this._records.release(group);
         }
     }
 
@@ -1302,16 +1113,12 @@ class MeshletComponentSystem extends ComponentSystem {
     destroy() {
         super.destroy();
         this.app.off('framerender', this._onFrameRender, this);
-        for (const component of this._playableWatch) {
-            component._settlePlayable({ playable: false, failed: true, progress: 0, totalBytes: 0, loadedBytes: 0 });
-        }
-        this._playableWatch.clear();
+        this._playable.destroy();
+        this._records.destroy();
         this._transformQueue.length = 0;
         this._stateQueue.length = 0;
         this._activeComponents = [];
         this._partitionStates = [];
-        this._recordSources.clear();
-        this._restoreFailures.clear();
         this._group?.destroy();
         this._group = null;
         if (this._containerHandler) {

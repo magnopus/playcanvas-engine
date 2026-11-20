@@ -18,10 +18,9 @@ import { addDirectionalShadowPasses } from '../renderer/render-pass-forward.js';
  * pointed at.
  *
  * Lighting rides on a borrowed layer (the camera's World layer): its light list feeds the
- * light uniforms and keys the shader variants. For clustered
- * lighting the pass requests a cluster for a one-entry layerRenderSteps array - the
- * WorldClustersAllocator hash-dedupes it with the main pass, so meshlet draws share the World
- * layer's cluster data.
+ * light uniforms and keys the shader variants. For clustered lighting the pass requests a
+ * cluster for a one-entry layerRenderSteps array - the WorldClustersAllocator hash-dedupes it
+ * with the main pass, so meshlet draws share the World layer's cluster data.
  *
  * @ignore
  */

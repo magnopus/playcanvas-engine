@@ -1,6 +1,6 @@
 """Make Zorah's untextured materials dielectric in the baked meshlet material tables.
 
-Usage: python3 dielectric.py [bake_dir] [roughness]
+Usage: python3 dielectric.py <bake_dir> [roughness]
 
 The Zorah export is geometry only: most of its materials are `"pbrMetallicRoughness": {}`, which
 glTF reads as metallic 1 / roughness 1 - a white metal mirroring a blurred sky, so every surface
@@ -15,8 +15,9 @@ import os
 import struct
 import sys
 
-ZORAH = os.path.expanduser('~/Downloads/zorah_main_public.v2.gltf')
-OUT = sys.argv[1] if len(sys.argv) > 1 else f'{ZORAH}/streamed_meshlets_v4'
+if len(sys.argv) < 2:
+    sys.exit('usage: python3 dielectric.py <bake_dir> [roughness]')
+OUT = sys.argv[1]
 ROUGHNESS = float(sys.argv[2]) if len(sys.argv) > 2 else 0.8
 
 # src/scene/meshlet/constants.js MATERIAL_RECORD

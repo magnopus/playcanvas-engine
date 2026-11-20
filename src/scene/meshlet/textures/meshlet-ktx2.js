@@ -10,10 +10,14 @@
  *
  * The transcoder itself is injected rather than imported: it lives in the framework layer
  * (`basisTranscode`), which scene code must not depend on. {@link MeshletComponentSystem}
- * wires the engine's transcoder into the director; a manually created director has to set
- * `director.transcode` before loading textured meshlet assets.
+ * wires the engine's transcoder into the director group; a manually created group has to set
+ * its `transcode` before loading textured meshlet assets.
  *
  * @ignore
+ */
+
+/**
+ * @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js'
  */
 
 let _jobId = 0;
@@ -23,7 +27,7 @@ let _jobId = 0;
  * where the callback receives `(err, result)` and the return value is false when the
  * transcoder is not initialized.
  *
- * @typedef {(device: import('../../../platform/graphics/graphics-device.js').GraphicsDevice,
+ * @typedef {(device: GraphicsDevice,
  *   url: string, data: ArrayBuffer, callback: (err: string|null, result: object|null) => void,
  *   options: { isKTX2: boolean, isTextureArray?: boolean, hasAlpha?: boolean }) => boolean} MeshletTranscodeFn
  */
@@ -32,7 +36,7 @@ let _jobId = 0;
  * Transcodes one single-level KTX2 payload to the device's compressed target format.
  *
  * @param {MeshletTranscodeFn|null} transcode - The injected transcoder.
- * @param {import('../../../platform/graphics/graphics-device.js').GraphicsDevice} device - The device.
+ * @param {GraphicsDevice} device - The device.
  * @param {ArrayBuffer} bytes - The KTX2 file bytes (a private copy - it is transferred away).
  * @param {boolean} hasAlpha - Whether the texture family keeps alpha. Every layer of a family
  * must transcode to the same format, so this comes from the family, not the payload.
@@ -43,7 +47,7 @@ let _jobId = 0;
 function transcodeKtx2(transcode, device, bytes, hasAlpha) {
     return new Promise((resolve, reject) => {
         if (!transcode) {
-            reject(new Error('MeshletKtx2: no transcoder - the meshlet component system wires basisTranscode; a manually created MeshletDirector must set director.transcode before loading textured assets.'));
+            reject(new Error('MeshletKtx2: no transcoder - the meshlet component system wires basisTranscode; a manually created MeshletDirectorGroup must set its transcode before loading textured assets.'));
             return;
         }
         const key = `meshlet-ktx2-${_jobId++}`;

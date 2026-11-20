@@ -2,6 +2,11 @@ import { PAGE_TABLE, PAGE_TABLE_FIELDS } from '../constants.js';
 import { FETCH_PRIORITY_PAGES, FETCH_PRIORITY_ROOTS, defaultFetchScheduler } from './meshlet-fetch-scheduler.js';
 
 /**
+ * @import { MeshletFetchOptions } from '../meshlet-world.js'
+ * @import { MeshletFetchScheduler } from './meshlet-fetch-scheduler.js'
+ */
+
+/**
  * HTTP Range fetching of meshlet pages with run coalescing: wanted pages are sorted by shard
  * offset and merged into contiguous byte runs (small gaps fetched and discarded are cheaper
  * than extra requests), each run one Range request through the world's fetch scheduler.
@@ -16,15 +21,36 @@ export const RUN_GAP_BYTES = 512 * 1024;
 export const MAX_RUN_BYTES = 16 * 1024 * 1024;
 
 class MeshletPageFetcher {
+    /** @type {object} - the resource's stream manifest. */
+    manifest;
+
+    /** @type {string} - URL directory of the blobs, ending in a slash. */
+    baseUrl;
+
+    /** @type {((uri: string) => string)|null} */
+    resolveUrl;
+
+    /** @type {RequestCredentials|null} */
+    credentials;
+
+    /** @type {string|null} - versions the persistent cache keys. */
+    cacheVersion;
+
+    /** @type {MeshletFetchScheduler} */
+    scheduler;
+
+    /** @type {string[]} - per-blob fetch URLs, resolved once. */
+    _urls = [];
+
     /**
      * @param {object} manifest - The resource's stream manifest.
      * @param {string} baseUrl - URL directory the manifest's blob URIs are relative to.
-     * @param {import('../meshlet-world.js').MeshletFetchOptions|null} [fetchOptions] - How the
+     * @param {MeshletFetchOptions|null} [fetchOptions] - How the
      * sidecars are fetched: `resolveUrl` maps a manifest URI to the URL to fetch in place of
      * appending it to the base URL (the application's URL resolver, so hosts that store a
      * package's files behind rewritten or signed URLs can serve them), `credentials` is the fetch
      * credentials mode (cookies for hosts that need them).
-     * @param {import('./meshlet-fetch-scheduler.js').MeshletFetchScheduler|null} [scheduler] - The
+     * @param {MeshletFetchScheduler|null} [scheduler] - The
      * scheduler requests go through; null selects the page-wide default.
      */
     constructor(manifest, baseUrl, fetchOptions = null, scheduler = null) {
@@ -34,9 +60,6 @@ class MeshletPageFetcher {
         this.credentials = fetchOptions?.credentials ?? null;
         this.cacheVersion = fetchOptions?.cacheVersion ?? null;
         this.scheduler = scheduler ?? defaultFetchScheduler();
-
-        /** @type {string[]} - per-blob fetch URLs, resolved once. */
-        this._urls = [];
     }
 
     _blobUrl(blobIndex) {

@@ -1,16 +1,14 @@
 // @config
+//
+// GPU-driven meshlet rendering (WebGPU only): a grid of Stanford bunnies, culled and LOD-selected
+// on the GPU every frame - instance frustum cull, per-cluster DAG cut (crack-free, screen-space
+// error driven), cone backface cull, GPU-generated index buffer, indirect draw. All bunnies share
+// one set of geometry pages. Colour by meshlet to watch the DAG cut coarsen with distance and the
+// error threshold. Click a bunny to select it (shift-click to add): the GPU picker identifies the
+// instance behind the pixel, and the same index outlines it. Untick "Meshlets" to draw the same
+// bunnies as ordinary meshes for comparison.
+//
 // @flag WEBGL_DISABLED
-
-// GPU-driven meshlet rendering: a grid of Stanford bunnies, fully resident, culled and
-// LOD-selected on the GPU every frame - instance frustum cull, per-cluster DAG cut (crack-free,
-// screen-space error driven), cone backface cull, GPU-generated index buffer, indirect draw.
-// All bunnies share one set of geometry pages, so a 24x24 grid costs the same memory as one
-// bunny; the draw index buffer starts small and grows to the observed demand. Colour by meshlet
-// to inspect the clusters and watch the DAG cut coarsen with distance and the error threshold.
-// Click a bunny to select it: the GPU picker identifies the individual instance behind the
-// pixel, and that same index outlines it - shift-click to add to the selection.
-// Untick "Meshlets" (or ?meshlets=0) to draw the same bunnies as ordinary meshes - one render
-// component and draw call per bunny, at full resolution, culled on the CPU - for comparison.
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
@@ -39,6 +37,7 @@ import {
     Layer,
     Mesh,
     MeshInstance,
+    MESHLET_COLOR_MODE,
     MeshletComponentSystem,
     Mouse,
     OutlineRenderer,
@@ -75,18 +74,15 @@ const assets = {
     )
 };
 
-// The example runs in an iframe and the example browser does not forward its query string, so
-// merge the top window's params in (lowest priority) - ?grid=24&aa=0 then works on the outer
-// /#/graphics/meshlet-inspect URL as well as on the /iframe/ one.
+// the example browser does not forward its query string to this iframe, so the top window's
+// params are merged in at lowest priority
 const params = new URLSearchParams(location.search);
 try {
-    if (window.top !== window) {
-        new URLSearchParams(window.top.location.search).forEach((value, key) => {
-            if (!params.has(key)) params.set(key, value);
-        });
-    }
-} catch (_e) {
-    // cross-origin parent - this frame's own params only
+    new URLSearchParams(window.top.location.search).forEach((value, key) => {
+        if (!params.has(key)) params.set(key, value);
+    });
+} catch {
+    // cross-origin parent: this frame's own params only
 }
 
 // No backbuffer MSAA: anti-aliasing is chosen from the panel's AA dropdown and applied on the
@@ -276,15 +272,10 @@ const buildPlainGrid = (n) => {
 // drives the director directly instead of adding meshlet components
 const director = app.systems.meshlet.director;
 director.world.initialIndices = 1024 * 1024;
-// debug hooks: the director and the panel observer, so this can be driven headlessly
-window.__meshletDirector = director;
-window.__data = data;
 
 // ?opaque=1 clears the material's doubleSided flag, moving the asset from the two-sided bucket
-// to the fully opaque one. The bunny is a closed solid, so its doubleSided export flag is a
-// lie - and backface culling is worth roughly another 20% of the draw on top of what dropping
-// the alpha test already recovers. A fragment-cost A/B, and a demonstration of what the asset
-// is costing itself.
+// to the fully opaque one. The bunny is a closed solid, so backface culling is safe; this
+// compares the fragment cost of the two buckets.
 if (params.get('opaque') === '1' && resource.materialTable) {
     // baked material records - MATERIAL_RECORD_U32S words per row, flags word, double-sided
     // bit (src/scene/meshlet/constants.js; the constants are not exported from the engine)
@@ -305,7 +296,7 @@ if (params.get('timers') === '1') {
 data.set('data', {
     meshlets: params.get('meshlets') !== '0',
     gridSize: parseInt(params.get('grid') ?? '8', 10),
-    colorMode: parseInt(params.get('color') ?? '0', 10),
+    colorMode: Number(params.get('color') ?? MESHLET_COLOR_MODE.LIT),
     threshold: parseFloat(params.get('threshold') ?? '1'),
     sunLight: params.get('lights') !== '0' && params.get('sun') !== '0',
     spotLight: params.get('lights') !== '0' && params.get('spot') !== '0',
@@ -438,8 +429,8 @@ sun.addComponent('light', {
 sun.setEulerAngles(48, 35, 0);
 app.root.addChild(sun);
 
-// ?localshadows=0 turns the point/spot shadows off. An omni costs SIX meshlet shadow views -
-// one cull chain per cube face - so it is the honest stress case for local shadows.
+// ?localshadows=0 turns the point/spot shadows off. An omni light costs six meshlet shadow views,
+// one cull chain per cube face.
 const localShadows = params.get('localshadows') !== '0';
 
 const makeOmni = (color) => {
@@ -507,14 +498,12 @@ app.root.addChild(refSphere);
 
 // The camera renders through a CameraFrame (bloom/tonemap post chain). A camera with frame
 // passes never reaches the renderer's render-action path, so the meshlet passes are spliced
-// into the CameraFrame's own scene chain instead - see MeshletDirector#buildCameraFramePasses.
+// into the CameraFrame's own scene chain instead - see MeshletDirectorGroup#buildCameraFramePasses.
 // ?cameraframe=0 drops it to exercise the raw render-action path (no post, no AA dropdown).
 //
 // Anti-aliasing comes from the panel's AA dropdown, applied on the CameraFrame's scene target.
-// Mind the MSAA option: meshlet geometry is micro-triangle dense, so nearly every pixel sits
-// on a triangle edge and shades several samples - measured here as roughly quadrupling the
-// per-fragment lighting cost (local clustered lights went from ~1.5 ms to ~12 ms a frame at
-// 4x on a 5M-pixel canvas). TAA pays a flat post-process cost instead.
+// MSAA is expensive here: meshlet geometry is dense, so most pixels sit on a triangle edge and
+// shade several samples. TAA pays a flat post-process cost instead.
 let cameraFrame = null;
 if (params.get('cameraframe') !== '0') {
     cameraFrame = new CameraFrame(app, camera.camera);
@@ -532,9 +521,7 @@ if (params.get('cameraframe') !== '0') {
 // that; without one it needs a render target with a depth texture.
 director.occlusionEnabled = params.get('occlusion') === '1';
 
-// SMAA is deliberately not offered: the engine's SMAA chain has a gamma handling bug
-// unrelated to meshlets (compose hands it a gamma-encoded intermediate whose round trip does
-// not survive every target setup), so the choices are None / TAA / MSAA 4x.
+// the choices are None / TAA / MSAA 4x
 const applyAaMode = () => {
     if (!cameraFrame) return;
     const mode = data.get('data.aaMode') ?? 'none';
@@ -547,16 +534,14 @@ const applyAaMode = () => {
 data.on('data.aaMode:set', applyAaMode);
 applyAaMode();
 
-// Click to select. This is the editor round trip in miniature: the GPU picker returns a per
-// INSTANCE record - one primitive at one transform, which is what a glTF submesh becomes here -
-// and that instance index is exactly what selects it for outlining.
+// Click to select. The GPU picker returns a per-instance record (one primitive at one transform),
+// and that instance index is what selects it for outlining.
 //
-// Meshlets need both halves wired by hand, because their mesh instances live outside the layer
-// system: the picker gets them from MeshletDirector#preparePicking, and the outline renderer
-// gets the whole geometry once (on a layer the scene camera does NOT render, or the main camera
-// would draw the world a second time) with a per-instance flag deciding what actually
-// rasterises. Ordinary meshes still go through OutlineRenderer#addEntity - the reference sphere
-// is wired that way, in a different colour, so the two paths can be told apart.
+// Meshlet mesh instances live outside the layer system, so both halves are wired by hand: the
+// picker gets them from MeshletDirector#preparePicking, and the outline renderer gets the whole
+// geometry once, on a layer the scene camera does not render, with a per-instance flag deciding
+// what rasterises. The reference sphere goes through OutlineRenderer#addEntity, in a different
+// colour, so the two paths can be told apart.
 const outlineLayer = new Layer({ name: 'MeshletOutline' });
 app.scene.layers.push(outlineLayer);
 const outlineRenderer = new OutlineRenderer(app, outlineLayer);
@@ -594,19 +579,9 @@ const applySelection = () => {
     data.set('data.selection', `${sel}  (hover: ${hov})`);
 };
 
-/**
- * Picks at a canvas coordinate and updates the selection. Exposed on window so the headless
- * checks can drive it without synthesising mouse events.
- *
- * @param {number} x - Canvas x, in CSS pixels.
- * @param {number} y - Canvas y, in CSS pixels.
- * @param {boolean} [add] - True to add to the selection rather than replace it.
- * @returns {Promise<string>} What was hit, for logging.
- */
-// A click cannot pick immediately. The meshlet draw is INDIRECT, and its draw arguments are
-// written by the cull that runs at the start of each frame - so a picker prepared during input
-// handling renders the meshlets with arguments that are stale or already cleared, and finds
-// nothing. Queue the request and service it from postrender, once the frame's cull has run.
+// A click cannot pick immediately: the meshlet draw is indirect, and its arguments are written by
+// the cull at the start of each frame, so a picker prepared during input handling finds nothing.
+// The request is queued and serviced from postrender, once the frame's cull has run.
 /** @type {{ x: number, y: number, add: boolean, resolve: Function }|null} */
 let pendingPick = null;
 
@@ -659,8 +634,7 @@ app.on('postrender', () => {
 });
 
 /**
- * Queues a pick at a canvas coordinate; resolves once the selection has been updated. Exposed
- * on window so the headless checks can drive it without synthesising mouse events.
+ * Queues a pick at a canvas coordinate; resolves once the selection has been updated.
  *
  * @param {number} x - Canvas x, in CSS pixels.
  * @param {number} y - Canvas y, in CSS pixels.
@@ -678,8 +652,6 @@ const selectAt = (x, y, add = false, hover = false) =>
         pendingPick?.resolve('superseded');
         pendingPick = { x, y, add, hover, resolve };
     });
-window.__selectAt = selectAt;
-window.__hoverAt = (x, y) => selectAt(x, y, false, true);
 
 const mouse = new Mouse(canvas);
 mouse.on(EVENT_MOUSEDOWN, (event) => {
@@ -718,9 +690,8 @@ let time = 0;
 let sizeChangedAt = -1;
 
 app.on('update', (dt) => {
-    // clamp the final step so `time` lands EXACTLY on freezeAt: everything animated here is a
-    // function of accumulated time, so two runs then produce identical frames regardless of
-    // how the real frame times fell
+    // clamp the final step so `time` lands on freezeAt: everything animated is a function of
+    // accumulated time, so two runs produce identical frames whatever the real frame times
     if (freezeAt >= 0) dt = Math.max(Math.min(dt, freezeAt - time), 0);
     time += dt;
 
@@ -758,8 +729,8 @@ app.on('update', (dt) => {
     const omnisOn = !!data.get('data.omniLights');
     omniA.enabled = omnisOn;
     omniB.enabled = omnisOn;
-    // sweep the spot ACROSS the grid rather than around it: a small orbit radius high above
-    // the bunnies, aimed at a point circling the other way, so the cone crosses the field
+    // sweep the spot across the grid rather than around it: a small orbit high above the
+    // bunnies, aimed at a point circling the other way
     const spotAngle = time * 0.35;
     spot.setLocalPosition(
         Math.cos(spotAngle) * gridExtent * 0.18,
@@ -771,9 +742,7 @@ app.on('update', (dt) => {
         0.05,
         Math.sin(spotAngle + Math.PI) * gridExtent * 0.3
     );
-    // lookAt aims the entity's -Z at the target, but a spot light emits down its -Y (the same
-    // convention the shadow renderer undoes with rotateLocal(-90, 0, 0) to build its camera).
-    // Without this the cone points 90 degrees off and the pool lands beside the target.
+    // lookAt aims the entity's -Z at the target, but a spot light emits down its -Y
     spot.rotateLocal(90, 0, 0);
     sun.light.shadowDistance = gridExtent * 2.5;
     app.scene.envAtlas = data.get('data.ibl') ? assets.helipad.resource : null;
@@ -811,16 +780,4 @@ app.on('update', (dt) => {
     director.dagPixelThreshold = data.get('data.threshold');
     director.world.setColorMode(data.get('data.colorMode'));
     director.shadowsEnabled = !!data.get('data.shadows');
-
-    // numeric oracle for the headless gates: per-cascade index demand. A cascade reporting 0
-    // means its cull emitted nothing - the failure mode of a wrong LOD projection, which is
-    // visually indistinguishable from "subtle" but obvious here.
-    window.__meshletShadowStats = director.shadowRenderer.views.map((v) => ({
-        light: v.light._node?.name ?? '?',
-        type: v.light._type,
-        face: v.face,
-        orthoScale: v.culler.orthoScale,
-        demand: v.lastDemand,
-        indexCapacity: v.indexCapacity.slice()
-    }));
 });

@@ -101,6 +101,10 @@ class GlbContainerResource {
     instantiateRenderEntity(options) {
 
         const defaultMaterial = this._defaultMaterial;
+        let skipBlendedShadowCasters = false;
+        if (options?.skipBlendedShadowCasters !== undefined) {
+            ({ skipBlendedShadowCasters, ...options } = options);
+        }
         const skinnedMeshInstances = [];
 
         const createMeshInstance = function (root, entity, mesh, materials, meshDefaultMaterials, skins, gltfNode, nodeInstancingMap) {
@@ -228,14 +232,15 @@ class GlbContainerResource {
                 // assign asset id without recreating mesh instances which are already set up with materials
                 entity.render.assignAsset(renderAsset);
 
-                // A shadow map can only record a blended or transmissive surface as solid, so such
-                // primitives do not cast; alpha-tested (masked) surfaces still do. Applied after
-                // the component, which sets every mesh instance from its own castShadows.
-                for (let i = 0; i < attachedMi.length; i++) {
-                    const material = attachedMi[i].material;
-                    const blended = material.blendType !== BLEND_NONE && !(material.alphaTest > 0);
-                    if (blended || material.refraction > 0) {
-                        attachedMi[i].castShadow = false;
+                // a shadow map can only record a blended or transmissive surface as solid; applied
+                // after the component, which sets every mesh instance from its own castShadows
+                if (skipBlendedShadowCasters) {
+                    for (let i = 0; i < attachedMi.length; i++) {
+                        const material = attachedMi[i].material;
+                        const blended = material.blendType !== BLEND_NONE && !(material.alphaTest > 0);
+                        if (blended || material.refraction > 0) {
+                            attachedMi[i].castShadows = false;
+                        }
                     }
                 }
             }

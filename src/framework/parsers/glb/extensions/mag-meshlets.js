@@ -2,6 +2,7 @@ import { Debug } from '../../../../core/debug.js';
 import { Mat4 } from '../../../../core/math/mat4.js';
 import { Quat } from '../../../../core/math/quat.js';
 import { Vec3 } from '../../../../core/math/vec3.js';
+import { http, Http } from '../../../../platform/net/http.js';
 import { PAGE_SIZE_BYTES } from '../../../../scene/meshlet/constants.js';
 import { MeshletResource, MeshletPrimitive } from '../../../../scene/meshlet/meshlet-resource.js';
 import { MeshletInstanceListBuilder } from '../../../../scene/meshlet/meshlet-instance-list.js';
@@ -232,8 +233,6 @@ const createMeshlets = (device, gltf, bufferViews) => {
             prim.meshletDataF32 = new Float32Array(meshletData.buffer, meshletData.byteOffset, meshletData.length);
             prim.meshletCount = ext.meshletCount ?? 0;
             prim.uvChannelMask = ext.uvChannelMask ?? 0;
-            prim.vertexCount = ext.vertexCount ?? 0;
-            prim.lods = ext.lods ?? [];
             prim.aabbCenter = ext.aabbCenter ?? [0, 0, 0];
             prim.aabbHalfExtents = ext.aabbHalfExtents ?? [0, 0, 0];
             prim.materialIndex = primitive.material ?? -1;
@@ -308,7 +307,7 @@ const createMeshlets = (device, gltf, bufferViews) => {
         for (const primIndex of list) instances.add(primIndex, transform);
     });
 
-    const resource = new MeshletResource(device, primitives, manifest, instances);
+    const resource = new MeshletResource(primitives, manifest, instances);
 
     // streamed-texture manifest (MAG_texture_streaming root extension) - consumed by the
     // meshlet world's texture system; absent on texture-less bakes
@@ -336,10 +335,33 @@ const createMeshlets = (device, gltf, bufferViews) => {
 };
 
 /**
+ * Fetches a URL as an ArrayBuffer through the engine's HTTP layer, so the request is retried and
+ * answered from {@link ResourceLoader#byteCache} like the asset's own load.
+ *
+ * @param {string} url - The URL.
+ * @param {RequestCredentials|null} credentials - Fetch credentials mode.
+ * @returns {Promise<ArrayBuffer>} The response.
+ */
+const fetchArrayBuffer = (url, credentials) => new Promise((resolve, reject) => {
+    http.get(url, {
+        responseType: Http.ResponseType.ARRAY_BUFFER,
+        retry: true,
+        withCredentials: credentials === 'include'
+    }, (err, data) => {
+        if (err) {
+            reject(new Error(`meshlet records fetch failed (${err}): ${url}`));
+        } else {
+            resolve(data);
+        }
+    });
+});
+
+/**
  * Fetches a streamed-meshlet GLB again and hands its primitives' meshlet records back to the
  * resource parsed from it, after {@link MeshletResource#releaseRecords} dropped them. The records
  * are found through the glTF JSON (mesh, primitive, accessor), not remembered byte offsets, so the
- * way the file was first delivered does not matter.
+ * way the file was first delivered does not matter. Only uncompressed u32 records stored in the
+ * GLB's own binary chunk can be restored; any other layout fails.
  *
  * @param {string} url - The GLB's URL.
  * @param {MeshletResource} resource - The resource parsed from it.
@@ -348,20 +370,42 @@ const createMeshlets = (device, gltf, bufferViews) => {
  * @ignore
  */
 const restoreMeshletRecords = async (url, resource, credentials = null) => {
-    const response = await fetch(url, credentials ? { credentials } : {});
-    if (!response.ok) throw new Error(`meshlet records fetch failed (${response.status}): ${url}`);
-    const buffer = await response.arrayBuffer();
+    const fail = (reason) => {
+        const message = `meshlet records cannot be restored from ${url}: ${reason}`;
+        Debug.error(message);
+        return new Error(message);
+    };
+
+    const buffer = await fetchArrayBuffer(url, credentials);
     const view = new DataView(buffer);
-    if (view.getUint32(0, true) !== 0x46546C67) throw new Error(`meshlet records: ${url} is not a GLB`);
+    if (buffer.byteLength < 20 || view.getUint32(0, true) !== 0x46546C67) throw fail('not a GLB');
     const jsonLength = view.getUint32(12, true);
+    const binHeader = 20 + jsonLength;
+    if (buffer.byteLength < binHeader + 8 || view.getUint32(binHeader + 4, true) !== 0x004E4942) {
+        throw fail('the GLB has no binary chunk');
+    }
+    const binStart = binHeader + 8;
+    const binEnd = binStart + view.getUint32(binHeader, true);
     const gltf = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 20, jsonLength)));
-    const binStart = 20 + jsonLength + 8;
+
     const records = resource.primitives.map((prim) => {
         const ext = gltf.meshes?.[prim.meshIndex]?.primitives?.[prim.primIndex]?.extensions?.[gpuExtensionName];
         const accessor = gltf.accessors?.[ext?.accessors?.meshletData];
         const bufferView = gltf.bufferViews?.[accessor?.bufferView];
-        if (!bufferView) throw new Error(`meshlet records: ${url} no longer matches its parsed resource`);
-        return new Uint32Array(buffer, binStart + (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0), accessor.count);
+        if (!bufferView) throw fail('the file no longer matches its parsed resource');
+
+        // the records must be stored raw in the binary chunk (buffer 0 without a uri), as
+        // compressed (EXT_meshopt_compression) or external buffers would need decoding first
+        if (bufferView.buffer !== 0 || gltf.buffers?.[0]?.uri !== undefined || bufferView.extensions ||
+            accessor.componentType !== 5125 || accessor.sparse) {
+            throw fail('the meshlet records are not stored as raw u32 data in the GLB binary chunk');
+        }
+        const start = binStart + (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
+        const end = start + accessor.count * 4;
+        if (end > binEnd) throw fail('the meshlet records lie outside the binary chunk');
+
+        // copied, so the fetched GLB is not kept alive by the records
+        return new Uint32Array(buffer.slice(start, end));
     });
     resource.restoreRecords(records);
 };

@@ -1,6 +1,8 @@
 import { MeshletCells } from './meshlet-cells.js';
 import { MeshletCutData } from './meshlet-cut-data.js';
 import { MeshletInstanceList } from './meshlet-instance-list.js';
+import { MeshletMaterialTable, bucketOfMeshletFlags, meshletFlagsOfBucket } from './meshlet-material-table.js';
+import { resolveMeshletBudget, rootListItems } from './meshlet-world-budget.js';
 import { meshletBakeStamp } from './streaming/meshlet-bake-stamp.js';
 import { Debug } from '../../core/debug.js';
 import { PickerId } from '../picker-id.js';
@@ -12,26 +14,24 @@ import {
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { ShaderChunks } from '../shader-lib/shader-chunks.js';
 import { OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW,
-    MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
-    MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
-    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
-    MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, MESHLET_NO_PARENT, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
+    MATERIAL_RECORD, MATERIAL_RECORD_U32S, MESHLET_BUCKET_COUNT, MESHLET_DATA, MESHLET_DATA_U32S,
+    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, MESHLET_NO_PARENT,
+    OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
     PRIMITIVE_DATA,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED,
     PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
-    RECORD_U32S, ROOT_LIST_U32S, TEXEL_RATE_PER_MIP,
-    MESHLET_COLOR_MODE, claimWordCount } from './constants.js';
+    TEXEL_RATE_PER_MIP, MESHLET_COLOR_MODE } from './constants.js';
 import { createMeshletLitMaterial } from './meshlet-lit-material.js';
 import { createMeshletMaterial } from './meshlet-material.js';
 import { buildMeshletLitChunks } from './shaders/meshlet-lit-chunks-wgsl.js';
 import { MeshletTextures, MESHLET_TEX_FAMILIES } from './textures/meshlet-textures.js';
 
-/** Page attribute streams this build can place (see meshletPageLayoutWGSL). */
-const KNOWN_LAYOUT_KEYS = new Set(['positions', 'normals', 'tangents', 'uvComponents', 'colors']);
-
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
- * @import { MeshletResource } from './meshlet-resource.js'
+ * @import { Material } from '../materials/material.js'
+ * @import { MeshletFetchScheduler } from './streaming/meshlet-fetch-scheduler.js'
+ * @import { MeshletPrimitive, MeshletResource } from './meshlet-resource.js'
+ * @import { MeshletTranscodeFn } from './textures/meshlet-ktx2.js'
  */
 
 /**
@@ -45,56 +45,27 @@ const KNOWN_LAYOUT_KEYS = new Set(['positions', 'normals', 'tangents', 'uvCompon
  * {@link MeshletFetchScheduler#byteCache}); the world sets it to the resource's bake stamp.
  */
 
+/** Page attribute streams this build can place (see meshletPageLayoutWGSL). */
+const KNOWN_LAYOUT_KEYS = new Set(['positions', 'normals', 'tangents', 'uvComponents', 'colors']);
+
 // meshlet records (128 bytes each) gathered per upload while building a world: 16 MB
 const RECORD_UPLOAD_BATCH = 128 * 1024;
-
-// Least the draw index budget is resolved to, whatever the geometry budget leaves for it: 4M
-// indices. Root admission takes instances nearest first, so any real capacity draws the closest
-// ones; a budget that leaves the indices nothing would admit no instance at all and draw an
-// empty scene.
-const MIN_INDEX_BUDGET_BYTES = 16 * 1024 * 1024;
-
-// Bytes per record a view holds: the record itself and its selected-meshlet entry.
-const RECORD_BYTES = RECORD_U32S * 4 + 8;
-
-// Bytes per cut queue entry: an (instance, group row) pair.
-const CUT_QUEUE_ENTRY_BYTES = 8;
-
-// Least each view's records and cut queue are resolved to under a budget: enough for a few
-// thousand instances' roots and their first refinements.
-const MIN_VIEW_RECORDS = 16 * 1024;
-const MIN_VIEW_CUT_QUEUE = 16 * 1024;
-
-// Shares of the draw working set given to all views' records and cut queues, the rest going to
-// the indices. A drawn meshlet costs hundreds of indices (four bytes each) against one 24-byte
-// record and a cut task for its group, so these are small.
-const RECORD_BUDGET_SHARE = 0.05;
-const CUT_QUEUE_BUDGET_SHARE = 0.03;
-
-// A shadow view's weight against a camera view's in that split. A cascade cuts far coarser
-// than the camera it shadows, and an even split hands a scene with a dozen shadow views a
-// camera share too small to refine anything near.
-const SHADOW_VIEW_DRAW_WEIGHT = 0.25;
-
-/**
- * Root list entries a view holds: one per instance. Admission ranks every instance in view, so
- * this scales with the scene, not the budget.
- *
- * @param {number} instanceCount - The world's instances.
- * @returns {number} Entries.
- * @ignore
- */
-const rootListItems = instanceCount => Math.max(instanceCount, 4);
 
 // objectData instance rows generated per upload (64 bytes each): 4 MB. Rows are generated from
 // the placements on demand rather than mirrored, so this is all the CPU holds of them.
 const OBJECT_ROW_BATCH = 64 * 1024;
+
+// floats per instance of the lightmap table: atlas scale/bias, EPIC scale, EPIC add, then
+// (texture index, UV channel, enabled, 0)
+const LIGHTMAP_ROW_FLOATS = 16;
 
 // longest the world bounds stay loose after instances move, in milliseconds
 const WORLD_BOUNDS_REFIT_MS = 1000;
 
 // outline and hover changes up to this many instances write just their flags words
 const FLAG_WRITE_LIMIT = 256;
+
+const BYTES_PER_MB = 1024 * 1024;
 
 const _tmpMat = new Mat4();
 
@@ -116,11 +87,77 @@ const _tailBindName = family => `meshletTail${_familyName(family)}`;
 const _fineBindName = family => `meshletFine${_familyName(family)}`;
 
 /**
+ * Largest storage buffer the device can bind, in bytes: both the buffer size and the storage
+ * binding limits apply, and exceeding either fails creation with a validation error instead of
+ * allocating.
+ *
+ * @param {GraphicsDevice} device - The device.
+ * @returns {number} Bytes.
+ */
+const maxStorageBytes = (device) => {
+    const limits = device.limits ?? {};
+    return Math.min(
+        limits.maxBufferSize ?? Number.MAX_SAFE_INTEGER,
+        limits.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER
+    );
+};
+
+/**
+ * The primitive-local pages of a primitive's root clusters (those without a parent): what the
+ * residency pins for as long as the primitive is placed. Kept on the primitive, with
+ * {@link primitiveStats}, so a resource whose records were released can still be laid out.
+ *
+ * @param {MeshletPrimitive} prim - The primitive.
+ * @returns {number[]} Its root pages (may repeat).
+ */
+const primitiveRootPages = (prim) => {
+    if (!prim._rootPages) {
+        const data = prim.meshletData;
+        const pages = [];
+        for (let m = 0; m < prim.meshletCount; m++) {
+            const row = m * MESHLET_DATA_U32S;
+            if (data[row + MESHLET_DATA.PARENT] === MESHLET_NO_PARENT) pages.push(data[row + MESHLET_DATA.PAGE]);
+        }
+        prim._rootPages = pages;
+    }
+    return prim._rootPages;
+};
+
+/**
+ * Caches a primitive's index count and its first meshlet's flags (see {@link primitiveRootPages}).
+ *
+ * @param {MeshletPrimitive} prim - The primitive.
+ */
+const primitiveStats = (prim) => {
+    if (prim._indexCount >= 0) return;
+    const src = prim.meshletData;
+    let triangles = 0;
+    for (let m = 0; m < prim.meshletCount; m++) triangles += src[m * MESHLET_DATA_U32S + MESHLET_DATA.TRIANGLE_COUNT];
+    prim._indexCount = triangles * 3;
+    prim._firstFlags = prim.meshletCount ? src[MESHLET_DATA.FLAGS] : 0;
+};
+
+/**
  * What a picked meshlet id resolves to: one instance, a primitive at one transform.
  *
  * @ignore
  */
 class MeshletPickRecord {
+    /** @type {number} - the picker id. */
+    pickId;
+
+    /** @type {object} - the world placement holding the instance. */
+    placement;
+
+    /** @type {number} - global instance index (see MeshletWorld#instanceOffset). */
+    instanceIndex;
+
+    /** @type {number} - the resource primitive. */
+    primIndex;
+
+    /** @type {number} - the instance's position in the placement's list. @private */
+    _listIndex;
+
     /**
      * @param {number} pickId - The picker id.
      * @param {object} placement - The world placement holding the instance.
@@ -148,6 +185,25 @@ class MeshletPickRecord {
 }
 
 /**
+ * Scene totals of a world's pending resources (see MeshletWorld#_countTotals).
+ *
+ * @typedef {object} MeshletBuildTotals
+ * @property {number} totalPages - Pages across resources.
+ * @property {number} totalMeshlets - Meshlets across resources.
+ * @property {number} totalInstances - Instances across placements.
+ * @property {number} totalPrimitiveRows - Primitive rows of objectData.
+ * @property {number} totalMaterialRows - Material table rows.
+ * @property {number} pairs - Instance-meshlet pairs.
+ * @property {number[]} rootPages - Global pages of every placed primitive's roots, ascending.
+ * @property {boolean} anyLightmaps - Some instance carries a lightmap.
+ * @property {boolean} anyTextures - Some resource streams textures.
+ * @property {number} uvChannels - Most UV channels of any resource.
+ * @property {boolean} anyTangents - Some resource carries tangents.
+ * @property {boolean} anyColors - Some resource carries vertex colours.
+ * @ignore
+ */
+
+/**
  * The GPU residency and instance state of a set of streamed meshlet assets: page pool, resident
  * meshletData records (rebased into one global meshlet space), per-instance objectData, material
  * palette and the frame's record/index working buffers plus the draw mesh instances.
@@ -156,6 +212,13 @@ class MeshletPickRecord {
  * through {@link MeshletDirector#rebuild}. Per-placement transforms may change after finalize
  * via {@link setPlacementTransform}. Resources may differ in position grid and page attribute
  * layout (carried per instance in objectData); all must share one page size.
+ *
+ * Five address spaces are each concatenated in resource add order: pages (pool slot / residency
+ * index), meshlets (global id), instances (objectData row = pick record), material rows and flat
+ * texture indices. A resource's block starts where the previous one ended, which is what lets a
+ * rebuild carry a previous world's page pool, residency and visibility bits: only an unchanged
+ * prefix of the add order keeps its addresses, so anything after the first changed resource is
+ * rebuilt cold.
  *
  * @ignore
  */
@@ -168,12 +231,37 @@ class MeshletWorld {
 
     finalized = false;
 
-    // GPU buffers
+    /** @type {StorageBuffer|null} - the page pool, {@link poolSlots} pages. */
     pagePool = null;
 
+    /** @type {number} - pages {@link pagePool} holds. */
+    poolSlots = 0;
+
+    /** @type {Uint32Array} - page -> pool slot (PAGE_NOT_RESIDENT when not resident). */
+    residency = new Uint32Array(0);
+
+    /** @type {StorageBuffer|null} - {@link residency} on the GPU. */
     residencyBuffer = null;
 
-    /** @type {StorageBuffer|null} - 16-byte placeholder bound as visBits by single-phase views. */
+    /**
+     * Per page a streaming request mark, then per material row a texture-mip feedback mark
+     * (atomicMax'd texel rates). Shared by every view - marks union by max - and cleared once
+     * a frame by the residency.
+     *
+     * @type {StorageBuffer|null}
+     */
+    requestsBuffer = null;
+
+    /** @type {number} - material rows, and texel-rate marks after the page marks. */
+    materialRowCount = 0;
+
+    /**
+     * Placeholder bound as visBits by single-phase (shadow) views. The cull shader always
+     * declares the binding but only its phase 1/2 branches touch it, so those views bind this
+     * 16-byte buffer instead of one bit per instance-meshlet pair.
+     *
+     * @type {StorageBuffer|null}
+     */
     dummyBits = null;
 
     /** @type {number} - first id of this world's reserved per-instance picker block. */
@@ -197,6 +285,7 @@ class MeshletWorld {
     /** @type {Set<number>} - instance indices flagged as hovered. */
     _hovered = new Set();
 
+    /** @type {StorageBuffer|null} */
     meshletDataBuffer = null;
 
     /** @type {MeshletCutData|null} */
@@ -204,7 +293,6 @@ class MeshletWorld {
 
     /** @type {MeshletCells|null} - spatial instance cells the views cull before their instances. */
     cells = null;
-
 
     /** @type {StorageBuffer|null} - instance rows, then primitive rows (see OBJECT_DATA_U32S). */
     objectDataBuffer = null;
@@ -218,19 +306,26 @@ class MeshletWorld {
      */
     instanceFlags = new Uint32Array(0);
 
-    /** @type {Uint32Array} - the primitive rows of objectData, as uploaded after the instance rows. */
-    primitiveRows = new Uint32Array(0);
-
-    /** @type {number} - index of the placement {@link _placementOf} found last. */
+    /** @type {number} - index of the placement {@link _locate} found last. */
     _placementCursor = 0;
 
+    /** @type {StorageBuffer|null} */
     materialTableBuffer = null;
 
     /** @type {StorageBuffer|null} */
     lightmapBuffer = null;
 
-    /** @type {import('./textures/meshlet-textures.js').MeshletTextures|null} */
+    /** @type {MeshletTextures|null} */
     textures = null;
+
+    /** @type {Material[]|null} - engine-lit bucket materials, one per MESHLET_BUCKET_*. */
+    _litMaterials = null;
+
+    /** @type {Material[]|null} - unlit debug bucket materials, created on first use. */
+    _debugMaterials = null;
+
+    /** @type {number} - the MESHLET_COLOR_MODE in effect (see {@link setColorMode}). */
+    _colorMode = 0;
 
     // capacities (index capacities are the initial per-view values; each MeshletView owns
     // its own demand-grown copy)
@@ -256,6 +351,14 @@ class MeshletWorld {
     // format (all resources in a world share one page size; attribute layouts may differ,
     // carried per instance in objectData)
     pageSizeBytes = 0;
+
+    /**
+     * Global pages of every placed primitive's root clusters, ascending: pinned by the
+     * residency, and reserved in the page pool before anything else.
+     *
+     * @type {number[]}
+     */
+    rootPages = [];
 
     /** @type {BoundingBox} */
     _worldBounds = new BoundingBox();
@@ -291,7 +394,10 @@ class MeshletWorld {
     }
 
     /**
-     * Grows {@link _worldBounds} by the world boxes of a range of instances.
+     * Grows {@link _worldBounds} by the world boxes of a range of instances: each primitive's
+     * baked AABB through its instance matrix, which keeps a flat instance flat where its
+     * bounding sphere would not - and with it the depth range of the shadow cascades fitted
+     * around the world.
      *
      * @param {number} first - First instance.
      * @param {number} count - Instance count.
@@ -374,14 +480,13 @@ class MeshletWorld {
      * Total geometry-side VRAM budget in bytes, or 0 for unbudgeted (size the page pool to hold
      * every page). This covers everything the meshlet pipeline allocates for geometry - the
      * page pool, the world tables (meshletData, objectData), and the per-view working set
-     * (claim/visibility bit planes, work items, records, draw indices) - not just the page pool.
+     * (claim/visibility bit planes, work items, records, draw indices) - not just the page pool,
+     * which the demand-grown buffers can outgrow many times over when they have no ceiling.
      *
-     * Budgeting only the pool is misleading: the demand-grown buffers can dominate it many
-     * times over when they have no ceiling. The
-     * fixed and per-view costs are computed at finalize and subtracted; what remains is split
-     * between the page pool and the draw index buffers by {@link indexBudgetFraction}, and the
-     * index share becomes {@link maxIndices}, so growth is bounded by the budget rather than by
-     * the device.
+     * The fixed and per-view costs are computed at finalize and subtracted; what remains is
+     * split between the page pool and the draw index buffers by {@link indexBudgetFraction}, and
+     * the index share becomes {@link indexBudgetTotal}, so growth is bounded by the budget rather
+     * than by the device.
      *
      * @type {number}
      */
@@ -464,15 +569,15 @@ class MeshletWorld {
      * KTX2 transcoder handed to the texture system (see {@link MeshletDirector#transcode}).
      * Scene code cannot import the framework's Basis transcoder, so it arrives by injection.
      *
-     * @type {import('./textures/meshlet-ktx2.js').MeshletTranscodeFn|null}
+     * @type {MeshletTranscodeFn|null}
      */
     transcode = null;
 
     /**
      * The scheduler the world's sidecar fetches (geometry shards, texture containers) go
-     * through; the director shares one across its worlds. Null selects the page-wide default.
+     * through; a director group shares one across its worlds. Null selects the page-wide default.
      *
-     * @type {import('./streaming/meshlet-fetch-scheduler.js').MeshletFetchScheduler|null}
+     * @type {MeshletFetchScheduler|null}
      */
     fetchScheduler = null;
 
@@ -548,25 +653,27 @@ class MeshletWorld {
     placements = [];
 
     /**
-     * Per added-resource identity, in add order - what the director's retention path compares
-     * across rebuilds: `{ resource, baseUrl, streamed, pageCount }`.
+     * Per added-resource identity, in add order - what a rebuild compares to decide what carries
+     * (see MeshletRebuildCarry#adoptStreamingState): `{ resource, baseUrl, streamed, pageCount,
+     * instances, repeat }`, `instances` being the placement list as added and `repeat` its run
+     * count.
      *
      * @type {Array<object>}
      */
     buildEntries = [];
 
-    // Retention (set by MeshletDirector.rebuild before finalize): a compatible previous world's
-    // page pool buffer is adopted instead of recreated, its residency map prefix is carried
-    // (adoptedPages entries), its persistent visibility bits prefix is GPU-copied (placements
-    // with unchanged instance lists - else phase 2 re-discovers the whole frustum and the page
-    // demand burst evicts the hot set), and its texture system is reused wholesale when the
-    // streamed texture set is unchanged.
+    // What a rebuild hands this world from the previous one (see
+    // MeshletRebuildCarry#adoptStreamingState), consumed by finalize: the page pool buffer, the
+    // residency map whose first adoptedPages entries stay valid, and the texture system.
+    /** @type {StorageBuffer|null} */
     adoptPagePool = null;
 
+    /** @type {Uint32Array|null} */
     adoptResidency = null;
 
     adoptedPages = 0;
 
+    /** @type {MeshletTextures|null} */
     adoptTextures = null;
 
     /** @type {number} - textured resources (in add order) the adopted texture system already holds; the rest are appended to it. */
@@ -582,11 +689,6 @@ class MeshletWorld {
      * @type {number}
      */
     maxFineTextureSize = 2048;
-
-    /** @type {import('../../platform/graphics/storage-buffer.js').StorageBuffer|null} */
-    adoptVisBits = null;
-
-    adoptVisBitsWords = 0;
 
     /** @type {number} - resources added but not yet finalized. */
     get pendingCount() {
@@ -631,136 +733,13 @@ class MeshletWorld {
     }
 
     /**
-     * Largest page pool, in pages, a single buffer can hold on this device. The pool is bound
-     * as storage, so both the buffer and the storage binding limits apply; exceeding them fails
-     * buffer creation with a validation error instead of allocating.
+     * Largest page pool, in pages, a single buffer can hold on this device (see
+     * {@link maxStorageBytes}).
      *
-     * @param {import('../../platform/graphics/graphics-device.js').GraphicsDevice} device - Device.
      * @returns {number} Page count.
      */
-    maxPoolSlots(device) {
-        const limits = device.limits ?? {};
-        const limitBytes = Math.min(
-            limits.maxBufferSize ?? Number.MAX_SAFE_INTEGER,
-            limits.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER
-        );
-        return Math.max(Math.floor(limitBytes / this.pageSizeBytes), 1);
-    }
-
-    /**
-     * Splits {@link poolBytes} into the page pool and the draw working set: the shared index
-     * pool and each view's record and cut-queue ceilings. Nothing a view allocates later grows
-     * past these, so the budget bounds the pipeline's memory rather than its starting point -
-     * what does not fit is not drawn, farthest first (see {@link rootBudgetFraction}).
-     *
-     * The world tables and each view's scene-sized state (claim and visibility bits, one per
-     * instance-meshlet pair, and the root list, one entry per instance) are exactly computable
-     * from the scene's counts and come off the top. A shadow view costs far less than a camera
-     * one - it borrows the claim plane and root list from its siblings and binds a placeholder
-     * for the visibility bits it never touches - so the two are counted separately.
-     *
-     * @param {object} counts - Scene totals.
-     * @returns {number} Bytes for the page pool (0 = unbudgeted, size to every page).
-     * @private
-     */
-    _resolveBudget(counts) {
-        const { totalPages, totalMeshlets, totalInstances, totalPrimitiveRows = 0, totalMaterialRows, pairs, lightmapBytes = 0, rootPages = 0 } = counts;
-        this.recordCeiling = 0;
-        this.cutQueueCeiling = 0;
-        this.shadowRecordCeiling = 0;
-        this.shadowCutQueueCeiling = 0;
-        if (!(this.poolBytes > 0)) {
-            this.budgetBreakdown = null;
-            this.maxIndices = 0;
-            return 0;
-        }
-
-        const pairWords = Math.max(Math.ceil((pairs + totalInstances) / 32), 4);
-        const claimWords = claimWordCount(pairs, totalInstances);
-        // Group headers and membership lists, packed selection links, per-instance root offsets
-        // and cell tables.
-        const cutBytes = totalMeshlets * (56 + 8) + totalInstances * 44;
-        const fixed = cutBytes + lightmapBytes + totalMeshlets * MESHLET_DATA_U32S * 4 +      // meshletData
-            (totalInstances + totalPrimitiveRows) * OBJECT_DATA_U32S * 4 +  // objectData
-            totalPages * 4 +                                       // residency
-            (totalPages + totalMaterialRows) * 4 +                 // requests + texel-rate marks
-            totalMaterialRows * MATERIAL_RECORD_U32S * 4;          // material table
-        const rootListBytes = rootListItems(totalInstances) * ROOT_LIST_U32S * 4;
-        // camera view: own claim plane, own visibility bits, own root list
-        const perCamera = (claimWords + pairWords) * 4 + rootListBytes;
-        // shadow views: one claim plane and root list shared by every cascade
-        const shadows = this.budgetShadowViews;
-        const shared = shadows > 0 ? claimWords * 4 + rootListBytes : 0;
-
-        const views = Math.max(this.budgetCameraViews, 1);
-        const reserved = fixed + perCamera * views + shared;
-        let available = this.poolBytes - reserved;
-
-        // The pool must hold every resource's pinned root pages plus a demand reserve, and the
-        // draw working set enough for the nearest instances' roots - without either nothing
-        // draws. A budget that cannot even hold the fixed cost is not a budget: keep going with
-        // those minimums rather than allocating nothing, and say so.
-        const viewCount = views + shadows;
-        const minRecordBytes = MIN_VIEW_RECORDS * RECORD_BYTES;
-        const minQueueBytes = MIN_VIEW_CUT_QUEUE * CUT_QUEUE_ENTRY_BYTES;
-        const minDraw = MIN_INDEX_BUDGET_BYTES + viewCount * (minRecordBytes + minQueueBytes);
-        const minPool = Math.min(totalPages, rootPages + Math.min(64, Math.max(totalPages - rootPages, 0))) * this.pageSizeBytes;
-        const minimum = minPool + minDraw;
-        if (available < minimum) {
-            Debug.warnOnce(`MeshletWorld: geometry budget ${(this.poolBytes / 1048576).toFixed(0)} MB is below the ${((reserved + minimum) / 1048576).toFixed(0)} MB this scene needs for its fixed and per-view buffers, its ${rootPages} root pages and a minimal draw working set; falling back to those minimums, so only the nearest instances draw.`);
-            available = minimum;
-        }
-
-        let drawBytes = Math.floor(available * this.indexBudgetFraction);
-        let pagePool = available - drawBytes;
-        if (pagePool < minPool) {
-            // the roots come before the draw working set
-            drawBytes -= minPool - pagePool;
-            pagePool = minPool;
-        }
-        if (drawBytes < minDraw) {
-            // and the minimal draw working set before the rest of the page pool
-            const take = Math.min(minDraw - drawBytes, pagePool - minPool);
-            pagePool -= take;
-            drawBytes = Math.max(drawBytes + take, minDraw);
-        }
-        // The pool never allocates more slots than the scene has pages (many instances of a
-        // small asset fit whole): hand the rest to the draw working set instead of leaving it
-        // unused.
-        const allPages = totalPages * this.pageSizeBytes;
-        if (allPages > 0 && pagePool > allPages) {
-            drawBytes += pagePool - allPages;
-            pagePool = allPages;
-        }
-
-        // Each view's records and cut queue take a small share of the draw working set; the
-        // indices, by far the largest per drawn meshlet, take the rest as one pool the director
-        // shares between the views by demand.
-        const weights = views + shadows * SHADOW_VIEW_DRAW_WEIGHT;
-        const recordBytes = Math.max(Math.floor(drawBytes * RECORD_BUDGET_SHARE / weights), minRecordBytes);
-        const queueBytes = Math.max(Math.floor(drawBytes * CUT_QUEUE_BUDGET_SHARE / weights), minQueueBytes);
-        const shadowRecordBytes = Math.max(Math.floor(recordBytes * SHADOW_VIEW_DRAW_WEIGHT), minRecordBytes);
-        const shadowQueueBytes = Math.max(Math.floor(queueBytes * SHADOW_VIEW_DRAW_WEIGHT), minQueueBytes);
-        const records = recordBytes * views + shadowRecordBytes * shadows;
-        const cutQueue = queueBytes * views + shadowQueueBytes * shadows;
-        const indexBytes = Math.max(drawBytes - records - cutQueue, MIN_INDEX_BUDGET_BYTES);
-        this.recordCeiling = Math.floor(recordBytes / RECORD_BYTES);
-        this.cutQueueCeiling = Math.floor(queueBytes / CUT_QUEUE_ENTRY_BYTES);
-        this.shadowRecordCeiling = Math.floor(shadowRecordBytes / RECORD_BYTES);
-        this.shadowCutQueueCeiling = Math.floor(shadowQueueBytes / CUT_QUEUE_ENTRY_BYTES);
-        this.indexBudgetTotal = Math.max(Math.floor(indexBytes / 4), 3);
-        this.maxIndices = 0;
-        this.budgetBreakdown = {
-            budget: this.poolBytes,
-            fixed,
-            perView: reserved - fixed,
-            pagePool,
-            indices: indexBytes,
-            records,
-            cutQueue,
-            rootPages
-        };
-        return pagePool;
+    maxPoolSlots() {
+        return Math.max(Math.floor(maxStorageBytes(this.device) / this.pageSizeBytes), 1);
     }
 
     /**
@@ -787,7 +766,6 @@ class MeshletWorld {
      * @private
      */
     _build() {
-        const device = this.device;
         const pending = this._pending;
         Debug.assert(pending.length, 'MeshletWorld: no resources added');
 
@@ -796,161 +774,237 @@ class MeshletWorld {
         Debug.assert(pending.every(({ resource }) => resource.manifest.pageSizeBytes === this.pageSizeBytes),
             'MeshletWorld: all resources must share one page size');
 
-        // totals. Material rows: a resource with a baked material table contributes its records
-        // verbatim (plus one synthesized fallback row when any primitive has no material); a
-        // resource without one gets one synthesized row per primitive (baseColorFactor only).
-        let totalPages = 0;
-        let totalMeshlets = 0;
-        let totalInstances = 0;
-        let totalPrimitiveRows = 0;
-        let anyLightmaps = false;
-        let totalMaterialRows = 0;
-        let anyTextures = false;
-        let uvChannels = 0;
-        let anyTangents = false;
-        let anyColors = false;
-        for (const entry of pending) {
-            const { resource, instances, transform } = entry;
-            // the effective placement list, repeated once per root transform
-            entry.list = MeshletInstanceList.from(instances ?? resource.instances);
-            entry.repeat = Array.isArray(transform) ? transform.length : 1;
-            totalPages += resource.manifest.pageCount;
-            totalMeshlets += resource.totalMeshlets;
-            totalPrimitiveRows += resource.primitives.length;
-            totalInstances += entry.list.count * entry.repeat;
-            anyLightmaps ||= !!entry.list.lightmaps?.some(lightmap => !!lightmap);
-            if (resource.materialTable) {
-                const unassigned = resource.primitives.some(p => p.materialIndex < 0) ? 1 : 0;
-                totalMaterialRows += resource.materialCount + unassigned;
-            } else {
-                totalMaterialRows += resource.primitives.length;
-            }
-            if (resource.textureManifest) anyTextures = true;
-            uvChannels = Math.max(uvChannels, resource.manifest.attributeLayout.uvComponents ?? 0);
-            if (resource.manifest.attributeLayout.tangents) anyTangents = true;
-            if (resource.manifest.attributeLayout.colors) anyColors = true;
-            for (const key of Object.keys(resource.manifest.attributeLayout)) {
-                // a stream this build cannot place would shift every block after it
-                if (!KNOWN_LAYOUT_KEYS.has(key)) console.warn(`MeshletWorld: unknown page attribute '${key}' in a streamed asset's attributeLayout - its pages will decode wrongly; update the engine.`);
-            }
-        }
+        const totals = this._countTotals(pending);
+        this.totalPages = totals.totalPages;
+        this.rootPages = totals.rootPages;
+        this.instanceCount = totals.totalInstances;
+        this.materialRowCount = totals.totalMaterialRows;
 
-        // streamed-texture state (resident coarse tails + demand-streamed fine pools); the
-        // flat texture index space concatenates resources like every other address space.
-        // Retention: when the director determined the streamed texture set is unchanged, the
-        // previous world's system - tails, fine pools, residency - is adopted wholesale.
+        // an adopted texture system is already finalized and possibly fully loaded; resources
+        // after the prefix it holds are appended to it
         const texturesAdopted = !!this.adoptTextures;
-        const adoptedTexResources = texturesAdopted ? this.adoptTexturesPrefix : 0;
-        let texResourceIndex = 0;
-        this.textures = this.adoptTextures ?? (anyTextures ? new MeshletTextures(device, this.transcode, this.fetchScheduler) : null);
-        this.adoptTextures = null;
-        this.adoptTexturesPrefix = 0;
+        this.textures = this.adoptTextures ?? (totals.anyTextures ? new MeshletTextures(this.device, this.transcode, this.fetchScheduler) : null);
         if (this.textures && !texturesAdopted) {
             this.textures.poolBytes = this.texturePoolBytes;
             this.textures.maxFineSize = this.maxFineTextureSize;
         }
 
-        // page pool + residency map. Resident worlds: slot = rebased page index. Streamed
-        // worlds: pool sized to the budget, everything starts non-resident (the residency
-        // manager pins roots and streams the rest on demand).
-        this.totalPages = totalPages;
+        // the budget is resolved before anything is allocated
+        this._applyBudget(totals);
+        this._createPagePool();
 
-        // Resolve the geometry budget before anything is allocated. The per-view working set is
-        // sized from the (instance, meshlet) pair count, so count the pairs up front - the main
-        // loop below recomputes them as it writes the tables.
-        let budgetPairs = 0;
-        // unique root pages per resource (the pages of meshlets without a parent): pinned for
-        // the resource's lifetime, so the pool is sized to hold them before anything else
-        const rootPagesOf = new Map();
-        const rootScanned = new Set();
-        for (const { resource, list, repeat } of pending) {
-            let roots = rootPagesOf.get(resource);
-            if (!roots) rootPagesOf.set(resource, roots = new Set());
+        const primitiveRows = new Uint32Array(totals.totalPrimitiveRows * OBJECT_DATA_U32S);
+        const build = {
+            materials: new MeshletMaterialTable(totals.totalMaterialRows),
+            // meshletData is not assembled on the CPU: a world of millions of meshlets would hold
+            // a GB-scale copy of records its resources already carry. Each primitive's records are
+            // copied, rebased and stamped only as the cut tables consume them (see _createTables),
+            // from what this keeps per global first meshlet.
+            /** @type {Map<number, { prim: MeshletPrimitive, pageBase: number, bucketBits: number }>} */
+            primRecords: new Map(),
+            primitiveRows,
+            primitiveRowsF: new Float32Array(primitiveRows.buffer),
+            // per instance, its primitive row
+            instancePrimitive: new Uint32Array(totals.totalInstances),
+            lightmapData: totals.anyLightmaps ? new Float32Array(totals.totalInstances * LIGHTMAP_ROW_FLOATS) : null,
+            /** @type {number[]} - (material row, texture index, tiling bias) per lightmapped instance */
+            lightmapSlots: [],
+            texturesAdopted,
+            adoptedTexturedResources: texturesAdopted ? this.adoptTexturesPrefix : 0,
+            texturedResources: 0,
+            // the running bases of the address spaces (see the class description)
+            pageBase: 0,
+            meshletBase: 0,
+            instanceBase: 0,
+            primitiveRow: 0,
+            materialBase: 0,
+            textureBase: 0
+        };
+        this.adoptTextures = null;
+        this.adoptTexturesPrefix = 0;
+
+        this.instanceFlags = new Uint32Array(totals.totalInstances);
+        this._placementCursor = 0;
+        this.recordCapacity = 0;
+        this.indexCapacity = [0, 0, 0];
+        this.indexWorst = [0, 0, 0];
+
+        // One pick id per instance (see pickRecords), from one block of the engine's picker
+        // space, so they never collide with mesh instance ids.
+        this.pickIdBase = PickerId.reserve(totals.totalInstances);
+        this._pickRecords = null;
+
+        for (const entry of pending) this._addPlacement(entry, build);
+
+        this._worldBoundsDirty = false;
+        this._worldBounds.center.set(0, 0, 0);
+        this._worldBounds.halfExtents.set(0, 0, 0);
+        this._growWorldBounds(0, totals.totalInstances, false);
+
+        this._initIndexCapacities();
+        this._createTables(build, totals);
+        this._createMaterials(build, totals);
+        this._colorMode = 0;
+        this._pending = [];
+    }
+
+    /**
+     * Totals the pending resources, and resolves each entry's placement list and run count.
+     *
+     * @param {Array<object>} pending - The pending resources.
+     * @returns {MeshletBuildTotals} The totals.
+     * @private
+     */
+    _countTotals(pending) {
+        const totals = {
+            totalPages: 0,
+            totalMeshlets: 0,
+            totalInstances: 0,
+            totalPrimitiveRows: 0,
+            totalMaterialRows: 0,
+            pairs: 0,
+            rootPages: [],
+            anyLightmaps: false,
+            anyTextures: false,
+            uvChannels: 0,
+            anyTangents: false,
+            anyColors: false
+        };
+        const rootPages = new Set();
+        const scanned = new Set();
+        for (const entry of pending) {
+            const { resource, instances, transform } = entry;
+            const manifest = resource.manifest;
+            const layout = manifest.attributeLayout;
+            const list = entry.list = MeshletInstanceList.from(instances ?? resource.instances);
+            const repeat = entry.repeat = Array.isArray(transform) ? transform.length : 1;
+            const pageBase = totals.totalPages;
+            totals.totalPages += manifest.pageCount;
+            totals.totalMeshlets += resource.totalMeshlets;
+            totals.totalPrimitiveRows += resource.primitives.length;
+            totals.totalInstances += list.count * repeat;
+            totals.anyLightmaps ||= !!list.lightmaps?.some(lightmap => !!lightmap);
+            if (resource.materialTable) {
+                // the baked records, plus a fallback row for primitives without a material
+                const unassigned = resource.primitives.some(p => p.materialIndex < 0) ? 1 : 0;
+                totals.totalMaterialRows += resource.materialCount + unassigned;
+            } else {
+                // a synthesized row per primitive
+                totals.totalMaterialRows += resource.primitives.length;
+            }
+            totals.anyTextures ||= !!resource.textureManifest;
+            totals.uvChannels = Math.max(totals.uvChannels, layout.uvComponents ?? 0);
+            totals.anyTangents ||= !!layout.tangents;
+            totals.anyColors ||= !!layout.colors;
+            for (const key of Object.keys(layout)) {
+                // a stream this build cannot place shifts every block after it; shipped in release
+                // builds because an engine older than its assets otherwise renders garbage silently
+                if (!KNOWN_LAYOUT_KEYS.has(key)) console.warn(`MeshletWorld: unknown page attribute '${key}' in a streamed asset's attributeLayout - its pages will decode wrongly; update the engine.`);
+            }
+
+            // pairs, and the root pages of the primitives some instance uses
+            scanned.clear();
             for (let i = 0; i < list.count; i++) {
                 const prim = resource.primitives[list.primIndex[i]];
-                const n = prim.meshletCount;
-                budgetPairs += n * repeat;
-                if (!rootScanned.has(prim)) {
-                    rootScanned.add(prim);
-                    if (!prim._rootPages) {
-                        prim._rootPages = [];
-                        for (let m = 0; m < n; m++) {
-                            const row = m * MESHLET_DATA_U32S;
-                            if (prim.meshletData[row + MESHLET_DATA.PARENT] === MESHLET_NO_PARENT) {
-                                prim._rootPages.push(prim.meshletData[row + MESHLET_DATA.PAGE]);
-                            }
-                        }
-                    }
-                    for (const page of prim._rootPages) roots.add(page);
-                }
+                totals.pairs += prim.meshletCount * repeat;
+                if (scanned.has(prim)) continue;
+                scanned.add(prim);
+                for (const page of primitiveRootPages(prim)) rootPages.add(pageBase + page);
             }
         }
-        let rootPageCount = 0;
-        rootPagesOf.forEach((roots) => {
-            rootPageCount += roots.size;
-        });
-        this.pagePoolBytes = this._resolveBudget({
-            totalPages,
-            totalMeshlets,
-            totalInstances,
-            totalPrimitiveRows,
-            totalMaterialRows,
-            lightmapBytes: anyLightmaps ? totalInstances * 64 : 0,
-            pairs: budgetPairs,
-            rootPages: rootPageCount
-        });
+        totals.rootPages = Array.from(rootPages).sort((a, b) => a - b);
+        return totals;
+    }
 
+    /**
+     * Resolves {@link poolBytes} into the page pool and the draw working set (see
+     * resolveMeshletBudget).
+     *
+     * @param {MeshletBuildTotals} totals - The scene totals.
+     * @private
+     */
+    _applyBudget(totals) {
+        const budget = resolveMeshletBudget({
+            poolBytes: this.poolBytes,
+            indexBudgetFraction: this.indexBudgetFraction,
+            cameraViews: this.budgetCameraViews,
+            shadowViews: this.budgetShadowViews,
+            pageSizeBytes: this.pageSizeBytes
+        }, {
+            totalPages: totals.totalPages,
+            totalMeshlets: totals.totalMeshlets,
+            totalInstances: totals.totalInstances,
+            totalPrimitiveRows: totals.totalPrimitiveRows,
+            totalMaterialRows: totals.totalMaterialRows,
+            pairs: totals.pairs,
+            lightmapBytes: totals.anyLightmaps ? totals.totalInstances * LIGHTMAP_ROW_FLOATS * 4 : 0,
+            rootPages: totals.rootPages.length
+        });
+        this.maxIndices = 0;
+        this.budgetBreakdown = budget?.breakdown ?? null;
+        this.pagePoolBytes = budget?.pagePoolBytes ?? 0;
+        this.recordCeiling = budget?.recordCeiling ?? 0;
+        this.cutQueueCeiling = budget?.cutQueueCeiling ?? 0;
+        this.shadowRecordCeiling = budget?.shadowRecordCeiling ?? 0;
+        this.shadowCutQueueCeiling = budget?.shadowCutQueueCeiling ?? 0;
+        if (budget) this.indexBudgetTotal = budget.indexBudgetTotal;
+    }
+
+    /**
+     * Creates the page pool and the residency map. A resident world holds every page, slot =
+     * rebased page index; a streamed one is sized to the budget and starts with nothing
+     * resident (the residency pins the roots and streams the rest on demand).
+     *
+     * A pool carried from the previous world keeps its resident pages valid, because the carried
+     * resources keep their page-space prefix. It is kept whole while large enough - the resolved
+     * pool drifts down a little between builds once the budget caps it, and shrinking to match
+     * would restart streaming cold for a few slots - unless it is more than twice what the scene
+     * wants. One the scene outgrew is copied into the larger pool, so its pages stay resident at
+     * their slots. Otherwise its slots would not fit, and streaming starts cold.
+     *
+     * @private
+     */
+    _createPagePool() {
+        const device = this.device;
+        const totalPages = this.totalPages;
+        const pageSize = this.pageSizeBytes;
         let poolSlots = totalPages;
         if (this.streamed) {
-            poolSlots = this.pagePoolBytes > 0 ?
-                Math.max(Math.floor(this.pagePoolBytes / this.pageSizeBytes), 1) :
-                totalPages;
+            poolSlots = this.pagePoolBytes > 0 ? Math.max(Math.floor(this.pagePoolBytes / pageSize), 1) : totalPages;
             poolSlots = Math.min(poolSlots, totalPages);
         }
-        const maxSlots = this.maxPoolSlots(device);
+        const maxSlots = this.maxPoolSlots();
         if (poolSlots > maxSlots) {
-            Debug.warnOnce(`MeshletWorld: page pool of ${poolSlots} pages (${(poolSlots * this.pageSizeBytes / 1048576).toFixed(0)} MB) exceeds the device buffer limit; clamped to ${maxSlots} pages.`);
+            Debug.warnOnce(`MeshletWorld: page pool of ${poolSlots} pages (${(poolSlots * pageSize / BYTES_PER_MB).toFixed(0)} MB) exceeds the device buffer limit; clamped to ${maxSlots} pages.`);
             poolSlots = maxSlots;
         }
-        this.poolSlots = poolSlots;
-        // retention: adopt a compatible previous world's page pool (its resident pages stay
-        // valid because the carried resources keep their page-space prefix); otherwise create
-        const poolByteSize = poolSlots * this.pageSizeBytes;
-        if (this.adoptPagePool && this.adoptPagePool.byteSize >= poolByteSize &&
-            this.adoptPagePool.byteSize <= poolByteSize * 2) {
-            // the carried pool is large enough: keep it whole, extra slots included. The resolved
-            // pool drifts down a little from build to build once the budget caps it (the
-            // per-view reservation tracks the scene), and shrinking to match would mean
-            // starting streaming cold for a few slots' worth of budget. A pool more than twice
-            // what the scene wants (most of it removed) is let go instead
-            this.pagePool = this.adoptPagePool;
-            poolSlots = this.adoptPagePool.byteSize / this.pageSizeBytes;
-            this.poolSlots = poolSlots;
-        } else if (this.adoptPagePool && this.adoptPagePool.byteSize < poolByteSize) {
-            // the scene outgrew the carried pool (its slot count tracks the page count until the
-            // budget caps it): allocate the larger pool and copy the old slots across on the
-            // queue, ordered before any install that follows, so every resident page stays
-            // resident at its slot instead of the whole world re-streaming from its roots
+
+        const adopted = this.adoptPagePool;
+        this.adoptPagePool = null;
+        const poolByteSize = poolSlots * pageSize;
+        if (adopted && adopted.byteSize >= poolByteSize && adopted.byteSize <= poolByteSize * 2) {
+            this.pagePool = adopted;
+            poolSlots = adopted.byteSize / pageSize;
+        } else if (adopted && adopted.byteSize < poolByteSize) {
             this.pagePool = new StorageBuffer(device, poolByteSize, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
+            // submitted at once rather than on the frame's encoder (StorageBuffer#copy): page
+            // installs are queue writes, and must land after the copy, not be overwritten by it
             const wgpu = device.wgpu;
             const encoder = wgpu.createCommandEncoder();
-            encoder.copyBufferToBuffer(this.adoptPagePool.impl.buffer, 0, this.pagePool.impl.buffer, 0, this.adoptPagePool.byteSize);
+            encoder.copyBufferToBuffer(adopted.impl.buffer, 0, this.pagePool.impl.buffer, 0, adopted.byteSize);
             wgpu.queue.submit([encoder.finish()]);
-            this.adoptPagePool.destroy();
+            adopted.destroy();
         } else {
-            // no pool to carry, or one the new pool cannot hold (a budget cut, or a pool more
-            // than twice what the scene wants): its slots would not fit and their residency
-            // would point past the new pool, so streaming starts cold from the roots
-            this.adoptPagePool?.destroy();
+            adopted?.destroy();
             this.adoptResidency = null;
             this.adoptedPages = 0;
             this.pagePool = new StorageBuffer(device, poolByteSize, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
         }
-        this.adoptPagePool = null;
+        this.poolSlots = poolSlots;
+
         this.residency = new Uint32Array(totalPages);
         if (this.streamed) {
             this.residency.fill(PAGE_NOT_RESIDENT);
-            // carried prefix: those pages keep their pool slots
             if (this.adoptResidency) {
                 const carry = Math.min(this.adoptedPages, totalPages);
                 for (let p = 0; p < carry; p++) this.residency[p] = this.adoptResidency[p];
@@ -961,350 +1015,274 @@ class MeshletWorld {
         this.adoptResidency = null;
         this.residencyBuffer = new StorageBuffer(device, this.residency.byteLength, BUFFERUSAGE_COPY_DST);
         this.residencyBuffer.write(0, this.residency);
+    }
 
-        // meshletData is not assembled on the CPU: a world of millions of meshlets would hold a
-        // GB-scale copy of records its resources already carry. Each primitive's records are
-        // copied, rebased and stamped only as the cut tables consume them, then uploaded into
-        // place (see recordsOf below). This keeps, per global first meshlet, how to rebuild them.
-        /** @type {Map<number, { prim: object, pageBase: number, bucketBits: number }>} */
-        const primRecords = new Map();
-        const instanceFlags = new Uint32Array(totalInstances);
-        const primitiveRows = new Uint32Array(totalPrimitiveRows * OBJECT_DATA_U32S);
-        const primitiveRowsF = new Float32Array(primitiveRows.buffer);
-        // per instance, its primitive row - only while the cut tables are built
-        const instancePrimitive = new Uint32Array(totalInstances);
-        const lightmapData = anyLightmaps ? new Float32Array(totalInstances * 16) : null;
-        const lightmapSlots = [];
-        const materialTable = new Uint32Array(Math.max(totalMaterialRows, 1) * MATERIAL_RECORD_U32S);
-        const materialTableF = new Float32Array(materialTable.buffer);
-
-        // synthesized fallback record: matte white/baseColor, no textures
-        const writeSynthRecord = (row, baseColor) => {
-            const recordBase = row * MATERIAL_RECORD_U32S;
-            for (let c = 0; c < 4; c++) materialTableF[recordBase + MATERIAL_RECORD.BASE_COLOR + c] = baseColor?.[c] ?? 1;
-            materialTableF[recordBase + MATERIAL_RECORD.EMISSIVE_STRENGTH] = 1;
-            materialTableF[recordBase + MATERIAL_RECORD.METALLIC] = 0;
-            materialTableF[recordBase + MATERIAL_RECORD.ROUGHNESS] = 1;
-            materialTableF[recordBase + MATERIAL_RECORD.ALPHA_CUTOFF] = 0.5;
-            for (let slot = 0; slot < MATERIAL_TEXTURE_SLOTS; slot++) {
-                materialTable[recordBase + MATERIAL_RECORD.SLOT_WORDS + slot] = MATERIAL_SLOT_ABSENT;
-            }
+    /**
+     * Lays out one pending resource: its pages (uploaded now, or registered for streaming), its
+     * material rows and textures, its primitive rows and its instances.
+     *
+     * @param {object} entry - The pending resource.
+     * @param {object} build - The build state (see _build).
+     * @private
+     */
+    _addPlacement(entry, build) {
+        const { resource, transform, shardBuffers, baseUrl, instances, list, repeat } = entry;
+        const manifest = resource.manifest;
+        // the bake stamp versions every sidecar's cache key, so a rebake over the same URLs can
+        // never be served the previous bake's cached pages or texture regions
+        const fetchOptions = { ...entry.fetchOptions, cacheVersion: meshletBakeStamp(resource) };
+        // the world keeps its own copy of each root: rows are regenerated from them later, and
+        // the caller's matrices (an entity's world transform) keep changing
+        const ownRoot = (root) => {
+            if (!root) return null;
+            const own = new Mat4();
+            own.data.set(root.data);
+            return own;
         };
+        const placement = {
+            resource,
+            instances: list,
+            repeat,
+            roots: Array.isArray(transform) ? transform.map(ownRoot) : [ownRoot(transform)],
+            instanceBase: build.instanceBase,
+            instanceCount: list.count * repeat,
+            primitiveRow: build.primitiveRow,
+            pairBase: this.totalPairs,
+            pairCount: 0,
+            runPairs: 0,
+            pairOffsets: new Uint32Array(list.count)
+        };
+        this.placements.push(placement);
+        this.buildEntries.push({
+            resource,
+            baseUrl: baseUrl ?? null,
+            streamed: !shardBuffers,
+            pageCount: manifest.pageCount,
+            instances: instances ?? resource.instances,
+            repeat
+        });
 
-        // Five address spaces, each concatenated in resource add order: pages (pool slot /
-        // residency index), meshlets (global id), instances (objectData row = pick record),
-        // material rows and flat texture indices. A resource's block starts where the previous
-        // one ended, which is what lets MeshletDirector#rebuild carry a previous world's page
-        // pool, residency and visibility bits: only an unchanged prefix of the add order keeps
-        // its addresses, so anything after the first changed resource is rebuilt cold.
-        let pageBase = 0;
-        let meshletBase = 0;
-        let instanceBase = 0;
-        let primitiveRow = 0;
-        let materialBase = 0;
-        let runningTexBase = 0;
-        this._worldBoundsDirty = false;
-        this.worldBounds.center.set(0, 0, 0);
-        this.worldBounds.halfExtents.set(0, 0, 0);
-        let boundsInit = false;
-
-        this.instanceCount = totalInstances;
-        this.instanceFlags = instanceFlags;
-        this.primitiveRows = primitiveRows;
-        this._placementCursor = 0;
-        this.recordCapacity = 0;
-        this.indexCapacity = [0, 0, 0];
-        this.indexWorst = [0, 0, 0];
-
-        // One pick id per instance, from one reserved block. An instance is one primitive at
-        // one transform - which is exactly the granularity a glTF submesh has so, for example, picking a
-        // table's top and its legs apart works the way it would with ordinary meshes. The ids
-        // share the engine's picker space, so they never collide with mesh instance ids.
-        this.pickIdBase = PickerId.reserve(totalInstances);
-        this._pickRecords = null;
-
-        for (const { resource, transform, shardBuffers, baseUrl, instances, list, repeat, fetchOptions: options } of pending) {
-            // the bake stamp versions every sidecar's cache key, so a rebake over the same URLs
-            // can never be served the previous bake's cached pages or texture regions
-            const fetchOptions = { ...options, cacheVersion: meshletBakeStamp(resource) };
-            const manifest = resource.manifest;
-            const grid = manifest.positionGrid;
-            const uvFloats = (manifest.attributeLayout.uvComponents ?? 0) * 2;
-            const hasTangents = manifest.attributeLayout.tangents ? 1 : 0;
-            const hasColors = manifest.attributeLayout.colors ? 1 : 0;
-            const resourceTextureBase = runningTexBase;
-            // the world keeps its own copy of each root: rows are regenerated from them later,
-            // and the caller's matrices (an entity's world transform) keep changing
-            const ownRoot = (root) => {
-                if (!root) return null;
-                const own = new Mat4();
-                own.data.set(root.data);
-                return own;
-            };
-            const placement = {
-                resource,
-                instances: list,
-                repeat,
-                roots: Array.isArray(transform) ? transform.map(ownRoot) : [ownRoot(transform)],
-                instanceBase,
-                instanceCount: list.count * repeat,
-                primitiveRow,
-                pairBase: this.totalPairs,
-                pairCount: 0,
-                runPairs: 0,
-                pairOffsets: new Uint32Array(list.count)
-            };
-            this.placements.push(placement);
-            this.buildEntries.push({
-                resource,
-                baseUrl: baseUrl ?? null,
-                streamed: !shardBuffers,
-                pageCount: manifest.pageCount,
-                instances: instances ?? resource.instances,
-                repeat
-            });
-
-            if (shardBuffers) {
-                // fully resident: upload every page now, slot = rebased page index
-                const table = manifest.pageTable;
-                for (let p = 0; p < manifest.pageCount; p++) {
-                    const entry = p * PAGE_TABLE_FIELDS;
-                    const blob = table[entry + PAGE_TABLE.BLOB];
-                    const offset = table[entry + PAGE_TABLE.OFFSET_HI] * 0x100000000 + table[entry + PAGE_TABLE.OFFSET_LO];
-                    this.pagePool.write((pageBase + p) * this.pageSizeBytes,
-                        new Uint32Array(shardBuffers[blob], offset, this.pageSizeBytes / 4));
-                }
-            } else {
-                this.streamInfo.push({ resource, pageBase, baseUrl, fetchOptions: fetchOptions ?? null });
+        if (shardBuffers) {
+            // fully resident: upload every page now, slot = rebased page index
+            const table = manifest.pageTable;
+            for (let p = 0; p < manifest.pageCount; p++) {
+                const field = p * PAGE_TABLE_FIELDS;
+                const blob = table[field + PAGE_TABLE.BLOB];
+                const offset = table[field + PAGE_TABLE.OFFSET_HI] * 0x100000000 + table[field + PAGE_TABLE.OFFSET_LO];
+                this.pagePool.write((build.pageBase + p) * this.pageSizeBytes,
+                    new Uint32Array(shardBuffers[blob], offset, this.pageSizeBytes / 4));
             }
-
-            // material rows: baked table verbatim, or one synthesized row per primitive
-            const baked = resource.materialTable;
-            let resourceRows;
-            let fallbackRow = -1;
-            if (baked) {
-                materialTable.set(baked, materialBase * MATERIAL_RECORD_U32S);
-                resourceRows = resource.materialCount;
-                if (resource.primitives.some(p => p.materialIndex < 0)) {
-                    fallbackRow = resourceRows++;
-                    writeSynthRecord(materialBase + fallbackRow, null);
-                }
-            } else {
-                resourceRows = resource.primitives.length;
-            }
-
-            // streamed textures: register the manifest (unless the texture system was adopted -
-            // then it already holds this resource's textures) and rebase the copied records'
-            // slot texture indices into the world-global flat index space (like pageBase for
-            // pages).
-            if (resource.textureManifest && this.textures) {
-                // position among the textured resources, in add order - the adopted system
-                // already holds the first adoptedTexResources of them
-                const texResource = texResourceIndex++;
-                if (!baseUrl) {
-                    Debug.warnOnce('MeshletWorld: resource has a texture manifest but no base URL (resident add) - its textures are skipped.');
-                } else {
-                    const textureBase = runningTexBase;
-                    for (const arr of resource.textureManifest.arrays ?? []) {
-                        if (arr.containerVersion === 2) runningTexBase += Array.isArray(arr.layers) ? arr.layers.length : 0;
-                    }
-                    // an adopted system already holds the carried prefix; resources after it
-                    // join it in place (new tail layers, no re-download of what is resident)
-                    if (!texturesAdopted) {
-                        this.textures.addResource(resource.textureManifest, baseUrl, fetchOptions ?? null);
-                    } else if (texResource >= adoptedTexResources) {
-                        this.textures.appendResource(resource.textureManifest, baseUrl, fetchOptions ?? null);
-                    }
-                    if (baked && textureBase > 0) {
-                        for (let row = 0; row < resource.materialCount; row++) {
-                            const recordBase = (materialBase + row) * MATERIAL_RECORD_U32S;
-                            for (let slot = 0; slot < MATERIAL_TEXTURE_SLOTS; slot++) {
-                                const word = materialTable[recordBase + MATERIAL_RECORD.SLOT_WORDS + slot];
-                                if ((word & 0xFFFF) === MATERIAL_SLOT_ABSENT) continue;
-                                // texture indices are 16-bit, with the top value meaning absent:
-                                // a world past that drops the slot rather than wrap onto another
-                                // texture
-                                const rebased = (word & 0xFFFF) + textureBase;
-                                if (rebased >= MATERIAL_SLOT_ABSENT) {
-                                    Debug.errorOnce(`MeshletWorld: more than ${MATERIAL_SLOT_ABSENT} streamed textures in one world; textures past the limit are dropped.`);
-                                }
-                                materialTable[recordBase + MATERIAL_RECORD.SLOT_WORDS + slot] = (word & 0xFFFF0000) | Math.min(rebased, MATERIAL_SLOT_ABSENT);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // meshletData with page rebasing; per-prim bases + material rows, index budgets
-            const primMatRows = [];
-            const primBucketCorners = [];
-            const primFlags = [];
-            for (let primIndex = 0; primIndex < resource.primitives.length; primIndex++) {
-                const prim = resource.primitives[primIndex];
-                // what the build needs of the records besides the copy recordsOf makes, kept on
-                // the primitive so a resource whose records were released can still be laid out
-                if (prim._indexCount === undefined) {
-                    const src = prim.meshletData;
-                    let triangles = 0;
-                    for (let m = 0; m < prim.meshletCount; m++) triangles += src[m * MESHLET_DATA_U32S + MESHLET_DATA.TRIANGLE_COUNT];
-                    prim._indexCount = triangles * 3;
-                    prim._firstFlags = prim.meshletCount ? src[MESHLET_DATA.FLAGS] : 0;
-                }
-                const primFirst = meshletBase;
-                meshletBase += prim.meshletCount;
-
-                if (baked) {
-                    primMatRows.push(prim.materialIndex >= 0 ? prim.materialIndex : fallbackRow);
-                } else {
-                    primMatRows.push(primIndex);
-                    writeSynthRecord(materialBase + primIndex, prim.baseColorFactor);
-                }
-
-                // This primitive's draw bucket comes from its material record, which keeps
-                // alpha masking and two-sidedness apart (word 11) - and a primitive has exactly
-                // one material, so the bucket is a per-primitive property. Folding the two facts
-                // into one bit would put opaque geometry in the alpha-tested bucket and hand it a
-                // `discard` that defeats early-Z.
-                //
-                // Without a baked material table there is nothing better than the meshlet flags
-                // themselves; a flag set that cannot tell the two apart reads as masked, which is
-                // the safe way to be wrong.
-                let bucket;
-                if (baked) {
-                    const matFlags = materialTable[(materialBase + primMatRows[primIndex]) * MATERIAL_RECORD_U32S + MATERIAL_RECORD.FLAGS];
-                    bucket = (matFlags & MATERIAL_FLAG_ALPHA_MASK) ? MESHLET_BUCKET_MASKED :
-                        ((matFlags & MATERIAL_FLAG_DOUBLE_SIDED) ? MESHLET_BUCKET_OPAQUE_TWO_SIDED :
-                            MESHLET_BUCKET_OPAQUE);
-                } else {
-                    const meshletFlags = prim._firstFlags;
-                    bucket = (meshletFlags & MESHLET_FLAG_ALPHA_MASKED) ? MESHLET_BUCKET_MASKED :
-                        ((meshletFlags & MESHLET_FLAG_TWO_SIDED) ? MESHLET_BUCKET_OPAQUE_TWO_SIDED :
-                            MESHLET_BUCKET_OPAQUE);
-                }
-                const bucketBits = (bucket === MESHLET_BUCKET_MASKED ? MESHLET_FLAG_ALPHA_MASKED : 0) |
-                    (bucket === MESHLET_BUCKET_OPAQUE ? 0 : MESHLET_FLAG_TWO_SIDED);
-
-                // the bucket is stamped onto every meshlet as its records are copied (recordsOf);
-                // total the worst-case index count per bucket once per primitive - the
-                // per-instance loop below then just adds these, instead of re-walking every
-                // meshlet for each instance
-                primRecords.set(primFirst, { prim, pageBase, bucketBits });
-                const primCorners = [0, 0, 0];
-                primCorners[bucket] = prim._indexCount;
-                primBucketCorners.push(primCorners);
-                primFlags.push((hasTangents ? OBJECT_FLAG_HAS_TANGENTS : 0) | (hasColors ? OBJECT_FLAG_HAS_COLORS : 0) |
-                    (bucket << OBJECT_BUCKET_SHIFT));
-
-                // the primitive row, shared by every instance of the primitive
-                const row = (primitiveRow + primIndex) * OBJECT_DATA_U32S;
-                const halfExtents = prim.aabbHalfExtents;
-                for (let c = 0; c < 3; c++) {
-                    primitiveRowsF[row + PRIMITIVE_DATA.SPHERE + c] = prim.aabbCenter[c];
-                    primitiveRowsF[row + PRIMITIVE_DATA.GRID_ORIGIN + c] = grid.origin[c];
-                }
-                primitiveRowsF[row + PRIMITIVE_DATA.SPHERE + 3] = Math.hypot(halfExtents[0], halfExtents[1], halfExtents[2]);
-                primitiveRowsF[row + PRIMITIVE_DATA.GRID_STEP] = grid.step;
-                primitiveRows[row + PRIMITIVE_DATA.FIRST_MESHLET] = primFirst;
-                primitiveRows[row + PRIMITIVE_DATA.MESHLET_COUNT] = prim.meshletCount;
-                primitiveRows[row + PRIMITIVE_DATA.MATERIAL] = materialBase + primMatRows[primIndex];
-                primitiveRows[row + PRIMITIVE_DATA.UV_FLOATS_PER_VERTEX] = uvFloats;
-                primitiveRows[row + PRIMITIVE_DATA.PICK_ID_BASE] = this.pickIdBase;
-            }
-
-            // One run of the placement list: where each instance's pair bits start within it, and
-            // the run's worst-case capacities (every meshlet of every instance drawn).
-            let runPairs = 0;
-            const runCorners = [0, 0, 0];
-            for (let i = 0; i < list.count; i++) {
-                const p = list.primIndex[i];
-                const meshletCount = resource.primitives[p].meshletCount;
-                placement.pairOffsets[i] = runPairs;
-                runPairs += meshletCount;
-                for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) runCorners[b] += primBucketCorners[p][b];
-            }
-            placement.runPairs = runPairs;
-            placement.pairCount = runPairs * repeat;
-            this.totalPairs += placement.pairCount;
-            this.recordCapacity += placement.pairCount;
-            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) this.indexCapacity[b] += runCorners[b] * repeat;
-
-            // instances, run by run: one run of the list per root transform
-            for (let run = 0; run < repeat; run++) {
-                const root = placement.roots[run];
-                for (let i = 0; i < list.count; i++) {
-                    const instance = instanceBase++;
-                    const p = list.primIndex[i];
-                    const prim = resource.primitives[p];
-                    instanceFlags[instance] = primFlags[p];
-                    instancePrimitive[instance] = primitiveRow + p;
-                    list.getMatrix(i, _tmpMat);
-                    if (root) _tmpMat.mul2(root, _tmpMat);
-
-                    const lightmap = list.getLightmap(i);
-                    if (lightmapData && lightmap && baseUrl) {
-                        const reference = lightmap.texture;
-                        const arrays = resource.textureManifest?.arrays ?? [];
-                        let textureIndex = resourceTextureBase;
-                        let textureArray = null;
-                        for (const array of arrays) {
-                            if (array.containerVersion !== 2) continue;
-                            if (array.id === reference.arrayId) {
-                                textureArray = array;
-                                break;
-                            }
-                            textureIndex += array.layers.length;
-                        }
-                        const channel = reference.texCoord ?? 0;
-                        const coefficients = [lightmap.coordinateScaleBias, lightmap.lightmapScale, lightmap.lightmapAdd];
-                        if (textureArray && Number.isInteger(reference.layer) && reference.layer >= 0 && reference.layer < textureArray.layers.length &&
-                            Number.isInteger(channel) && channel >= 0 && channel < MESHLET_MAX_UV_CHANNELS && (prim.uvChannelMask & (1 << channel)) &&
-                            coefficients.every(values => values?.length === 4 && values.every(Number.isFinite))) {
-                            textureIndex += reference.layer;
-                            const lightmapRow = instance * 16;
-                            lightmapData.set(lightmap.coordinateScaleBias, lightmapRow);
-                            lightmapData.set(lightmap.lightmapScale, lightmapRow + 4);
-                            lightmapData.set(lightmap.lightmapAdd, lightmapRow + 8);
-                            lightmapData.set([textureIndex, channel, 1, 0], lightmapRow + 12);
-                            const scale = Math.max(Math.abs(lightmap.coordinateScaleBias[0]), Math.abs(lightmap.coordinateScaleBias[1]) * 0.5, 1e-8);
-                            lightmapSlots.push(materialBase + primMatRows[p], textureIndex, Math.round(TEXEL_RATE_PER_MIP * Math.log2(scale)));
-                        } else {
-                            Debug.warnOnce('MeshletWorld: invalid streamed EPIC lightmap reference, coefficients or UV channel; lightmap ignored.');
-                        }
-                    }
-
-                    // World bounds, from the baked AABB transformed by the instance matrix - not the
-                    // bounding sphere radius on every axis, which turns a flat landscape into a cube
-                    // and inflates the depth range of every shadow cascade fitted around it.
-                    const halfExtents = prim.aabbHalfExtents;
-                    _tmpLocalBox.center.set(prim.aabbCenter[0], prim.aabbCenter[1], prim.aabbCenter[2]);
-                    _tmpLocalBox.halfExtents.set(halfExtents[0], halfExtents[1], halfExtents[2]);
-                    _tmpBox.setFromTransformedAabb(_tmpLocalBox, _tmpMat);
-                    if (!boundsInit) {
-                        this.worldBounds.copy(_tmpBox);
-                        boundsInit = true;
-                    } else {
-                        this.worldBounds.add(_tmpBox);
-                    }
-                }
-            }
-
-            primitiveRow += resource.primitives.length;
-            pageBase += manifest.pageCount;
-            materialBase += resourceRows;
+        } else {
+            this.streamInfo.push({ resource, pageBase: build.pageBase, baseUrl, fetchOptions });
         }
 
-        // start below the worst case - GPU-side per-bucket clamps make a smaller allocation
-        // safe, and the director grows the buffer to the observed demand. The unscaled worst
-        // case (every meshlet drawn) is kept as the views' absolute capacity ceiling
+        // material rows: the baked table verbatim, or one synthesized row per primitive
+        const materials = build.materials;
+        const materialBase = build.materialBase;
+        const baked = resource.materialTable;
+        let resourceRows = resource.primitives.length;
+        let fallbackRow = -1;
+        if (baked) {
+            materials.setRecords(baked, materialBase);
+            resourceRows = resource.materialCount;
+            if (resource.primitives.some(p => p.materialIndex < 0)) {
+                fallbackRow = resourceRows++;
+                materials.writeFallback(materialBase + fallbackRow, null);
+            }
+        }
+
+        const resourceTextureBase = build.textureBase;
+        this._addTextures(resource, baseUrl, fetchOptions, build);
+
+        const primMatRows = [];
+        const primBucketCorners = [];
+        const primFlags = [];
+        const layout = manifest.attributeLayout;
+        const objectFlags = (layout.tangents ? OBJECT_FLAG_HAS_TANGENTS : 0) | (layout.colors ? OBJECT_FLAG_HAS_COLORS : 0);
+        for (let primIndex = 0; primIndex < resource.primitives.length; primIndex++) {
+            const prim = resource.primitives[primIndex];
+            primitiveStats(prim);
+            const primFirst = build.meshletBase;
+            build.meshletBase += prim.meshletCount;
+
+            let materialRow = primIndex;
+            if (baked) {
+                materialRow = prim.materialIndex >= 0 ? prim.materialIndex : fallbackRow;
+            } else {
+                materials.writeFallback(materialBase + primIndex, prim.baseColorFactor);
+            }
+            primMatRows.push(materialRow);
+
+            // A primitive has exactly one material, so its draw bucket is a per-primitive
+            // property. Without a baked material record there is nothing better than the
+            // meshlet flags themselves.
+            const bucket = baked ? materials.bucket(materialBase + materialRow) : bucketOfMeshletFlags(prim._firstFlags);
+
+            // the bucket is stamped onto every meshlet as its records are copied; the worst-case
+            // index count per bucket is totalled once per primitive here, so the per-instance
+            // loop below just adds these up
+            build.primRecords.set(primFirst, { prim, pageBase: build.pageBase, bucketBits: meshletFlagsOfBucket(bucket) });
+            const primCorners = [0, 0, 0];
+            primCorners[bucket] = prim._indexCount;
+            primBucketCorners.push(primCorners);
+            primFlags.push(objectFlags | (bucket << OBJECT_BUCKET_SHIFT));
+
+            this._writePrimitiveRow(build, build.primitiveRow + primIndex, prim, primFirst, materialBase + materialRow, manifest);
+        }
+
+        // One run of the placement list: where each instance's pair bits start within it, and
+        // the run's worst-case capacities (every meshlet of every instance drawn).
+        let runPairs = 0;
+        const runCorners = [0, 0, 0];
+        for (let i = 0; i < list.count; i++) {
+            const p = list.primIndex[i];
+            placement.pairOffsets[i] = runPairs;
+            runPairs += resource.primitives[p].meshletCount;
+            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) runCorners[b] += primBucketCorners[p][b];
+        }
+        placement.runPairs = runPairs;
+        placement.pairCount = runPairs * repeat;
+        this.totalPairs += placement.pairCount;
+        this.recordCapacity += placement.pairCount;
+        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) this.indexCapacity[b] += runCorners[b] * repeat;
+
+        // instances, run by run: one run of the list per root transform
+        for (let run = 0; run < repeat; run++) {
+            for (let i = 0; i < list.count; i++) {
+                const instance = build.instanceBase++;
+                const p = list.primIndex[i];
+                this.instanceFlags[instance] = primFlags[p];
+                build.instancePrimitive[instance] = build.primitiveRow + p;
+                const lightmap = build.lightmapData && baseUrl ? list.getLightmap(i) : null;
+                if (lightmap) {
+                    this._writeLightmap(build, instance, lightmap, resource.primitives[p], resource, resourceTextureBase, materialBase + primMatRows[p]);
+                }
+            }
+        }
+
+        build.primitiveRow += resource.primitives.length;
+        build.pageBase += manifest.pageCount;
+        build.materialBase += resourceRows;
+    }
+
+    /**
+     * Registers a resource's streamed textures with the texture system (unless an adopted system
+     * already holds them) and rebases its material rows' slot texture indices into the world's
+     * flat texture space.
+     *
+     * @param {MeshletResource} resource - The resource.
+     * @param {string|undefined} baseUrl - Its base URL; resident adds carry none.
+     * @param {MeshletFetchOptions} fetchOptions - How its containers are fetched.
+     * @param {object} build - The build state (see _build).
+     * @private
+     */
+    _addTextures(resource, baseUrl, fetchOptions, build) {
+        if (!resource.textureManifest || !this.textures) return;
+        // position among the textured resources, in add order
+        const textured = build.texturedResources++;
+        if (!baseUrl) {
+            Debug.warnOnce('MeshletWorld: resource has a texture manifest but no base URL (resident add) - its textures are skipped.');
+            return;
+        }
+        const textureBase = build.textureBase;
+        for (const array of resource.textureManifest.arrays ?? []) {
+            if (array.containerVersion === 2) build.textureBase += Array.isArray(array.layers) ? array.layers.length : 0;
+        }
+        if (!build.texturesAdopted) {
+            this.textures.addResource(resource.textureManifest, baseUrl, fetchOptions);
+        } else if (textured >= build.adoptedTexturedResources) {
+            this.textures.appendResource(resource.textureManifest, baseUrl, fetchOptions);
+        }
+        if (resource.materialTable && textureBase > 0) {
+            build.materials.rebaseTextures(build.materialBase, resource.materialCount, textureBase);
+        }
+    }
+
+    /**
+     * Writes a primitive's objectData row, shared by every instance of the primitive.
+     *
+     * @param {object} build - The build state (see _build).
+     * @param {number} rowIndex - The primitive row.
+     * @param {MeshletPrimitive} prim - The primitive.
+     * @param {number} firstMeshlet - Global id of its first meshlet.
+     * @param {number} materialRow - Its material row.
+     * @param {object} manifest - Its resource's stream manifest.
+     * @private
+     */
+    _writePrimitiveRow(build, rowIndex, prim, firstMeshlet, materialRow, manifest) {
+        const { primitiveRows: rows, primitiveRowsF: rowsF } = build;
+        const grid = manifest.positionGrid;
+        const row = rowIndex * OBJECT_DATA_U32S;
+        const halfExtents = prim.aabbHalfExtents;
+        for (let c = 0; c < 3; c++) {
+            rowsF[row + PRIMITIVE_DATA.SPHERE + c] = prim.aabbCenter[c];
+            rowsF[row + PRIMITIVE_DATA.GRID_ORIGIN + c] = grid.origin[c];
+        }
+        rowsF[row + PRIMITIVE_DATA.SPHERE + 3] = Math.hypot(halfExtents[0], halfExtents[1], halfExtents[2]);
+        rowsF[row + PRIMITIVE_DATA.GRID_STEP] = grid.step;
+        rows[row + PRIMITIVE_DATA.FIRST_MESHLET] = firstMeshlet;
+        rows[row + PRIMITIVE_DATA.MESHLET_COUNT] = prim.meshletCount;
+        rows[row + PRIMITIVE_DATA.MATERIAL] = materialRow;
+        rows[row + PRIMITIVE_DATA.UV_FLOATS_PER_VERTEX] = (manifest.attributeLayout.uvComponents ?? 0) * 2;
+        rows[row + PRIMITIVE_DATA.PICK_ID_BASE] = this.pickIdBase;
+    }
+
+    /**
+     * Writes an instance's lightmap row and registers its texture for mip feedback. A reference
+     * to a missing texture layer or UV channel, or malformed coefficients, leaves the instance
+     * unlightmapped.
+     *
+     * @param {object} build - The build state (see _build).
+     * @param {number} instance - The instance.
+     * @param {object} lightmap - Its MeshletLightmap.
+     * @param {MeshletPrimitive} prim - Its primitive.
+     * @param {MeshletResource} resource - Its resource.
+     * @param {number} resourceTextureBase - Flat index of the resource's first texture.
+     * @param {number} materialRow - The primitive's material row.
+     * @private
+     */
+    _writeLightmap(build, instance, lightmap, prim, resource, resourceTextureBase, materialRow) {
+        const reference = lightmap.texture;
+        let textureIndex = resourceTextureBase;
+        let textureArray = null;
+        for (const array of resource.textureManifest?.arrays ?? []) {
+            if (array.containerVersion !== 2) continue;
+            if (array.id === reference.arrayId) {
+                textureArray = array;
+                break;
+            }
+            textureIndex += array.layers.length;
+        }
+        const channel = reference.texCoord ?? 0;
+        const coefficients = [lightmap.coordinateScaleBias, lightmap.lightmapScale, lightmap.lightmapAdd];
+        if (!textureArray || !Number.isInteger(reference.layer) || reference.layer < 0 || reference.layer >= textureArray.layers.length ||
+            !Number.isInteger(channel) || channel < 0 || channel >= MESHLET_MAX_UV_CHANNELS || !(prim.uvChannelMask & (1 << channel)) ||
+            !coefficients.every(values => values?.length === 4 && values.every(Number.isFinite))) {
+            Debug.warnOnce('MeshletWorld: invalid streamed EPIC lightmap reference, coefficients or UV channel; lightmap ignored.');
+            return;
+        }
+        textureIndex += reference.layer;
+        const data = build.lightmapData;
+        const row = instance * LIGHTMAP_ROW_FLOATS;
+        data.set(lightmap.coordinateScaleBias, row);
+        data.set(lightmap.lightmapScale, row + 4);
+        data.set(lightmap.lightmapAdd, row + 8);
+        data.set([textureIndex, channel, 1, 0], row + 12);
+        const scale = Math.max(Math.abs(lightmap.coordinateScaleBias[0]), Math.abs(lightmap.coordinateScaleBias[1]) * 0.5, 1e-8);
+        build.lightmapSlots.push(materialRow, textureIndex, Math.round(TEXEL_RATE_PER_MIP * Math.log2(scale)));
+    }
+
+    /**
+     * Sets the views' initial index capacities: below the worst case, which is kept as their
+     * absolute ceiling. GPU-side per-bucket clamps make a smaller allocation safe, and the views
+     * grow to the observed demand.
+     *
+     * @private
+     */
+    _initIndexCapacities() {
         this.indexWorst = this.indexCapacity.slice();
-        // u32 indices, and the buffer is bound both as an index buffer and as storage (the
-        // index-write pass writes it), so both limits apply
-        const limits = device.limits ?? {};
-        const limitBytes = Math.min(
-            limits.maxBufferSize ?? Number.MAX_SAFE_INTEGER,
-            limits.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER
-        );
-        this.deviceIndexCeiling = Math.floor(limitBytes / 4);
+        // u32 indices, in a buffer bound both as an index buffer and as storage
+        this.deviceIndexCeiling = Math.floor(maxStorageBytes(this.device) / 4);
         const totalIndexWanted = this.indexCapacity.reduce((a, b) => a + b, 0);
         let indexTarget = Math.min(totalIndexWanted, this.indexCeiling);
         if (this.initialIndices > 0) indexTarget = Math.min(indexTarget, this.initialIndices);
@@ -1312,18 +1290,30 @@ class MeshletWorld {
             const s = indexTarget / totalIndexWanted;
             this.indexCapacity = this.indexCapacity.map(c => Math.floor(c * s));
         }
+    }
 
-        this.cells = new MeshletCells(device, this.instanceCount, (instance, out, offset) => this._instanceSphere(instance, out, offset));
+    /**
+     * Creates the GPU tables: spatial cells, meshlet records with their cut tables, objectData,
+     * the material table, lightmaps, the shared request marks, and the texture tables.
+     *
+     * @param {object} build - The build state (see _build).
+     * @param {MeshletBuildTotals} totals - The scene totals.
+     * @private
+     */
+    _createTables(build, totals) {
+        const device = this.device;
+        const { totalMeshlets, totalInstances, totalPages, totalMaterialRows } = totals;
+        const { primRecords, primitiveRows, instancePrimitive, lightmapData, materials } = build;
+
+        this.cells = new MeshletCells(device, totalInstances, (instance, out, offset) => this._instanceSphere(instance, out, offset));
+
         const recordBytes = MESHLET_DATA_U32S * 4;
-        this.meshletDataBuffer = new StorageBuffer(device, Math.max(totalMeshlets * recordBytes, 16), BUFFERUSAGE_COPY_DST);
+        const meshletDataBuffer = this.meshletDataBuffer = new StorageBuffer(device, Math.max(totalMeshlets * recordBytes, 16), BUFFERUSAGE_COPY_DST);
         // One primitive's records at a time: a copy of the resource's (which stay untouched for
         // later rebuilds) with page indices rebased and the draw bucket stamped, handed to the
         // cut tables to complete, then uploaded to their place. Only primitives some instance
-        // uses are visited; nothing reads the records of the rest.
-        const meshletDataBuffer = this.meshletDataBuffer;
-        // Uploads are batched: primitives are mostly visited in meshlet order, so consecutive
-        // ones gather in a staging array and go up in one write. A world of many small
-        // primitives would otherwise issue a write per primitive.
+        // uses are visited. Consecutive primitives - mostly visited in meshlet order - gather in
+        // a staging array and go up in one write.
         const staging = new Uint32Array(Math.min(totalMeshlets, RECORD_UPLOAD_BATCH) * MESHLET_DATA_U32S);
         let stagedFirst = 0;
         let stagedCount = 0;
@@ -1364,76 +1354,52 @@ class MeshletWorld {
             meshletCount: instance => primitiveWord(instance, PRIMITIVE_DATA.MESHLET_COUNT)
         });
         flush();
-        this.objectDataBuffer = new StorageBuffer(device, Math.max((totalInstances + totalPrimitiveRows) * OBJECT_DATA_U32S * 4, 16), BUFFERUSAGE_COPY_DST);
+
+        this.objectDataBuffer = new StorageBuffer(device, Math.max((totalInstances + totals.totalPrimitiveRows) * OBJECT_DATA_U32S * 4, 16), BUFFERUSAGE_COPY_DST);
         this._writeObjectRows(0, totalInstances);
         if (primitiveRows.length) this.objectDataBuffer.write(totalInstances * OBJECT_DATA_U32S * 4, primitiveRows);
-        this.materialTableBuffer = new StorageBuffer(device, materialTable.byteLength, BUFFERUSAGE_COPY_DST);
-        this.materialTableBuffer.write(0, materialTable);
+        this.materialTableBuffer = new StorageBuffer(device, materials.data.byteLength, BUFFERUSAGE_COPY_DST);
+        this.materialTableBuffer.write(0, materials.data);
         if (lightmapData) {
             this.lightmapBuffer = new StorageBuffer(device, lightmapData.byteLength, BUFFERUSAGE_COPY_DST);
             this.lightmapBuffer.write(0, lightmapData, 0, lightmapData.length);
         }
-
-        // streaming request marks (u32 per page) followed by the texture-mip feedback marks
-        // (u32 per material row, atomicMax'd texel rates) - shared by all views (marks union
-        // via max semantics), cleared once per frame by the residency manager. Per-view frame
-        // buffers (cull params, counters, work items, records, claim/vis bits, draw indices)
-        // live on each MeshletView.
-        this.materialRowCount = totalMaterialRows;
         this.requestsBuffer = new StorageBuffer(device, Math.max((totalPages + totalMaterialRows) * 4, 16), BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
-        // Placeholder for the visBits binding of single-phase (shadow) views. The cull shader
-        // always declares the binding but only its phase 1/2 branches touch it, and those views
-        // run phase 0 - so they bind this 16-byte buffer instead of allocating one bit per
-        // instance-meshlet pair, which is tens of MB on a scattered scene.
         this.dummyBits = new StorageBuffer(device, 16, BUFFERUSAGE_COPY_DST);
 
-        // streamed textures: tails + residency exist before the materials bind them (an
-        // adopted system is already finalized and possibly fully loaded)
-        if (texturesAdopted) {
+        // the texture tails and residency exist before the materials bind them
+        if (build.texturesAdopted) {
             this.textures.appendFinalize();
         } else {
             this.textures?.finalize();
         }
-        this.textures?.setMaterialSlots(materialTable, totalMaterialRows, MATERIAL_RECORD_U32S, MATERIAL_RECORD.SLOT_WORDS);
+        this.textures?.setMaterialSlots(materials.data, totalMaterialRows, MATERIAL_RECORD_U32S, MATERIAL_RECORD.SLOT_WORDS);
+    }
 
-        // binds the world's storage buffers to a bucket material (lit or debug). The per-view
-        // records buffer is not bound here - each view's mesh instances carry it as an
-        // instance-level parameter override
-        const bindWorldParams = (material) => {
-            material.setParameter('meshletData', this.meshletDataBuffer);
-            material.setParameter('objectData', this.objectDataBuffer);
-            material.setParameter('pagePool', this.pagePool);
-            material.setParameter('residency', this.residencyBuffer);
-            material.setParameter('materialTable', this.materialTableBuffer);
-            if (this.lightmapBuffer) material.setParameter('meshletLightmaps', this.lightmapBuffer);
-            material.setParameter('pageSizeWords', this.pageSizeBytes / 4);
-        };
-        const bindTextureParams = (material) => {
-            if (!this.textures) return;
-            material.setParameter('texResidency', this.textures.residencyBuffer);
-            material.setParameter('meshletSlotDesc', this.textures.slotDescBuffer);
-            for (let f = 0; f < MESHLET_TEX_FAMILIES.length; f++) {
-                const { tail, fine } = this.textures.familyTextures(f);
-                material.setParameter(_tailBindName(f), tail);
-                material.setParameter(_fineBindName(f), fine);
-            }
-        };
-
+    /**
+     * Creates the engine-lit bucket materials (one per MESHLET_BUCKET_*, shared by both phases
+     * and every view) and wires the texture system's feedback maps. The unlit debug materials of
+     * the colour modes are created on first use (see {@link setColorMode}).
+     *
+     * @param {object} build - The build state (see _build).
+     * @param {MeshletBuildTotals} totals - The scene totals.
+     * @private
+     */
+    _createMaterials(build, totals) {
+        const textures = this.textures;
         // per-world chunk set: texture sampling, UV varyings and tangents compile in only when
         // the resources carry them
         const chunks = buildMeshletLitChunks({
-            textures: !!this.textures,
-            uvChannels: Math.min(uvChannels, MESHLET_MAX_UV_CHANNELS),
-            tangents: anyTangents,
-            colors: anyColors,
-            lightmaps: anyLightmaps,
-            forwardBackend: ShaderChunks.get(device, 'wgsl').get('litForwardBackendPS'),
-            familySizes: this.textures?.families.map(fam => fam.slotSize),
-            familyLevels: this.textures?.families.map(fam => ({ slotLevels: fam.slotLevels, tailLevels: fam.levels }))
+            textures: !!textures,
+            uvChannels: Math.min(totals.uvChannels, MESHLET_MAX_UV_CHANNELS),
+            tangents: totals.anyTangents,
+            colors: totals.anyColors,
+            lightmaps: totals.anyLightmaps,
+            forwardBackend: ShaderChunks.get(this.device, 'wgsl').get('litForwardBackendPS'),
+            familySizes: textures?.families.map(fam => fam.slotSize),
+            familyLevels: textures?.families.map(fam => ({ slotLevels: fam.slotLevels, tailLevels: fam.levels }))
         });
 
-        // engine-lit bucket materials (one per MESHLET_BUCKET_*) shared by both phases; the
-        // unlit debug materials (colour modes) are created lazily on first setColorMode(>0)
         this._litMaterials = [];
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             const material = createMeshletLitMaterial(b, chunks);
@@ -1441,57 +1407,62 @@ class MeshletWorld {
                 material.setDefine('MESHLET_TEX_DEBUG', true);
                 material.update();
             }
+            this._bindWorldParams(material);
+            this._bindTextureParams(material);
             this._litMaterials.push(material);
         }
-        this._litMaterials.forEach(bindWorldParams);
-        this._litMaterials.forEach(bindTextureParams);
         this._debugMaterials = null;
 
-        this._bindWorldParams = bindWorldParams;
-
-        // family arrays are created asynchronously (format known after the first transcode) -
-        // swap the placeholder bindings for the real textures when each family lands
-        if (this.textures) {
-            this.textures.onFamilyTexturesReady = (family, tail, fine) => {
+        if (textures) {
+            // family arrays are created once the first transcode decides their format - swap the
+            // placeholder bindings for the real textures as each family lands
+            textures.onFamilyTexturesReady = (family, tail, fine) => {
                 this._litMaterials?.forEach((m) => {
                     m.setParameter(_tailBindName(family), tail);
                     if (fine) m.setParameter(_fineBindName(family), fine);
                 });
             };
-
-            // material row -> up to 4 flat texture indices, for turning the cull pass's
-            // per-material feedback marks into per-texture fine-mip demand. The cull pass
-            // measures texel rate in pre-transform UV space, but sampling applies each
-            // slot's KHR_texture_transform scale to the derivatives - a tiled texture
-            // (scale > 1) resolves that much coarser than the raw mark suggests, so each
-            // slot carries a tiling bias of 16*log2(scale), subtracted from its mark, to keep demand honest.
-            const f16 = (h) => {
-                const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1F, m = h & 0x3FF;
-                return e === 0 ? s * m * (2 ** -24) : e === 31 ? s * Infinity : s * (1 + m / 1024) * (2 ** (e - 15));
-            };
-            const rowTex = new Int32Array(totalMaterialRows * MATERIAL_TEXTURE_SLOTS).fill(-1);
-            const rowTilingBias = new Int16Array(totalMaterialRows * MATERIAL_TEXTURE_SLOTS);
-            for (let row = 0; row < totalMaterialRows; row++) {
-                for (let s = 0; s < MATERIAL_TEXTURE_SLOTS; s++) {
-                    const word = materialTable[row * MATERIAL_RECORD_U32S + MATERIAL_RECORD.SLOT_WORDS + s];
-                    if ((word & 0xFFFF) === 0xFFFF) continue;
-                    rowTex[row * MATERIAL_TEXTURE_SLOTS + s] = word & 0xFFFF;
-                    const t0 = materialTable[row * MATERIAL_RECORD_U32S + MATERIAL_RECORD.SLOT_TRANSFORMS + s * 2];
-                    const t1 = materialTable[row * MATERIAL_RECORD_U32S + MATERIAL_RECORD.SLOT_TRANSFORMS + s * 2 + 1];
-                    if ((t0 | t1) !== 0) {
-                        const scale = Math.max(Math.abs(f16(t1 & 0xFFFF)), Math.abs(f16(t1 >>> 16)));
-                        if (scale > 0 && Number.isFinite(scale)) {
-                            rowTilingBias[row * MATERIAL_TEXTURE_SLOTS + s] = Math.round(TEXEL_RATE_PER_MIP * Math.log2(scale));
-                        }
-                    }
-                }
-            }
-            this.textures.setMaterialSlotMap(rowTex, rowTilingBias);
-            this.textures.setLightmapSlotMap(new Int32Array(lightmapSlots));
+            const { rowTex, rowTilingBias } = build.materials.slotTextureMaps();
+            textures.setMaterialSlotMap(rowTex, rowTilingBias);
+            textures.setLightmapSlotMap(new Int32Array(build.lightmapSlots));
         }
+    }
 
-        this._colorMode = 0;
-        this._pending = [];
+    /**
+     * Binds the world's storage buffers to a bucket material (lit or debug). The per-view
+     * records buffer is not bound here - each view's mesh instances carry it as an
+     * instance-level parameter.
+     *
+     * @param {Material} material - The material.
+     * @private
+     */
+    _bindWorldParams(material) {
+        material.setParameter('meshletData', this.meshletDataBuffer);
+        material.setParameter('objectData', this.objectDataBuffer);
+        material.setParameter('pagePool', this.pagePool);
+        material.setParameter('residency', this.residencyBuffer);
+        material.setParameter('materialTable', this.materialTableBuffer);
+        if (this.lightmapBuffer) material.setParameter('meshletLightmaps', this.lightmapBuffer);
+        material.setParameter('pageSizeWords', this.pageSizeBytes / 4);
+    }
+
+    /**
+     * Binds the texture system's tables and family arrays (placeholders until they land) to a
+     * lit material.
+     *
+     * @param {Material} material - The material.
+     * @private
+     */
+    _bindTextureParams(material) {
+        const textures = this.textures;
+        if (!textures) return;
+        material.setParameter('texResidency', textures.residencyBuffer);
+        material.setParameter('meshletSlotDesc', textures.slotDescBuffer);
+        for (let f = 0; f < MESHLET_TEX_FAMILIES.length; f++) {
+            const { tail, fine } = textures.familyTextures(f);
+            material.setParameter(_tailBindName(f), tail);
+            material.setParameter(_fineBindName(f), fine);
+        }
     }
 
     /**
@@ -1499,7 +1470,7 @@ class MeshletWorld {
      * materials when a colour mode is active. Views compare this by identity each frame and
      * swap their mesh instances' materials when it changes.
      *
-     * @type {Array<object>}
+     * @type {Material[]}
      */
     get bucketMaterials() {
         return this._colorMode > 0 && this._colorMode !== MESHLET_COLOR_MODE.TEXTURES ? this._debugMaterials : this._litMaterials;
@@ -1520,8 +1491,8 @@ class MeshletWorld {
 
     /**
      * One record per instance, for resolving a picked id. An instance is one primitive at one
-     * transform, so this is submesh granularity - a table baked with its top and legs as
-     * separate glTF primitives picks apart exactly as it would have unbaked.
+     * transform, so this is glTF submesh granularity - a table baked with its top and legs as
+     * separate primitives picks apart exactly as it would have unbaked.
      *
      * Built on the first pick and cached: an app that never picks pays nothing, and the records
      * are what the picker's id map needs distinct values of (it de-duplicates by identity, so
@@ -1554,17 +1525,26 @@ class MeshletWorld {
      * these unconditionally - the debug materials are unlit {@link ShaderMaterial}s with no
      * shadow variant, so a colour mode would otherwise silently drop every meshlet shadow.
      *
-     * @type {Array<object>}
+     * @type {Material[]}
      */
     get litMaterials() {
         return this._litMaterials;
     }
 
     /**
+     * The debug color mode (MESHLET_COLOR_MODE) set by {@link setColorMode}.
+     *
+     * @type {number}
+     */
+    get colorMode() {
+        return this._colorMode;
+    }
+
+    /**
      * Sets the debug color mode (MESHLET_COLOR_MODE): MESHLET swaps in the unlit per-meshlet
      * debug materials (applied to each view's mesh instances via
      * {@link MeshletView#syncMaterials}); TEXTURES keeps the lit ones, painting each pixel with
-     * its texture-sample state.
+     * its texture-sample state. Call after {@link finalize}.
      *
      * @param {number} mode - The color mode.
      */
@@ -1573,9 +1553,10 @@ class MeshletWorld {
         if (mode > 0 && !texDebug && !this._debugMaterials) {
             this._debugMaterials = [];
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
-                this._debugMaterials.push(createMeshletMaterial(b));
+                const material = createMeshletMaterial(b);
+                this._bindWorldParams(material);
+                this._debugMaterials.push(material);
             }
-            this._debugMaterials.forEach(this._bindWorldParams);
         }
         this._colorMode = mode;
         if (this._texDebug !== texDebug) {
@@ -1683,8 +1664,8 @@ class MeshletWorld {
      * Marks instances for the outline pass, by global instance index - the same index a pick
      * returns, so an editor can outline exactly what was clicked.
      *
-     * Selection has to live in objectData: one indirect draw covers every instance, so there is
-     * no mesh instance to add to an outline layer and no per-object uniform to set. The outline
+     * Selection lives in objectData: one indirect draw covers every instance, so there is no
+     * mesh instance to add to an outline layer and no per-object uniform to set. The outline
      * variant of the vertex shader collapses unselected instances to a degenerate triangle, so
      * they cost a vertex fetch and no rasterisation.
      *
@@ -1852,7 +1833,7 @@ class MeshletWorld {
      *
      * @param {number} instance - The instance index.
      * @param {Mat4} out - Receives the matrix.
-     * @returns {import('./meshlet-resource.js').MeshletPrimitive} The instance's primitive.
+     * @returns {MeshletPrimitive} The instance's primitive.
      * @private
      */
     _instanceMatrix(instance, out) {

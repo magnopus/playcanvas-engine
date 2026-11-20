@@ -21,7 +21,7 @@ export const MAX_IN_FLIGHT_RUNS = 8;
  * Minimum pool slots kept free of pinned roots for demand pages, so a pool too small for every
  * root still streams refinement.
  */
-const DEMAND_SLOT_RESERVE = 64;
+export const DEMAND_SLOT_RESERVE = 64;
 
 /** Multiplier packing a slot index below its last-used frame in an eviction-queue key. */
 const EVICT_SLOT_RANGE = 1 << 24;
@@ -31,6 +31,9 @@ const SETTLED_READBACKS = 2;
 
 /** Wait before retrying a failing stream, in milliseconds, doubled per consecutive failure. */
 const RETRY_BASE_MS = 1000;
+
+/** Consecutive failed fetches after which a stream is given up on. */
+const MAX_STREAM_FAILURES = 4;
 
 /**
  * One page's words out of a fetched run.
@@ -95,7 +98,7 @@ class WantedPages {
  * (one to two frames latent), coalesces missing pages into HTTP Range runs, uploads arrived
  * pages into free or LRU-evicted pool slots and maintains the page-to-slot residency map.
  *
- * Every resource's root pages (its coarsest clusters, `cut.rootPages`) are fetched once at load
+ * Every resource's root pages (its coarsest clusters, {@link MeshletWorld#rootPages}) are fetched once at load
  * and pinned for the resource's lifetime, as in Nanite: a few pages per unique mesh, whatever the
  * placement count. Any placement's coarse cut is then always drawable, so admission needs no
  * per-view page accounting.
@@ -230,6 +233,30 @@ class MeshletResidency {
     /** @type {number} - root fetch runs still outstanding. */
     _rootRunsPending = 0;
 
+    /**
+     * Every streamed resource's bake marks its sloppy clusters, so the floor is exact. Older
+     * bakes cannot tell sloppy levels apart, so readiness falls back to the view's cut having
+     * converged.
+     *
+     * @type {boolean}
+     */
+    sloppyAware = false;
+
+    /**
+     * Per streamed resource: its stream info (see MeshletWorld#streamInfo), page fetcher, fetch
+     * failure state and load accounting.
+     *
+     * @type {Array<object>}
+     * @private
+     */
+    _streams = [];
+
+    /** @type {(a: number, b: number) => number} - orders missing pages roots first. @private */
+    _compareRequests;
+
+    /** @type {boolean} - set by destroy; in-flight completions check it. @private */
+    _destroyed = false;
+
     // stats
     residentPages = 0;
 
@@ -265,11 +292,10 @@ class MeshletResidency {
         this.readbackPool = new WebgpuReadbackPool(device);
 
         const slots = world.poolSlots;
-        // Root pages pinned for good, up to what the pool can hold beside a demand reserve; the
-        // world's budget sizes the pool to fit them, so a shortfall means the budget is too small.
-        const rootPages = world.cut?.rootPages ?? [];
-        // the world's budget sizes the pool for every root plus this reserve; a pool too small
-        // for both (a budget below the fixed costs) still keeps half its slots for demand
+        // Root pages are pinned for good, up to what the pool can hold beside a demand reserve.
+        // The world's budget sizes the pool for every root plus the reserve; a pool too small for
+        // both (a budget below the fixed costs) still keeps half its slots for demand.
+        const rootPages = world.rootPages ?? [];
         const reserve = Math.min(DEMAND_SLOT_RESERVE, Math.max(world.totalPages - rootPages.length, 0), Math.floor(slots / 2));
         const pinnable = Math.min(rootPages.length, Math.max(slots - reserve, 0));
         this._isRoot = new Uint8Array(world.totalPages);
@@ -315,13 +341,6 @@ class MeshletResidency {
 
         this._requestData = new Uint32Array(world.totalPages + (world.materialRowCount ?? 0));
 
-        /**
-         * Every streamed resource's bake marks its sloppy clusters, so the floor is exact. Older
-         * bakes cannot tell sloppy levels apart, so readiness falls back to the view's cut
-         * having converged.
-         *
-         * @type {boolean}
-         */
         this.sloppyAware = world.streamInfo.length > 0 && world.streamInfo.every(info => info.resource.manifest.sloppyFlags === true);
 
         // per-resource fetchers
@@ -348,8 +367,6 @@ class MeshletResidency {
     }
 
     destroy() {
-        // in-flight fetch completions and pending readbacks check this before touching the
-        // (possibly rebuilt) world's buffers
         this._destroyed = true;
         this.readbackPool.destroy();
     }
@@ -402,7 +419,7 @@ class MeshletResidency {
                 this._rootRunsPending++;
                 fetches.push(stream.fetcher.fetchRange(run.blob, run.offset, run.length, FETCH_PRIORITY_ROOTS).then((bytes) => {
                     if (!bytes) {
-                        for (const { localPage } of run.pages) this._settleFailedRoot(stream.pageBase + localPage);
+                        for (const { localPage } of run.pages) this._settleRoot(stream.pageBase + localPage);
                         return;
                     }
                     const pageWordsSize = stream.resource.manifest.pageSizeBytes / 4;
@@ -414,9 +431,8 @@ class MeshletResidency {
                     }
                 }).catch((err) => {
                     // roots are required: no retries against a backoff, the stream is dead
-                    stream.failures = Math.max(stream.failures, 3);
-                    this._failStream(stream, err);
-                    for (const { localPage } of run.pages) this._settleFailedRoot(stream.pageBase + localPage);
+                    this._failStream(stream, err, true);
+                    for (const { localPage } of run.pages) this._settleRoot(stream.pageBase + localPage);
                 }).finally(() => {
                     this._rootRunsPending--;
                 }));
@@ -437,7 +453,7 @@ class MeshletResidency {
         const world = this.world;
         const floor = world.cut?.floorPages ?? [];
         let rootsMissing = 0;
-        for (const page of world.cut?.rootPages ?? []) {
+        for (const page of world.rootPages ?? []) {
             if (this._isRoot[page] && world.residency[page] === PAGE_NOT_RESIDENT) rootsMissing++;
         }
         const reserve = Math.min(DEMAND_SLOT_RESERVE, Math.floor(this.slotPage.length / 4));
@@ -608,7 +624,7 @@ class MeshletResidency {
             const rootBudget = budget * 4;
             while (this._arrivedRootsHead < this._arrivedRoots.length && spent < rootBudget) {
                 const { globalPage, words } = this._arrivedRoots[this._arrivedRootsHead++];
-                this._settleFailedRoot(globalPage);
+                this._settleRoot(globalPage);
                 this._installPage(globalPage, words, true);
                 spent += pageBytes;
             }
@@ -734,12 +750,13 @@ class MeshletResidency {
     }
 
     /**
-     * Forgets a root page that arrived (it installs next) or whose fetch failed.
+     * Stops a root page counting as in flight: it arrived (and installs next), or its fetch
+     * failed.
      *
      * @param {number} globalPage - The page.
      * @private
      */
-    _settleFailedRoot(globalPage) {
+    _settleRoot(globalPage) {
         if (this.inFlight.delete(globalPage)) {
             const stream = this._streamOf(globalPage);
             if (stream) stream.rootsPending--;
@@ -806,26 +823,27 @@ class MeshletResidency {
             }).catch(() => {
                 this._readbackBusy = false;
             });
-            const encoder = this.device.getCommandEncoder();
-            encoder.clearBuffer(world.requestsBuffer.impl.buffer, 0, requestsSize);
+            world.requestsBuffer.clear(0, requestsSize);
         }
     }
 
     /**
-     * Records a failed fetch on a stream: a 404-class status kills it outright, anything else
-     * backs it off exponentially and kills it after repeated failures.
+     * Records a failed fetch on a stream: a fatal failure or a 404-class status kills it
+     * outright, anything else backs it off exponentially and kills it after repeated failures.
      *
      * @param {object} stream - The stream.
      * @param {Error & { status?: number }} err - The failure; `status` is the HTTP status of a
      * response that was not ok.
+     * @param {boolean} [fatal] - The stream cannot do without what failed (its roots).
      * @private
      */
-    _failStream(stream, err) {
+    _failStream(stream, err, fatal = false) {
         const status = err?.status;
         stream.failures++;
-        if (status === 404 || status === 403 || status === 410 || stream.failures >= 4) {
+        if (fatal || status === 404 || status === 403 || status === 410 || stream.failures >= MAX_STREAM_FAILURES) {
             if (!stream.dead) {
                 stream.dead = true;
+                // a broken asset package must be diagnosable in release builds too
                 console.error(`MeshletResidency: giving up on ${stream.resource.manifest.blobs[0]?.uri ?? 'a resource'} after ${stream.failures} failed fetch(es): ${err?.message ?? err}`);
             }
             return;

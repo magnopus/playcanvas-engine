@@ -27,13 +27,16 @@ describe('GlbContainerResource', function () {
 
     describe('#instantiateRenderEntity', function () {
 
-        it('does not cast shadows from blended or transmissive primitives', function () {
+        const createContainer = () => {
             const opaque = new StandardMaterial();
             const blended = new StandardMaterial();
             blended.blendType = BLEND_NORMAL;
             const transmissive = new StandardMaterial();
             transmissive.refraction = 1;
-            const materials = [opaque, blended, transmissive];
+            const masked = new StandardMaterial();
+            masked.blendType = BLEND_NORMAL;
+            masked.alphaTest = 0.5;
+            const materials = [opaque, blended, transmissive, masked];
 
             // one node and one single-primitive mesh per material
             const root = new GraphNode('root');
@@ -63,13 +66,25 @@ describe('GlbContainerResource', function () {
                 skins: [],
                 nodeInstancingMap: new Map()
             };
-            const container = new GlbContainerResource(data, new Asset('test', 'container', { url: '' }), app.assets, opaque);
-            const entity = container.instantiateRenderEntity();
+            return new GlbContainerResource(data, new Asset('test', 'container', { url: '' }), app.assets, opaque);
+        };
 
-            const castShadow = name => entity.findByName(name).render.meshInstances[0].castShadow;
-            expect(castShadow('node0'), 'opaque').to.equal(true);
-            expect(castShadow('node1'), 'blended').to.equal(false);
-            expect(castShadow('node2'), 'transmissive').to.equal(false);
+        const castShadow = (entity, name) => entity.findByName(name).render.meshInstances[0].castShadows;
+
+        it('casts shadows from every primitive by default', function () {
+            const entity = createContainer().instantiateRenderEntity();
+            expect(castShadow(entity, 'node0'), 'opaque').to.equal(true);
+            expect(castShadow(entity, 'node1'), 'blended').to.equal(true);
+            expect(castShadow(entity, 'node2'), 'transmissive').to.equal(true);
+            expect(castShadow(entity, 'node3'), 'masked').to.equal(true);
+        });
+
+        it('skips blended and transmissive casters with skipBlendedShadowCasters', function () {
+            const entity = createContainer().instantiateRenderEntity({ skipBlendedShadowCasters: true });
+            expect(castShadow(entity, 'node0'), 'opaque').to.equal(true);
+            expect(castShadow(entity, 'node1'), 'blended').to.equal(false);
+            expect(castShadow(entity, 'node2'), 'transmissive').to.equal(false);
+            expect(castShadow(entity, 'node3'), 'masked').to.equal(true);
         });
 
     });

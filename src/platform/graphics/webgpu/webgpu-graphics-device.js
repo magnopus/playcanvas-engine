@@ -2121,9 +2121,8 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
             this.wgpu.queue.writeBuffer(storageBuffer.buffer, bufferOffset, data, dataOffset, size);
             return;
         }
-        // Chrome stages each writeBuffer through shared memory mapped into both the page and the
-        // GPU process, sized to the write. A multi-GB upload (a large meshlet world's tables) left
-        // that much memory mapped in both, so big writes go through in bounded slices instead.
+        // Chrome stages each writeBuffer through shared memory sized to the write, mapped in both
+        // the page and the GPU process, so large writes are sliced to bound that mapping
         const step = Math.floor(MAX_WRITE_BUFFER_BYTES / elementBytes);
         for (let done = 0; done < elements; done += step) {
             const count = Math.min(step, elements - done);

@@ -10,6 +10,8 @@ import {
 } from '@playcanvas/pcui/react';
 import { useEffect } from 'react';
 
+import { MESHLET_COLOR_MODE } from 'playcanvas';
+
 /**
  * @import { Observer } from '@playcanvas/observer'
  * @import { ReactElement } from 'react'
@@ -67,8 +69,8 @@ export function Controls({ observer }) {
                         link={{ observer, path: 'data.colorMode' }}
                         type='number'
                         options={[
-                            { v: 0, t: 'Material' },
-                            { v: 2, t: 'Meshlet' }
+                            { v: MESHLET_COLOR_MODE.LIT, t: 'Material' },
+                            { v: MESHLET_COLOR_MODE.MESHLET, t: 'Meshlet' }
                         ]}
                     />
                 </LabelGroup>

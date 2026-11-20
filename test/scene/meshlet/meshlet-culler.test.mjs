@@ -3,8 +3,8 @@ import { expect } from 'chai';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import {
-    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_COUNTER_U32S,
-    MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS, MESHLET_ROOT_BAND_OCTAVES, claimPersistBase
+    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, CUT_BUDGET_U32S, MESHLET_BUCKET_COUNT, MESHLET_CELL_CULL_WORKGROUP, MESHLET_COUNTER,
+    MESHLET_COUNTER_CLEAR_U32S, MESHLET_COUNTER_U32S, MESHLET_DISPATCH_WIDTH, MESHLET_LIST_WORKGROUP, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS, MESHLET_ROOT_BAND_OCTAVES, claimPersistBase
 } from '../../../src/scene/meshlet/constants.js';
 import { FramePassMeshletCompute } from '../../../src/scene/meshlet/frame-pass-meshlet-compute.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
@@ -73,8 +73,8 @@ const makeView = (singlePhase = false) => ({
     indexCapacity: [10, 20, 30],
     cullParamsBuffer: storage(256),
     countersBuffer: storage(MESHLET_COUNTER_U32S * 4),
-    cutBudgetBuffer: storage(24),
-    cutBudgetInitial: new Uint32Array(6),
+    cutBudgetBuffer: storage(CUT_BUDGET_U32S * 4),
+    cutBudgetInitial: new Uint32Array(CUT_BUDGET_U32S),
     claimBitsBuffer: storage(64),
     rootListBuffer: storage(),
     recordsBuffer: storage(),
@@ -117,7 +117,7 @@ describe('MeshletCuller', function () {
         const world = makeWorld();
         const culler = new MeshletCuller(device, world, view, shaders);
         expect(culler.cutEmit.getParameter('selectionTopology')).to.equal(world.cut.selectionTopology);
-        for (const name of ['objectData', 'meshletData', 'cullParams', 'selectedMeshlets', 'counters', 'records', 'residency', 'requests', 'visBits']) {
+        for (const name of ['objectData', 'meshletData', 'cullParams', 'selectedMeshlets', 'counters', 'records', 'requests', 'visBits']) {
             expect(culler.meshletCull.getParameter(name), name).to.equal(culler.meshletCullPhase2.getParameter(name));
         }
         expect(culler.meshletCullPhase2.getParameter('phase')).to.equal(2);
@@ -147,7 +147,12 @@ describe('MeshletCuller', function () {
             }
         });
         expect(culler.rootClassify.getParameter('rootList')).to.equal(view.rootListBuffer);
+        // classify fills the list's first half, the scatter sorts it into the second
+        expect(culler.rootClassify.getParameter('sortedBase')).to.equal(world.instanceCount);
+        expect(culler.rootScatter.getParameter('sortedBase')).to.equal(world.instanceCount);
         expect(culler.rootArgs.getParameter('counterIndex')).to.equal(MESHLET_COUNTER.ROOT_CANDIDATES);
+        expect(culler.rootArgs.getParameter('groupSize')).to.equal(MESHLET_LIST_WORKGROUP);
+        expect(culler.cutEmitArgs.getParameter('groupSize')).to.equal(MESHLET_LIST_WORKGROUP);
 
         device.gpuProfiler = { enabled: true, passDetail: true, destroy() {} };
         culler.beginFrame(planes, camera, 640, viewProj, null);
@@ -258,7 +263,7 @@ describe('MeshletCuller', function () {
         const view = makeView();
         const culler = new MeshletCuller(device, makeWorld(), view, shaders);
         const row = index => index * 4;
-        const hzb = { texture: {}, width: 256, height: 128, mipCount: 8 };
+        const hzb = { texture: {}, width: 256, height: 128, mipCount: 8, valid: true };
         culler.twoPhase = true;
         culler.viewDir = { x: 0, y: 0, z: -1 };
         const armed = (frame) => {
@@ -290,9 +295,35 @@ describe('MeshletCuller', function () {
 
         culler.beginFrame(planes, camera, 640, viewProj, { ...hzb, texture: hzb.texture, width: 512 });
         expect(armed(5), 'a resized pyramid, once a frame has built it').to.equal(1);
+        // recreated, but its mip 0 not yet built: zeros, which would hide everything
+        culler.beginFrame(planes, camera, 640, viewProj, { ...hzb, texture: hzb.texture, width: 512, valid: false });
+        expect(armed(6), 'not built yet').to.equal(0);
         culler.occlusionAdmission = false;
         culler.beginFrame(planes, camera, 640, viewProj, { ...hzb, texture: hzb.texture, width: 512 });
-        expect(armed(6), 'switched off').to.equal(0);
+        expect(armed(7), 'switched off').to.equal(0);
+        culler.destroy();
+    });
+
+    it('runs single-phase while the HZB holds no built pyramid', function () {
+        const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
+        culler.twoPhase = true;
+        const hzb = { texture: new Texture(device, { width: 4, height: 4 }), width: 320, height: 200, mipCount: 9, valid: false };
+        culler.beginFrame(planes, camera, 640, viewProj, hzb);
+        expect(culler.meshletCull.getParameter('phase')).to.equal(0);
+        expect(culler.meshletCull.getParameter('hzbTexture')).to.equal(shaders.dummyHzb);
+        hzb.valid = true;
+        culler.beginFrame(planes, camera, 640, viewProj, hzb);
+        expect(culler.meshletCull.getParameter('phase')).to.equal(1);
+        expect(culler.meshletCull.getParameter('hzbTexture')).to.equal(hzb.texture);
+        hzb.texture.destroy();
+        culler.destroy();
+    });
+
+    it('dispatches the cell cull over a grid no wider than the dispatch width', function () {
+        const world = makeWorld();
+        world.cells.cellCount = (MESHLET_DISPATCH_WIDTH + 5) * MESHLET_CELL_CULL_WORKGROUP;
+        const culler = new MeshletCuller(device, world, makeView(), shaders);
+        expect([culler.cellCull.countX, culler.cellCull.countY]).to.deep.equal([MESHLET_DISPATCH_WIDTH, 2]);
         culler.destroy();
     });
 
@@ -370,7 +401,7 @@ describe('MeshletCuller', function () {
         const view = makeView();
         const culler = new MeshletCuller(device, makeWorld(), view, shaders);
         culler.twoPhase = true;
-        const hzb = { texture: new Texture(device, { width: 4, height: 4 }), width: 320, height: 200, mipCount: 9 };
+        const hzb = { texture: new Texture(device, { width: 4, height: 4 }), width: 320, height: 200, mipCount: 9, valid: true };
         culler.beginFrame(planes, camera, 640, viewProj, hzb);
         expect(culler.meshletCull.getParameter('phase')).to.equal(1);
         expect(culler.meshletCull.getParameter('hzbTexture')).to.equal(hzb.texture);
@@ -448,6 +479,7 @@ describe('MeshletHzb', function () {
         expect(hzb.mipCount, 'floor(log2(640)) + 1').to.equal(10);
         expect(hzb.mip0Pass.name).to.equal('MeshletHzbMip0');
         expect(hzb.mip0Pass.colorOps.clear, 'the quad writes every texel').to.equal(true);
+        expect(hzb.valid, 'nothing built yet').to.equal(false);
         const texture = hzb.texture;
         hzb.resize(depth, 1280, 800);
         expect(hzb.texture, 'same size: no reallocation').to.equal(texture);

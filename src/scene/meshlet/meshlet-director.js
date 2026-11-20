@@ -6,53 +6,49 @@ import { Vec3 } from '../../core/math/vec3.js';
 import { LAYERID_WORLD } from '../constants.js';
 import { MESHLET_BUCKET_COUNT } from './constants.js';
 import { MeshletBudgetManager } from './meshlet-budget-manager.js';
-import { MeshletCullShaders } from './meshlet-cull-shaders.js';
+import { MeshletRebuildCarry } from './meshlet-retention.js';
 import { MeshletShadowRenderer } from './meshlet-shadow-renderer.js';
-import { MeshletHzb } from './meshlet-hzb.js';
-import { MeshletView } from './meshlet-view.js';
+import { MeshletView, sumBuckets } from './meshlet-view.js';
 import { MeshletWorld } from './meshlet-world.js';
 import { MeshletResidency } from './streaming/meshlet-residency.js';
-import { MAX_CONCURRENT_FETCHES, MeshletFetchScheduler } from './streaming/meshlet-fetch-scheduler.js';
 
 /**
- * @import { ByteCache } from '../../platform/net/byte-cache.js'
  * @import { CameraComponent } from '../../framework/components/camera/component.js'
  * @import { Color } from '../../core/math/color.js'
  * @import { ForwardRenderer } from '../renderer/forward-renderer.js'
- * @import { FrameGraph } from '../frame-graph.js'
- * @import { FramePass } from '../../platform/graphics/frame-pass.js'
- * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { Layer } from '../layer.js'
  * @import { LayerComposition } from '../composition/layer-composition.js'
  * @import { MeshInstance } from '../mesh-instance.js'
+ * @import { MeshletCullShaders } from './meshlet-cull-shaders.js'
  * @import { MeshletDirectorGroup } from './meshlet-director-group.js'
+ * @import { MeshletFetchScheduler } from './streaming/meshlet-fetch-scheduler.js'
  * @import { MeshletTranscodeFn } from './textures/meshlet-ktx2.js'
+ * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { RenderTarget } from '../../platform/graphics/render-target.js'
  * @import { StorageBuffer } from '../../platform/graphics/storage-buffer.js'
  */
 
+/**
+ * What {@link MeshletDirector#onBudgetExceeded} receives.
+ *
+ * @typedef {object} MeshletBudgetReport
+ * @property {number} budgetBytes - The configured geometry budget.
+ * @property {number} suggestedBudgetBytes - An estimate of the budget the visible set needs; not
+ * a coverage guarantee.
+ * @property {number} indexDemandRatio - Index demand over the view's share.
+ * @property {number} indexCeiling - The world's index ceiling.
+ * @property {number} pagesMissing - Pages the cut wanted that were not resident.
+ * @property {number} poolPages - Pages the page pool holds.
+ * @property {number} totalPages - Pages of the world.
+ * @property {number} rootInstancesDeferred - Visible instances deferred for capacity (0 when
+ * reporting a sustained overrun).
+ * @property {number} rootInstancesUnready - Visible instances whose root pages were not resident.
+ * @property {number} rootShortfallPages - Root pages the pool cannot pin.
+ * @ignore
+ */
+
 const _viewProj = new Mat4();
 const _frustum = new Frustum();
-
-// Margin over the pair-count ratio when pre-sizing carried index capacities for a scene that
-// grew: enough to lead the demand readback by a step change, not a scene-size ratio.
-const CARRY_GROWTH_MARGIN = 1.35;
-
-// Every view keeps at least this fraction of an equal share of the index budget, so a view
-// that is momentarily empty can grow back without waiting for a redistribution.
-const SHARE_FLOOR_FRACTION = 0.25;
-
-// Occupancy camera views are budgeted at before shadow views get any index budget: under the
-// budget manager's indexEasedAt, so a camera that is given its full want never reads as tight.
-const CAMERA_SHARE_OCCUPANCY = 0.5;
-
-// Shadow LOD controller (see MeshletDirector#_updateShadowPressure): the per-frame step is the
-// demand ratio's distance outside the hold band raised to this power, and limited to these
-// bounds - about x2 a second up and x0.6 a second down at 60 fps, against x18 and x0.74 for the
-// camera's controller.
-const SHADOW_PRESSURE_GAIN = 0.1;
-const SHADOW_PRESSURE_MAX_RAISE = 1.012;
-const SHADOW_PRESSURE_MAX_DECAY = 0.992;
 
 const BYTES_PER_MB = 1024 * 1024;
 
@@ -60,57 +56,52 @@ const BYTES_PER_MB = 1024 * 1024;
 // a frame - one per root admission band - so the device default of 256 runs out at a dozen views.
 const MIN_INDIRECT_DISPATCH_SLOTS = 1024;
 
-/** @type {never[]} */
-const _noViews = [];
+// World settings a rebuild carries into the fresh world.
+const WORLD_SETTINGS = [
+    'poolBytes', 'texturePoolBytes', 'maxFineTextureSize', 'maxInstallBytesPerFrame', 'initialIndices',
+    'initialRecords', 'indexBudgetFraction', 'rootBudgetFraction'
+];
 
 /**
- * Fills a view's phase-1 draw list in place: its phase-1 bucket mesh instances.
+ * Defaults of the director settings a {@link MeshletDirectorGroup} applies to every director;
+ * each is documented on the director property of the same name.
  *
- * @param {MeshletView} view - The view.
+ * @ignore
  */
-const fillPhase1Draws = (view) => {
-    const mis = view.meshInstances;
-    const out = view.drawPass1.meshInstances;
-    out.length = 0;
-    for (let i = 0; i < MESHLET_BUCKET_COUNT; i++) out.push(mis[i]);
-};
+const MESHLET_DIRECTOR_SETTINGS = Object.freeze({
+    dagPixelThreshold: 2,
+    occlusionEnabled: true,
+    occlusionAdmission: true,
+    shadowsEnabled: false,
+    shadowThresholdScale: 4,
+    rootMinPixels: 3,
+    rootHysteresis: 0.75,
+    bucketThresholdScales: Object.freeze([4, 1, 1]),
+    bucketRootMinScales: Object.freeze([1, 1, 1]),
+    shadowRootMinPixels: 2,
+    shadowMatchCameraLod: false,
+    cssPixels: true,
+    fastLoad: true
+});
 
 /**
- * Fills a view's phase-2 draw list in place: its phase-2 bucket mesh instances.
+ * Drives one meshlet world of a {@link MeshletDirectorGroup}: its streaming residency and
+ * budget, a {@link MeshletView} per camera with its per-frame culling compute (encoded ahead of
+ * the frame graph), and its shadow views. The group registers with the renderer and emits the
+ * draw passes covering every world's views.
  *
- * @param {MeshletView} view - The view.
- */
-const fillPhase2Draws = (view) => {
-    const mis = view.meshInstances;
-    const out = view.drawPass2.meshInstances;
-    out.length = 0;
-    for (let i = MESHLET_BUCKET_COUNT; i < MESHLET_BUCKET_COUNT * 2; i++) out.push(mis[i]);
-};
-
-/**
- * A view's index-budget want: its demand at the given target occupancy, above the share floor.
- *
- * @param {{ indexDemand: () => number }} view - A camera or shadow view.
- * @param {number} floor - The share floor every view gets.
- * @param {number} occupancy - Target occupancy of the share (1 = the demand itself).
- * @returns {number} The want, in indices.
- */
-const viewWant = (view, floor, occupancy) => Math.max(view.indexDemand() / occupancy - floor, 0);
-
-/**
- * Orchestrates the GPU-driven meshlet pipeline: per-frame culling compute (encoded ahead of the
- * frame graph), the meshlet draw passes inserted after the camera's main scene pass, and - when
- * two-phase occlusion is enabled - the HZB build and the phase-2 re-cull between them.
- *
- * Wire-up: create, add resources to {@link world}, call {@link finalize}, assign a camera to
- * {@link cameraComponent} and register on the renderer via {@link bindRenderer}. For occlusion
- * the camera must render into a render target with a depth texture.
+ * Wire-up: add resources to {@link world} and call {@link finalize}, or {@link rebuild};
+ * assign the camera to {@link cameraComponent}. For occlusion the camera must render into a
+ * render target with a depth texture, or through a CameraFrame.
  *
  * @ignore
  */
 class MeshletDirector {
     /** @type {GraphicsDevice} */
     device;
+
+    /** @type {MeshletDirectorGroup} - the group this director is one world of. */
+    group;
 
     /** @type {MeshletWorld} */
     world;
@@ -135,17 +126,33 @@ class MeshletDirector {
     /** @type {MeshletBudgetManager} */
     budget = new MeshletBudgetManager();
 
-    /** @type {ForwardRenderer|null} */
+    /** @type {ForwardRenderer|null} - set by the group. */
     renderer = null;
 
+    /**
+     * The scheduler every sidecar fetch goes through - the group's, shared by every world, so
+     * the concurrency cap and request priorities span them all.
+     *
+     * @type {MeshletFetchScheduler}
+     */
+    fetchScheduler;
+
+    /**
+     * The cull compute shaders - the group's, compiled once and shared by every view's culler
+     * (the shadow phase alone adds one culler per face).
+     *
+     * @type {MeshletCullShaders|null}
+     */
+    cullShaders = null;
+
     /** @type {boolean} - two-phase HZB occlusion culling, see {@link occlusionEnabled}. */
-    _occlusionEnabled = true;
+    _occlusionEnabled = MESHLET_DIRECTOR_SETTINGS.occlusionEnabled;
 
     /** @type {Float32Array} */
     _frustumPlanes = new Float32Array(24);
 
-    /** @type {number} */
-    _dagPixelThreshold = 2;
+    /** @type {number} - screen-space error threshold in pixels for the DAG LOD cut. */
+    dagPixelThreshold = MESHLET_DIRECTOR_SETTINGS.dagPixelThreshold;
 
     /**
      * Render target pixels per CSS pixel of the last camera view updated (at least 1): the factor
@@ -157,37 +164,21 @@ class MeshletDirector {
     pixelScale = 1;
 
     /**
-     * Rebuild retention: previous views' visibility-bit buffers keyed by camera, GPU-copied
-     * into the recreated views' fresh buffers (see MeshletView), then retired.
+     * What the last rebuild hands from the previous world's views to the new ones, taken as
+     * the views are created.
      *
-     * @type {{ words: number, byCamera: Map<CameraComponent, StorageBuffer> }|null}
+     * @type {MeshletRebuildCarry|null}
+     * @private
      */
-    _visCarry = null;
-
-    /**
-     * Rebuild retention: previous views' per-bucket demand-grown index capacities keyed by
-     * camera. A fresh view would restart at the initial allocation and clamp its draws for the
-     * frames the demand readback is in flight - and with occlusion on, those missing draws
-     * punch holes in the HZB that phase 2 reads as disocclusion, bursting page demand.
-     *
-     * @type {Map<CameraComponent, number[]>|null}
-     */
-    _capCarry = null;
+    _carry = null;
 
     /**
      * Buffers a rebuild copied from, destroyed one frame later (after their commands submit).
      *
      * @type {StorageBuffer[]}
+     * @private
      */
     _retired = [];
-
-    /**
-     * The cull compute shaders, compiled once and shared by every view's culler. Held on the
-     * director rather than per view because the shadow phase adds one culler per cascade.
-     *
-     * @type {MeshletCullShaders|null}
-     */
-    cullShaders = null;
 
     /**
      * Cast shadows from the meshlet geometry: directional cascades and, unless
@@ -196,7 +187,7 @@ class MeshletDirector {
      *
      * @type {boolean}
      */
-    shadowsEnabled = false;
+    shadowsEnabled = MESHLET_DIRECTOR_SETTINGS.shadowsEnabled;
 
     /**
      * Multiplier on {@link dagPixelThreshold} for shadow views. Shadow-map texels are coarser
@@ -206,19 +197,19 @@ class MeshletDirector {
      *
      * @type {number}
      */
-    shadowThresholdScale = 4;
+    shadowThresholdScale = MESHLET_DIRECTOR_SETTINGS.shadowThresholdScale;
 
     /**
      * Projected size on screen, in pixels, below which an instance is not drawn at all. Every
      * drawn instance costs at least its coarsest level, so a wide view of a world with very many
      * small placements is bound by that floor however coarse the cut gets, and seen from afar
-     * most such placements are under a pixel. An instance already drawn stays
-     * until it shrinks to {@link rootHysteresis} of this size, so the cut does not pop while the
-     * camera moves. 0 draws every visible instance.
+     * most such placements are under a pixel. An instance already drawn stays until it shrinks
+     * to {@link rootHysteresis} of this size, so the cut does not pop while the camera moves. 0
+     * draws every visible instance.
      *
      * @type {number}
      */
-    rootMinPixels = 3;
+    rootMinPixels = MESHLET_DIRECTOR_SETTINGS.rootMinPixels;
 
     /**
      * The fraction of {@link rootMinPixels} (scaled for its bucket) an instance already drawn may
@@ -227,7 +218,7 @@ class MeshletDirector {
      *
      * @type {number}
      */
-    rootHysteresis = 0.75;
+    rootHysteresis = MESHLET_DIRECTOR_SETTINGS.rootHysteresis;
 
     /**
      * Per draw bucket - opaque, opaque two-sided, alpha-masked - a multiplier on
@@ -239,14 +230,14 @@ class MeshletDirector {
      *
      * @type {number[]}
      */
-    bucketThresholdScales = [4, 1, 1];
+    bucketThresholdScales = MESHLET_DIRECTOR_SETTINGS.bucketThresholdScales.slice();
 
     /**
      * Per draw bucket, a multiplier on {@link rootMinPixels} (and {@link shadowRootMinPixels}).
      *
      * @type {number[]}
      */
-    bucketRootMinScales = [1, 1, 1];
+    bucketRootMinScales = MESHLET_DIRECTOR_SETTINGS.bucketRootMinScales.slice();
 
     /**
      * Measure the screen-space thresholds - {@link dagPixelThreshold}, {@link rootMinPixels} and
@@ -259,7 +250,7 @@ class MeshletDirector {
      *
      * @type {boolean}
      */
-    cssPixels = true;
+    cssPixels = MESHLET_DIRECTOR_SETTINGS.cssPixels;
 
     /**
      * Shadow casters also refine at least as far as the camera's own cut does. The shadow cut is
@@ -271,7 +262,7 @@ class MeshletDirector {
      *
      * @type {boolean}
      */
-    shadowMatchCameraLod = false;
+    shadowMatchCameraLod = MESHLET_DIRECTOR_SETTINGS.shadowMatchCameraLod;
 
     /**
      * Projected size on screen, in pixels, below which an instance casts no meshlet shadow. A
@@ -282,7 +273,7 @@ class MeshletDirector {
      *
      * @type {number}
      */
-    shadowRootMinPixels = 2;
+    shadowRootMinPixels = MESHLET_DIRECTOR_SETTINGS.shadowRootMinPixels;
 
     /**
      * Index budget of a shadow face, per texel of its part of the shadow map (three indices to a
@@ -295,19 +286,6 @@ class MeshletDirector {
      */
     shadowIndicesPerTexel = 8;
 
-    /**
-     * Shadow views' own LOD pressure, on top of the camera's. Shadow views are budgeted after
-     * the camera (see _distributeIndexBudget), so a starved cascade coarsens its own casters
-     * instead of the scene the camera sees.
-     *
-     * @type {number}
-     * @ignore
-     */
-    shadowPressureScale = 1;  // the largest shadow face's (see _updateShadowPressure)
-
-    /** @type {number} - worst shadow-view demand/share ratio from the last distribution. @private */
-    _shadowIndexRatio = 0;
-
     /** @private */
     _transcode = null;
 
@@ -315,19 +293,9 @@ class MeshletDirector {
     _budgetWarnedAt = -1;
 
     /**
-     * The scheduler every sidecar fetch of this director's worlds goes through: a priority
-     * queue capped at {@link maxConcurrentFetches} requests in flight that merges queued byte
-     * ranges on one file. Shared across rebuilds, so a rebuild never doubles the traffic.
-     *
-     * @type {MeshletFetchScheduler}
-     */
-    fetchScheduler = new MeshletFetchScheduler();
-
-    /**
      * The KTX2 transcoder used for streamed textures - a `basisTranscode`-compatible function.
      * Scene code cannot import the framework's Basis handler, so the transcoder is injected:
-     * {@link MeshletComponentSystem} sets it to the engine's `basisTranscode`; a director
-     * created by hand must set it before loading a textured asset, or its textures reject.
+     * {@link MeshletComponentSystem} sets it on the group, which hands it to every director.
      *
      * @type {MeshletTranscodeFn|null}
      */
@@ -338,23 +306,6 @@ class MeshletDirector {
 
     get transcode() {
         return this._transcode;
-    }
-
-    /**
-     * Cap on sidecar requests in flight - geometry shards and texture containers across every
-     * streamed resource. Defaults to 16. Requests beyond it wait in priority order (root shards,
-     * pages, texture tails, fine mips) instead of piling into the browser's request pool, which
-     * fails them outright once it overflows.
-     *
-     * @type {number}
-     */
-    set maxConcurrentFetches(value) {
-        this._maxConcurrentFetches = Math.max(1, value | 0);
-        this._applyFetchConcurrency();
-    }
-
-    get maxConcurrentFetches() {
-        return this._maxConcurrentFetches;
     }
 
     /**
@@ -402,17 +353,13 @@ class MeshletDirector {
         };
     }
 
-    /** @private */
+    /**
+     * The shared scheduler loads fast while any of the group's worlds is fast-loading.
+     *
+     * @private
+     */
     _applyFetchConcurrency() {
-        // a shared scheduler is fast while any of the group's worlds is
-        if (this.group) {
-            this.group._applyFetchConcurrency();
-            return;
-        }
-        const fast = !!this.residency?.fastLoad;
-        this.fetchScheduler.maxConcurrent = fast ?
-            Math.max(this._maxConcurrentFetches, this.fastLoadConcurrentFetches) :
-            this._maxConcurrentFetches;
+        this.group._applyFetchConcurrency();
     }
 
     /**
@@ -458,29 +405,10 @@ class MeshletDirector {
     }
 
     /**
-     * Persistent cache for streamed sidecar bytes - geometry pages and texture regions - or null
-     * for none. Ranges whose bytes are all stored load without a request, so re-entering a scene
-     * streams from local storage; fetched ranges are widened to the cache's chunk boundaries and
-     * stored. The cache assumes sidecar URLs are versioned (their content never changes).
-     *
-     * @type {ByteCache|null}
-     * @example
-     * director.byteCache = new pc.ByteCache(new pc.OpfsByteStore('my-app-meshlets'));
-     */
-    set byteCache(value) {
-        this.fetchScheduler.byteCache = value;
-    }
-
-    get byteCache() {
-        return this.fetchScheduler.byteCache;
-    }
-
-    /**
      * Fraction of the world's initial index budget a shadow cascade starts with. The budget is
      * tuned for the camera; a cascade's cut is coarser and its demand far lower, so matching it
-     * reserves hundreds of MB per cascade that growth would never ask for. Growth still reacts
-     * within a frame or two, and a briefly clamped shadow is far less visible than clamped
-     * camera geometry.
+     * would reserve memory growth would never ask for. Growth still reacts within a frame or
+     * two, and a briefly clamped shadow is far less visible than clamped camera geometry.
      *
      * @type {number}
      */
@@ -498,12 +426,11 @@ class MeshletDirector {
 
     /**
      * Called when visible coarse instances are deferred, or sustained demand exceeds the
-     * budget at maximum LOD pressure. Receives budget, index demand and missing-page statistics;
-     * `suggestedBudgetBytes` estimates additional capacity and is not a coverage guarantee.
+     * budget at maximum LOD pressure, with budget, index demand and missing-page statistics.
      * The configured budget stays unchanged. Complete admitted instances continue rendering;
      * displaying the entire visible set requires cheaper coarse geometry or more capacity.
      *
-     * @type {((info: object) => void)|null}
+     * @type {((info: MeshletBudgetReport) => void)|null}
      */
     onBudgetExceeded = null;
 
@@ -521,8 +448,6 @@ class MeshletDirector {
 
     /** @type {number} - consecutive infeasible frames before {@link onBudgetExceeded} fires. */
     budgetOverrunFrames = 120;
-
-    _infeasibleFrames = 0;
 
     /** @type {Layer|null} - the outline renderer's layer, if registered. */
     _outlineLayer = null;
@@ -547,21 +472,14 @@ class MeshletDirector {
 
     /**
      * Load as fast as possible until the world is {@link playable}: arrived pages upload
-     * without the per-frame budget and up to {@link fastLoadConcurrentFetches} requests go out
-     * at once. Frames may stutter meanwhile, so hide the load behind a loading screen. Once
+     * without the per-frame budget and up to the group's `fastLoadConcurrentFetches` requests go
+     * out at once. Frames may stutter meanwhile, so hide the load behind a loading screen. Once
      * playable, streaming returns to its smooth, budgeted pace; a rebuild that adds content
      * fast-loads again until that content is playable. Defaults to true.
      *
      * @type {boolean}
      */
-    fastLoad = true;
-
-    /**
-     * Cap on requests in flight while fast-loading (see {@link fastLoad}). Defaults to 64.
-     *
-     * @type {number}
-     */
-    fastLoadConcurrentFetches = 64;
+    fastLoad = MESHLET_DIRECTOR_SETTINGS.fastLoad;
 
     /**
      * Called each time the world becomes {@link playable}.
@@ -573,79 +491,40 @@ class MeshletDirector {
     /** @type {boolean} @private */
     _playable = false;
 
-    /** @type {number} - {@link maxConcurrentFetches} outside the fast-load phase. @private */
-    _maxConcurrentFetches = MAX_CONCURRENT_FETCHES;
-
     /**
-     * Ceiling on how much a rebuild may pre-grow a view's carried index capacity. Pre-sizing
-     * exists only to avoid a few clamped frames while the demand readback catches up, so it
-     * needs to cover a step change, not a scene-size ratio.
+     * Ceiling on how much a rebuild may pre-grow a view's carried index capacity (see
+     * MeshletRebuildCarry#scaleCapacities).
      *
      * @type {number}
      */
     maxCarryScale = 2;
 
     /**
-     * Rebuild retention for shadow views: demand-grown index capacities keyed `lightId:face`.
-     * Same reasoning as {@link _capCarry} - a rebuild that resets shadow capacity clamps caster
-     * draws while the demand readback is in flight, which shows as shadows popping in.
-     *
-     * @type {Map<string, number[]>|null}
-     * @private
+     * @param {MeshletDirectorGroup} group - The group this director is one world of; its fetch
+     * scheduler and cull shaders are shared.
      */
-    _shadowCapCarry = null;
-
-    /**
-     * The group this director is one world of, or null when it drives the renderer on its own.
-     * A group shares one HZB per camera across its directors, emits their passes together, and
-     * owns the fetch concurrency.
-     *
-     * @type {MeshletDirectorGroup|null}
-     * @ignore
-     */
-    group = null;
-
-    /** @type {boolean} - false when {@link fetchScheduler} is shared with a group. @private */
-    _ownsFetchScheduler = true;
-
-    /** @type {boolean} - false when {@link cullShaders} are shared with a group. @private */
-    _ownsCullShaders = true;
-
-    /**
-     * @param {GraphicsDevice} device - The graphics device.
-     * @param {object} [options] - Shared state, for a director that is one world of a group.
-     * @param {MeshletFetchScheduler} [options.fetchScheduler] - Fetch scheduler to share instead of
-     * creating one, so every world's requests go through one priority queue and concurrency cap.
-     * @param {MeshletCullShaders} [options.cullShaders] - Compiled cull shaders to share.
-     */
-    constructor(device, options = {}) {
+    constructor(group) {
+        const device = group.device;
         this.device = device;
+        this.group = group;
+        this.renderer = group.renderer;
+        this.fetchScheduler = group.fetchScheduler;
+        this.cullShaders = group.cullShaders;
         device.maxIndirectDispatchCount = Math.max(device.maxIndirectDispatchCount, MIN_INDIRECT_DISPATCH_SLOTS);
-        if (options.fetchScheduler) {
-            this.fetchScheduler = options.fetchScheduler;
-            this._ownsFetchScheduler = false;
-        }
-        this.world = new MeshletWorld(device);
-        this.world.fetchScheduler = this.fetchScheduler;
-        this.cullShaders = options.cullShaders ?? new MeshletCullShaders(device);
-        this._ownsCullShaders = !options.cullShaders;
+        this.world = this._createWorld(null);
         this.shadowRenderer = new MeshletShadowRenderer(device, this);
     }
 
     destroy() {
-        if (this.renderer && this.renderer.meshletDirector === this) {
-            this.renderer.meshletDirector = null;
-        }
         this._destroyViews();
-        this._dropVisCarry();
+        this._carry?.destroy();
+        this._carry = null;
         this._retired.forEach(b => b.destroy());
         this._retired.length = 0;
         this.residency?.destroy();
-        if (this._ownsFetchScheduler) this.fetchScheduler.clear();
         this.world.destroy();
         this.shadowRenderer?.destroy();
         this.shadowRenderer = null;
-        if (this._ownsCullShaders) this.cullShaders?.destroy();
         this.cullShaders = null;
     }
 
@@ -663,26 +542,27 @@ class MeshletDirector {
         view.destroy();
     }
 
-    _dropVisCarry() {
-        this._visCarry?.byCamera.forEach(b => b.destroy());
-        this._visCarry = null;
-    }
-
     /**
-     * Registers this director with the forward renderer, which ticks it each frame and inserts
-     * its passes into the frame graph.
+     * Creates an empty world with the settings of the one it replaces.
      *
-     * @param {ForwardRenderer} renderer - The renderer (app.renderer).
+     * @param {MeshletWorld|null} prev - The world being replaced, or null.
+     * @returns {MeshletWorld} The world.
+     * @private
      */
-    bindRenderer(renderer) {
-        this.renderer = renderer;
-        renderer.meshletDirector = this;
+    _createWorld(prev) {
+        const world = new MeshletWorld(this.device);
+        if (prev) {
+            for (const name of WORLD_SETTINGS) world[name] = prev[name];
+        }
+        world.transcode = this._transcode;
+        world.fetchScheduler = this.fetchScheduler;
+        return world;
     }
 
     /**
      * Finalizes the world and builds the culler. Call after all resources are added. For a
-     * streamed world this enables demand streaming. Root pages load for the active view; an instance becomes
-     * drawable once its complete coarse fallback is resident.
+     * streamed world this enables demand streaming: root pages load for the active view, and an
+     * instance becomes drawable once its complete coarse fallback is resident.
      *
      * @returns {MeshletWorld} The finalized world.
      */
@@ -698,12 +578,10 @@ class MeshletDirector {
 
     /**
      * Tears down the current world and rebuilds it - the component system's add/remove path.
-     * Streaming state is retained where possible: when the leading resources of the new build
-     * match the previous one (same resource, base URL and order) and the pool geometry is
-     * unchanged, the GPU page pool, its resident pages, the slot/LRU state and pinned roots
-     * carry over - only genuinely new resources re-stream. The streamed texture system carries
-     * whenever the texture-bearing resource set is unchanged. An empty build leaves the
-     * director idle.
+     * Streaming state is retained where possible (see MeshletRebuildCarry#adoptStreamingState):
+     * the page pool and its resident pages for an unchanged leading run of resources, the
+     * texture system for an unchanged textured prefix, and the views' visibility bits and grown
+     * capacities. The colour mode carries too. An empty build leaves the director idle.
      *
      * @param {function(MeshletWorld): void} build - Adds resources to the fresh world.
      * @returns {MeshletWorld} The new world (finalized unless empty).
@@ -712,44 +590,22 @@ class MeshletDirector {
         const prevWorld = this.world;
         const prevResidency = this.residency;
         const prevViews = this.views;
-        this.views = new Map();
-        this._dropVisCarry();
-        this._capCarry = new Map();
         const prevPairs = prevWorld.totalPairs || 1;
-        prevViews.forEach((v, cam) => {
-            this._capCarry.set(cam, v.indexCapacity.slice());
-        });
-        // shadow views hold buffers sized to the old world (claim bits are one bit per
-        // instance-meshlet pair), so they are dropped and rebuilt next frame - carrying only
-        // their grown index capacities, as the camera views do
-        this._shadowCapCarry = new Map();
-        this.shadowRenderer?.entries.forEach((entry, light) => {
-            entry.views.forEach((v) => {
-                this._shadowCapCarry.set(`${light.id}:${v.face}`, v.indexCapacity.slice());
-            });
-        });
+        const colorMode = prevWorld.colorMode;
+        this.views = new Map();
+        this._carry?.destroy();
+        const carry = this._carry = new MeshletRebuildCarry();
+        carry.captureCapacities(prevViews, this.shadowRenderer);
+        // shadow views hold buffers sized to the old world: dropped, and rebuilt next frame
         this.shadowRenderer?.reset();
-        const { poolBytes, texturePoolBytes, maxFineTextureSize, initialIndices, initialRecords, indexBudgetFraction, rootBudgetFraction } = prevWorld;
         this.residency = null;
         this.rootsLoaded = null;
         this._playable = false;
         this._applyFetchConcurrency();
 
-        this.world = new MeshletWorld(this.device);
+        this.world = this._createWorld(prevWorld);
         this._outlineAttached = false;
-        this.world.poolBytes = poolBytes;
-        this.world.texturePoolBytes = texturePoolBytes;
-        this.world.maxFineTextureSize = maxFineTextureSize;
-        this.world.maxInstallBytesPerFrame = prevWorld.maxInstallBytesPerFrame;
-        this.world.initialIndices = initialIndices;
-        this.world.indexBudgetFraction = indexBudgetFraction;
-        this.world.rootBudgetFraction = rootBudgetFraction;
-        this.world.initialRecords = initialRecords;
-        this.world.transcode = this._transcode;
-        this.world.fetchScheduler = this.fetchScheduler;
-        this.budget._lastDropped = 0;
-        this.budget._lastEvicted = 0;
-        this.budget._lastFetched = 0;
+        this.budget.reset();
         build(this.world);
         if (this.world.pendingCount === 0) {
             prevViews.forEach(v => this._destroyView(v));
@@ -758,9 +614,8 @@ class MeshletDirector {
             return this.world;
         }
 
-        // retention: compare the new build against the previous streamed world
         const carriedSlots = (prevWorld.finalized && prevWorld.streamed && prevResidency) ?
-            this._adoptStreamingState(prevWorld, prevResidency, prevViews) : null;
+            carry.adoptStreamingState(this.world, prevWorld, prevResidency, prevViews) : null;
 
         prevViews.forEach(v => this._destroyView(v));
         prevResidency?.destroy();
@@ -768,143 +623,12 @@ class MeshletDirector {
 
         this._applyBudgetViews();
         this.world.finalize();
-        // pre-size the recreated views' index buffers for grown scenes: index demand scales
-        // roughly with the pair count, and starting under-sized clamps draws for the frames
-        // the demand readback is in flight (with occlusion on, the missing draws punch HZB
-        // holes phase 2 reads as disocclusion - a page-demand burst). The margin applies
-        // only when the scene grew - a flat multiplier would compound across same-size
-        // rebuilds (a budget change, say) into unbounded buffers. Shrunk scenes scale down
-        // proportionally (the view floors at the world's initial target).
-        // Bounded, because index demand does not scale with the scene: it is screen-bound (the
-        // DAG cut coarsens with distance and the frustum limits what is in view). Scaling the
-        // carry by the raw pair ratio would over-allocate by orders of magnitude, compounding
-        // across successive rebuilds.
-        const pairRatio = this.world.totalPairs / prevPairs;
-        const pairScale = pairRatio > 1 ? Math.min(pairRatio * CARRY_GROWTH_MARGIN, this.maxCarryScale) : pairRatio;
-        const scaleCarry = (/** @type {number[]} */ c) => {
-            for (let b = 0; b < c.length; b++) c[b] = Math.ceil(c[b] * pairScale);
-        };
-        this._capCarry?.forEach(scaleCarry);
-        this._shadowCapCarry?.forEach(scaleCarry);
+        if (colorMode) this.world.setColorMode(colorMode);
+        carry.scaleCapacities(this.world.totalPairs / prevPairs, this.maxCarryScale);
         if (this.world.streamed) {
             this._startStreaming(carriedSlots);
         }
         return this.world;
-    }
-
-    /**
-     * Decides what the new (pending, not yet finalized) world inherits from the previous
-     * streamed one, and hands it over through the world's adopt* fields.
-     *
-     * Leading resources that are identical in both builds (same resource, base URL and order)
-     * keep their page space; the stricter pair prefix - instance lists unchanged too - also
-     * keeps its persistent visibility bits. The page pool buffer itself is reusable only when
-     * its slot count and page size are unchanged. The texture system carries whenever the
-     * texture-bearing resource sequence and the texture pool budget are unchanged.
-     *
-     * @param {MeshletWorld} prevWorld - The finalized, streamed world being replaced.
-     * @param {MeshletResidency} prevResidency - Its residency manager.
-     * @param {Map<CameraComponent, MeshletView>} prevViews - Its views (visibility-bit sources).
-     * @returns {object|null} The residency slot state to carry into the new
-     * {@link MeshletResidency}, or null when the pool is not reusable.
-     * @private
-     */
-    _adoptStreamingState(prevWorld, prevResidency, prevViews) {
-        const world = this.world;
-        const pending = world._pending;
-        const prevEntries = prevWorld.buildEntries;
-        const { poolBytes, texturePoolBytes } = world;
-
-        // the same placement list (an instance list is compared by identity, a placement array
-        // by its entries), repeated as often
-        const sameInstances = (a, b) => {
-            if (a === b) return true;
-            if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-            for (let i = 0; i < a.length; i++) {
-                if (a[i] !== b[i]) return false;
-            }
-            return true;
-        };
-        const repeatOf = transform => (Array.isArray(transform) ? transform.length : 1);
-        let prefix = 0;
-        let adoptedPages = 0;
-        let carriedPairs = 0;
-        let pairPrefixIntact = true;
-        while (prefix < pending.length && prefix < prevEntries.length) {
-            const n = pending[prefix];
-            const o = prevEntries[prefix];
-            if (n.resource !== o.resource || (n.baseUrl ?? null) !== o.baseUrl ||
-                !o.streamed || !!n.shardBuffers) break;
-            if (pairPrefixIntact && sameInstances(n.instances ?? n.resource.instances, o.instances) && repeatOf(n.transform) === o.repeat) {
-                carriedPairs += prevWorld.placements[prefix].pairCount;
-            } else {
-                pairPrefixIntact = false;
-            }
-            adoptedPages += o.pageCount;
-            prefix++;
-        }
-
-        // the pool buffer carries whenever the budget is unchanged (the world keeps a pool
-        // that is large enough and copies the old slots into one that grew) and, under a
-        // changed budget, when the pool would not shrink - a budget cut starts cold
-        let newTotalPages = 0;
-        for (const { resource } of pending) newTotalPages += resource.manifest.pageCount;
-        // predict the new pool's slot count the way finalize will: the budget covers more
-        // than the pool, so the previous world's resolved page-pool size is the comparable
-        // figure when the budget itself is unchanged
-        const newPagePoolBytes = poolBytes === prevWorld.poolBytes ? prevWorld.pagePoolBytes : poolBytes;
-        let newPoolSlots = newPagePoolBytes > 0 ?
-            Math.max(Math.floor(newPagePoolBytes / prevWorld.pageSizeBytes), 1) : newTotalPages;
-        newPoolSlots = Math.min(newPoolSlots, newTotalPages, prevWorld.maxPoolSlots(this.device));
-
-        let carriedSlots = null;
-        if (prefix > 0 && (poolBytes === prevWorld.poolBytes || newPoolSlots >= prevWorld.poolSlots) &&
-            pending[0].resource.manifest.pageSizeBytes === prevWorld.pageSizeBytes) {
-            world.adoptPagePool = prevWorld.pagePool;
-            prevWorld.pagePool = null;
-            world.adoptResidency = prevWorld.residency;
-            world.adoptedPages = adoptedPages;
-            if (carriedPairs > 0) {
-                // each view's visibility bits are GPU-copied into its recreated counterpart
-                // (matched by camera) when the view is next built; the source buffers are
-                // retired after consumption. One bit per pair, 32 to a word.
-                this._visCarry = { words: Math.floor(carriedPairs / 32), byCamera: new Map() };
-                prevViews.forEach((v, cam) => {
-                    if (v.visBitsBuffer) {
-                        this._visCarry.byCamera.set(cam, v.visBitsBuffer);
-                        v.visBitsBuffer = null;
-                    }
-                });
-            }
-            carriedSlots = {
-                slotPage: prevResidency.slotPage,
-                slotPinned: prevResidency.slotPinned,
-                slotLastUsed: prevResidency.slotLastUsed,
-                frame: prevResidency.frame
-            };
-        }
-
-        // the texture budget compares against what the live system was built with
-        // (prevWorld.texturePoolBytes may already hold the caller's new value)
-        // the system carries when its textured resources are an unchanged prefix of the new
-        // build's and every resource after that prefix fits its family arrays as sized: those
-        // are appended in place, so a scene whose assets arrive one by one keeps every tail
-        // it has already loaded instead of re-downloading them all per arrival
-        if (prevWorld.textures) {
-            const prevTex = prevEntries.filter(e => e.resource.textureManifest);
-            const newTex = pending.filter(e => e.resource.textureManifest);
-            const prefixSame = prevTex.length <= newTex.length &&
-                prevTex.every((e, i) => e.resource === newTex[i].resource && e.baseUrl === (newTex[i].baseUrl ?? null));
-            const appendable = prefixSame &&
-                newTex.slice(prevTex.length).every(e => prevWorld.textures.canAppend(e.resource.textureManifest));
-            if (appendable && prevWorld.textures.poolBytes === texturePoolBytes &&
-                prevWorld.textures.maxFineSize === world.maxFineTextureSize) {
-                world.adoptTextures = prevWorld.textures;
-                world.adoptTexturesPrefix = prevTex.length;
-                prevWorld.textures = null;
-            }
-        }
-        return carriedSlots;
     }
 
     /**
@@ -922,18 +646,9 @@ class MeshletDirector {
         return this.cameras[0] ?? null;
     }
 
-    /** @type {number} - screen-space error threshold in pixels for the DAG LOD cut. */
-    set dagPixelThreshold(value) {
-        this._dagPixelThreshold = value;
-    }
-
-    get dagPixelThreshold() {
-        return this._dagPixelThreshold;
-    }
-
     /**
-     * Per-frame tick, called by the forward renderer before the frame graph is built. Runs the
-     * streaming residency update and encodes the phase-1 culling chain.
+     * Per-frame tick, called by the group before the frame graph is built. Runs the streaming
+     * residency update and encodes the phase-1 culling chain of every view.
      *
      * @param {LayerComposition} [comp] - The layer composition, used to pick a camera when
      * {@link cameraComponent} is not set (the first composition camera).
@@ -955,9 +670,11 @@ class MeshletDirector {
         this._updatePlayable();
         // index starvation feeds the same controller as page pressure: both say the cut is
         // too fine for the memory it has, and the answer to both is to coarsen it
-        const indexRatio = this._distributeIndexBudget();
-        this.budget.update(this.residency, indexRatio);
-        this._updateShadowPressure();
+        const budget = this.budget;
+        const shadowViews = this.shadowRenderer?.views ?? null;
+        const indexRatio = budget.distributeIndexBudget(this.world.indexCeiling, this.views, shadowViews, this.shadowIndicesPerTexel);
+        budget.update(this.residency, indexRatio);
+        budget.updateShadowPressure(shadowViews);
         this._checkBudgetFeasible(indexRatio);
 
         // resolve this frame's camera set
@@ -979,10 +696,10 @@ class MeshletDirector {
         for (const cameraComponent of cameras) {
             let view = this.views.get(cameraComponent);
             if (!view) {
-                const carry = this._visCarry?.byCamera.get(cameraComponent);
-                view = new MeshletView(this.device, this.world, this.renderer, cameraComponent, {
-                    visCarry: carry ? { buffer: carry, words: this._visCarry.words } : null,
-                    capCarry: this._capCarry?.get(cameraComponent) ?? null,
+                const visCarry = this._carry?.takeVisBits(cameraComponent) ?? null;
+                view = new MeshletView(this.device, this.world, cameraComponent, {
+                    visCarry,
+                    capCarry: this._carry?.takeCaps(cameraComponent) ?? null,
                     cullShaders: this.cullShaders
                 });
                 this.views.set(cameraComponent, view);
@@ -990,44 +707,55 @@ class MeshletDirector {
                 // to rebuild now that there are meshlet passes to splice in
                 this._invalidateCameraFrame(cameraComponent);
                 if (this._outlineLayer) this._registerOutlineView(view);
-                if (carry) {
-                    // copy is encoded; the source buffer must outlive this frame's submission
-                    this._visCarry.byCamera.delete(cameraComponent);
-                    this._retired.push(carry);
-                }
+                // the copy is encoded; its source must outlive this frame's submission
+                if (visCarry) this._retired.push(visCarry.buffer);
             }
             this._updateView(view);
         }
     }
 
     /**
-     * Per-view frame tick: materials, index demand, frustum/HZB setup and the phase-1 cull
-     * chain encode.
+     * Per-view frame tick: materials, index demand, projection and HZB setup and the phase-1
+     * cull chain encode.
      *
      * @param {MeshletView} view - The view.
      * @private
      */
     _updateView(view) {
         const cameraComponent = view.cameraComponent;
-        view._passesAdded = false;
         view.syncMaterials();
         view.culler.pressureScale = this.budget.pressureScale;
         // grow first, then read demand: buffers must not change once the frame is encoding
         view.applyPendingGrowth();
         view.monitorIndexDemand();
 
+        // With a CameraFrame the camera's own renderTarget is the output (often the backbuffer);
+        // the scene renders into the frame pass's internal target - which holds the depth the
+        // HZB needs and, with a render scale, the resolution the cut is measured against.
+        const rt = cameraComponent.framePasses?.[0]?.rt ?? cameraComponent.renderTarget;
+        const projScale = this._setupProjection(view, rt);
+        const useOcclusion = this._setupOcclusion(view, rt);
+        view.culler.beginFrame(this._frustumPlanes, cameraComponent.entity.getPosition(), projScale, _viewProj.data,
+            useOcclusion ? view.hzb : null);
+        this._reportDeferredRoots(view);
+    }
+
+    /**
+     * Sets up a view's frustum, projection scale and screen-space thresholds for this frame.
+     *
+     * @param {MeshletView} view - The view.
+     * @param {RenderTarget|null} rt - The target the scene renders into.
+     * @returns {number} The projection scale: pixels per unit of size at unit distance.
+     * @private
+     */
+    _setupProjection(view, rt) {
+        const cameraComponent = view.cameraComponent;
         const camera = cameraComponent.camera;
         _viewProj.mul2(camera.projectionMatrix, camera.viewMatrix);
         _frustum.setFromMat4(_viewProj);
-        const planes = this._frustumPlanes;
         // same packed layout the cull shaders read: normal xyz, distance, per plane
-        planes.set(_frustum.planeData);
+        this._frustumPlanes.set(_frustum.planeData);
 
-        // With a CameraFrame the camera's own renderTarget is the output (often the backbuffer);
-        // the scene is rendered into the frame pass's internal target, which is also where the
-        // depth the HZB needs lives - and, with a render scale, the resolution the cut should
-        // be measured against.
-        const rt = cameraComponent.framePasses?.[0]?.rt ?? cameraComponent.renderTarget;
         const viewportHeight = rt?.height ?? this.device.height;
         const viewportWidth = rt?.width ?? this.device.width;
         // the projection scale wants the vertical field of view; a camera set up with a
@@ -1042,21 +770,35 @@ class MeshletDirector {
         // see cssPixels: render target pixels per CSS pixel, for a camera drawing to the canvas
         const cssHeight = this.cssPixels && !cameraComponent.renderTarget ? this.device.canvas?.clientHeight : 0;
         this.pixelScale = cssHeight > 0 ? Math.max(viewportHeight / cssHeight, 1) : 1;
-        view.culler.dagPixelThreshold = this._dagPixelThreshold * this.pixelScale;
-        view.culler.rootMinPixels = this.rootMinPixels * this.pixelScale;
-        view.culler.rootHysteresis = this.rootHysteresis;
-        view.culler.bucketThresholdScales = this.bucketThresholdScales;
-        view.culler.bucketRootMinScales = this.bucketRootMinScales;
+        const culler = view.culler;
+        culler.dagPixelThreshold = this.dagPixelThreshold * this.pixelScale;
+        culler.rootMinPixels = this.rootMinPixels * this.pixelScale;
+        culler.rootHysteresis = this.rootHysteresis;
+        culler.bucketThresholdScales = this.bucketThresholdScales;
+        culler.bucketRootMinScales = this.bucketRootMinScales;
         // shadow views rank their casters' root admission by this camera's view of them
         this.priorityOrigin.copy(cameraComponent.entity.getPosition());
         this.priorityProjScale = projScale;
+        return projScale;
+    }
 
-        // Two-phase occlusion needs a scene depth the HZB can sample. A render target with a
-        // depth texture supplies hardware depth. A CameraFrame keeps its scene depth as a
-        // renderbuffer, but renders the linear scene depth as an extra attachment when asked
-        // (wantsSceneDepth -> sceneTextureDepth), and the HZB reads that instead.
-        // Either way the pyramid is built mid-frame, after phase 1 and the scene's opaque
-        // layers, so meshlet and scene geometry both occlude.
+    /**
+     * Decides whether a view culls two-phase this frame and points it at the camera's HZB.
+     *
+     * Two-phase occlusion needs a scene depth the HZB can sample. A render target with a depth
+     * texture supplies hardware depth. A CameraFrame keeps its scene depth as a renderbuffer, but
+     * renders the linear scene depth as an extra attachment when asked (wantsSceneDepth ->
+     * sceneTextureDepth), and the HZB reads that instead. Either way the pyramid is built
+     * mid-frame, after phase 1 and the scene's opaque layers, so meshlet and scene geometry both
+     * occlude.
+     *
+     * @param {MeshletView} view - The view.
+     * @param {RenderTarget|null} rt - The target the scene renders into.
+     * @returns {boolean} True when the view culls two-phase.
+     * @private
+     */
+    _setupOcclusion(view, rt) {
+        const cameraComponent = view.cameraComponent;
         const framePass = cameraComponent.framePasses?.[0];
         let depthTexture = rt?.depthBuffer ?? null;
         let hzbLinear = false;
@@ -1074,13 +816,8 @@ class MeshletDirector {
             }
         });
         if (useOcclusion) {
-            // in a group every world's view of this camera culls against the one pyramid
-            if (this.group) {
-                view.hzb = this.group.hzbFor(cameraComponent);
-                view._ownsHzb = false;
-            } else {
-                view.hzb ??= new MeshletHzb(this.device);
-            }
+            // every world's view of this camera culls against the group's one pyramid
+            view.hzb = this.group.hzbFor(cameraComponent);
             // the frame's scene textures are replaced when it rebuilds, which can happen between
             // this update and the pass executing - so the pass resolves its source as it runs
             view._hzbSource ??= () => {
@@ -1089,7 +826,7 @@ class MeshletDirector {
                 return target?.depthBuffer ?? passes?.[0]?.sceneDepthTexture ?? null;
             };
             view.hzb.resize(depthTexture, rt.width, rt.height, hzbLinear, view._hzbSource);
-            view.hzb.setProjection(camera.projectionMatrix);
+            view.hzb.setProjection(cameraComponent.camera.projectionMatrix);
         }
         // a CameraFrame caches its pass chain, and the HZB and phase-2 passes are only spliced
         // in (or dropped) when it rebuilds - so tell it when the occlusion state flips
@@ -1100,164 +837,63 @@ class MeshletDirector {
         view.culler.occlusionAdmission = this.occlusionAdmission;
         view.culler.viewDir = cameraComponent.entity.forward;
         view.useOcclusion = useOcclusion;
+        return useOcclusion;
+    }
 
-        view.culler.beginFrame(planes, cameraComponent.entity.getPosition(), projScale, _viewProj.data,
-            useOcclusion ? view.hzb : null);
-        // root admission runs on the GPU; its counters arrive a few frames late by readback
+    /**
+     * Reports, once per episode, visible instances root admission deferred for capacity. Its
+     * counters arrive a few frames late by readback.
+     *
+     * @param {MeshletView} view - The view.
+     * @private
+     */
+    _reportDeferredRoots(view) {
         const roots = view.lastRoots;
         const deferred = roots.rejectedInstances;
-        if (deferred && !view._rootBudgetWarned) {
-            view._rootBudgetWarned = true;
-            Debug.warnOnce(`MeshletDirector: ${deferred} visible instances are deferred because their complete coarse geometry exceeds the current working-set capacity. The smallest on screen are dropped first; no partial instances are emitted. This bake needs cheaper coarse levels to display the entire visible set within this budget.`);
-            const rejected = roots.rejected[0] + roots.rejected[1] + roots.rejected[2];
-            const admitted = roots.admitted[0] + roots.admitted[1] + roots.admitted[2];
-            this.onBudgetExceeded?.({
-                budgetBytes: this.world.poolBytes,
-                suggestedBudgetBytes: this.world.poolBytes + rejected * 4,
-                indexDemandRatio: (admitted + rejected) / Math.max(view.indexTotal(), 1),
-                indexCeiling: this.world.indexCeiling,
-                pagesMissing: this.residency?.lastMissingWanted ?? 0,
-                poolPages: this.world.poolSlots,
-                totalPages: this.world.totalPages,
-                rootInstancesDeferred: deferred,
-                rootInstancesUnready: roots.unready,
-                rootShortfallPages: this.residency?.rootShortfallPages ?? 0
-            });
-        } else if (!deferred) {
+        if (!deferred) {
             view._rootBudgetWarned = false;
+            return;
         }
+        if (view._rootBudgetWarned) return;
+        view._rootBudgetWarned = true;
+        Debug.warnOnce(`MeshletDirector: ${deferred} visible instances are deferred because their complete coarse geometry exceeds the current working-set capacity. The smallest on screen are dropped first; no partial instances are emitted. This bake needs cheaper coarse levels to display the entire visible set within this budget.`);
+        const rejected = sumBuckets(roots.rejected);
+        const admitted = sumBuckets(roots.admitted);
+        this.onBudgetExceeded?.(this._budgetReport(this.world.poolBytes + rejected * 4,
+            (admitted + rejected) / Math.max(view.indexTotal(), 1), roots));
     }
 
     /**
-     * Shares the world's index budget across every live view, camera views first, and returns
-     * the worst camera-view pressure.
+     * Builds an {@link onBudgetExceeded} report.
      *
-     * Every view keeps a growth floor. Camera views are then budgeted for their demand at
-     * CAMERA_SHARE_OCCUPANCY, and shadow views split what is left in proportion to their
-     * demand. A plain proportional split would let far cascades - which cover most of the world,
-     * so their root floor alone can exceed the camera's demand - take most of the budget, and
-     * because index pressure feeds the camera's LOD controller, the shadows would coarsen and
-     * drop what the camera sees. Shadow views report to their own controller instead
-     * ({@link shadowPressureScale}).
-     *
-     * @returns {number} Highest demand/share ratio across camera views.
+     * @param {number} suggestedBudgetBytes - The estimated budget the visible set needs.
+     * @param {number} indexDemandRatio - Index demand over the share.
+     * @param {{ rejectedInstances: number, unready: number }|null} [roots] - The view's root
+     * admission counters, when reporting deferred instances.
+     * @returns {MeshletBudgetReport} The report.
      * @private
      */
-    _distributeIndexBudget() {
-        this._shadowIndexRatio = 0;
-        const ceiling = this.world.indexCeiling;
-        if (!(ceiling > 0) || !Number.isFinite(ceiling)) return 0;
-
-        const cameras = this.views;
-        const shadows = this.shadowRenderer ? this.shadowRenderer.views : _noViews;
-        const count = cameras.size + shadows.length;
-        if (!count) return 0;
-
-        // Draw capacity belongs to the active working set, not all scene roots. Charge
-        // the growth floor before distributing the rest so shares stay inside the budget.
-        const floor = Math.floor((ceiling / count) * SHARE_FLOOR_FRACTION);
-        const remaining = ceiling - floor * count;
-        // A camera is budgeted for its whole demand at the target occupancy, so it always has
-        // headroom. Budgeting only the part above the floor would strand a coarsened camera
-        // whose demand has fallen under the floor at ~0.8 occupancy, where the controller holds
-        // and never restores quality.
-        // (Without shadow views nothing competes, and cameras split by demand above the floor.)
-        const cameraOccupancy = shadows.length ? CAMERA_SHARE_OCCUPANCY : 1;
-
-        let cameraWant = 0;
-        for (const v of cameras.values()) cameraWant += viewWant(v, floor, cameraOccupancy);
-        // without shadow views the cameras keep the whole budget
-        const cameraGive = shadows.length ? Math.min(cameraWant, remaining) : remaining;
-        let shadowWant = 0;
-        for (let i = 0; i < shadows.length; i++) shadowWant += viewWant(shadows[i], floor, 1);
-        const shadowGive = remaining - cameraGive;
-
-        let worst = 0;
-        for (const v of cameras.values()) {
-            v.indexShare = floor + (cameraWant > 0 ?
-                Math.floor(cameraGive * viewWant(v, floor, cameraOccupancy) / cameraWant) :
-                Math.floor(cameraGive / cameras.size));
-            worst = Math.max(worst, v.indexPressure());
-        }
-        for (let i = 0; i < shadows.length; i++) {
-            const v = shadows[i];
-            v.indexShare = floor + (shadowWant > 0 ?
-                Math.floor(shadowGive * viewWant(v, floor, 1) / shadowWant) :
-                Math.floor(shadowGive / shadows.length));
-            // a face never gets more than its shadow map can resolve: what is left of a large
-            // memory budget is not a reason to draw triangles far below a texel
-            const cap = this._shadowIndexCap(v);
-            if (cap > 0) v.indexShare = Math.min(v.indexShare, cap);
-            this._shadowIndexRatio = Math.max(this._shadowIndexRatio, v.indexPressure());
-        }
-        return worst;
+    _budgetReport(suggestedBudgetBytes, indexDemandRatio, roots = null) {
+        const world = this.world;
+        const residency = this.residency;
+        return {
+            budgetBytes: world.poolBytes,
+            suggestedBudgetBytes,
+            indexDemandRatio,
+            indexCeiling: world.indexCeiling,
+            pagesMissing: residency?.lastMissingWanted ?? 0,
+            poolPages: world.poolSlots,
+            totalPages: world.totalPages,
+            rootInstancesDeferred: roots?.rejectedInstances ?? 0,
+            rootInstancesUnready: roots?.unready ?? 0,
+            rootShortfallPages: residency?.rootShortfallPages ?? 0
+        };
     }
 
     /**
-     * The most indices a shadow face may draw: {@link shadowIndicesPerTexel} per texel of its
-     * part of the shadow map, or 0 when that is not known yet.
-     *
-     * @param {import('./meshlet-shadow-view.js').MeshletShadowView} view - The shadow face.
-     * @returns {number} The cap, in indices.
-     * @private
-     */
-    _shadowIndexCap(view) {
-        if (!(this.shadowIndicesPerTexel > 0)) return 0;
-        const resolution = view.light?._shadowResolution ?? 0;
-        const viewport = view.renderData?.shadowViewport;
-        const texels = resolution * resolution * (viewport ? viewport.z * viewport.w : 1);
-        return texels > 0 ? Math.floor(texels * this.shadowIndicesPerTexel) : 0;
-    }
-
-    /**
-     * Steps every shadow face's own LOD pressure from its demand against its share, and
-     * reports the largest as {@link shadowPressureScale}. Per face, so a far cascade over its
-     * budget coarsens alone instead of taking the near cascades - where coarse casters show as
-     * blotches - with it.
-     *
-     * @private
-     */
-    _updateShadowPressure() {
-        let worst = 1;
-        const shadows = this.shadowRenderer ? this.shadowRenderer.views : _noViews;
-        for (let i = 0; i < shadows.length; i++) {
-            const view = shadows[i];
-            view.pressureScale = this._stepShadowPressure(view.pressureScale, view.indexPressure());
-            worst = Math.max(worst, view.pressureScale);
-        }
-        this.shadowPressureScale = worst;
-    }
-
-    /**
-     * One step of a shadow face's LOD controller: the budget manager's index response (raise
-     * past indexStarvedAt, decay under indexEasedAt, hold between).
-     *
-     * @param {number} scale - The face's pressure scale.
-     * @param {number} ratio - Its demand/share ratio.
-     * @returns {number} The new scale.
-     * @private
-     */
-    _stepShadowPressure(scale, ratio) {
-        const budget = this.budget;
-        // Proportional and rate-limited, unlike the camera's: the scale moves every shadow
-        // caster's cut at once, and demand lags a change by a readback or two, so a fast ramp
-        // overshoots and then decays back - a shadow LOD sawtooth seen as popping and uneven
-        // frame times.
-        let step = 1;
-        if (ratio > budget.indexStarvedAt) {
-            step = Math.min((ratio / budget.indexStarvedAt) ** SHADOW_PRESSURE_GAIN, SHADOW_PRESSURE_MAX_RAISE);
-        } else if (ratio < budget.indexEasedAt) {
-            step = Math.max((ratio / budget.indexEasedAt) ** SHADOW_PRESSURE_GAIN, SHADOW_PRESSURE_MAX_DECAY);
-        }
-        return Math.min(Math.max(scale * step, 1), budget.maxScale);
-    }
-
-    /**
-     * Detects a budget the scene cannot meet, and says so.
-     *
-     * At the DAG roots there is nothing coarser to select. Sustained unmet demand at maximum
-     * pressure triggers {@link onBudgetExceeded}, without increasing the configured ceiling.
-     * The application can supply cheaper coarse geometry or change its working-set budget.
+     * Reports a budget the scene cannot meet (see MeshletBudgetManager#checkFeasible) to the
+     * application, without raising it: silently increasing the ceiling would defeat a bounded
+     * streaming budget. Cheaper coarse geometry or a smaller working set is the answer.
      *
      * @param {number} indexRatio - Worst per-view demand/share ratio.
      * @private
@@ -1265,35 +901,15 @@ class MeshletDirector {
     _checkBudgetFeasible(indexRatio) {
         const world = this.world;
         if (!(world.poolBytes > 0)) return;
+        const pagesShort = this.residency?.lastMissingWanted ?? 0;
+        if (!this.budget.checkFeasible(indexRatio, pagesShort, this.budgetOverrunFrames)) return;
 
-        const res = this.residency;
-        const pagesShort = res ? (res.lastMissingWanted ?? 0) : 0;
-        const pinned = this.budget.pressureScale >= this.budget.maxScale;
-        const short = indexRatio > 1 || pagesShort > 0;
-        this._infeasibleFrames = (pinned && short) ? this._infeasibleFrames + 1 : 0;
-        if (this._infeasibleFrames < this.budgetOverrunFrames) return;
-        this._infeasibleFrames = 0;
-
-        // An infeasible working set is reported to the application; silently increasing
-        // the ceiling defeats a bounded streaming budget.
-        const suggested = world.poolBytes + pagesShort * world.pageSizeBytes;
-        const info = {
-            budgetBytes: world.poolBytes,
-            suggestedBudgetBytes: suggested,
-            indexDemandRatio: indexRatio,
-            indexCeiling: world.indexCeiling,
-            pagesMissing: pagesShort,
-            poolPages: res ? res.slotPage.length : 0,
-            totalPages: world.totalPages
-        };
-        const message = `MeshletDirector: the geometry budget (${(world.poolBytes / BYTES_PER_MB).toFixed(0)} MB) cannot render this scene even at the coarsest LOD - ${pagesShort} page(s) short, index demand ${indexRatio.toFixed(2)}x the share. The configured budget remains unchanged; cheaper coarse geometry or a smaller active working set is required.`;
-        // a configuration problem the application must act on, so it is reported in every
-        // build (the Debug channel is stripped from release builds), once per budget value
+        // a configuration problem the application must act on, so it ships in release builds
         if (this._budgetWarnedAt !== world.poolBytes) {
             this._budgetWarnedAt = world.poolBytes;
-            console.warn(message);
+            console.warn(`MeshletDirector: the geometry budget (${(world.poolBytes / BYTES_PER_MB).toFixed(0)} MB) cannot render this scene even at the coarsest LOD - ${pagesShort} page(s) short, index demand ${indexRatio.toFixed(2)}x the share. The configured budget remains unchanged; cheaper coarse geometry or a smaller active working set is required.`);
         }
-        this.onBudgetExceeded?.(info);
+        this.onBudgetExceeded?.(this._budgetReport(world.poolBytes + pagesShort * world.pageSizeBytes, indexRatio));
     }
 
     /**
@@ -1309,7 +925,7 @@ class MeshletDirector {
     }
 
     /**
-     * Consumes the retained index capacity for one shadow view after a rebuild, if any.
+     * Hands over the index capacity a rebuild carried for one shadow view, if any.
      *
      * @param {number} lightId - The light's id.
      * @param {number} face - The shadow face index.
@@ -1317,7 +933,7 @@ class MeshletDirector {
      * @ignore
      */
     takeShadowCapCarry(lightId, face) {
-        return this._shadowCapCarry?.get(`${lightId}:${face}`) ?? null;
+        return this._carry?.takeShadowCaps(lightId, face) ?? null;
     }
 
     /**
@@ -1361,12 +977,10 @@ class MeshletDirector {
      * Registers the meshlet geometry with an {@link OutlineRenderer}'s layer, so its camera
      * draws the selected instances into the outline texture.
      *
-     * The outline renderer's usual contract - add an entity's mesh instances to a layer - cannot
-     * work here: one indirect draw covers the whole world, so there is no per-object mesh
-     * instance to add and no per-object uniform to colour. Instead the whole meshlet geometry is
-     * registered once and selection is a per-instance flag
-     * ({@link MeshletWorld#setInstancesOutlined}); the outline variant of the vertex shader
-     * collapses unselected instances to a degenerate triangle.
+     * One indirect draw covers the whole world, so the outline renderer's usual contract - add an
+     * entity's mesh instances to a layer - does not apply: the whole meshlet geometry is
+     * registered once and selection is a per-instance flag (see
+     * {@link MeshletWorld#setInstancesOutlined}).
      *
      * The layer must not be one the scene camera renders, or the main camera will draw the
      * entire meshlet world a second time. `OutlineRenderer` takes such a layer as its first
@@ -1423,10 +1037,9 @@ class MeshletDirector {
      *
      * Use this rather than {@link MeshletWorld#setInstancesOutlined} directly: it also adds and
      * removes the geometry from the outline layer, so an empty selection - the usual state in an
-     * editor - costs nothing at all. Leaving it registered is not free: the outline camera runs
-     * the meshlet vertex shader over every visible index, and that shader pulls from the page
-     * pool and dequantises, so on a dense scene it is several milliseconds of work that draws no
-     * pixels.
+     * editor - costs nothing at all. While registered, the outline camera runs the meshlet
+     * vertex shader over every visible index - page pool reads and dequantisation included -
+     * however few instances are selected.
      *
      * @param {number[]|Set<number>} instanceIndices - Global instance indices.
      * @param {boolean} [outlined] - True to add, false to remove. Defaults to true.
@@ -1494,14 +1107,11 @@ class MeshletDirector {
      * Contributes the meshlet geometry to a pick render.
      *
      * Meshlet mesh instances live outside the layer system, so the picker - which walks each
-     * layer's culled instances - never sees them. This is the same seam the gsplat renderer has,
-     * and the same answer: hand the picker the instances directly, plus the id mapping it will
-     * resolve a picked pixel through.
-     *
-     * The id is per instance - one primitive at one transform, which is what a glTF submesh
-     * becomes here, so a table's top and legs pick apart as they would unbaked. It cannot be the
-     * picker's per-mesh-instance uniform: one indirect draw covers the whole world. Instead it
-     * travels in objectData and the fragment shader emits it (PICK_CUSTOM_ID in the chunk set).
+     * layer's culled instances - never sees them. As with the gsplat renderer, the picker is
+     * handed the instances directly, plus the id mapping it resolves a picked pixel through. The
+     * id is per instance (see {@link MeshletWorld#pickRecords}); one indirect draw covers the
+     * whole world, so it travels in objectData and the fragment shader emits it
+     * (PICK_CUSTOM_ID in the chunk set) instead of the picker's per-mesh-instance uniform.
      *
      * @param {CameraComponent} cameraComponent - The camera being picked through.
      * @param {Map<number, object>} mapping - Picker id -> object map to add this world's ids to.
@@ -1573,7 +1183,7 @@ class MeshletDirector {
      *
      * @type {boolean}
      */
-    occlusionAdmission = true;
+    occlusionAdmission = MESHLET_DIRECTOR_SETTINGS.occlusionAdmission;
 
     /**
      * Whether a camera's CameraFrame should render the scene depth for the meshlet HZB: occlusion
@@ -1587,125 +1197,6 @@ class MeshletDirector {
     wantsSceneDepth(cameraComponent) {
         return this._occlusionEnabled && this.views.has(cameraComponent);
     }
-
-    /**
-     * The CameraFrame variant of {@link buildCameraPasses}. A camera with frame passes never
-     * reaches the render-action path - the renderer schedules its `framePasses` and returns - so
-     * the meshlet passes have to be handed to {@link FramePassCameraFrame} instead, which
-     * splices them around its own scene pass.
-     *
-     * Returns the passes rather than adding them to a frame graph, because the CameraFrame owns
-     * the ordering: `before` runs ahead of the scene's opaque layers (phase 1 also takes over
-     * the clear), `middle` runs between the opaque and transparent halves.
-     *
-     * @param {CameraComponent} cameraComponent - The camera being set up.
-     * @param {RenderTarget} renderTarget - The CameraFrame's scene render target.
-     * @param {boolean} clears - True when this camera's first pass should clear.
-     * @returns {{ before: FramePass[], middle: FramePass[] }|null} Passes to splice, or null
-     * when the director is not driving this camera.
-     */
-    buildCameraFramePasses(cameraComponent, renderTarget, clears) {
-        const view = this.views.get(cameraComponent);
-        if (!view) {
-            return null;
-        }
-
-        const camera = cameraComponent.camera;
-        view.drawPass1.setup(cameraComponent, renderTarget, this._lightLayer, {
-            clearColor: clears && camera.clearColorBuffer,
-            clearDepth: clears && camera.clearDepthBuffer,
-            clearStencil: clears && camera.clearStencilBuffer
-        });
-        fillPhase1Draws(view);
-
-        const middle = [];
-        if (view.useOcclusion) {
-            view.drawPass2.setup(cameraComponent, renderTarget, this._lightLayer);
-            fillPhase2Draws(view);
-            middle.push(view.hzb.mip0Pass, view.hzbMipsPass, view.cullPhase2Pass, view.drawPass2);
-        }
-
-        // the render-action path is not going to run for this camera, so nothing else will mark
-        // the view's passes as emitted
-        view._passesAdded = true;
-        return { before: [view.drawPass1], middle };
-    }
-
-    /**
-     * Called by the forward renderer while building the frame graph, in place of the camera
-     * block's single main render pass. Emits the meshlet-aware pass order:
-     *
-     *   draw P1 (owns the camera clear) -> opaque scene passes (load) ->
-     *   [HZB -> cull P2 -> draw P2] -> transparent scene passes (load)
-     *
-     * Meshlet depth is laid down first so scene opaque early-z-culls against it (and scene
-     * geometry composites correctly with meshlets), the HZB sees meshlet + scene occluders,
-     * and phase-2 disocclusion draws land before transparents and UI.
-     *
-     * @param {FrameGraph} frameGraph - The frame graph being built.
-     * @param {LayerComposition} layerComposition - The layer composition.
-     * @param {RenderTarget|null} renderTarget - The block's render target.
-     * @param {number} startIndex - First render action index of the block.
-     * @param {number} endIndex - Last render action index of the block.
-     * @param {CameraComponent} cameraComponent - The camera of the block.
-     * @returns {boolean} True when the director emitted the block's passes; false leaves the
-     * renderer's default path (director inactive, other camera, or non-full-viewport clears).
-     */
-    buildCameraPasses(frameGraph, layerComposition, renderTarget, startIndex, endIndex, cameraComponent) {
-        const view = this.views.get(cameraComponent);
-        if (!view || view._passesAdded) {
-            return false;
-        }
-        if (!cameraComponent.camera.fullSizeClearRect) {
-            Debug.warnOnce('MeshletDirector: camera does not clear the full viewport; meshlet draws fall back to post-scene ordering (incorrect compositing with scene geometry).');
-            return false;
-        }
-        view._passesAdded = true;
-
-        const renderActions = layerComposition._renderActions;
-        const renderer = this.renderer;
-
-        // meshlet P1 draws first and owns the camera clear; the scene passes load on top
-        const firstAction = renderActions[startIndex];
-        view.drawPass1.setup(cameraComponent, renderTarget, this._lightLayer, {
-            clearColor: firstAction.clearColor,
-            clearDepth: firstAction.clearDepth,
-            clearStencil: firstAction.clearStencil
-        });
-        fillPhase1Draws(view);
-        frameGraph.addPass(view.drawPass1);
-
-        // split the block at its first transparent render action
-        let splitIndex = endIndex + 1;
-        for (let j = startIndex; j <= endIndex; j++) {
-            if (renderActions[j].transparent) {
-                splitIndex = j;
-                break;
-            }
-        }
-
-        // opaque scene passes (depth-tested against meshlet depth)
-        if (splitIndex > startIndex) {
-            renderer.addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, splitIndex - 1, true);
-        }
-
-        // two-phase occlusion: HZB from the combined meshlet + scene opaque depth, then the
-        // newly-disoccluded remainder - all before transparents
-        if (view.useOcclusion) {
-            frameGraph.addPass(view.hzb.mip0Pass);
-            frameGraph.addPass(view.hzbMipsPass);
-            frameGraph.addPass(view.cullPhase2Pass);
-            view.drawPass2.setup(cameraComponent, renderTarget, this._lightLayer);
-            fillPhase2Draws(view);
-            frameGraph.addPass(view.drawPass2);
-        }
-
-        // transparent scene passes (and anything after them - immediate, UI)
-        if (splitIndex <= endIndex) {
-            renderer.addMainRenderPass(frameGraph, layerComposition, renderTarget, splitIndex, endIndex, true);
-        }
-        return true;
-    }
 }
 
-export { MeshletDirector };
+export { MeshletDirector, MESHLET_DIRECTOR_SETTINGS };

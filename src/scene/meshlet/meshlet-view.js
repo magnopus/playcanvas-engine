@@ -4,20 +4,17 @@ import {
 import { IndexBuffer } from '../../platform/graphics/index-buffer.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { WebgpuReadbackPool } from '../../platform/graphics/webgpu/webgpu-readback-pool.js';
-import { Debug } from '../../core/debug.js';
 import {
-    CULL_PARAMS_VEC4S, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, ROOT_LIST_U32S
+    CULL_PARAMS_VEC4S, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, ROOT_LIST_U32S, CUT_BUDGET_U32S
 } from './constants.js';
 import { GraphNode } from '../graph-node.js';
 import { Mesh } from '../mesh.js';
 import { MeshInstance } from '../mesh-instance.js';
-import { FramePassMeshletCompute } from './frame-pass-meshlet-compute.js';
 import { MeshletCuller } from './meshlet-culler.js';
-import { RenderPassMeshletDraw } from './render-pass-meshlet-draw.js';
+import { visWordCount } from './meshlet-world-budget.js';
 
 /**
  * @import { CameraComponent } from '../../framework/components/camera/component.js'
- * @import { ForwardRenderer } from '../renderer/forward-renderer.js'
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { MeshletWorld } from './meshlet-world.js'
  * @import { MeshletCullShaders } from './meshlet-cull-shaders.js'
@@ -52,11 +49,11 @@ const CUT_QUEUE_INITIAL = 1 << 16;
 
 // words of a view's cut budget: used indices per bucket, used records, rejected record demand,
 // then the cut queue entries admitted roots claimed
-const CUT_BUDGET_U32S = 6;
 
 /**
  * @param {ArrayLike<number>} values - Per-bucket values.
  * @returns {number} Their sum over the draw buckets.
+ * @ignore
  */
 const sumBuckets = (values) => {
     let sum = 0;
@@ -68,30 +65,34 @@ const sumBuckets = (values) => {
  * The per-camera half of the meshlet pipeline: everything that depends on one camera's cull
  * result. Owns the frame working buffers (cull params, counters, work items, records, claim
  * bits), the persistent occlusion visibility bits, the GPU-written draw index buffer with its
- * mesh instances, the culling compute chains, the HZB and the draw passes. Everything else -
- * page pool, meshlet/object/material data, streaming residency, textures, the shared feedback
- * requests buffer and the budget - lives on the world and is shared by all views; request
- * marks from concurrent views union naturally (max semantics).
+ * mesh instances and the culling compute chains. Everything else - page pool,
+ * meshlet/object/material data, streaming residency, textures, the shared feedback requests
+ * buffer and the budget - lives on the world and is shared by all views; request marks from
+ * concurrent views union naturally (max semantics). The HZB and the draw passes belong to the
+ * director group, shared by every world's view of the camera.
  *
  * @ignore
  */
 class MeshletView {
+    /** @type {GraphicsDevice} */
+    device;
+
     /** @type {CameraComponent|null} */
     cameraComponent;
 
     /** @type {MeshletWorld} */
     world;
 
-    /** @type {MeshletHzb|null} */
-    hzb = null;
+    /** @type {MeshletCuller|null} - null once destroyed. */
+    culler = null;
 
     /**
-     * False when {@link hzb} is borrowed - a director group builds one pyramid per camera and
-     * hands it to every world's view of that camera.
+     * The camera's HZB, the director group's (one pyramid per camera, shared by every world's
+     * view of it); set while the view culls two-phase.
      *
-     * @type {boolean}
+     * @type {MeshletHzb|null}
      */
-    _ownsHzb = true;
+    hzb = null;
 
     /**
      * Resolves the HZB's depth source as its mip 0 pass executes - see MeshletHzb#resize.
@@ -106,6 +107,62 @@ class MeshletView {
 
     /** @type {boolean} - one cull pass, no occlusion test, no phase 2 (shadow views). */
     singlePhase = false;
+
+    /**
+     * One mesh instance per bucket per phase - phase 1 first, then phase 2 (a single-phase view
+     * has one set). They share one mesh, whose index buffer is {@link indexBuffer}.
+     *
+     * @type {MeshInstance[]}
+     */
+    meshInstances = [];
+
+    /** @type {IndexBuffer|null} - the GPU-written draw indices. */
+    indexBuffer = null;
+
+    /** @type {number[]} - this view's index capacity per bucket: its slice of the index buffer. */
+    indexCapacity = [];
+
+    /** @type {StorageBuffer} - the cull parameter block. */
+    cullParamsBuffer;
+
+    /** @type {StorageBuffer} - the cull counters, then this frame's visible cells. */
+    countersBuffer;
+
+    /** @type {WebgpuReadbackPool} - staging for the counter readbacks. */
+    readbackPool;
+
+    /** @type {StorageBuffer|null} - root admission entries, possibly borrowed (see {@link rootListCapacity}). */
+    rootListBuffer = null;
+
+    /** @type {StorageBuffer|null} - the claim plane, possibly borrowed. */
+    claimBitsBuffer = null;
+
+    /** @type {StorageBuffer|null} - the persistent visibility bits, or the world's placeholder. */
+    visBitsBuffer = null;
+
+    /** @type {number} - records {@link recordsBuffer} holds. */
+    recordCapacity = 0;
+
+    /** @type {StorageBuffer|null} - this frame's records, read by the draws. */
+    recordsBuffer = null;
+
+    /** @type {StorageBuffer|null} - this frame's selected meshlets, one entry per record. */
+    selectedMeshletsBuffer = null;
+
+    /** @type {StorageBuffer} - per-bucket used indices, used records, rejected record demand and admitted roots' queue entries. */
+    cutBudgetBuffer;
+
+    /** @type {Uint32Array} - what {@link cutBudgetBuffer} is reset to each frame. */
+    cutBudgetInitial;
+
+    /** @type {Mesh|null} @private */
+    _mesh = null;
+
+    /** @type {GraphNode|null} @private */
+    _node = null;
+
+    /** @type {boolean} - the director reported this view's deferred instances. @ignore */
+    _rootBudgetWarned = false;
 
     /** @type {StorageBuffer|null} - the queued cut's tasks, (instance, group row) pairs. */
     cutQueueBuffer = null;
@@ -177,8 +234,10 @@ class MeshletView {
     /**
      * Occupancy at which a buffer grows. Demand is read back a frame or two late, so growth
      * must lead it: waiting for an actual overflow means a clamped frame, and a clamped frame
-     * is not just missing triangles - with occlusion on, the holes it leaves in the HZB are
-     * recorded as disocclusion.
+     * is not just missing triangles. With occlusion on, the missing draws punch holes in the
+     * HZB that phase 2 reads as disocclusion: it records a false visible set in the visibility
+     * bits and marks its pages, a page-demand burst that evicts the hot working set. Dropped
+     * records are missing draws just the same.
      *
      * @type {number}
      */
@@ -197,12 +256,10 @@ class MeshletView {
     shrinkAt = 0.35;
 
     /**
-     * Consecutive frames demand must stay under {@link shrinkAt} before shrinking. Growth lets the cut refine
-     * sooner, while shrinking waits long
-     * enough that a camera turning away from the dense part of a scene does not cost a
-     * reallocation it will immediately undo: ~10 s at 60 fps. Looking around a dense scene swings
-     * demand several-fold between directions, and at ~3 s buffers of hundreds of MB were released
-     * and reallocated as the camera turned back.
+     * Consecutive frames demand must stay under {@link shrinkAt} before shrinking: ~10 s at 60
+     * fps. Looking around a dense scene swings demand several-fold between directions, so
+     * shrinking waits long enough that a camera turning away from the dense part does not cost
+     * a reallocation it undoes as soon as it turns back.
      *
      * @type {number}
      */
@@ -222,22 +279,17 @@ class MeshletView {
     /** @type {Array<object>|null} */
     _appliedMaterials = null;
 
-
     /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {MeshletWorld} world - The finalized world.
-     * @param {ForwardRenderer|null} renderer - The forward renderer (for the draw passes;
-     * unused by a single-phase view, which has none).
      * @param {CameraComponent|null} cameraComponent - The camera this view culls and draws
      * for, or null for a view not driven by a scene camera (shadow cascades).
      * @param {object} [options] - View options.
      * @param {{ buffer: object, words: number }|null} [options.visCarry] - Previous visibility
      * bits to GPU-copy into this view's fresh visBits (rebuild retention). Not owned.
      * @param {number[]|null} [options.capCarry] - Previous per-bucket demand-grown index
-     * capacities (rebuild retention) - starting back at the initial
-     * allocation would clamp draws while the demand readback is in flight, and with occlusion
-     * on the missing draws punch HZB holes that phase 2 reads as disocclusion (a page-demand
-     * burst).
+     * capacities (rebuild retention): starting back at the initial allocation would clamp draws
+     * while the demand readback is in flight (see {@link growAt}).
      * @param {MeshletCullShaders|null} [options.cullShaders] - Shared compiled cull shaders.
      * @param {boolean} [options.singlePhase] - Cull in one pass with no occlusion test. Skips
      * the visibility bits, the HZB and the phase-2 half of the pipeline, and halves the mesh
@@ -251,11 +303,9 @@ class MeshletView {
      * @param {StorageBuffer|null} [options.sharedRootList] - Root list to borrow, under the same
      * back-to-back restriction.
      * @param {number} [options.initialIndexScale] - Fraction of the world's initial index
-     * budget this view starts with. Shadow views take less: the budget is tuned for the camera,
-     * and a cascade's cut is coarser, so pre-sizing them for the camera reserves hundreds of MB
-     * that demand-driven growth would never ask for.
+     * budget this view starts with (see MeshletDirector#shadowInitialIndexScale).
      */
-    constructor(device, world, renderer, cameraComponent, options = {}) {
+    constructor(device, world, cameraComponent, options = {}) {
         const {
             visCarry = null, capCarry = null, cullShaders = null,
             singlePhase = false, castShadow = false, sharedClaimBits = null,
@@ -266,9 +316,7 @@ class MeshletView {
         this.cameraComponent = cameraComponent;
         this.singlePhase = singlePhase;
 
-        // one bit per instance-meshlet pair, 32 to a word; a few words minimum so tiny scenes
-        // still get a real buffer
-        const pairWords = Math.max(Math.ceil((world.totalPairs + world.instanceCount) / 32), 4);
+        const visWords = visWordCount(world.totalPairs, world.instanceCount);
         // the claim plane also holds one off-frustum refinement flag per pair after the
         // admission bits (see meshletCutWGSL)
         const claimWords = claimWordCount(world.totalPairs, world.instanceCount);
@@ -284,14 +332,13 @@ class MeshletView {
         this.rootListBuffer = sharedRootList ??
             new StorageBuffer(device, this.rootListCapacity * ROOT_LIST_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         this._ownsRootList = !sharedRootList;
-        this.recordsBuffer = null; // allocated below, once recordCapacity is known
         this.claimBitsBuffer = sharedClaimBits ?? new StorageBuffer(device, claimWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         this._ownsClaimBits = !sharedClaimBits;
         // Records are demand-grown like the index buffer. Sizing them for the worst case (every
         // meshlet of every instance drawn at once) reaches gigabytes on scattered scenes, while
-        // a real frame's LOD cut emits a few hundred thousand records. counters[MESHLET_COUNTER.RECORDS] counts unclamped
-        // demand, so the buffer starts small and grows to what frames actually ask for - up to
-        // the budget's ceiling, when there is one.
+        // a real frame's LOD cut emits a few hundred thousand records. The counters report
+        // unclamped demand, so the buffer starts small and grows to what frames actually ask
+        // for - up to the budget's ceiling, when there is one.
         const recordCeiling = this.recordCeiling;
         this.recordCapacity = Math.min(recordCeiling, world.initialRecords || recordCeiling);
         this.selectedMeshletsBuffer = new StorageBuffer(device, Math.max(this.recordCapacity * 8, 16), BUFFERUSAGE_COPY_DST);
@@ -302,22 +349,19 @@ class MeshletView {
         this.cutQueueCapacity = Math.min(CUT_QUEUE_INITIAL, this.cutQueueCeiling);
         this.cutQueueBuffer = new StorageBuffer(device, this.cutQueueCapacity * 8, BUFFERUSAGE_COPY_DST);
         // persistent visibility bits for two-phase occlusion (never cleared - phase 2 maintains
-        // them); carried across a rebuild for the unchanged-placement prefix, or the first
-        // phase-2 pass re-discovers the whole frustum and its page-demand burst evicts the hot
-        // working set. A single-phase view never reads or writes them - only the phase 1/2
-        // branches of the cull shader touch the binding - so it borrows the world's placeholder
-        // rather than allocating one bit per instance-meshlet pair (tens of MB on a scattered
-        // scene).
+        // them), carried across a rebuild for the unchanged-placement prefix (see
+        // MeshletRebuildCarry). A single-phase view never touches them and binds the world's
+        // placeholder (see MeshletWorld#dummyBits).
         if (singlePhase) {
             this.visBitsBuffer = world.dummyBits;
             this._ownsVisBits = false;
         } else {
             // WebGPU zero-initialises new buffers
-            this.visBitsBuffer = new StorageBuffer(device, pairWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
+            this.visBitsBuffer = new StorageBuffer(device, visWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
             this._ownsVisBits = true;
             if (visCarry && visCarry.words > 0) {
-                const words = Math.min(visCarry.words, pairWords, Math.floor(visCarry.buffer.byteSize / BYTES_PER_WORD));
-                device.getCommandEncoder().copyBufferToBuffer(visCarry.buffer.impl.buffer, 0, this.visBitsBuffer.impl.buffer, 0, words * BYTES_PER_WORD);
+                const words = Math.min(visCarry.words, visWords, Math.floor(visCarry.buffer.byteSize / BYTES_PER_WORD));
+                this.visBitsBuffer.copy(visCarry.buffer, 0, 0, words * BYTES_PER_WORD);
             }
         }
 
@@ -338,11 +382,9 @@ class MeshletView {
         mesh.primitive[0] = { type: PRIMITIVE_TRIANGLES, base: 0, count: 0, indexed: true };
         this._mesh = mesh;
 
-        // One mesh instance per bucket per phase - phase 1 first, then phase 2 (a single-phase
-        // view has no phase 2, so one set). Materials are shared across views; the per-view
-        // records buffer rides as an instance parameter.
+        // materials are shared across views; the per-view records buffer rides as an instance
+        // parameter
         this._node = new GraphNode('MeshletView');
-        this.meshInstances = [];
         const instanceCount = (singlePhase ? 1 : 2) * MESHLET_BUCKET_COUNT;
         for (let k = 0; k < instanceCount; k++) {
             const mi = new MeshInstance(mesh, world.bucketMaterials[k % MESHLET_BUCKET_COUNT]);
@@ -350,7 +392,7 @@ class MeshletView {
             // A caster must keep cull = true: ShadowRenderer short-circuits on !mi.cull and
             // never calls isVisibleFunc, which would route one caster into every cascade.
             mi.cull = castShadow;
-            mi.castShadow = castShadow;
+            mi.castShadows = castShadow;
             this.meshInstances.push(mi);
         }
         this._appliedMaterials = world.bucketMaterials;
@@ -359,15 +401,6 @@ class MeshletView {
         this.meshInstances.forEach(mi => mi.setParameter('records', this.recordsBuffer));
 
         this.culler = new MeshletCuller(device, world, this, cullShaders);
-
-        // a single-phase view is drawn by whoever owns its instances (the shadow renderer's
-        // caster submission); it has no HZB, no phase-2 cull and no draw passes of its own
-        if (!singlePhase) {
-            this.drawPass1 = new RenderPassMeshletDraw(device, renderer, 'MeshletDrawPhase1');
-            this.drawPass2 = new RenderPassMeshletDraw(device, renderer, 'MeshletDrawPhase2');
-            this.hzbMipsPass = new FramePassMeshletCompute(device, 'MeshletHzbMips', () => this.hzb.buildMips());
-            this.cullPhase2Pass = new FramePassMeshletCompute(device, 'MeshletCullPhase2', () => this.culler.dispatchPhase2());
-        }
     }
 
     /** @type {number} - most records this view may grow to: the budget's ceiling, or the worst case. */
@@ -386,7 +419,7 @@ class MeshletView {
      * Reallocates this view's cut queue to the observed demand. Written and consumed within
      * each frame, so nothing copies.
      *
-     * @param {number} wanted - Tasks queued (unclamped, counters[MESHLET_COUNTER.CUT_QUEUE_END]).
+     * @param {number} wanted - Tasks queued, unclamped.
      * @returns {boolean} True when the buffer was replaced.
      */
     growCutQueue(wanted) {
@@ -402,7 +435,7 @@ class MeshletView {
      * Reallocates this view's record buffer to the observed demand. The contents are
      * GPU-written every frame, so nothing copies.
      *
-     * @param {number} wanted - Peak record demand observed (unclamped, counters[MESHLET_COUNTER.RECORDS]).
+     * @param {number} wanted - Peak record demand observed, unclamped.
      * @returns {boolean} True when the buffer was replaced.
      */
     growRecordsBuffer(wanted) {
@@ -421,12 +454,6 @@ class MeshletView {
     destroy() {
         this.culler?.destroy();
         this.culler = null;
-        this.drawPass1?.destroy();
-        this.drawPass2?.destroy();
-        this.hzbMipsPass?.destroy();
-        this.cullPhase2Pass?.destroy();
-        this.drawPass1 = this.drawPass2 = this.hzbMipsPass = this.cullPhase2Pass = null;
-        if (this._ownsHzb) this.hzb?.destroy();
         this.hzb = null;
         this.readbackPool?.destroy();
         this.cullParamsBuffer?.destroy();
@@ -481,8 +508,7 @@ class MeshletView {
      */
     _clampToCeiling(capacity) {
         const ceiling = this._ceiling();
-        const total = capacity[0] + capacity[1] + capacity[2];
-        if (total <= ceiling) return false;
+        if (sumBuckets(capacity) <= ceiling) return false;
         this._split(capacity, ceiling, this.lastDemand?.indices ?? capacity);
         return true;
     }
@@ -510,8 +536,7 @@ class MeshletView {
      * @private
      */
     _split(capacity, total, weights) {
-        let sum = 0;
-        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) sum += weights[b];
+        const sum = sumBuckets(weights);
         const floor = sum > 0 ? sum * RESLICE_FLOOR : 1;
         let weighted = 0;
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) weighted += Math.max(weights[b], floor);
@@ -545,17 +570,24 @@ class MeshletView {
     }
 
     /**
-     * Allocates this view's index buffer at the current capacity. No initial data: every index
-     * is written by the index-write pass before any draw reads it (finalizeArgs bounds each
-     * draw to the committed end), so uploading a zeroed copy of a buffer this size is pure
-     * cost - gpuOnly also skips IndexBuffer's CPU shadow copy.
+     * Allocates this view's index buffer at the current capacity, replacing (and destroying) the
+     * previous one. No initial data: every index is written by the index-write pass before any
+     * draw reads it (finalizeArgs bounds each draw to the committed end), so uploading a zeroed
+     * copy of a buffer this size is pure cost - gpuOnly also skips IndexBuffer's CPU shadow copy.
+     * The capacity is clamped to the device's limits (see {@link _clampToCeiling}), so the
+     * allocation itself cannot fail validation.
      *
      * @private
      */
     _allocIndexBuffer() {
+        const old = this.indexBuffer;
         const total = Math.max(this.indexTotal(), MIN_INDICES);
         this.indexBuffer = new IndexBuffer(this.device, INDEXFORMAT_UINT32, total, BUFFER_STATIC,
             undefined, { storage: true, gpuOnly: true });
+        if (this._mesh) this._mesh.indexBuffer[0] = this.indexBuffer;
+        // previous frames' submissions hold their own reference; this frame onwards encodes
+        // against the new buffer only
+        old?.destroy();
     }
 
     /**
@@ -568,7 +600,7 @@ class MeshletView {
     indexPressure() {
         const d = this.lastDemand;
         if (!d) return 0;
-        const ceiling = this.indexShare > 0 ? this.indexShare : this.world.indexCeiling;
+        const ceiling = this._ceiling();
         if (!(ceiling > 0) || !Number.isFinite(ceiling)) return 0;
         const demand = sumBuckets(d.indices);
         // Coarsening cannot go below the roots, so measure only the refinement above them
@@ -576,12 +608,12 @@ class MeshletView {
         // maximum on scenes whose root floor alone passes indexStarvedAt of the share (a wide view
         // of very many placements), coarsening everything without shrinking the demand at all.
         const r = this.lastRoots;
-        const roots = r ? r.admitted[0] + r.admitted[1] + r.admitted[2] + r.rejected[0] + r.rejected[1] + r.rejected[2] : 0;
+        const roots = sumBuckets(r.admitted) + sumBuckets(r.rejected);
         const pressure = Math.max(demand - roots, 0) / Math.max(ceiling - roots, 1);
         // When roots themselves are rejected, coarsening cannot help (the roots are the coarsest
         // level) - hold between the controller's ease and starve thresholds instead of winding
         // it to its maximum and blurring everything that did get admitted.
-        return r?.rejectedInstances > 0 ? Math.min(pressure, ROOT_REJECTED_PRESSURE) : pressure;
+        return r.rejectedInstances > 0 ? Math.min(pressure, ROOT_REJECTED_PRESSURE) : pressure;
     }
 
     /** @returns {number} This view's total unclamped index demand, or 0 before the first readback. */
@@ -591,9 +623,7 @@ class MeshletView {
 
     /** @returns {number} Total index capacity across the buckets. */
     indexTotal() {
-        let n = 0;
-        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) n += this.indexCapacity[b];
-        return n;
+        return sumBuckets(this.indexCapacity);
     }
 
     /**
@@ -610,7 +640,7 @@ class MeshletView {
             next.push(Math.max(this.indexCapacity[b], wanted[b]));
         }
         if (world.maxIndices > 0) {
-            const total = next.reduce((a, b) => a + b, 0);
+            const total = sumBuckets(next);
             if (total > world.maxIndices) {
                 const s = world.maxIndices / total;
                 for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) next[b] = Math.floor(next[b] * s);
@@ -622,36 +652,19 @@ class MeshletView {
         this._clampToCeiling(next);
         // Only a larger total needs a new buffer. At the ceiling the clamp re-splits the same
         // total, so a bucket can look grown while the buffer would not be: reallocating then
-        // replaces a buffer the size of the whole budget every time demand is read back - GBs a
-        // second at a high budget, which stalls the GPU process. Moving capacity between the
-        // buckets at a fixed total is _resliceBuckets' job, and needs no new buffer.
-        let total = 0;
-        for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) total += next[b];
-        if (total <= this.indexTotal()) {
+        // would replace a buffer the size of the whole budget every time demand is read back.
+        // Moving capacity between the buckets at a fixed total is _resliceBuckets' job, and
+        // needs no new buffer.
+        if (sumBuckets(next) <= this.indexTotal()) {
             return false;
         }
-        const previous = this.indexCapacity.slice();
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             this.indexCapacity[b] = Math.max(next[b], this.indexCapacity[b]);
         }
         // the ceiling applies to the total, and taking the per-bucket max above can push it
         // back over
         this._clampToCeiling(this.indexCapacity);
-
-        const old = this.indexBuffer;
-        try {
-            this._allocIndexBuffer();
-        } catch (e) {
-            // Keep the previous allocation and its complete coarse cut if growth fails.
-            Debug.error(`MeshletView: index buffer allocation failed at ${this.indexTotal()} indices; keeping the previous allocation.`, e);
-            this.indexCapacity = previous;
-            this.indexBuffer = old;
-            return false;
-        }
-        this._mesh.indexBuffer[0] = this.indexBuffer;
-        // previous frames' submissions already hold their own reference; this frame onwards
-        // encodes against the new buffer only
-        old.destroy();
+        this._allocIndexBuffer();
         return true;
     }
 
@@ -686,17 +699,8 @@ class MeshletView {
         }
         if (!changed) return false;
 
-        const previous = this.indexCapacity;
         this.indexCapacity = next;
-        const old = this.indexBuffer;
-        try {
-            this._allocIndexBuffer();
-        } catch (e) {
-            this.indexCapacity = previous;
-            return false;
-        }
-        this._mesh.indexBuffer[0] = this.indexBuffer;
-        old.destroy();
+        this._allocIndexBuffer();
         return true;
     }
 
@@ -715,8 +719,8 @@ class MeshletView {
             // may already be encoded against the old buffer while the draw reads the new,
             // never-written one - which rasterises garbage indices as stretched degenerate
             // triangles. {@link applyPendingGrowth} does the swap before anything is encoded.
-            // rejected roots count as demand on the GPU, so an initially small buffer grows to
-            // the full visible root set within its budget
+            // Rejected roots count as demand on the GPU, so an initially small buffer grows to
+            // the full visible root set within its budget.
             const demand = this._demand;
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) demand.indices[b] = data[MESHLET_COUNTER.DEMAND_BASE + b];
             demand.records = data[MESHLET_COUNTER.RECORD_DEMAND];
@@ -752,10 +756,7 @@ class MeshletView {
         if (!d || !this.culler) return;
         this._pendingDemand = null;
 
-        // grow at `growAt` occupancy, before demand overflows: clamped draws are not only a
-        // visual glitch - with occlusion on, the missing draws punch HZB holes that
-        // phase 2 records as disocclusion, poisoning the visibility bits with a false
-        // working set the streamer then fetches
+        // grow at `growAt` occupancy, before demand overflows (see growAt)
         let wantsGrowth = false;
         const target = this._growTarget;
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
@@ -764,8 +765,7 @@ class MeshletView {
         }
         if (wantsGrowth) {
             this._lowFrames = 0;
-            let needed = 0;
-            for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) needed += target[b];
+            const needed = sumBuckets(target);
             const total = this.indexTotal();
             if (needed <= total) {
                 // The buffer already holds every bucket's target: only the ranges move. A bucket
@@ -789,8 +789,7 @@ class MeshletView {
         if (this._resliceBuckets(d.indices)) {
             this.culler.bindIndexState(this);
         }
-        // records overflow the same way - dropped records are missing draws, which the
-        // HZB then reads as disocclusion
+        // records overflow the same way
         if (d.records > this.recordCapacity * this.growAt && this.growRecordsBuffer(d.records)) {
             this.culler.bindRecordState(this);
         }
@@ -801,4 +800,4 @@ class MeshletView {
     }
 }
 
-export { MeshletView };
+export { MeshletView, sumBuckets };

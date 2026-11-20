@@ -23,7 +23,7 @@ fn encodePickOutput(id: u32) -> vec4f {
     fn getPickDepth() -> vec4f {
         var linearDepth: f32;
         if (uniform.camera_params.w > 0.5) {
-            // orthographic: pcPosition.z IS the hardware NDC z, flip for reverse-z
+            // orthographic: pcPosition.z is the hardware NDC z, flip for reverse-z
             #ifdef REVERSE_Z
                 linearDepth = 1.0 - pcPosition.z;
             #else

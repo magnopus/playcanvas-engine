@@ -77,10 +77,7 @@ class IndexBuffer {
         if (initialData) {
             this.setData(initialData);
         } else if (options?.gpuOnly) {
-            // A buffer whose contents are written on the GPU never needs a CPU copy, and at
-            // meshlet scale that copy is hundreds of megabytes - large enough to fail outright.
-            // lock() allocates one on demand. Still create the GPU buffer: unlock() allocates
-            // from numBytes and uploads nothing when there is no CPU copy.
+            // unlock() without storage allocates the GPU buffer from numBytes and uploads nothing
             this.storage = null;
             this.unlock();
         } else {
@@ -129,15 +126,13 @@ class IndexBuffer {
 
     /**
      * Called when the rendering context is restored. Recreates the GPU buffer and uploads from
-     * {@link IndexBuffer#lock|lock} storage.
+     * {@link IndexBuffer#lock|lock} storage, if any.
      *
      * @ignore
      */
     restoreContext() {
-        // nothing to restore from when the contents only ever existed on the GPU
-        if (this.storage) {
-            this.unlock();
-        }
+        // without a CPU copy (gpuOnly) the buffer is recreated empty for its owner to rewrite
+        this.unlock();
     }
 
     /**

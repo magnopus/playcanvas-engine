@@ -1,4 +1,5 @@
 import { Debug } from '../../core/debug.js';
+import { hash53 } from '../../core/hash.js';
 
 /**
  * @import { ByteStore } from './byte-store.js'
@@ -11,26 +12,6 @@ const INDEX_VERSION = 1;
 
 /** Size an eviction pass shrinks the cache to, as a share of its limit, so each pass buys headroom. */
 const EVICT_TARGET = 0.9;
-
-/**
- * 53-bit string hash (cyrb53), rendered in base 36. Wide enough that a collision between two cached
- * URLs is negligible; the cache still refuses the second of two keys that do collide.
- *
- * @param {string} str - The string.
- * @returns {string} The hash.
- */
-const hashKey = (str) => {
-    let h1 = 0xdeadbeef;
-    let h2 = 0x41c6ce57;
-    for (let i = 0; i < str.length; i++) {
-        const ch = str.charCodeAt(i);
-        h1 = Math.imul(h1 ^ ch, 2654435761);
-        h2 = Math.imul(h2 ^ ch, 1597334677);
-    }
-    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
-};
 
 /**
  * Default cache key: the URL itself, except for data and blob URLs, which are already local.
@@ -129,7 +110,7 @@ class ByteCacheEntry {
  *     new pc.CacheStorageByteStore('my-app-cache');
  * const cache = new pc.ByteCache(store, { maxBytes: 4 * 1024 * 1024 * 1024 });
  * app.loader.byteCache = cache;
- * director.byteCache = cache;
+ * app.systems.meshlet.byteCache = cache;
  *
  * // ask the browser not to evict the cache under storage pressure
  * navigator.storage.persist();
@@ -605,7 +586,9 @@ class ByteCache {
             entry = undefined;
         }
         if (!entry) {
-            const name = hashKey(key);
+            // 53 bits: a collision between two cached URLs is negligible, and the cache still
+            // refuses the second of two keys that do collide
+            const name = hash53(key);
             if (this._names.has(name)) {
                 Debug.warnOnce(`ByteCache: key hash collision, not caching ${key}`);
                 return;

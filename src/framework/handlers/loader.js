@@ -52,6 +52,14 @@ class ResourceLoader {
         this._requests = {};
         this._cache = {};
         this._app = app;
+
+        /**
+         * The byte cache this loader installed on the shared HTTP layer, cleared on destroy.
+         *
+         * @type {ByteCache|null}
+         * @private
+         */
+        this._byteCache = null;
     }
 
     /**
@@ -443,7 +451,8 @@ class ResourceLoader {
      * assumes the content behind a URL never changes, so serve assets from versioned URLs.
      *
      * Note this is a process-global setting (it applies to the shared HTTP layer), so with
-     * multiple applications the last value set wins. It applies to requests made through the
+     * multiple applications the last value set wins; destroying the loader clears it if it is
+     * still the value this loader set. It applies to requests made through the
      * engine's HTTP layer, which carries most asset loads; formats fetched with `fetch()`
      * directly (Gaussian splat PLY and SOG bundles, asset bundles) are not cached.
      *
@@ -453,6 +462,7 @@ class ResourceLoader {
      */
     set byteCache(value) {
         http.byteCache = value;
+        this._byteCache = value;
     }
 
     /**
@@ -468,6 +478,10 @@ class ResourceLoader {
      * Destroys the resource loader.
      */
     destroy() {
+        if (this._byteCache && http.byteCache === this._byteCache) {
+            http.byteCache = null;
+        }
+        this._byteCache = null;
         this._handlers = {};
         this._requests = {};
         this._cache = {};

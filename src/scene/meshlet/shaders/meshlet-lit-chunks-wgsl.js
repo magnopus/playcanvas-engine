@@ -2,13 +2,19 @@ import { Debug } from '../../../core/debug.js';
 import litForwardBackend from '../../shader-lib/wgsl/chunks/lit/frag/pass-forward/litForwardBackend.js';
 import {
     MATERIAL_FLAG_UNLIT, MATERIAL_SLOT, MATERIAL_SLOT_ABSENT, MATERIAL_TEXTURE_SLOTS, MESHLET_MAX_UV_CHANNELS, MESHLET_TEX_NO_MINLOD,
-    OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED
+    OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED
 } from '../constants.js';
 import {
-    meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL, meshletDecodeTangentWGSL,
-    meshletMaterialTableWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL,
+    meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL, meshletDecodeTangentWGSL, meshletFetchVertexWGSL,
+    meshletMaterialTableWGSL, meshletNormalMatrixWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL,
     meshletStructsWGSL, meshletTexResidencyWGSL
 } from './meshlet-page-wgsl.js';
+
+// Unreal's HQ lightmap encoding, which the EPIC lightmaps use: luminance is stored as
+// log2(L + LIGHTMAP_LOG_BLACK_POINT), and a non-directional lightmap scales its irradiance by
+// LIGHTMAP_NON_DIRECTIONAL_SCALE where a directional one would apply the SH directionality term
+const LIGHTMAP_LOG_BLACK_POINT = 0.01858136;
+const LIGHTMAP_NON_DIRECTIONAL_SCALE = 0.6;
 
 /**
  * WGSL chunk overrides that turn a StandardMaterial into the meshlet forward material: the
@@ -68,11 +74,8 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     const transformCoreVS = /* wgsl */ `
         var<private> vertex_position: vec4f;
 
-        // declared here rather than in normalCoreVS because that chunk is NORMALS-gated
-        // (litMain.js:51) and shadow passes force needsNormal = false (lit-shader.js:170),
-        // while litEngineMainStartVS assigns vertex_normal unconditionally. transformCoreVS
-        // is included on every pass, so the declaration always exists; when NORMALS is off
-        // the assignment is a dead store.
+        // declared here rather than in normalCoreVS, which is only included when the pass needs
+        // normals (shadow passes do not), because litEngineMainStartVS assigns it on every pass
         var<private> vertex_normal: vec3f;
 
         uniform matrix_viewProjection: mat4x4f;
@@ -96,20 +99,14 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     `;
 
     const normalCoreVS = /* wgsl */ `
+        ${meshletNormalMatrixWGSL}
+
         fn getLocalNormal(vertexNormal: vec3f) -> vec3f {
             return vertexNormal;
         }
 
         fn getNormalMatrix(modelMatrix: mat4x4f) -> mat3x3f {
-            // the cofactor matrix: the inverse transpose up to scale, so normals stay
-            // perpendicular under non-uniform scale; the determinant's sign keeps mirrored
-            // instances facing out
-            let m0 = modelMatrix[0].xyz;
-            let m1 = modelMatrix[1].xyz;
-            let m2 = modelMatrix[2].xyz;
-            let c0 = cross(m1, m2);
-            let s = select(1.0, -1.0, dot(m0, c0) < 0.0);
-            return mat3x3f(c0 * s, cross(m2, m0) * s, cross(m0, m1) * s);
+            return meshletNormalMatrix(modelMatrix);
         }
     `;
 
@@ -137,29 +134,21 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         ${meshletDecodeOct16WGSL}
         ${tan ? meshletDecodeTangentWGSL : ''}
         ${meshletPageLayoutWGSL}
+        ${meshletFetchVertexWGSL}
     `;
 
     const litEngineMainStartVS = /* wgsl */ `
-        let meshletDrawIndex = meshletDecodeDrawIndex(pcVertexIndex);
-        let meshletRecord = meshletDrawIndex.x;
-        let meshletLocalVert = meshletDrawIndex.y;
-
-        let meshletInstance = records[meshletRecord].instance;
-        let meshletIndex = records[meshletRecord].meshlet;
-
-        let meshletPage = meshletData[meshletIndex].page;
-        let meshletVerticesOffset = meshletData[meshletIndex].verticesOffset;
-
-        // per-primitive page attribute layout and position grid (resources may differ)
-        let meshletPrimitive = meshletPrimitiveData(meshletInstance);
+        let meshletFetched = meshletFetchVertex(pcVertexIndex, uniform.pageSizeWords);
+        let meshletInstance = meshletFetched.instance;
+        let meshletIndex = meshletFetched.meshlet;
+        let meshletPrimitive = meshletFetched.primitive;
         let meshletUvFloats = meshletPrimitive.uvFloatsPerVertex;
-        let meshletHasTangents = (objectData[meshletInstance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
-        let meshletHasColors = (objectData[meshletInstance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
+        let meshletHasTangents = meshletFetched.hasTangents;
+        let meshletHasColors = meshletFetched.hasColors;
         let meshletGridOrigin = meshletPrimitive.gridOrigin;
         let meshletGridStep = meshletPrimitive.gridStep;
-
-        let meshletLayout = meshletPageLayout(residency[meshletPage] * uniform.pageSizeWords, meshletHasTangents, meshletUvFloats, meshletHasColors);
-        let meshletVert = pagePool[meshletLayout.meshletVertexBase + meshletVerticesOffset + meshletLocalVert];
+        let meshletLayout = meshletFetched.pageLayout;
+        let meshletVert = meshletFetched.vertex;
 
         vertex_position = vec4f(meshletPagePosition(meshletLayout, meshletVert, meshletGridOrigin, meshletGridStep), 1.0);
 
@@ -179,12 +168,10 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         dMeshletModelMatrix = meshletInstanceMatrix(meshletInstance);
         #ifdef SHADOW_PASS
         #if LIGHT_TYPE == DIRECTIONAL
-        // A simplified cluster lies within its error of the true surface - above it as often
-        // as below - and the camera draws the receiver at its own, usually finer, cut: unbiased,
-        // a coarse caster shadows the surface it stands for in broad blotches. Pushed away from
-        // the light by its error it can only sit behind that surface. Clip depth is linear in
-        // world position for the orthographic shadow camera, so its gradient is the light axis;
-        // reverse-z stores nearer as larger, so away is down that axis instead of up it.
+        // A simplified caster lies within its LOD error of the surface the camera draws, as often
+        // in front as behind, and shadows it in blotches; pushed away from the light by that error
+        // it can only sit behind. The orthographic clip-depth gradient is the light axis (negated
+        // under reverse-z).
         let meshletDepthAxis = vec3f(uniform.matrix_viewProjection[0][2], uniform.matrix_viewProjection[1][2], uniform.matrix_viewProjection[2][2]);
         #ifdef REVERSE_Z
             let meshletAwayFromLight = -normalize(meshletDepthAxis);
@@ -460,7 +447,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
             let lower = meshletSampleTexture(u32(textureInfo.x), atlasUv + vec2f(0.0, 0.5), atlasDx, atlasDy, vec4f(0.0));
             let logLuminance = (upper.a + lower.a / 255.0 - 0.5 / 255.0) * decodeScale.a + decodeAdd.a;
             let chromaticity = upper.rgb * upper.rgb * decodeScale.rgb + decodeAdd.rgb;
-            return max(exp2(logLuminance) - 0.01858136, 0.0) * 0.6 * chromaticity;
+            return max(exp2(logLuminance) - ${LIGHTMAP_LOG_BLACK_POINT}, 0.0) * ${LIGHTMAP_NON_DIRECTIONAL_SCALE} * chromaticity;
         }` : ''}
     `;
 

@@ -183,8 +183,8 @@ class GraphNode extends EventHandler {
 
     /**
      * Notified (onWorldDirty) whenever this node's world transform is dirtied, so a system can
-     * track the few nodes that moved instead of polling every node it owns each frame. Not
-     * cloned.
+     * track the few nodes that moved instead of polling every node it owns each frame. A single
+     * slot, owned by the entity's MeshletComponent while it has one. Not cloned.
      *
      * @type {{ onWorldDirty: function(): void }|null}
      * @ignore
@@ -274,7 +274,6 @@ class GraphNode extends EventHandler {
     /** @ignore */
     scaleCompensation = false;
 
-    /** @type {AppBase|undefined} */
     _appRef = undefined;
 
     /**

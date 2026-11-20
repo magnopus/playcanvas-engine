@@ -108,7 +108,7 @@ class WebgpuReadbackPool {
         Debug.assert(offset % 4 === 0 && size % 4 === 0, 'WebgpuReadbackPool: copyBufferToBuffer offset and size must be multiples of 4', offset, size);
         const stagingBuffer = this._borrow(size);
 
-        // The copy is recorded on the current encoder NOW, so the bytes read are the storage
+        // The copy is recorded on the current encoder now, so the bytes read are the storage
         // buffer's contents at this point in the frame's command stream - a consumer that calls
         // at the top of its update, before encoding this frame's work, reads last frame's result.
         const commandEncoder = device.getCommandEncoder();

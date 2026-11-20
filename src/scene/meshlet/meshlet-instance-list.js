@@ -20,6 +20,15 @@ class MeshletInstanceListBuilder {
     /** @type {Array<MeshletLightmap|null>|null} */
     lightmaps = null;
 
+    /** @type {Uint32Array} - per instance, its primitive (grown by doubling). */
+    primIndex;
+
+    /** @type {Uint32Array} - per instance, its transform. */
+    transformIndex;
+
+    /** @type {Float32Array} - packed affine transforms (grown by doubling). */
+    transforms;
+
     /**
      * @param {number} [capacity] - Expected instance count.
      */

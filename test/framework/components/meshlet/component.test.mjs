@@ -73,7 +73,7 @@ describe('MeshletComponent', function () {
         const system = app.systems.meshlet;
         expect(system.dagPixelThreshold).to.equal(2);
         expect(system.bucketThresholdScales).to.deep.equal([4, 1, 1]);
-        expect(system.occlusion).to.equal(false);
+        expect(system.occlusion).to.equal(true);
         expect(system.shadows).to.equal(false);
         expect(system.shadowThresholdScale).to.equal(4);
         expect(system.camera).to.equal(null);
@@ -86,8 +86,8 @@ describe('MeshletComponent', function () {
         expect(system.poolBytes).to.equal(128 * 1024 * 1024);
         system.maxDrawIndices = 5000;
         expect(system.maxDrawIndices).to.equal(5000);
-        system.occlusion = true;
-        expect(system.occlusion, 'no director to hold it').to.equal(false);
+        system.occlusion = false;
+        expect(system.occlusion, 'no director to hold it').to.equal(true);
     });
 
     it('clones the component properties onto a cloned entity', function () {
@@ -183,7 +183,7 @@ describe('MeshletComponent', function () {
                     throw new Error('released a resource it did not restore');
                 }
             };
-            system._recordSources.set(resident, { url: 'a.glb', credentials: null });
+            system._records.sources.set(resident, { url: 'a.glb', credentials: null });
             expect(await system.withMeshletRecords(() => 42)).to.equal(42);
             expect(await system.withMeshletRecords(() => Promise.resolve('later'))).to.equal('later');
         });

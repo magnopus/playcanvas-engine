@@ -2,7 +2,8 @@
 # convert (if needed) -> bake -> manifest for the JungleRuins groups.
 #   pipeline.sh terrain static trees plants sky canopy
 # JUNGLE_RAW: export folder (raw GLBs + resized textures), GLTF_TOOLS: gltf-tools checkout,
-# PY: python with usd-core + numpy + Pillow, JUNGLE_USD: the scene (defaults to ~/Downloads)
+# PY: python with usd-core + numpy + Pillow, JUNGLE_USD: the scene (JungleRuins/USD/JungleRuins_Karma.usda),
+# JUNGLE_HDR: the dome HDR for 'sky' (JungleRuins/USD/kloppenheim_06_puresky_8k.hdr)
 # RECONVERT=1 re-exports, EXPORT_ARGS passes extra usd2glb.py options (e.g. --forest-radius 1500),
 # BAKE_ARGS extra streamed-meshlets options (default --srgb-encoding uastc: ETC1S colour is blocky
 # on the close-up stone)
@@ -21,7 +22,8 @@ mkdir -p $RAW $OUT
 for g in "$@"; do
     echo "== $g $(date +%T)"
     if [[ $g == sky ]]; then
-        $PY -u $HERE/sky.py --out $OUT ${=SKY_ARGS:---to-sun 0.35355,0.70711,0.61237} || echo "SKY FAILED"
+        $PY -u $HERE/sky.py --hdr ${JUNGLE_HDR:?set JUNGLE_HDR to the dome HDR} --out $OUT \
+            ${=SKY_ARGS:---to-sun 0.35355,0.70711,0.61237} || echo "SKY FAILED"
         continue
     fi
     if [[ $g == canopy ]]; then

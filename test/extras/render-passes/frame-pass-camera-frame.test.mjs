@@ -165,6 +165,34 @@ describe('FramePassCameraFrame', function () {
         }
     });
 
+    it('gives the meshlet draw passes the scene pass settings, and leaves its other passes alone', function () {
+        // a draw pass declares the scene settings it can take; the HZB and cull passes do not
+        const draw = new FramePass(app.graphicsDevice);
+        draw.sceneTextures = undefined;
+        draw.gammaCorrection = undefined;
+        draw.toneMapping = undefined;
+        const hzb = new FramePass(app.graphicsDevice);
+        app.renderer.meshletDirector = {
+            buildCameraFramePasses: () => ({ before: [draw], middle: [hzb] }),
+            wantsSceneDepth: () => false
+        };
+        try {
+            cameraFrame.update();
+            const scenePass = cameraFrame.renderPassCamera.scenePass;
+            expect(draw.toneMapping).to.equal(TONEMAP_NONE);
+            expect(draw.gammaCorrection).to.equal(scenePass.gammaCorrection);
+            expect(draw.sceneTextures).to.equal(scenePass.sceneTextures);
+            expect(hzb).to.not.have.property('sceneTextures');
+            expect(hzb).to.not.have.property('toneMapping');
+        } finally {
+            app.renderer.meshletDirector = null;
+            cameraFrame.destroy();
+            cameraFrame = new CameraFrame(app, app.root.findByName('Camera').camera);
+            draw.destroy();
+            hzb.destroy();
+        }
+    });
+
     it('resizes the scene render target when the render target scale changes after the passes are created', function () {
         // the meshlet passes split the scene into a pass before and one after them, both resizing
         // the one scene render target - one left on the old scale would size it back every frame

@@ -2,21 +2,21 @@ import { Compute } from '../../platform/graphics/compute.js';
 import { BUFFERUSAGE_COPY_DST } from '../../platform/graphics/constants.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import {
-    CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_CULL_SLICE,
-    MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS,
-    MESHLET_ROOT_BAND_OCTAVES, ROOT_LIST_U32S, claimPersistBase
+    CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_CELL_CULL_WORKGROUP, MESHLET_COUNTER,
+    MESHLET_COUNTER_CLEAR_U32S, MESHLET_CULL_SLICE, MESHLET_DISPATCH_WIDTH, MESHLET_LIST_WORKGROUP, MESHLET_ROOT_BANDS,
+    MESHLET_ROOT_BAND_MAX_PIXELS, MESHLET_ROOT_BAND_OCTAVES, ROOT_LIST_U32S, claimPersistBase
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
 import { TRACEID_GPU_TIMINGS } from '../../core/constants.js';
 import { Tracing } from '../../core/tracing.js';
 
 /**
+ * @import { Vec3 } from '../../core/math/vec3.js'
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { MeshletCells } from './meshlet-cells.js'
  * @import { MeshletHzb } from './meshlet-hzb.js'
  * @import { MeshletWorld } from './meshlet-world.js'
  * @import { MeshletView } from './meshlet-view.js'
- * @typedef {import('../../core/math/vec3.js').Vec3} Vec3;
  */
 
 /**
@@ -86,7 +86,7 @@ class MeshletCuller {
      * by how much they matter to what is on screen (its own camera sits far back along the
      * light, and an orthographic projection has no size falloff).
      *
-     * @type {import('../../core/math/vec3.js').Vec3|null}
+     * @type {Vec3|null}
      */
     priorityOrigin = null;
 
@@ -213,7 +213,6 @@ class MeshletCuller {
      */
     _prevHzbShape = [0, 0, 0, 0];
 
-
     /** @private */
     _passSuffix = '';
 
@@ -274,8 +273,8 @@ class MeshletCuller {
         this.cellCull.setParameter('cellMaxRadius', cells.radiiBuffer);
         this.cellCull.setParameter('cullParams', view.cullParamsBuffer);
         this.cellCull.setParameter('counters', view.countersBuffer);
-        const cellGroups = Math.ceil(cells.cellCount / 64);
-        this.cellCull.setupDispatch(Math.min(cellGroups, 65535), Math.ceil(cellGroups / 65535));
+        const cellGroups = Math.ceil(cells.cellCount / MESHLET_CELL_CULL_WORKGROUP);
+        this.cellCull.setupDispatch(Math.min(cellGroups, MESHLET_DISPATCH_WIDTH), Math.ceil(cellGroups / MESHLET_DISPATCH_WIDTH));
         // one workgroup per visible cell
         this.cellArgs = makeCompute('dispatchArgs');
         this.cellArgs.setParameter('counterIndex', MESHLET_COUNTER.VISIBLE_CELLS);
@@ -329,6 +328,7 @@ class MeshletCuller {
         this.persistWords = Math.ceil(world.instanceCount / 32);
         this.rootClassify = makeCompute('rootClassify');
         this.rootClassify.setParameter('instanceCount', world.instanceCount);
+        this.rootClassify.setParameter('sortedBase', world.instanceCount);
         this.rootClassify.setParameter('objectData', world.objectDataBuffer);
         this.rootClassify.setParameter('cullParams', view.cullParamsBuffer);
         this.rootClassify.setParameter('claimBits', view.claimBitsBuffer);
@@ -339,7 +339,7 @@ class MeshletCuller {
         this.rootClassify.setParameter('hzbTexture', this.dummyHzb);
         this.rootArgs = makeCompute('dispatchArgs');
         this.rootArgs.setParameter('counterIndex', MESHLET_COUNTER.ROOT_CANDIDATES);
-        this.rootArgs.setParameter('groupSize', 64);
+        this.rootArgs.setParameter('groupSize', MESHLET_LIST_WORKGROUP);
         this.rootArgs.setParameter('itemCapacity', world.instanceCount);
         this.rootArgs.setParameter('counters', view.countersBuffer);
         this.rootArgs.setupDispatch(1);
@@ -386,7 +386,7 @@ class MeshletCuller {
         this.cutEmit.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
         this.cutEmitArgs = makeCompute('dispatchArgs');
         this.cutEmitArgs.setParameter('counterIndex', MESHLET_COUNTER.CUT_QUEUE_END);
-        this.cutEmitArgs.setParameter('groupSize', 64);
+        this.cutEmitArgs.setParameter('groupSize', MESHLET_LIST_WORKGROUP);
         this.cutEmitArgs.setParameter('counters', view.countersBuffer);
         this.bindQueueState(view);
 
@@ -418,7 +418,6 @@ class MeshletCuller {
             meshletCull.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
             meshletCull.setParameter('counters', view.countersBuffer);
             meshletCull.setParameter('records', view.recordsBuffer);
-            meshletCull.setParameter('residency', world.residencyBuffer);
             meshletCull.setParameter('requests', world.requestsBuffer);
             meshletCull.setParameter('visBits', view.visBitsBuffer);
             meshletCull.setParameter('hzbTexture', this.dummyHzb);
@@ -570,14 +569,15 @@ class MeshletCuller {
      * of the frame graph, so it executes before any of the frame's render passes.
      *
      * @param {Float32Array} frustumPlanes - 24 floats, world frustum planes (normal, distance).
-     * @param {import('../../core/math/vec3.js').Vec3} cameraPos - Camera world position.
+     * @param {Vec3} cameraPos - Camera world position.
      * @param {number} projScale - viewportHeight / (2 * tan(fovY / 2)).
      * @param {Float32Array|number[]} viewProj - 16 floats, column-major view-projection matrix.
      * @param {MeshletHzb|null} hzb - The HZB (two-phase mode), or null.
      */
     beginFrame(frustumPlanes, cameraPos, projScale, viewProj, hzb) {
         const { device, world, view } = this;
-        const twoPhase = this.twoPhase && !!hzb?.texture;
+        // a pyramid recreated since its last build holds no depth yet, and would hide everything
+        const twoPhase = this.twoPhase && !!hzb?.texture && hzb.valid;
 
         // frame params, one vec4 row each (CULL_PARAMS.*)
         const params = this.cullParams;

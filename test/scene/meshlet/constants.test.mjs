@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 
 import {
-    CULL_PARAMS, CULL_PARAMS_VEC4S, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT,
+    CULL_PARAMS, CULL_PARAMS_VEC4S, CUT_BUDGET, CUT_BUDGET_U32S, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_COLOR_MODE,
     MESHLET_MAX_UV_CHANNELS,
     MESHLET_COUNTER, MESHLET_DATA,
@@ -91,6 +91,13 @@ describe('meshlet constants', function () {
         expect(new Set(Object.values(MESHLET_COLOR_MODE)).size).to.equal(3);
     });
 
+    it('lays the cut budget out as one index word per bucket, then the scalar charges', function () {
+        expect(CUT_BUDGET.INDICES_BASE + MESHLET_BUCKET_COUNT).to.equal(CUT_BUDGET.RECORDS);
+        const words = [CUT_BUDGET.RECORDS, CUT_BUDGET.REJECTED_RECORDS, CUT_BUDGET.QUEUE];
+        expect(new Set(words).size).to.equal(words.length);
+        expect(Math.max(...words) + 1).to.equal(CUT_BUDGET_U32S);
+    });
+
     it('lays the counter blocks out contiguously, one word per bucket', function () {
         expect(MESHLET_COUNTER.COMMITTED_BASE).to.equal(MESHLET_COUNTER.CURSOR_BASE + MESHLET_BUCKET_COUNT);
         expect(MESHLET_COUNTER.DEMAND_BASE).to.equal(MESHLET_COUNTER.COMMITTED_BASE + MESHLET_BUCKET_COUNT);
@@ -153,7 +160,7 @@ describe('MeshletResource', function () {
 
     it('totals the meshlets across primitives and keeps the placements it is given', function () {
         const instances = [{ primIndex: 0, matrix: new Float32Array(16) }, { primIndex: 1, matrix: new Float32Array(16) }];
-        const resource = new MeshletResource(null, [makePrimitive(5), makePrimitive(7)], makeManifest(3), instances);
+        const resource = new MeshletResource([makePrimitive(5), makePrimitive(7)], makeManifest(3), instances);
         expect(resource.totalMeshlets).to.equal(12);
         expect(resource.instances).to.be.an.instanceof(MeshletInstanceList);
         expect(Array.from(resource.instances.primIndex)).to.deep.equal([0, 1]);
@@ -163,7 +170,7 @@ describe('MeshletResource', function () {
     });
 
     it('defaults to no placements and releases its data on destroy', function () {
-        const resource = new MeshletResource(null, [makePrimitive(1)], makeManifest(1));
+        const resource = new MeshletResource([makePrimitive(1)], makeManifest(1));
         expect(resource.instances.count).to.equal(0);
         resource.destroy();
         expect(resource.primitives).to.deep.equal([]);

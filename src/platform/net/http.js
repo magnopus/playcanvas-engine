@@ -91,7 +91,7 @@ class Http {
      * Persistent cache for GET responses, or null for none. Asynchronous GET requests for URLs the
      * cache accepts are answered from it when the whole response is stored, and stored in it when
      * they succeed. Requests with `options.cache` or `options.byteCache` set to false, with a
-     * `Range` header, or for an XML document bypass it. Prefer setting it via
+     * `Range` header, or for an XML document or response bypass it. Prefer setting it via
      * {@link ResourceLoader#byteCache}.
      *
      * @type {ByteCache|null}
@@ -181,7 +181,8 @@ class Http {
      * @param {number} [options.maxRetries] - If options.retry is true this specifies the maximum number of retries. Defaults to 5.
      * @param {number} [options.maxRetryDelay] - If options.retry is true this specifies the maximum amount of time to wait between retries in milliseconds. Defaults to 5000.
      * @param {EventHandler} [options.progress] - Object to use for firing progress events.
-     * @param {boolean} [options.byteCache] - If false, the request bypasses {@link Http#byteCache}.
+     * @param {boolean} [options.byteCache] - If false, the request bypasses the persistent cache
+     * set with {@link ResourceLoader#byteCache}.
      * @param {HttpResponseCallback} callback - The callback used when the response has returned. Passed (err, data)
      * where data is the response (format depends on response type: text, Object, ArrayBuffer, XML) and
      * err is the error code.
@@ -619,7 +620,8 @@ class Http {
     _storeInCache(url, xhr, contentType) {
         const cache = this.byteCache;
         const response = xhr.response;
-        if (!cache || response == null) return;
+        // an XML response is delivered as responseXML, which a cache hit cannot reproduce
+        if (!cache || response == null || contentType === Http.ContentType.XML) return;
         switch (xhr.responseType) {
             case Http.ResponseType.ARRAY_BUFFER:
                 cache.putFile(url, response, contentType);

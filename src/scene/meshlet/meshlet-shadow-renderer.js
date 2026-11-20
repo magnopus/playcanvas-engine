@@ -9,15 +9,17 @@ import { Mat4 } from '../../core/math/mat4.js';
 import { math } from '../../core/math/math.js';
 import { Vec3 } from '../../core/math/vec3.js';
 import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, ROOT_LIST_U32S, claimWordCount } from './constants.js';
+import { casterVolumePlanes, sliceSphere } from './meshlet-caster-volume.js';
 import { MeshletShadowView } from './meshlet-shadow-view.js';
+import { CASCADE_REUSE_DRIFT } from '../renderer/shadow-renderer-directional.js';
 
 /**
  * @import { Camera } from '../camera.js'
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { Layer } from '../layer.js'
  * @import { Light } from '../light.js'
+ * @import { MeshletCuller } from './meshlet-culler.js'
  * @import { MeshletDirector } from './meshlet-director.js'
- * @import { StorageBuffer } from '../../platform/graphics/storage-buffer.js'
  */
 
 // a light shining straight along the horizon has no vertical component to divide by; the
@@ -27,159 +29,18 @@ const MIN_LIGHT_VERTICAL = 1e-3;
 // bytes per u32 of a word-addressed buffer
 const BYTES_PER_WORD = 4;
 
+// PCF filter reach plus a little, in shadow-map texels: receivers this close outside the slice's
+// outline still sample casters inside it
+const CASTER_VOLUME_TEXELS = 4;
+
 const _viewProj = new Mat4();
 const _view = new Mat4();
 const _frustum = new Frustum();
 const _planes = new Float32Array(24);
 const _viewDir = new Vec3();
 const _center = new Vec3();
-const _tmp = new Vec3();
 const _casterBox = new BoundingBox();
-
-// caster volume scratch (see _setCasterVolume)
 const _sliceCorners = Array.from({ length: 8 }, () => new Vec3());
-const _lightDir = new Vec3();
-const _axisU = new Vec3();
-const _axisV = new Vec3();
-const _polyA = [];
-const _polyB = [];
-const _hullPoints = [];
-const _hullOrder = [];
-const _hull = [];
-// receiver region planes (see _setCasterVolume): up to 6 box faces + 12 silhouette edges, as
-// (nx, ny, nz, d) keeping dot(n, p) <= d
-const _regionPlanes = new Float32Array(18 * 4);
-// slice planes in the same form, for testing world corners against the slice
-const _slicePlanes = new Float32Array(6 * 4);
-const _faceNormal = new Vec3();
-const _facing = [0, 0, 0, 0, 0, 0];
-const _edgeA = new Vec3();
-const _edgeB = new Vec3();
-
-// the six faces of a frustum slice, as corner indices of Camera#getFrustumCorners (near 0-3,
-// far 4-7, each in the same winding)
-const SLICE_FACES = [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
-
-// the world box: its corners as (x, y, z) picks of min (0) / max (1), its faces as (axis, side)
-// with the corner indices of each face, and its edges as corner index pairs with the two faces
-// they join
-const BOX_CORNERS = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]];
-const BOX_EDGES = [
-    [0, 1, 2, 4], [3, 2, 3, 4], [4, 5, 2, 5], [7, 6, 3, 5], // along x: faces -y/+y, -z/+z
-    [0, 3, 0, 4], [1, 2, 1, 4], [4, 7, 0, 5], [5, 6, 1, 5], // along y: faces -x/+x, -z/+z
-    [0, 4, 0, 2], [1, 5, 1, 2], [3, 7, 0, 3], [2, 6, 1, 3] //  along z: faces -x/+x, -y/+y
-];
-
-// PCF filter reach plus a little, in shadow-map texels: receivers this close outside the slice's
-// outline still sample casters inside it
-const CASTER_VOLUME_TEXELS = 4;
-
-// matches the drift a reused cascade tolerates before it refreshes (CASCADE_REUSE_DRIFT in
-// shadow-renderer-directional.js), as a fraction of the slice's bounding-sphere radius
-const CASCADE_REUSE_DRIFT = 0.1;
-
-/**
- * Clips a convex polygon (flat xyz triplets) to the half-space `dot(n, p) <= d`.
- *
- * @param {number[]} src - Input polygon.
- * @param {number[]} dst - Output polygon, overwritten.
- * @param {Float32Array} planes - Packed planes (nx, ny, nz, d).
- * @param {number} o - Offset of the plane in `planes`.
- */
-const clipPolygon = (src, dst, planes, o) => {
-    dst.length = 0;
-    const nx = planes[o], ny = planes[o + 1], nz = planes[o + 2], d = planes[o + 3];
-    const n = src.length / 3;
-    for (let i = 0; i < n; i++) {
-        const a = i * 3;
-        const b = ((i + 1) % n) * 3;
-        const da = nx * src[a] + ny * src[a + 1] + nz * src[a + 2] - d;
-        const db = nx * src[b] + ny * src[b + 1] + nz * src[b + 2] - d;
-        if (da <= 0) dst.push(src[a], src[a + 1], src[a + 2]);
-        if ((da <= 0) !== (db <= 0)) {
-            const t = da / (da - db);
-            dst.push(src[a] + (src[b] - src[a]) * t, src[a + 1] + (src[b + 1] - src[a + 1]) * t, src[a + 2] + (src[b + 2] - src[a + 2]) * t);
-        }
-    }
-};
-
-/**
- * Projects a point onto the light-space plane (axes {@link _axisU}, {@link _axisV}), appends it
- * to the hull points and returns its depth along {@link _lightDir}.
- *
- * @param {number} x - X.
- * @param {number} y - Y.
- * @param {number} z - Z.
- * @returns {number} The point's depth along the light.
- */
-const addHullPoint = (x, y, z) => {
-    _hullPoints.push(
-        _axisU.x * x + _axisU.y * y + _axisU.z * z,
-        _axisV.x * x + _axisV.y * y + _axisV.z * z
-    );
-    return _lightDir.x * x + _lightDir.y * y + _lightDir.z * z;
-};
-
-// orders projected hull points by x, then y
-const compareHullPoints = (a, b) => (_hullPoints[a * 2] - _hullPoints[b * 2]) || (_hullPoints[a * 2 + 1] - _hullPoints[b * 2 + 1]);
-
-// z of the cross product of (a - o) and (b - o): positive for a counter-clockwise turn
-const hullCross = (o, a, b) => (_hullPoints[a * 2] - _hullPoints[o * 2]) * (_hullPoints[b * 2 + 1] - _hullPoints[o * 2 + 1]) -
-    (_hullPoints[a * 2 + 1] - _hullPoints[o * 2 + 1]) * (_hullPoints[b * 2] - _hullPoints[o * 2]);
-
-/**
- * Writes the planes of the region a directional light can carry a caster's shadow into: the
- * box swept to infinity along the light. Its faces are the box faces that do not face away
- * from the light, plus a plane through each silhouette edge (between a lit and an unlit face),
- * parallel to the light.
- *
- * @param {Vec3} min - Box minimum.
- * @param {Vec3} max - Box maximum.
- * @param {Vec3} dir - Normalized light travel direction.
- * @param {Float32Array} out - Receives packed planes (nx, ny, nz, d), `dot(n, p) <= d` inside.
- * @returns {number} The number of planes written.
- */
-const sweptBoxPlanes = (min, max, dir, out) => {
-    // face f = axis * 2 + side, outward normal +-axis; its facing is the sign of dot(n, dir)
-    const facing = _facing;
-    facing[0] = -dir.x;
-    facing[1] = dir.x;
-    facing[2] = -dir.y;
-    facing[3] = dir.y;
-    facing[4] = -dir.z;
-    facing[5] = dir.z;
-    let count = 0;
-    for (let f = 0; f < 6; f++) {
-        if (facing[f] > 0) continue; // faces away from the light: the sweep passes through it
-        const axis = f >> 1;
-        const sign = (f & 1) ? 1 : -1;
-        const o = count++ * 4;
-        out[o] = axis === 0 ? sign : 0;
-        out[o + 1] = axis === 1 ? sign : 0;
-        out[o + 2] = axis === 2 ? sign : 0;
-        const bound = (f & 1) ? max : min;
-        out[o + 3] = sign * (axis === 0 ? bound.x : axis === 1 ? bound.y : bound.z);
-    }
-    for (const [ia, ib, fa, fb] of BOX_EDGES) {
-        if ((facing[fa] < 0) === (facing[fb] < 0) || facing[fa] === 0 || facing[fb] === 0) continue;
-        const ca = BOX_CORNERS[ia];
-        const cb = BOX_CORNERS[ib];
-        _edgeA.set(ca[0] ? max.x : min.x, ca[1] ? max.y : min.y, ca[2] ? max.z : min.z);
-        _edgeB.set(cb[0] ? max.x : min.x, cb[1] ? max.y : min.y, cb[2] ? max.z : min.z);
-        _faceNormal.sub2(_edgeB, _edgeA).cross(_faceNormal, dir).normalize();
-        // orient outwards: away from the box centre
-        const cx = (min.x + max.x) * 0.5 - _edgeA.x;
-        const cy = (min.y + max.y) * 0.5 - _edgeA.y;
-        const cz = (min.z + max.z) * 0.5 - _edgeA.z;
-        if (_faceNormal.x * cx + _faceNormal.y * cy + _faceNormal.z * cz > 0) _faceNormal.mulScalar(-1);
-        const o = count++ * 4;
-        out[o] = _faceNormal.x;
-        out[o + 1] = _faceNormal.y;
-        out[o + 2] = _faceNormal.z;
-        out[o + 3] = _faceNormal.dot(_edgeA);
-    }
-    return count;
-};
 
 /**
  * @typedef {object} ShadowLightEntry
@@ -364,19 +225,12 @@ class MeshletShadowRenderer {
         }
 
         // The engine's own selection, so meshlet casters appear for exactly the lights that get
-        // a shadow pass - keyed by scene camera, because directional shadow render data is per
-        // (light, camera) and a cascade's shadow camera only exists for the camera it was fitted
-        // for. Only one camera's lights are served (chosen below); a second camera would need its
-        // own set of views.
+        // a shadow pass. Directional shadow render data is per (light, camera), so only one
+        // camera's lights are served: the camera the meshlets are drawn for, which need not be
+        // the first the composition renders (an overlay, a picker), else the first.
         const desired = this._desired;
         desired.clear();
         const byCamera = director.renderer?.culler?.cameraDirShadowLights;
-        // Serve the camera the meshlets are culled and drawn for. The map's first entry is
-        // whichever camera the composition renders first, and in an application with several
-        // (a first-person rig, an overlay, a picker) that is not always the scene camera: the
-        // views then fit the wrong camera's cascades and the meshlets cast nothing where the
-        // player looks. Fall back to the first entry only when the director's camera has no
-        // shadowed directional light of its own.
         let sceneCamera = null;
         const preferred = director.cameraComponent?.camera ?? null;
         if (preferred && byCamera?.has(preferred)) {
@@ -432,13 +286,9 @@ class MeshletShadowRenderer {
 
         this.entries.forEach((entry) => {
             entry.views.forEach(view => view.setCasterBounds(this._casterBounds(entry, view)));
-            // A light with a static shadow map renders it once and then only on request. Its
-            // first request can come before any page is resident, so meshlets would never cast
-            // into it: ask for a re-render when the streamed content changed since the last one.
-            // Every page install or eviction changes it, so while the view streams the request is
-            // held until the content has been still for a moment (or has waited too long): a
-            // re-render per page would cost a shadow pass each frame, and cut the casters at a
-            // different LOD each time, which reads as the shadows flickering.
+            // A static shadow map can render before its casters' pages are resident, so request
+            // a re-render once the streamed content has changed and then settled (or waited too
+            // long): re-rendering per page install would cost a shadow pass each frame and flicker.
             const world = director.world;
             const time = now();
             if (entry.contentWorld !== world || entry.contentVersion !== world.contentVersion) {
@@ -553,19 +403,7 @@ class MeshletShadowRenderer {
                 return world;
             }
 
-            // the cascade's frustum slice, as a world-space sphere (the same construction the engine
-            // uses to fit the cascade itself)
-            const pts = camera.getFrustumCorners(near, far);
-            const camWorld = camera.node.getWorldTransform();
-            _center.set(0, 0, 0);
-            for (let i = 0; i < 8; i++) {
-                camWorld.transformPoint(pts[i], pts[i]);
-                _center.add(pts[i]);
-            }
-            _center.mulScalar(1 / 8);
-            for (let i = 0; i < 8; i++) {
-                radius = Math.max(radius, _tmp.sub2(pts[i], _center).length());
-            }
+            radius = sliceSphere(camera, near, far, _sliceCorners, _center);
         }
 
         // A caster h above the cascade shadows into it from h / tan(elevation) away
@@ -599,9 +437,8 @@ class MeshletShadowRenderer {
         const { director } = this;
         this.entries.forEach((entry) => {
             // A cached shadow map (SHADOWUPDATE_NONE) is not re-rendered this frame, so its cull
-            // chains would be pure cost: root admission alone scales with the casters inside each
-            // cascade, which over a large world is milliseconds per far cascade. The mode is read
-            // before the renderer consumes SHADOWUPDATE_THISFRAME, so a requested update still culls.
+            // chains would be pure cost. The mode is read before the renderer consumes
+            // SHADOWUPDATE_THISFRAME, so a requested update still culls.
             const { light } = entry;
             if (light.shadowUpdateMode === SHADOWUPDATE_NONE) return;
             const overrides = light.shadowUpdateOverrides;
@@ -683,19 +520,20 @@ class MeshletShadowRenderer {
     }
 
     /**
-     * Fills the culler's caster planes with a directional cascade's caster volume, or clears them
-     * (local lights, no camera, or a volume too complex to express - the light-space box alone
-     * then culls). The volume is the convex hull of the cascade's view slice, clipped to the
-     * world bounds swept along the light (the receivers any caster can reach), projected along
-     * the light: one plane per hull edge, parallel to the light,
-     * plus one rejecting casters beyond the slice's farthest point along the light. It is grown
-     * by the shadow filter's reach, the receivers' normal offset and, for a reused cascade, the
-     * drift it tolerates before it refreshes.
+     * Fills the culler's caster planes with a directional cascade's caster volume (see
+     * {@link casterVolumePlanes}), or clears them for local lights, without a camera, or when the
+     * volume is too complex to express - the light-space box alone then culls. The volume is
+     * grown by the shadow filter's reach, the receivers' normal offset and, for a reused cascade,
+     * the drift it tolerates before it refreshes.
+     *
+     * The receivers a meshlet caster can shadow lie in the world box swept along the light, not
+     * in the box itself: the ground a meshlet's shadow falls on is often other geometry (a floor,
+     * terrain) outside the meshlet world's bounds.
      *
      * @param {ShadowLightEntry} entry - The light entry.
      * @param {MeshletShadowView} view - The cascade view.
      * @param {number} orthoScale - Shadow-map texels per world unit.
-     * @param {import('./meshlet-culler.js').MeshletCuller} culler - The face's culler.
+     * @param {MeshletCuller} culler - The face's culler.
      * @private
      */
     _setCasterVolume(entry, view, orthoScale, culler) {
@@ -710,126 +548,13 @@ class MeshletShadowRenderer {
         const near = cascade === 0 ? camera._nearClip : (dists?.[cascade - 1] ?? 0) * (1 - light.cascadeBlend);
         if (!(far > near)) return;
 
-        const pts = camera.getFrustumCorners(near, far);
-        const camWorld = camera.node.getWorldTransform();
-        _center.set(0, 0, 0);
-        for (let i = 0; i < 8; i++) {
-            camWorld.transformPoint(pts[i], _sliceCorners[i]);
-            _center.add(_sliceCorners[i]);
-        }
-        _center.mulScalar(1 / 8);
-        let radius = 0;
-        for (let i = 0; i < 8; i++) radius = Math.max(radius, _tmp.sub2(_sliceCorners[i], _center).length());
-
-        // light-space axes: the light's travel direction and two perpendiculars
-        _lightDir.copy(view.shadowCamera._node.forward).normalize();
-        _axisU.cross(Math.abs(_lightDir.y) < 0.99 ? Vec3.UP : Vec3.RIGHT, _lightDir).normalize();
-        _axisV.cross(_lightDir, _axisU);
-
-        // The receivers a meshlet caster can shadow lie in the world box swept along the light -
-        // not in the box itself: the ground a meshlet's shadow falls on is often other geometry
-        // (a floor, terrain) outside the meshlet world's bounds. The volume is the slice's
-        // intersection with that region, whose vertices are the slice faces clipped to the
-        // region plus the box corners inside the slice (a box wholly inside the slice clips
-        // every slice face away).
-        const world = this.director.world.worldBounds;
-        const wmin = world.getMin();
-        const wmax = world.getMax();
-        const regionCount = sweptBoxPlanes(wmin, wmax, _lightDir, _regionPlanes);
-        _hullPoints.length = 0;
-        let maxDepth = -Infinity;
-        for (let f = 0; f < 6; f++) {
-            const face = SLICE_FACES[f];
-            let src = _polyA;
-            let dst = _polyB;
-            src.length = 0;
-            for (const index of face) {
-                const p = _sliceCorners[index];
-                src.push(p.x, p.y, p.z);
-            }
-
-            // the face's outward plane, for the corner test below
-            const p0 = _sliceCorners[face[0]];
-            _faceNormal.cross(_edgeA.sub2(_sliceCorners[face[1]], p0), _edgeB.sub2(_sliceCorners[face[2]], p0)).normalize();
-            if (_faceNormal.dot(_tmp.sub2(_center, p0)) > 0) _faceNormal.mulScalar(-1);
-            _slicePlanes[f * 4] = _faceNormal.x;
-            _slicePlanes[f * 4 + 1] = _faceNormal.y;
-            _slicePlanes[f * 4 + 2] = _faceNormal.z;
-            _slicePlanes[f * 4 + 3] = _faceNormal.dot(p0);
-
-            for (let r = 0; r < regionCount && src.length; r++) {
-                clipPolygon(src, dst, _regionPlanes, r * 4);
-                [src, dst] = [dst, src];
-            }
-            for (let i = 0; i < src.length; i += 3) maxDepth = Math.max(maxDepth, addHullPoint(src[i], src[i + 1], src[i + 2]));
-        }
-        const eps = 1e-4 * (radius + 1);
-        for (const [cx, cy, cz] of BOX_CORNERS) {
-            const x = cx ? wmax.x : wmin.x;
-            const y = cy ? wmax.y : wmin.y;
-            const z = cz ? wmax.z : wmin.z;
-            let inside = true;
-            for (let f = 0; f < 6 && inside; f++) {
-                const o = f * 4;
-                inside = _slicePlanes[o] * x + _slicePlanes[o + 1] * y + _slicePlanes[o + 2] * z <= _slicePlanes[o + 3] + eps;
-            }
-            if (inside) maxDepth = Math.max(maxDepth, addHullPoint(x, y, z));
-        }
-
-        const planes = culler.casterPlanes;
-        if (_hullPoints.length < 6) {
-            // the slice sees nothing any meshlet can shadow, so nothing casts
-            planes.fill(0, 0, 4);
-            planes[3] = -1e30;
-            culler.casterPlaneCount = 1;
-            return;
-        }
-
-        // convex hull of the projected points (Andrew's monotone chain, counter-clockwise)
-        const count = _hullPoints.length / 2;
-        _hullOrder.length = count;
-        for (let i = 0; i < count; i++) _hullOrder[i] = i;
-        _hullOrder.sort(compareHullPoints);
-        _hull.length = 0;
-        for (let pass = 0; pass < 2; pass++) {
-            const start = _hull.length;
-            for (let k = 0; k < count; k++) {
-                const i = _hullOrder[pass === 0 ? k : count - 1 - k];
-                while (_hull.length >= start + 2 && hullCross(_hull[_hull.length - 2], _hull[_hull.length - 1], i) <= 0) _hull.pop();
-                _hull.push(i);
-            }
-            _hull.pop();
-        }
-        const edges = _hull.length;
-        if (edges < 3 || edges + 1 > CULL_PARAMS.MAX_CASTER_PLANES) return;
-
+        const radius = sliceSphere(camera, near, far, _sliceCorners, _center);
         let margin = CASTER_VOLUME_TEXELS / orthoScale + Math.max(light._normalOffsetBias, 0);
         if ((light.cascadeUpdateIntervals?.[cascade] ?? 1) > 1) margin += CASCADE_REUSE_DRIFT * radius;
 
-        for (let e = 0; e < edges; e++) {
-            const a = _hull[e];
-            const b = _hull[(e + 1) % edges];
-            const ax = _hullPoints[a * 2], ay = _hullPoints[a * 2 + 1];
-            // inward (left) normal of a counter-clockwise edge
-            let nx = -(_hullPoints[b * 2 + 1] - ay);
-            let ny = _hullPoints[b * 2] - ax;
-            const len = Math.hypot(nx, ny);
-            if (!(len > 0)) return;
-            nx /= len;
-            ny /= len;
-            const o = e * 4;
-            planes[o] = nx * _axisU.x + ny * _axisV.x;
-            planes[o + 1] = nx * _axisU.y + ny * _axisV.y;
-            planes[o + 2] = nx * _axisU.z + ny * _axisV.z;
-            planes[o + 3] = -(nx * ax + ny * ay) + margin;
-        }
-        // casters beyond every receiver along the light shadow nothing in the slice
-        const o = edges * 4;
-        planes[o] = -_lightDir.x;
-        planes[o + 1] = -_lightDir.y;
-        planes[o + 2] = -_lightDir.z;
-        planes[o + 3] = maxDepth + margin;
-        culler.casterPlaneCount = edges + 1;
+        const world = this.director.world.worldBounds;
+        culler.casterPlaneCount = casterVolumePlanes(_sliceCorners, _center, radius, view.shadowCamera._node.forward,
+            world.getMin(), world.getMax(), margin, culler.casterPlanes, CULL_PARAMS.MAX_CASTER_PLANES);
     }
 
     /**
@@ -843,11 +568,8 @@ class MeshletShadowRenderer {
      * The face's pixel height comes from the render target and its viewport rect, which covers
      * both a cascade's slot in the directional map and a local light's tile in the clustered
      * shadow atlas. Before the first shadow render there is no target yet, so the light's
-     * nominal resolution stands in.
-     *
-     * Cross-check for the ortho case: with a 2x2 cascade grid (viewport w = 0.5) and
-     * orthoHeight = radius this is `0.25 * shadowResolution / radius`, exactly the engine's own
-     * texel-snapping constant in shadow-renderer-directional.js.
+     * nominal resolution stands in. For a cascade this is the texel rate the engine snaps the
+     * cascade to in shadow-renderer-directional.js.
      *
      * @param {Light} light - The light.
      * @param {MeshletShadowView} view - The face's view.
@@ -899,7 +621,7 @@ class MeshletShadowRenderer {
         const views = [];
         for (let c = 0; c < faces; c++) {
             const view = new MeshletShadowView(
-                this.device, director.world, director.renderer, light, c, camera,
+                this.device, director.world, light, c, camera,
                 {
                     cullShaders: director.cullShaders,
                     capCarry: director.takeShadowCapCarry(light.id, c),

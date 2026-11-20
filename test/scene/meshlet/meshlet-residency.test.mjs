@@ -24,7 +24,10 @@ const makeWorld = (slots, pages, installBytes = 4 * PAGE) => ({
         write() {
             this.flushes++;
         } },
-    requestsBuffer: { impl: { buffer: {} } },
+    requestsBuffer: { clears: 0,
+        clear() {
+            this.clears++;
+        } },
     streamInfo: [{ resource: { manifest: { pageTable: new Uint32Array(pages * 8), pageSizeBytes: PAGE, rootPages: [0], blobs: [{ uri: 'r.dat' }] } }, pageBase: 0, baseUrl: 'x/' }]
 });
 const device = { getCommandEncoder: () => ({ clearBuffer() {} }), createBufferImpl: () => ({ allocate() {}, destroy() {}, buffer: null }) };
@@ -85,7 +88,7 @@ describe('MeshletResidency', function () {
 
     it('fetches every root page at root priority and pins it for good', async function () {
         const world = makeWorld(4, 6);
-        world.cut = { rootPages: [0, 2] };
+        world.rootPages = [0, 2];
         const residency = new MeshletResidency(device, world);
         const fetches = [];
         residency._streams[0].fetcher = {
@@ -116,7 +119,7 @@ describe('MeshletResidency', function () {
 
     it('pins a demand-installed root page too', function () {
         const world = makeWorld(4, 6);
-        world.cut = { rootPages: [3] };
+        world.rootPages = [3];
         const residency = new MeshletResidency(device, world);
         residency._installPage(3, words(3), false);
         expect(residency.slotPinned[world.residency[3]]).to.equal(1);
@@ -125,30 +128,38 @@ describe('MeshletResidency', function () {
 
     it('pins only the roots the pool can hold beside a demand reserve, and reports the rest', function () {
         const world = makeWorld(4, 10);
-        world.cut = { rootPages: [0, 1, 2, 3, 4] };
+        world.rootPages = [0, 1, 2, 3, 4];
         const residency = new MeshletResidency(device, world);
         // a pool below roots + demand reserve keeps half its slots for demand
         expect(residency.rootShortfallPages).to.equal(3);
         const roomy = makeWorld(8, 7);
-        roomy.cut = { rootPages: [0, 1, 2, 3, 4] };
+        roomy.rootPages = [0, 1, 2, 3, 4];
         const fits = new MeshletResidency(device, roomy);
         expect(fits.rootShortfallPages, '8 slots - reserve of 2 non-root pages = 6 pinnable').to.equal(0);
         residency.destroy();
         fits.destroy();
     });
 
-    it('marks a stream dead when its roots cannot be fetched', async function () {
-        const world = makeWorld(4, 6);
-        world.cut = { rootPages: [0] };
-        const residency = new MeshletResidency(device, world);
-        residency._streams[0].fetcher = {
-            buildRuns: pages => [{ blob: 0, offset: 0, length: PAGE, pages: pages.map(p => ({ localPage: p, byteOffset: 0 })) }],
-            fetchRange: () => Promise.reject(Object.assign(new Error('not found'), { status: 404 }))
+    it('marks a stream dead the first time its roots cannot be fetched, whatever the failure', async function () {
+        const failRoots = async (status) => {
+            const world = makeWorld(4, 6);
+            world.rootPages = [0];
+            const residency = new MeshletResidency(device, world);
+            residency._streams[0].fetcher = {
+                buildRuns: pages => [{ blob: 0, offset: 0, length: PAGE, pages: pages.map(p => ({ localPage: p, byteOffset: 0 })) }],
+                fetchRange: () => Promise.reject(Object.assign(new Error('failed'), { status }))
+            };
+            await residency.loadRoots();
+            return residency;
         };
-        await residency.loadRoots();
-        expect(residency._streams[0].dead).to.equal(true);
-        expect(residency.inFlight.size).to.equal(0);
-        residency.destroy();
+        const residencies = await Promise.all([failRoots(404), failRoots(503)]);
+        for (const residency of residencies) {
+            expect(residency._streams[0].dead).to.equal(true);
+            expect(residency._streams[0].failures, 'one failure is enough').to.equal(1);
+            expect(residency.inFlight.size).to.equal(0);
+            expect(residency._streams[0].rootsPending).to.equal(0);
+            residency.destroy();
+        }
     });
 
     it('turns request marks into touches, protection and a bounded fetch queue', function () {
@@ -269,7 +280,7 @@ describe('MeshletResidency', function () {
         first.slotLastUsed[world.residency[9]] = 40;
 
         const smaller = makeWorld(4, 6);   // pages 6..9 dropped
-        smaller.cut = { rootPages: [0] };  // pins follow the new world's roots
+        smaller.rootPages = [0];  // pins follow the new world's roots
         smaller.adoptedPages = 6;
         smaller.residency.set(world.residency.subarray(0, 6));
         const carried = new MeshletResidency(device, smaller, { slotPage: first.slotPage, slotPinned: first.slotPinned, slotLastUsed: first.slotLastUsed, frame: first.frame });
@@ -289,7 +300,7 @@ describe('MeshletResidency', function () {
 
         // same page count, but the resource owning pages 6..9 changed: only 0..5 carry
         const rebuilt = makeWorld(4, 10);
-        rebuilt.cut = { rootPages: [0] };
+        rebuilt.rootPages = [0];
         rebuilt.adoptedPages = 6;
         rebuilt.residency.set(world.residency.subarray(0, 6));
         const carried = new MeshletResidency(device, rebuilt, { slotPage: first.slotPage, slotPinned: first.slotPinned, slotLastUsed: first.slotLastUsed, frame: first.frame });
@@ -319,7 +330,8 @@ describe('MeshletResidency', function () {
         it('fetches the floor beside the roots and becomes playable once it is installed', async function () {
             const world = makeWorld(32, 10);
             world.streamInfo[0].resource.manifest.sloppyFlags = true;
-            world.cut = { rootPages: [0], floorPages: [0, 5, 3, 7] };
+            world.rootPages = [0];
+            world.cut = { floorPages: [0, 5, 3, 7] };
             const residency = new MeshletResidency(device, world);
             const fetched = [];
             residency._streams[0].fetcher = instantFetcher(fetched);
@@ -342,7 +354,8 @@ describe('MeshletResidency', function () {
             // 8 slots: one root, a demand reserve of 2 (a quarter of the pool), 5 for the floor
             const world = makeWorld(8, 20);
             world.streamInfo[0].resource.manifest.sloppyFlags = true;
-            world.cut = { rootPages: [0], floorPages: [0, 9, 8, 7, 6, 5, 4, 3, 2] };
+            world.rootPages = [0];
+            world.cut = { floorPages: [0, 9, 8, 7, 6, 5, 4, 3, 2] };
             const residency = new MeshletResidency(device, world);
             const fetched = [];
             residency._streams[0].fetcher = instantFetcher(fetched);
@@ -359,7 +372,8 @@ describe('MeshletResidency', function () {
         it('stops waiting for a floor page whose fetch failed', async function () {
             const world = makeWorld(32, 10);
             world.streamInfo[0].resource.manifest.sloppyFlags = true;
-            world.cut = { rootPages: [], floorPages: [4] };
+            world.rootPages = [];
+            world.cut = { floorPages: [4] };
             const residency = new MeshletResidency(device, world);
             residency._streams[0].fetcher = { ...instantFetcher(), fetchRange: () => Promise.reject(Object.assign(new Error('boom'), { status: 500 })) };
             residency.loadRoots();
@@ -388,7 +402,8 @@ describe('MeshletResidency', function () {
             const a = { manifest: manifest(10) };
             const b = { manifest: manifest(10) };
             world.streamInfo = [{ resource: a, pageBase: 0, baseUrl: 'a/' }, { resource: b, pageBase: 10, baseUrl: 'b/' }];
-            world.cut = { rootPages: [0, 10], floorPages: [0, 10, 3, 4, 13] };
+            world.rootPages = [0, 10];
+            world.cut = { floorPages: [0, 10, 3, 4, 13] };
             const residency = new MeshletResidency(device, world);
             // stream b answers at once, stream a never does
             residency._streams[0].fetcher = { ...instantFetcher(), fetchRange: () => new Promise(() => {}) };
@@ -407,7 +422,8 @@ describe('MeshletResidency', function () {
         it('counts a resource whose stream died as settled and failed', async function () {
             const world = makeWorld(32, 10);
             world.streamInfo[0].resource.manifest.sloppyFlags = true;
-            world.cut = { rootPages: [0], floorPages: [0, 4] };
+            world.rootPages = [0];
+            world.cut = { floorPages: [0, 4] };
             const residency = new MeshletResidency(device, world);
             residency._streams[0].fetcher = { ...instantFetcher(), fetchRange: () => Promise.reject(Object.assign(new Error('gone'), { status: 404 })) };
             residency.loadRoots();
@@ -425,7 +441,8 @@ describe('MeshletResidency', function () {
             const flagged = { manifest: manifest(10, true) };
             const old = { manifest: manifest(10, false) };
             world.streamInfo = [{ resource: flagged, pageBase: 0, baseUrl: 'a/' }, { resource: old, pageBase: 10, baseUrl: 'b/' }];
-            world.cut = { rootPages: [], floorPages: [] };
+            world.rootPages = [];
+            world.cut = { floorPages: [] };
             const residency = new MeshletResidency(device, world);
             for (const stream of residency._streams) stream.fetcher = { ...instantFetcher(), fetchRange: () => new Promise(() => {}) };
             residency.loadRoots();
@@ -451,7 +468,8 @@ describe('MeshletResidency', function () {
 
         it('waits for the view to converge on bakes without sloppy flags', function () {
             const world = makeWorld(32, 10);
-            world.cut = { rootPages: [], floorPages: [] };
+            world.rootPages = [];
+            world.cut = { floorPages: [] };
             const residency = new MeshletResidency(device, world);
             residency._streams[0].fetcher = instantFetcher();
             residency.loadRoots();
