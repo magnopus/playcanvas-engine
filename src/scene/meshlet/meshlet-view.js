@@ -39,7 +39,7 @@ const INDEX_GROW_STEP = 1.5;
 // starve thresholds, so it holds its current error scale
 const ROOT_REJECTED_PRESSURE = 0.7;
 
-// bytes per vec4 row of the cull parameter block, and per u32 of a word-addressed buffer
+// bytes per u32 of a word-addressed buffer
 const BYTES_PER_WORD = 4;
 
 // Initial cut queue entries (8 bytes each). It grows to the queued-task demand by readback; an
