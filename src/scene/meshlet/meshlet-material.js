@@ -1,15 +1,15 @@
 import { CULLFACE_NONE } from '../../platform/graphics/constants.js';
 import { ShaderMaterial } from '../materials/shader-material.js';
-import { MESHLET_COLOR_MODE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS } from './constants.js';
+import { MESHLET_BUCKET_OPAQUE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS } from './constants.js';
 import {
-    meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL, meshletMaterialTableWGSL,
+    meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL,
     meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL
 } from './shaders/meshlet-page-wgsl.js';
 
 /**
- * The meshlet debug material (colour modes: material baseColor / LOD tint / per-meshlet hash):
- * a ShaderMaterial with the same page-pool vertex pull as the lit path (shared snippets in
- * shaders/meshlet-page-wgsl.js) but a flat lambert fragment. Normal shading uses the
+ * The meshlet debug material (MESHLET_COLOR_MODE.MESHLET): each meshlet in a hashed colour,
+ * with the same page-pool vertex pull as the lit path (shared snippets in
+ * shaders/meshlet-page-wgsl.js) and a flat lambert fragment. Normal shading uses the
  * engine-lit StandardMaterial (meshlet-lit-material.js); the world swaps between the two via
  * setColorMode.
  *
@@ -21,12 +21,10 @@ const vertexWGSL = /* wgsl */ `
 
     uniform matrix_viewProjection : mat4x4f;
     uniform pageSizeWords : u32;
-    uniform colorMode : u32;
 
     ${meshletDataWGSL}
     ${meshletObjectDataWGSL}
     ${meshletRecordsWGSL('read')}
-    ${meshletMaterialTableWGSL}
     var<storage, read> pagePool : array<u32>;
     var<storage, read> residency : array<u32>;
 
@@ -80,11 +78,7 @@ const vertexWGSL = /* wgsl */ `
         let normalMatrix = mat3x3f(c0, cross(m2, m0), cross(m0, m1)) * select(1.0, -1.0, dot(m0, c0) < 0.0);
         output.vNormal = normalize(normalMatrix * meshletDecodeOct16(pagePool[pageLayout.normalBase + vertex]));
 
-        if (uniform.colorMode == ${MESHLET_COLOR_MODE.MESHLET}u) {
-            output.vColor = meshletColor(meshlet);
-        } else {
-            output.vColor = materialTable[primitive.material].baseColor.rgb;
-        }
+        output.vColor = meshletColor(meshlet);
 
         return output;
     }
@@ -118,7 +112,7 @@ const fragmentWGSL = /* wgsl */ `
  * @ignore
  */
 function createMeshletMaterial(bucket) {
-    const doubleSided = bucket !== 0;
+    const doubleSided = bucket !== MESHLET_BUCKET_OPAQUE;
     const material = new ShaderMaterial({
         uniqueName: ['MeshletForward', 'MeshletForwardTwoSided', 'MeshletForwardMasked'][bucket],
         vertexWGSL: vertexWGSL,

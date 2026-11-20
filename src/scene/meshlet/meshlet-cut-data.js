@@ -5,6 +5,9 @@ import {
     MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_SLOPPY, MESHLET_FLAG_TWO_SIDED
 } from './constants.js';
 
+// fields every member of a coarse group shares with its representative
+const GROUP_FIELDS = [M.CLUSTER_ERROR, M.GROUP_SPHERE, M.GROUP_SPHERE + 1, M.GROUP_SPHERE + 2, M.GROUP_SPHERE + 3];
+
 /**
  * Recover complete replacement groups from the baker's level-major cluster order. Parent
  * representatives start contiguous coarse groups. Validate the shared error/bounds before
@@ -45,7 +48,7 @@ function buildMeshletGroups(data) {
         }
         for (let m = start; m < end; m++) {
             const base = m * MESHLET_DATA_U32S;
-            for (const field of [M.CLUSTER_ERROR, M.GROUP_SPHERE, M.GROUP_SPHERE + 1, M.GROUP_SPHERE + 2, M.GROUP_SPHERE + 3]) {
+            for (const field of GROUP_FIELDS) {
                 if (data[base + field] !== data[row + field]) throw new Error('Meshlet DAG coarse group has inconsistent error or bounds.');
             }
         }
@@ -121,12 +124,30 @@ class U32Builder {
 
     /** @param {...number} values - Words to append. */
     push(...values) {
-        if (this.length + values.length > this.data.length) {
-            const grown = new Uint32Array(Math.max(this.data.length * 2, this.length + values.length));
-            grown.set(this.data.subarray(0, this.length));
-            this.data = grown;
-        }
+        this._reserve(values.length);
         for (let i = 0; i < values.length; i++) this.data[this.length++] = values[i];
+    }
+
+    /**
+     * Appends one word, without the rest-array allocation of {@link push}: the build makes tens
+     * of millions of these calls on a large world.
+     *
+     * @param {number} value - The word.
+     */
+    push1(value) {
+        if (this.length === this.data.length) this._reserve(1);
+        this.data[this.length++] = value;
+    }
+
+    /**
+     * @param {number} count - Words about to be appended.
+     * @private
+     */
+    _reserve(count) {
+        if (this.length + count <= this.data.length) return;
+        const grown = new Uint32Array(Math.max(this.data.length * 2, this.length + count));
+        grown.set(this.data.subarray(0, this.length));
+        this.data = grown;
     }
 
     /** @returns {Uint32Array} The words pushed so far. */
@@ -179,17 +200,12 @@ class MeshletCutData {
         const floorPages = new Map();
         this.rootIndices = [0, 0, 0];
         this.rootRecords = 0;
-        // Per primitive, in its meshlet index range: [first] = the lowest LOD level holding a root
-        // (terminal groups leave roots below the top), [first + level] = where that level starts
-        // (level-major order). Compaction starts each instance at the finer of its cut's finest
-        // level and that root level, instead of scanning every LOD.
-        const levelStarts = new Uint32Array(records.count);
-        // Compaction scans every LOD. Keep its two links contiguous instead of fetching
-        // them from 128-byte geometry records for every instance of a primitive.
+        // each meshlet's two cut links (parent and birth group), contiguous so the cut emit reads
+        // them without fetching the 128-byte geometry records
         const topology = new Uint32Array(records.count * 2);
         const instanceCount = instances.count;
         // Leading words [0, instanceCount): each instance's root header offset in cutGroups.
-        for (let i = 0; i < instanceCount; i++) words.push(0);
+        for (let i = 0; i < instanceCount; i++) words.push1(0);
         for (let instance = 0; instance < instanceCount; instance++) {
             const first = instances.first(instance);
             const count = instances.meshletCount(instance);
@@ -197,13 +213,6 @@ class MeshletCutData {
             if (!primitive) {
                 const source = records.get(first, count);
                 const { groups, roots } = buildMeshletGroups(source);
-                let minRootLevel = Infinity;
-                for (const root of roots) minRootLevel = Math.min(minRootLevel, source[root * MESHLET_DATA_U32S + M.LOD_LEVEL]);
-                for (let m = count - 1; m > 0; m--) {
-                    const level = source[m * MESHLET_DATA_U32S + M.LOD_LEVEL];
-                    if (level !== source[(m - 1) * MESHLET_DATA_U32S + M.LOD_LEVEL]) levelStarts[first + level] = m;
-                }
-                levelStarts[first] = Number.isFinite(minRootLevel) ? minRootLevel : 0;
                 for (const root of roots) rootPages.add(source[root * MESHLET_DATA_U32S + M.PAGE]);
                 collectFloorPages(source, groups, floorPages);
                 for (let m = 0; m < count; m++) source[m * MESHLET_DATA_U32S + M.BIRTH_GROUP] = MESHLET_NO_PARENT;
@@ -272,12 +281,15 @@ class MeshletCutData {
                     // the group refines and their own group does not.
                     words.push(first + group.start, parents.size, offset + 8 + parents.size * 3, pages.size,
                         fineCost[0], coarseCost[0], fineCost[1], coarseCost[1]);
-                    for (const [parent, members] of parents) words.push(parent, ...costs(members));
-                    for (const page of pages) words.push(page);
-                    words.push(owned.length);
-                    for (const task of owned) words.push(task);
-                    words.push(group.children.length);
-                    for (const child of group.children) words.push(child);
+                    for (const [parent, members] of parents) {
+                        const [indices, records] = costs(members);
+                        words.push(parent, indices, records);
+                    }
+                    for (const page of pages) words.push1(page);
+                    words.push1(owned.length);
+                    for (const task of owned) words.push1(task);
+                    words.push1(group.children.length);
+                    for (const child of group.children) words.push1(child);
                     if (words.length !== offset + 8 + parents.size * 3 + pages.size + 1 + owned.length + 1 + group.children.length) {
                         throw new Error('MeshletCutData: task row layout mismatch.');
                     }
@@ -294,14 +306,14 @@ class MeshletCutData {
                 // lists of MESHLET_CUT_ROOT_CHUNK (the chunk count, then each list's count and
                 // primitive-local indices), which the admission queues for the emit pass.
                 words.push(first, 0, rootOffset + 8, pages.size, rootCost[0], bucket, rootCost[1], 0);
-                for (const page of pages) words.push(page);
-                words.push(rootOwned.length);
-                for (const task of rootOwned) words.push(task);
-                words.push(Math.ceil(roots.length / MESHLET_CUT_ROOT_CHUNK));
+                for (const page of pages) words.push1(page);
+                words.push1(rootOwned.length);
+                for (const task of rootOwned) words.push1(task);
+                words.push1(Math.ceil(roots.length / MESHLET_CUT_ROOT_CHUNK));
                 for (let r = 0; r < roots.length; r += MESHLET_CUT_ROOT_CHUNK) {
                     const chunk = roots.slice(r, r + MESHLET_CUT_ROOT_CHUNK);
-                    words.push(chunk.length);
-                    for (const root of chunk) words.push(root);
+                    words.push1(chunk.length);
+                    for (const root of chunk) words.push1(root);
                 }
                 for (let m = 0; m < count; m++) {
                     topology[(first + m) * 2] = source[m * MESHLET_DATA_U32S + M.PARENT];
@@ -329,13 +341,6 @@ class MeshletCutData {
         this.groups = create(words.view());
         this.selectionTopology = new StorageBuffer(device, Math.max(topology.byteLength, 16), BUFFERUSAGE_COPY_DST);
         if (topology.length) this.selectionTopology.write(0, topology);
-        this.levelStarts = new StorageBuffer(device, Math.max(levelStarts.byteLength, 16), BUFFERUSAGE_COPY_DST);
-        if (levelStarts.length) this.levelStarts.write(0, levelStarts);
-        // #if _DEBUG
-        // for inspection and tests only: 4 bytes per meshlet of the world, hundreds of MB in a
-        // large scene, so release builds keep only the GPU copy
-        this.levelStartsCpu = levelStarts;
-        // #endif
         this.rootPages = Array.from(rootPages).sort((a, b) => a - b);
         /**
          * Global pages of the playable floor (see {@link collectFloorPages}), roots included,
@@ -349,7 +354,6 @@ class MeshletCutData {
     destroy() {
         this.groups.destroy();
         this.selectionTopology.destroy();
-        this.levelStarts.destroy();
     }
 }
 

@@ -34,19 +34,24 @@ const hasMeshletExtension = (primitive) => {
 };
 
 const _nodePos = new Vec3();
+const _nodeMat = new Mat4();
+const _parentMat = new Mat4();
 const _nodeRot = new Quat();
 const _nodeScale = new Vec3();
 
 /**
  * Computes the document-space transform of every glTF node in the default scene (every node
- * when the document has no scene). Nodes outside it stay null: they are not placed.
+ * when the document has no scene). Nodes outside it are not placed. Held flat rather than one
+ * Mat4 per node: a bake can carry millions of placement nodes.
  *
  * @param {object} gltf - The glTF document.
- * @returns {(Mat4|null)[]} One world matrix per node index.
+ * @returns {{ matrices: Float32Array, placed: Uint8Array }} 16 floats per node index, and 1
+ * for each node in the scene.
  */
 const computeNodeWorldTransforms = (gltf) => {
     const nodes = gltf.nodes ?? [];
-    const world = new Array(nodes.length).fill(null);
+    const matrices = new Float32Array(nodes.length * 16);
+    const placed = new Uint8Array(nodes.length);
 
     // iterative depth-first walk: bakes can nest deep enough to overflow a recursive one
     const stack = [];
@@ -57,7 +62,7 @@ const computeNodeWorldTransforms = (gltf) => {
             const index = stack.pop();
             const node = nodes[index];
             if (!node) continue;
-            const m = new Mat4();
+            const m = _nodeMat;
             if (node.matrix) {
                 m.set(node.matrix);
             } else {
@@ -69,8 +74,12 @@ const computeNodeWorldTransforms = (gltf) => {
                 _nodeScale.set(sc?.[0] ?? 1, sc?.[1] ?? 1, sc?.[2] ?? 1);
                 m.setTRS(_nodePos, _nodeRot, _nodeScale);
             }
-            if (parent >= 0) m.mul2(world[parent], m);
-            world[index] = m;
+            if (parent >= 0) {
+                _parentMat.data.set(matrices.subarray(parent * 16, parent * 16 + 16));
+                m.mul2(_parentMat, m);
+            }
+            matrices.set(m.data, index * 16);
+            placed[index] = 1;
             const children = node.children;
             if (children) {
                 for (let i = 0; i < children.length; i++) stack.push(children[i], index);
@@ -94,7 +103,7 @@ const computeNodeWorldTransforms = (gltf) => {
             if (!isChild[i]) walk(i);
         }
     }
-    return world;
+    return { matrices, placed };
 };
 
 const _scatterMat = new Mat4();
@@ -115,7 +124,8 @@ const _scatterScale = new Vec3();
 const readVecAccessor = (index, accessors, bufferViews, components) => {
     const accessor = accessors?.[index];
     if (!accessor) return null;
-    const data = GltfAccessor.getData(accessor, bufferViews, true);
+    // normalized integer ROTATION / SCALE (quantized scatters) are dequantized
+    const data = GltfAccessor.getDataFloat32(accessor, bufferViews);
     if (!data || data.length < components) return null;
     return data instanceof Float32Array ? data : Float32Array.from(data);
 };
@@ -241,6 +251,7 @@ const createMeshlets = (device, gltf, bufferViews) => {
 
     // one instance per (node placement, meshlet primitive)
     const nodeWorld = computeNodeWorldTransforms(gltf);
+    const nodeMatrix = (/** @type {number} */ nodeIndex) => _nodeMat.set(nodeWorld.matrices.subarray(nodeIndex * 16, nodeIndex * 16 + 16));
     const primsByMesh = new Map();
     primitives.forEach((p, i) => {
         let list = primsByMesh.get(p.meshIndex);
@@ -252,7 +263,7 @@ const createMeshlets = (device, gltf, bufferViews) => {
     // one transform per node or scatter entry, shared by the primitives of its mesh
     const instances = new MeshletInstanceListBuilder();
     gltf.nodes?.forEach((node, nodeIndex) => {
-        if (node.mesh === undefined || !nodeWorld[nodeIndex]) return;
+        if (node.mesh === undefined || !nodeWorld.placed[nodeIndex]) return;
         const list = primsByMesh.get(node.mesh);
         if (!list) return;
 
@@ -286,14 +297,14 @@ const createMeshlets = (device, gltf, bufferViews) => {
                 );
                 _scatterScale.set(s ? s[i * 3] : 1, s ? s[i * 3 + 1] : 1, s ? s[i * 3 + 2] : 1);
                 _scatterMat.setTRS(_scatterPos, _scatterRot, _scatterScale);
-                _scatterMat.mul2(nodeWorld[nodeIndex], _scatterMat);
+                _scatterMat.mul2(nodeMatrix(nodeIndex), _scatterMat);
                 const transform = instances.addTransform(_scatterMat.data, lightmap);
                 for (const primIndex of list) instances.add(primIndex, transform);
             }
             if (count > 0) return;
         }
 
-        const transform = instances.addTransform(nodeWorld[nodeIndex].data, lightmap);
+        const transform = instances.addTransform(nodeMatrix(nodeIndex).data, lightmap);
         for (const primIndex of list) instances.add(primIndex, transform);
     });
 

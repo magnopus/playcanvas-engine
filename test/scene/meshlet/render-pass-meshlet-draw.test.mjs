@@ -108,25 +108,44 @@ describe('RenderPassMeshletDraw', function () {
         expect(calls).to.deep.equal([7, 7, SHADER_FORWARD, SHADER_FORWARD]);
     });
 
-    it('claims the camera directional shadow passes once and releases them after the frame', function () {
+    it('claims the camera directional shadow passes once, without touching user before-passes', function () {
         const pass = new RenderPassMeshletDraw(app.graphicsDevice, renderer, 'MeshletDraw');
         const camera = cameraComponent.camera;
         const light = {};
         const shadowPass = { name: 'DirShadow' };
+        const userPass = { name: 'User' };
+        pass.beforePasses.push(userPass);
         renderer.culler.cameraDirShadowLights.set(camera, [light]);
         renderer._shadowRendererDirectional.getLightRenderPass = (l, c) => ((l === light && c === camera) ? shadowPass : null);
 
         pass.setup(cameraComponent, null, null, null);
         pass.frameUpdate();
-        expect(pass.beforePasses).to.deep.equal([shadowPass]);
+        expect(pass.internalBeforePasses).to.deep.equal([shadowPass]);
+        expect(pass.beforePasses).to.deep.equal([userPass]);
         expect(renderer.culler.dirLightShadows.get(light), 'claim registered for the scene passes').to.equal(camera);
 
         const second = new RenderPassMeshletDraw(app.graphicsDevice, renderer, 'MeshletDraw2');
         second.setup(cameraComponent, null, null, null);
         second.frameUpdate();
-        expect(second.beforePasses, 'already claimed this frame').to.deep.equal([]);
+        expect(second.internalBeforePasses, 'already claimed this frame').to.deep.equal([]);
 
-        pass.after();
-        expect(pass.beforePasses).to.deep.equal([]);
+        // the next frame collects them again rather than accumulating
+        renderer.culler.dirLightShadows.clear();
+        pass.frameUpdate();
+        expect(pass.internalBeforePasses).to.deep.equal([shadowPass]);
+    });
+
+    it('claims a light with shadow bounds for every camera, as the scene passes do', function () {
+        const pass = new RenderPassMeshletDraw(app.graphicsDevice, renderer, 'MeshletDraw');
+        const camera = cameraComponent.camera;
+        const light = { _shadowBounds: {} };
+        const shadowPass = { name: 'DirShadowBounds' };
+        renderer.culler.cameraDirShadowLights.set(camera, [light]);
+        renderer._shadowRendererDirectional.getLightRenderPass = (l, c) => ((l === light && c === null) ? shadowPass : null);
+
+        pass.setup(cameraComponent, null, null, null);
+        pass.frameUpdate();
+        expect(pass.internalBeforePasses).to.deep.equal([shadowPass]);
+        expect(renderer.culler.dirLightShadows.get(light)).to.equal(null);
     });
 });

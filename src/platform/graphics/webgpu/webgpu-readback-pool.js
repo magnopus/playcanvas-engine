@@ -30,9 +30,6 @@ class WebgpuReadbackPool {
      */
     _free = new Map();
 
-    /** @type {number} */
-    _inFlight = 0;
-
     /** @type {boolean} */
     _destroyed = false;
 
@@ -108,6 +105,7 @@ class WebgpuReadbackPool {
         const device = this.device;
         Debug.assert(!this._destroyed, 'WebgpuReadbackPool used after destroy');
 
+        Debug.assert(offset % 4 === 0 && size % 4 === 0, 'WebgpuReadbackPool: copyBufferToBuffer offset and size must be multiples of 4', offset, size);
         const stagingBuffer = this._borrow(size);
 
         // The copy is recorded on the current encoder NOW, so the bytes read are the storage
@@ -115,19 +113,16 @@ class WebgpuReadbackPool {
         // at the top of its update, before encoding this frame's work, reads last frame's result.
         const commandEncoder = device.getCommandEncoder();
         commandEncoder.copyBufferToBuffer(storageBuffer.impl.buffer, offset, stagingBuffer.buffer, 0, size);
-        this._inFlight++;
 
         return new Promise((resolve, reject) => {
             const read = () => {
                 // destroyed before the deferred map started: release the buffer, map nothing
                 if (this._destroyed) {
-                    this._inFlight--;
                     stagingBuffer.destroy(device);
                     reject(new Error('WebgpuReadbackPool destroyed before the read completed.'));
                     return;
                 }
                 device.mapBufferAsync(stagingBuffer.buffer, GPUMapMode.READ).then((mapped) => {
-                    this._inFlight--;
                     if (!mapped) {
                         stagingBuffer.destroy(device);
                         reject(new Error('Failed to map a pooled staging buffer for reading, most likely because the device was lost.'));

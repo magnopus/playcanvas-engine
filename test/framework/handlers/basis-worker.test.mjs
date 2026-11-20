@@ -7,7 +7,7 @@ import { PIXELFORMAT_DXT1, PIXELFORMAT_DXT5, PIXELFORMAT_RGBA8 } from '../../../
 import { transcodeKtx2 } from '../../../src/scene/meshlet/textures/meshlet-ktx2.js';
 
 describe('Basis texture array transcodes', function () {
-    const runWorker = async (formats, isTextureArray) => {
+    const runWorker = async (formats, isTextureArray, hasAlpha) => {
         const results = [];
         const selected = [];
         const self = {
@@ -66,7 +66,7 @@ describe('Basis texture array transcodes', function () {
                 type: 'transcode',
                 url: `mip-${flags}`,
                 data: new Uint8Array([flags]).buffer,
-                options: { isKTX2: true, isTextureArray, deviceDetails: { formats } }
+                options: { isKTX2: true, isTextureArray, hasAlpha, deviceDetails: { formats } }
             } });
         }
         for (const result of results) expect(result.err).to.equal(undefined);
@@ -78,6 +78,11 @@ describe('Basis texture array transcodes', function () {
         expect(selected).to.deep.equal([3, 3, 3, 3]);
         expect(results.map(result => result.data.format)).to.deep.equal(Array(4).fill(PIXELFORMAT_DXT5));
         expect(results.map(result => result.data.levels[0].byteLength)).to.deep.equal(Array(4).fill(16384));
+    });
+
+    it('uses the opaque blocks for every payload of an opaque texture array', async function () {
+        const { results } = await runWorker({ dxt: true, etc2: true }, true, false);
+        expect(results.map(result => result.data.format)).to.deep.equal(Array(4).fill(PIXELFORMAT_DXT1));
     });
 
     it('uses RGBA8 consistently without GPU compression support', async function () {
@@ -97,7 +102,7 @@ describe('Basis texture array transcodes', function () {
             options = requestOptions;
             callback(null, { format: PIXELFORMAT_DXT5, levels: [] });
             return true;
-        }, {}, new ArrayBuffer(0));
-        expect(options).to.deep.equal({ isKTX2: true, isTextureArray: true });
+        }, {}, new ArrayBuffer(0), false);
+        expect(options).to.deep.equal({ isKTX2: true, isTextureArray: true, hasAlpha: false });
     });
 });

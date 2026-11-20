@@ -216,7 +216,8 @@ function BasisWorker() {
         const width = basisFile.getWidth();
         const height = basisFile.getHeight();
         const levels = basisFile.getLevels();
-        const hasAlpha = !!options.isTextureArray || !!basisFile.getHasAlpha();
+        // a texture array's layers share one format: its alpha is the caller's, not each payload's
+        const hasAlpha = options.hasAlpha ?? (!!options.isTextureArray || !!basisFile.getHasAlpha());
         const isUASTC = !!options.isTextureArray || (basisFile.isUASTC && basisFile.isUASTC());
 
         // a six-face file is a cubemap; faces are transcoded into per-mip arrays

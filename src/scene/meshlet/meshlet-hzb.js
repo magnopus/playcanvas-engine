@@ -239,11 +239,9 @@ class MeshletHzb {
         this._reduceShader?.destroy();
         this._reduceShader = null;
         // the mip 0 shaders live in the program library's cache, shared with other pyramids;
-        // clearing the pass shader frees only this pass's quad uniforms and bind group
-        if (this.mip0Pass) {
-            this.mip0Pass.shader = null;
-            this.mip0Pass = null;
-        }
+        // destroying the pass frees only its quad, not the shader
+        this.mip0Pass?.destroy();
+        this.mip0Pass = null;
         this._mip0Target?.destroy();
         this._mip0Target = null;
         this.texture?.destroy();

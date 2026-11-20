@@ -44,6 +44,8 @@ import { MeshletTextureSource } from './meshlet-texture-source.js';
 
 const MESHLET_TEX_FAMILIES = ['srgb', 'srgba', 'normal', 'linear'];
 const FAMILY_IS_SRGB = [true, true, false, false];
+// only srgba carries alpha: the opaque families transcode to the smaller opaque formats (BC1)
+const FAMILY_HAS_ALPHA = [false, true, false, false];
 const TAIL_MAX_SIZE = 256;
 const MIN_MIP_SIZE = 4;
 /** Largest fine-pool texture a family allocates, whatever the budget says (one GPU resource). */
@@ -873,7 +875,7 @@ class MeshletTextures {
         const stillWanted = () => !this._destroyed && tex.slot >= 0 && fam.slotTex[tex.slot] === texIndex;
         tex.source.fetchRegion(tex.array.container.uri, r[0], r[1], FETCH_PRIORITY_FINE, stillWanted).then((bytes) => {
             if (!bytes || this._destroyed) return null;
-            return transcodeKtx2(this.transcode, this.device, bytes.slice(0));
+            return transcodeKtx2(this.transcode, this.device, bytes.slice(0), FAMILY_HAS_ALPHA[tex.family]);
         }).then((result) => {
             this._inFlight.delete(key);
             if (!result || this._destroyed) return;
@@ -1009,7 +1011,7 @@ class MeshletTextures {
                         if (mipSize > TAIL_MAX_SIZE || mipSize < MIN_MIP_SIZE) continue;
                         const bytes = source.sliceMip(tailBuffer, array.tail.byteOffset, array, layer, mip);
                         if (!bytes) continue;
-                        jobs.push(transcodeKtx2(this.transcode, this.device, bytes).then((result) => {
+                        jobs.push(transcodeKtx2(this.transcode, this.device, bytes, FAMILY_HAS_ALPHA[tex.family]).then((result) => {
                             if (this._destroyed) return;
                             this._createFamilyTextures(tex.family, result.format);
                             const level = this._tailLevel(tex.family, mipSize);

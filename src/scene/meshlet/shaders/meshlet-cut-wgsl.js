@@ -1,6 +1,6 @@
 import {
     CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_COUNTER, MESHLET_CUT_INVALID, MESHLET_CUT_ROOT_FLAG, MESHLET_DISPATCH_WIDTH,
-    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_NO_PARENT, PAGE_NOT_RESIDENT, PAGE_REQUEST, MESHLET_LEVEL_BIAS
+    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_NO_PARENT, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
 import { meshletCullVolumeWGSL } from './meshlet-cull-wgsl.js';
 import { meshletStructsWGSL, meshletDataWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
@@ -17,8 +17,6 @@ const cutShader = entry => /* wgsl */ `
     uniform totalPairs: u32;
     // bit base of the off-frustum refinement flags, after the pair and admission bits
     uniform freeBase: u32;
-    // word base of the per-instance finest-cut-level words, after every claim bit
-    uniform levelBase: u32;
     uniform recordCapacity: u32;
     uniform indexCapacity0: u32;
     uniform indexCapacity1: u32;
@@ -146,10 +144,6 @@ const cutShader = entry => /* wgsl */ `
             return false;
         }
         markBit(object.firstPairBit + first - firstMeshlet);
-        // this group's children (one level finer) are now selectable: compaction starts the
-        // instance no finer than the finest such level (see instanceCullWGSL)
-        let childLevel = meshletData[first].lodLevel - 1u;
-        atomicMax(&claimBits[uniform.levelBase + instance], ${MESHLET_LEVEL_BIAS}u - childLevel);
         return true;
     }
 
@@ -251,9 +245,7 @@ export const meshletCutQueueArgsWGSL = /* wgsl */ `
  * stage. A meshlet is drawn when the group it replaces (its parent) refined on-frustum and the
  * group it belongs to (its birth group) did not. Every group that refined was decided from the
  * queue, and every admitted instance queued its roots there, so the queue lists each candidate
- * once: a refined group's children, and the roots. This costs the size of the cut, where
- * compaction (instanceCullWGSL + compactMeshletsWGSL) scanned every DAG level of every admitted
- * instance from its finest refined level up.
+ * once: a refined group's children, and the roots, so this costs the size of the cut.
  *
  * @ignore
  */
@@ -278,8 +270,8 @@ export const meshletCutEmitWGSL = /* wgsl */ `
     }
 
     // drawn unless its own group refined, and only when it has triangles (legacy empty roots)
-    fn emits(instance: u32, local: u32, pairBase: u32) -> bool {
-        let meshlet = meshletPrimitiveData(instance).firstMeshlet + local;
+    fn emits(firstMeshlet: u32, local: u32, pairBase: u32) -> bool {
+        let meshlet = firstMeshlet + local;
         let birth = selectionTopology[meshlet].y;
         if (birth != ${MESHLET_NO_PARENT}u && bitSet(pairBase + birth)) { return false; }
         return meshletData[meshlet].triangleCount != 0u;
@@ -296,9 +288,10 @@ export const meshletCutEmitWGSL = /* wgsl */ `
         var instance = entry.x & ${~MESHLET_CUT_ROOT_FLAG >>> 0}u;
         var list = entry.y;
         let pairBase = objectData[instance].firstPairBit;
+        let firstMeshlet = meshletPrimitiveData(instance).firstMeshlet;
         if ((entry.x & ${MESHLET_CUT_ROOT_FLAG}u) == 0u) {
             let offset = entry.y;
-            let groupBit = pairBase + cutGroups[offset] - meshletPrimitiveData(instance).firstMeshlet;
+            let groupBit = pairBase + cutGroups[offset] - firstMeshlet;
             // undecided, or refined off-frustum only to unblock its dependants
             if (!bitSet(groupBit) || bitSet(uniform.freeBase + groupBit)) { return; }
             // the children follow the owned task list, which follows the page list
@@ -306,16 +299,27 @@ export const meshletCutEmitWGSL = /* wgsl */ `
             list = owned + 1u + cutGroups[owned];
         }
 
+        // count, then write: the first 64 decisions are kept in a mask rather than re-evaluated
         let count = cutGroups[list];
         var emitted = 0u;
+        var mask = vec2u(0u);
         for (var k = 0u; k < count; k++) {
-            if (emits(instance, cutGroups[list + 1u + k], pairBase)) { emitted++; }
+            if (emits(firstMeshlet, cutGroups[list + 1u + k], pairBase)) {
+                emitted++;
+                if (k < 64u) { mask[k >> 5u] |= 1u << (k & 31u); }
+            }
         }
         if (emitted == 0u) { return; }
         var slot = atomicAdd(&counters[${MESHLET_COUNTER.SELECTED}u], emitted);
         for (var k = 0u; k < count; k++) {
             let local = cutGroups[list + 1u + k];
-            if (emits(instance, local, pairBase)) {
+            var drawn: bool;
+            if (k < 64u) {
+                drawn = (mask[k >> 5u] & (1u << (k & 31u))) != 0u;
+            } else {
+                drawn = emits(firstMeshlet, local, pairBase);
+            }
+            if (drawn) {
                 if (slot < uniform.recordCapacity) {
                     selectedMeshlets[slot] = vec2u(instance, local);
                 }

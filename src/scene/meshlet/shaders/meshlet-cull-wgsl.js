@@ -6,7 +6,7 @@
  * The world's buffers are read through the typed views in meshlet-page-wgsl.js
  * (`objectData[instance].flags`, `meshletData[meshlet].page`, ...); their layouts are the
  * OBJECT_DATA / MESHLET_DATA enums in constants.js. The remaining raw buffers:
- * - counters: MESHLET_COUNTER.* — work items, records, then per-bucket cursors, committed
+ * - counters: MESHLET_COUNTER.* — records, then per-bucket cursors, committed
  *   ends and unclamped demand (the demand block survives the phase-2 reset; the CPU grows the
  *   index buffer from it). Bucket order is opaque, opaque-two-sided, masked (MESHLET_BUCKET_*).
  * - cullParams: array<vec4f>, rows CULL_PARAMS.* (planes, camera, LOD, view-projection,
@@ -21,22 +21,17 @@
  * @ignore
  */
 
-import { OBJECT_FLAG_NO_SHADOW, CULL_FLAG_SHADOW_VIEW,
-    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
-    MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_CELL_SIZE, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_COMPACT_SLICE,
-    MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP, MESHLET_INDEX_WRITE_RECORDS,
-    MESHLET_NO_PARENT, MESHLET_VISIBLE_CELLS_BASE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HIDDEN,
-    PAGE_REQUEST, TEXEL_RATE_PER_MIP, MESHLET_LEVEL_BIAS } from '../constants.js';
 import {
-    meshletDataWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL,
-    meshletWorkItemsWGSL
+    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MESHLET_BUCKET_MASKED,
+    MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE,
+    MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_INDEX_WRITE_WORKGROUP,
+    MESHLET_INDEX_WRITE_RECORDS, MESHLET_VISIBLE_CELLS_BASE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
+    PAGE_REQUEST, TEXEL_RATE_PER_MIP
+} from '../constants.js';
+import {
+    meshletDataWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL
 } from './meshlet-page-wgsl.js';
 
-/**
- * Cell culling: one thread per spatial cell (see MeshletCells). Appends the cells whose
- * bounding sphere touches the frustum to the view's visible-cell list, which the per-instance
- * and per-task passes then dispatch over - one workgroup per visible cell.
- */
 /**
  * The cull volume test every pass shares: the view's frustum planes, then any extra planes the
  * view adds (a shadow face's caster volume, see MeshletShadowRenderer). Reads `cullParams`.
@@ -58,6 +53,11 @@ export const meshletCullVolumeWGSL = /* wgsl */ `
     }
 `;
 
+/**
+ * Cell culling: one thread per spatial cell (see MeshletCells). Appends the cells whose
+ * bounding sphere touches the frustum to the view's visible-cell list, which the per-instance
+ * and per-task passes then dispatch over - one workgroup per visible cell.
+ */
 export const cellCullWGSL = /* wgsl */ `
     ${meshletCullVolumeWGSL}
     uniform cellCount : u32;
@@ -112,210 +112,12 @@ export const meshletVisibleCellWGSL = /* wgsl */ `
 `;
 
 /**
- * Instance culling: one workgroup per visible cell, one thread per instance of it. World-sphere
- * frustum test, then fan the instance's meshlets out into fixed-size slice work items.
- *
- * The fan-out is shared by the whole workgroup: an instance can own hundreds of thousands of
- * meshlets (Zorah's carved panels reach 700k), and a lane writing its own slices serially left
- * one lane looping ~90k times while the pass waited on it. Instead the lanes prefix-sum their
- * slice counts, reserve the cell's items with one atomicAdd, and stride over them together,
- * each finding the instance that owns an item by binary search over the prefix sums.
- */
-export const instanceCullWGSL = /* wgsl */ `
-    ${meshletCullVolumeWGSL}
-    ${meshletStructsWGSL}
-
-    uniform instanceCount : u32;
-    uniform totalPairs : u32;
-    uniform workItemCapacity : u32;
-    // word base of the per-instance finest-cut-level words in admittedBits (the claim buffer)
-    uniform levelBase : u32;
-
-    ${meshletObjectDataWGSL}
-    ${meshletWorkItemsWGSL('read_write')}
-
-    var<storage, read> cullParams : array<vec4f>;
-    var<storage, read> admittedBits : array<u32>;
-    // per primitive at its first meshlet: [0] lowest root level, [level] start of that level
-    var<storage, read> levelStarts : array<u32>;
-    var<storage, read_write> counters : array<atomic<u32>>;
-    // instance ids in cell order
-    var<storage, read> cellInstances : array<u32>;
-
-    // per lane: inclusive prefix sum of the slice counts, and the lane's instance and first meshlet
-    var<workgroup> slicePrefix : array<u32, ${MESHLET_CELL_SIZE}>;
-    var<workgroup> laneInstance : array<u32, ${MESHLET_CELL_SIZE}>;
-    var<workgroup> laneStart : array<u32, ${MESHLET_CELL_SIZE}>;
-    var<workgroup> itemBase : u32;
-
-    ${meshletVisibleCellWGSL}
-
-    // the work-item slices of an instance, 0 when it is culled; sets the first meshlet they cover
-    fn instanceSlices(instance : u32, start : ptr<function, u32>) -> u32 {
-        let admission = uniform.totalPairs + instance;
-        if ((admittedBits[admission >> 5u] & (1u << (admission & 31u))) == 0u) {
-            return 0u;
-        }
-        if ((objectData[instance].flags & ${OBJECT_FLAG_HIDDEN}u) != 0u) {
-            return 0u;
-        }
-        // per-instance shadow casting: a shadow view drops the instances that opted out
-        let shadowView = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_SHADOW_VIEW}u) != 0u;
-        if (shadowView && (objectData[instance].flags & ${OBJECT_FLAG_NO_SHADOW}u) != 0u) {
-            return 0u;
-        }
-
-        let primitive = meshletPrimitiveData(instance);
-        let localSphere = primitive.sphere;
-        let radius = localSphere.w * objectData[instance].maxScale;
-        let center = (meshletInstanceMatrix(instance) * vec4f(localSphere.xyz, 1.0)).xyz;
-        if (!meshletInCullVolume(center, radius)) {
-            return 0u;
-        }
-
-        // Selected meshlets lie no finer than the cut's finest refined level (the cut records it
-        // per instance) or the DAG's lowest root level. Meshlets are level-major, finest first,
-        // so skip every finer level rather than scanning the whole DAG of a distant instance.
-        let meshletCount = primitive.meshletCount;
-        let firstMeshlet = primitive.firstMeshlet;
-        var level = levelStarts[firstMeshlet];
-        let finest = admittedBits[uniform.levelBase + instance];
-        if (finest != 0u) { level = min(level, ${MESHLET_LEVEL_BIAS}u - finest); }
-        *start = select(levelStarts[firstMeshlet + level], 0u, level == 0u);
-        return (meshletCount - *start + ${MESHLET_COMPACT_SLICE - 1}u) / ${MESHLET_COMPACT_SLICE}u;
-    }
-
-    @compute @workgroup_size(${MESHLET_CELL_SIZE})
-    fn main(@builtin(workgroup_id) group : vec3u, @builtin(local_invocation_id) lane : vec3u) {
-        // every lane reaches every barrier, so nothing returns early
-        let cell = meshletVisibleCell(group);
-        let position = cell * ${MESHLET_CELL_SIZE}u + lane.x;
-        var instance = 0u;
-        var start = 0u;
-        var slices = 0u;
-        if (cell != 0xFFFFFFFFu && position < uniform.instanceCount) {
-            instance = cellInstances[position];
-            slices = instanceSlices(instance, &start);
-        }
-        laneInstance[lane.x] = instance;
-        laneStart[lane.x] = start;
-
-        // inclusive prefix sum of the slice counts (Hillis-Steele)
-        var sum = slices;
-        slicePrefix[lane.x] = sum;
-        workgroupBarrier();
-        for (var offset = 1u; offset < ${MESHLET_CELL_SIZE}u; offset <<= 1u) {
-            var add = 0u;
-            if (lane.x >= offset) { add = slicePrefix[lane.x - offset]; }
-            workgroupBarrier();
-            sum += add;
-            slicePrefix[lane.x] = sum;
-            workgroupBarrier();
-        }
-
-        let total = slicePrefix[${MESHLET_CELL_SIZE - 1}u];
-        if (lane.x == 0u && total != 0u) {
-            itemBase = atomicAdd(&counters[${MESHLET_COUNTER.WORK_ITEMS}u], total);
-        }
-        let base = workgroupUniformLoad(&itemBase);
-
-        for (var i = lane.x; i < total; i += ${MESHLET_CELL_SIZE}u) {
-            let item = base + i;
-            if (item >= uniform.workItemCapacity) {
-                break;
-            }
-            // the owner is the first lane whose inclusive prefix passes i
-            var lo = 0u;
-            var hi = ${MESHLET_CELL_SIZE - 1}u;
-            while (lo < hi) {
-                let mid = (lo + hi) >> 1u;
-                if (slicePrefix[mid] > i) { hi = mid; } else { lo = mid + 1u; }
-            }
-            var first = 0u;
-            if (lo > 0u) { first = slicePrefix[lo - 1u]; }
-            let slice = i - first;
-            workItems[item] = MeshletWorkItem(laneInstance[lo], laneStart[lo] + slice * ${MESHLET_COMPACT_SLICE}u);
-        }
-    }
-`;
-
-/** Compacts the committed LOD cut before bounds, cone and HZB tests. @ignore */
-export const compactMeshletsWGSL = /* wgsl */ `
-    ${meshletStructsWGSL}
-    ${meshletObjectDataWGSL}
-    ${meshletDataWGSL}
-    ${meshletWorkItemsWGSL('read')}
-    uniform totalPairs: u32;
-    uniform freeBase: u32;
-    uniform workItemCapacity: u32;
-    uniform recordCapacity: u32;
-    var<storage, read> selectionTopology: array<vec2u>;
-    var<storage, read> claimBits: array<u32>;
-    var<storage, read_write> counters: array<atomic<u32>>;
-    var<storage, read_write> selectedMeshlets: array<vec2u>;
-    var<workgroup> selectedCount: atomic<u32>;
-    var<workgroup> selectedBase: u32;
-
-    fn isSelected(instance: u32, localIndex: u32) -> bool {
-        let primitive = meshletPrimitiveData(instance);
-        if (localIndex >= primitive.meshletCount) { return false; }
-        let admission = uniform.totalPairs + instance;
-        if ((claimBits[admission >> 5u] & (1u << (admission & 31u))) == 0u) { return false; }
-        let meshlet = primitive.firstMeshlet + localIndex;
-        let pairBase = objectData[instance].firstPairBit;
-        let parent = selectionTopology[meshlet].x;
-        if (parent != ${MESHLET_NO_PARENT}u) {
-            let bit = pairBase + parent;
-            if ((claimBits[bit >> 5u] & (1u << (bit & 31u))) == 0u) { return false; }
-            // refined only to unblock its dependants: off-frustum, so never drawn or resident
-            let freeBit = uniform.freeBase + bit;
-            if ((claimBits[freeBit >> 5u] & (1u << (freeBit & 31u))) != 0u) { return false; }
-        }
-        let birth = selectionTopology[meshlet].y;
-        if (birth != ${MESHLET_NO_PARENT}u) {
-            let bit = pairBase + birth;
-            if ((claimBits[bit >> 5u] & (1u << (bit & 31u))) != 0u) { return false; }
-        }
-        // Only survivors need the larger geometry record, including legacy empty roots.
-        return meshletData[meshlet].triangleCount != 0u;
-    }
-
-    // one workgroup serves MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE work items, one lane per meshlet
-    @compute @workgroup_size(${MESHLET_CULL_SLICE})
-    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
-        let item = (group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x) * ${MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE}u + lane.x / ${MESHLET_COMPACT_SLICE}u;
-        // All lanes reach the barriers, including unused lanes in the final work item.
-        var instance = 0u;
-        var localIndex = 0u;
-        var selected = false;
-        if (item < min(atomicLoad(&counters[${MESHLET_COUNTER.WORK_ITEMS}u]), uniform.workItemCapacity)) {
-            instance = workItems[item].instance;
-            localIndex = workItems[item].sliceStart + lane.x % ${MESHLET_COMPACT_SLICE}u;
-            selected = isSelected(instance, localIndex);
-        }
-        var rank = 0u;
-        if (selected) { rank = atomicAdd(&selectedCount, 1u); }
-        workgroupBarrier();
-        if (lane.x == 0u) {
-            let count = atomicLoad(&selectedCount);
-            if (count != 0u) {
-                selectedBase = atomicAdd(&counters[${MESHLET_COUNTER.SELECTED}u], count);
-            }
-        }
-        workgroupBarrier();
-        if (selected && selectedBase + rank < uniform.recordCapacity) {
-            selectedMeshlets[selectedBase + rank] = vec2u(instance, localIndex);
-        }
-    }
-`;
-
-/**
  * Writes indirect dispatch args from a counter and the number of items per workgroup.
  * Uses a 2D grid to stay within the per-dimension limit. One thread.
  */
 export const dispatchArgsWGSL = /* wgsl */ `
     uniform dispatchSlot : u32;
-    uniform workItemCapacity : u32;
+    uniform itemCapacity : u32;
     uniform counterIndex : u32;
     uniform groupSize : u32;
 
@@ -324,7 +126,7 @@ export const dispatchArgsWGSL = /* wgsl */ `
 
     @compute @workgroup_size(1)
     fn main() {
-        let items = min(atomicLoad(&counters[uniform.counterIndex]), uniform.workItemCapacity);
+        let items = min(atomicLoad(&counters[uniform.counterIndex]), uniform.itemCapacity);
         let count = (items + uniform.groupSize - 1u) / uniform.groupSize;
         let base = uniform.dispatchSlot * ${INDIRECT_DISPATCH_U32S}u;
         indirectDispatch[base + 0u] = min(count, ${MESHLET_DISPATCH_WIDTH}u);
@@ -583,23 +385,24 @@ export const meshletCullWGSL = /* wgsl */ `
             let screenPx = 2.0 * radius * projScale / dist;
             // +1 so a mark of 0 means "not seen this frame"; 4095 caps the mark at 12 bits
             let texelRate = clamp(u32(${TEXEL_RATE_PER_MIP}.0 * log2(max(screenPx / uvSpan, 1.0))) + 1u, 1u, 4095u);
-            let texelRateMarkBase = u32(cullParams[${CULL_PARAMS.STREAMING}u].x);
-            atomicMax(&requests[texelRateMarkBase + primitive.material], texelRate);
+            // a handful of material words take a mark from every drawn cluster: read first so
+            // only a higher rate pays for the contended atomic
+            let mark = u32(cullParams[${CULL_PARAMS.STREAMING}u].x) + primitive.material;
+            if (atomicLoad(&requests[mark]) < texelRate) { atomicMax(&requests[mark], texelRate); }
         }
 
-        // Residency was checked for the entire replacement before its cut bit was set.
-        let chosen = meshlet;
-        let page = meshletData[chosen].page;
-        atomicMax(&requests[page], ${PAGE_REQUEST.USED}u);
+        // keeps the drawn page off the eviction list
+        let page = meshletData[meshlet].page;
+        if (atomicLoad(&requests[page]) < ${PAGE_REQUEST.USED}u) { atomicMax(&requests[page], ${PAGE_REQUEST.USED}u); }
 
-        let chosenTriangleCount = meshletData[chosen].triangleCount;
-        if (chosenTriangleCount == 0u) {
+        let triangleCount = meshletData[meshlet].triangleCount;
+        if (triangleCount == 0u) {
             return;
         }
 
         // Reserve only the drawn range here. The selection pass already reported capacity
         // demand for the complete cut, independently of either phase's occlusion results.
-        let indexNeed = chosenTriangleCount * 3u;
+        let indexNeed = triangleCount * 3u;
         let capacity = bucketCapacity(bucket);
         let recordIndex = atomicAdd(&counters[${MESHLET_COUNTER.RECORDS}u], 1u);
         if (recordIndex >= uniform.recordCapacity) {
@@ -607,13 +410,13 @@ export const meshletCullWGSL = /* wgsl */ `
         }
         let cursor = atomicAdd(&counters[${MESHLET_COUNTER.CURSOR_BASE}u + bucket], indexNeed);
         if (cursor + indexNeed > capacity) {
-            records[recordIndex] = MeshletRecord(instance, chosen, 0xffffffffu, bucket);
+            records[recordIndex] = MeshletRecord(instance, meshlet, 0xffffffffu, bucket);
             return;
         }
         atomicMax(&counters[${MESHLET_COUNTER.COMMITTED_BASE}u + bucket], cursor + indexNeed);
         let baseIndexOffset = bucketBase(bucket) + cursor;
 
-        records[recordIndex] = MeshletRecord(instance, chosen, baseIndexOffset, bucket);
+        records[recordIndex] = MeshletRecord(instance, meshlet, baseIndexOffset, bucket);
     }
 `;
 

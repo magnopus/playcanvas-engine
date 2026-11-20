@@ -70,13 +70,10 @@ class MeshletTextureSource {
                 cacheVersion: this.cacheVersion,
                 priority,
                 stillWanted
-            }).then((bytes) => {
-                // a dropped or failed request must not stand in for a later, wanted one
-                if (!bytes) this._regions.delete(key);
-                return bytes;
-            }, (err) => {
+            }).finally(() => {
+                // dedupe only requests in flight: a settled entry would pin its bytes for the
+                // source's lifetime, and a dropped one must not stand in for a later request
                 this._regions.delete(key);
-                throw err;
             });
             this._regions.set(key, promise);
         }

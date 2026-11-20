@@ -242,7 +242,7 @@ class ShadowRendererDirectional {
         // cull before any of them render, so a light-wide flag would be overwritten by the next
         // camera's cull).
         const intervals = light.cascadeUpdateIntervals;
-        _lightDir.copy(light._node.forward);
+        if (intervals) _lightDir.copy(light._node.forward);
         // the camera's schedule clock: cascade c on interval n refreshes when (frame + c) % n == 0,
         // so cascades sharing an interval take turns instead of landing on the same frame
         const scheduleFrame = intervals ? light.getRenderData(camera, 0).scheduleFrame++ : 0;
@@ -257,13 +257,13 @@ class ShadowRendererDirectional {
             _cascadeActive[cascade] = false;
             _cascadeAabbValid[cascade] = false;
 
-            const lightRenderData = light.getRenderData(camera, cascade);
-
             // if manually controlling cascade rendering and the cascade does not render this frame
             if (!(cascadeMask & (1 << cascade))) {
-                lightRenderData.cascadeRefresh = false;
+                if (intervals) light.getRenderData(camera, cascade).cascadeRefresh = false;
                 continue;
             }
+
+            const lightRenderData = light.getRenderData(camera, cascade);
 
             // get camera's frustum corners for the cascade, convert them to world space and find their center
             const frustumNearDist = cascade === 0 ? nearDist : splitDistances[cascade - 1];

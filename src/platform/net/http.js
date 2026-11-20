@@ -625,7 +625,9 @@ class Http {
                 cache.putFile(url, response, contentType);
                 break;
             case Http.ResponseType.BLOB:
-                response.arrayBuffer().then(data => cache.putFile(url, data, contentType || response.type), () => {});
+                if (response.size <= cache.maxFileBytes) {
+                    response.arrayBuffer().then(data => cache.putFile(url, data, contentType || response.type), () => {});
+                }
                 break;
             case Http.ResponseType.JSON:
                 cache.putFile(url, new TextEncoder().encode(JSON.stringify(response)), contentType);

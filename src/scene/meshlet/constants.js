@@ -117,8 +117,13 @@ export const PRIMITIVE_DATA = {
     PICK_ID_BASE: 12
 };
 
-/** u32 per cull work item: [instance, slice start]. @type {number} */
-export const WORK_ITEM_U32S = 2;
+/**
+ * u32 per instance in a view's root list: root classification appends each candidate to the
+ * first half, and the band sort copies it into the second.
+ *
+ * @type {number}
+ */
+export const ROOT_LIST_U32S = 2;
 
 /**
  * Rows (vec4 indices) of the per-view cull parameter buffer the culler fills each frame and
@@ -196,9 +201,6 @@ export const CULL_FLAG_NO_TEXEL_RATE = 1 << 0;
  * @type {number}
  */
 export const CULL_FLAG_SHADOW_VIEW = 1 << 2;
-
-/** Threads per workgroup of the instance cull (one thread per instance). @type {number} */
-export const MESHLET_INSTANCE_CULL_WORKGROUP = 64;
 
 /**
  * Instances per spatial cell (see MeshletCells). The per-instance passes - root classify and
@@ -283,7 +285,7 @@ export const MESHLET_BUCKET_OPAQUE_TWO_SIDED = 1;
 export const MESHLET_BUCKET_MASKED = 2;
 
 /**
- * Counter buffer words: [0] workItemCount, [1] recordCount, then three MESHLET_BUCKET_COUNT
+ * Counter buffer words: [0] unused, [1] recordCount, then three MESHLET_BUCKET_COUNT
  * blocks - index cursors, committed ends, unclamped index demand - then the frame's rendered
  * meshlet count across both phases and peak per-phase record demand, the root admission
  * counters, the visible cell count, the cut queue's cursor and current stage range and the
@@ -300,7 +302,6 @@ export const MESHLET_COUNTER_U32S = 32;
  * @ignore
  */
 export const MESHLET_COUNTER = {
-    WORK_ITEMS: 0,
     RECORDS: 1,
     CURSOR_BASE: 2,     // index cursor per bucket (reservation)
     COMMITTED_BASE: 5,  // highest reservation that fit per bucket - the draw's index count
@@ -519,8 +520,8 @@ export const TEX_RESIDENCY_U32S = 2;
 
 /**
  * Debug colour modes of the meshlet world (see MeshletWorld#setColorMode): the engine-lit
- * material, or the flat debug material tinted per meshlet. Values are stable (2 and 3 are
- * referenced by number from example URL parameters).
+ * material, or the flat debug material tinted per meshlet. Examples pass the values as URL
+ * parameters, so they stay stable.
  *
  * @ignore
  */
@@ -626,61 +627,28 @@ export const PAGE_TABLE = {
 };
 
 /**
- * Lanes per workgroup of the compaction and meshlet-cull compute shaders. Compaction packs
- * MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE work items into one workgroup; the meshlet cull
- * processes this many consecutive entries of the compacted cut.
+ * Lanes per workgroup of the meshlet cull, each processing one entry of the selected cut.
  *
  * @ignore
  */
 export const MESHLET_CULL_SLICE = 64;
 
 /**
- * Meshlets per compaction work item. The instance cull emits ceil(remaining / this) items per
- * surviving instance, and one compaction workgroup of MESHLET_CULL_SLICE lanes serves
- * MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE items. A distant instance keeps only a few coarse
- * meshlets after its finer levels are skipped, so a whole 64-lane workgroup per instance would
- * leave most lanes idle, and with very many visible instances that floor would dominate the pass.
- *
- * @ignore
- */
-export const MESHLET_COMPACT_SLICE = 8;
-
-/**
- * Bias of the per-instance finest-cut-level words after the claim bits: the cut stores
- * `MESHLET_LEVEL_BIAS - level` with atomicMax into a word cleared to 0 each frame, so 0 means
- * "nothing refined" and a larger value a finer level.
- *
- * @ignore
- */
-export const MESHLET_LEVEL_BIAS = 256;
-
-/**
- * Word offset of the per-instance finest-cut-level words in a view's claim buffer: after the
- * pair bits, the admission bits and the off-frustum refinement bits.
- *
- * @param {number} totalPairs - Instance-meshlet pairs in the world.
- * @param {number} instanceCount - Instances in the world.
- * @returns {number} Word offset.
- * @ignore
- */
-export const claimLevelBase = (totalPairs, instanceCount) => Math.max(Math.ceil((totalPairs * 2 + instanceCount) / 32), 4);
-
-/**
  * Word offset of the persistent per-instance admission bits in a view's claim buffer: two
- * regions of one bit per instance, after the finest-cut-level words, that swap roles each frame.
- * The root admission marks this frame's admissions in one and reads the previous frame's from
- * the other (hysteresis); the per-frame clear leaves the previous region intact.
+ * regions of one bit per instance, after the pair bits, the admission bits and the off-frustum
+ * refinement bits, that swap roles each frame. The root admission marks this frame's
+ * admissions in one and reads the previous frame's from the other (hysteresis); the per-frame
+ * clear leaves the previous region intact.
  *
  * @param {number} totalPairs - Instance-meshlet pairs in the world.
  * @param {number} instanceCount - Instances in the world.
  * @returns {number} Word offset of the first region; the second follows ceil(instanceCount / 32) words later.
  * @ignore
  */
-export const claimPersistBase = (totalPairs, instanceCount) => claimLevelBase(totalPairs, instanceCount) + instanceCount;
+export const claimPersistBase = (totalPairs, instanceCount) => Math.max(Math.ceil((totalPairs * 2 + instanceCount) / 32), 4);
 
 /**
- * Words in a view's claim buffer: the claim bits, one finest-cut-level word per instance, then
- * the two persistent admission bit regions.
+ * Words in a view's claim buffer: the claim bits, then the two persistent admission bit regions.
  *
  * @param {number} totalPairs - Instance-meshlet pairs in the world.
  * @param {number} instanceCount - Instances in the world.
@@ -688,7 +656,6 @@ export const claimPersistBase = (totalPairs, instanceCount) => claimLevelBase(to
  * @ignore
  */
 export const claimWordCount = (totalPairs, instanceCount) => claimPersistBase(totalPairs, instanceCount) + 2 * Math.ceil(instanceCount / 32);
-
 
 /**
  * Width of the two-dimensional indirect dispatch grid. Work-item counts above it wrap into the

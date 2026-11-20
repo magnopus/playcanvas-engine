@@ -1,4 +1,5 @@
 import { Debug } from '../../../core/debug.js';
+import { now } from '../../../core/time.js';
 import { WebgpuReadbackPool } from '../../../platform/graphics/webgpu/webgpu-readback-pool.js';
 import { PAGE_NOT_RESIDENT, PAGE_REQUEST } from '../constants.js';
 import { FETCH_PRIORITY_ROOTS } from './meshlet-fetch-scheduler.js';
@@ -27,6 +28,25 @@ const EVICT_SLOT_RANGE = 1 << 24;
 
 /** Consecutive settled request readbacks that make a view count as converged. */
 const SETTLED_READBACKS = 2;
+
+/** Wait before retrying a failing stream, in milliseconds, doubled per consecutive failure. */
+const RETRY_BASE_MS = 1000;
+
+/**
+ * One page's words out of a fetched run.
+ *
+ * @param {Uint8Array} bytes - The run's bytes, a view that may sit inside a larger buffer.
+ * @param {number} byteOffset - The page's offset in the run.
+ * @param {number} wordCount - Words per page.
+ * @returns {Uint32Array} The page's words: a view of the run where it is 4-byte aligned in its
+ * buffer, a copy where it is not.
+ */
+const pageWords = (bytes, byteOffset, wordCount) => {
+    const start = bytes.byteOffset + byteOffset;
+    return (start & 3) === 0 ?
+        new Uint32Array(bytes.buffer, start, wordCount) :
+        new Uint32Array(bytes.buffer.slice(start, start + wordCount * 4));
+};
 
 /**
  * The pages one request readback wanted, as a set with O(1) clear: each page holds the id of the
@@ -234,8 +254,9 @@ class MeshletResidency {
      * @param {GraphicsDevice} device - The graphics device.
      * @param {MeshletWorld} world - The finalized streamed world.
      * @param {object|null} [carry] - A previous residency's slot state ({ slotPage, slotPinned,
-     * slotLastUsed }), adopted when the world carried its page pool across a rebuild. Slots
-     * referencing pages the new world no longer has are freed; slots the pool grew by start free.
+     * slotLastUsed }), adopted when the world carried its page pool across a rebuild. Only pages
+     * of the carried prefix ({@link MeshletWorld#adoptedPages}) keep their slots: the rest belong to
+     * resources that changed or were dropped, and are freed with the slots the pool grew by.
      */
     constructor(device, world, carry = null) {
         this.maxInstallBytesPerFrame = world.maxInstallBytesPerFrame ?? this.maxInstallBytesPerFrame;
@@ -260,6 +281,7 @@ class MeshletResidency {
         this._compareRequests = (a, b) => this._isRoot[b] - this._isRoot[a];
 
         if (carry && carry.slotPage.length <= slots) {
+            const carriedPages = Math.min(world.adoptedPages, world.totalPages);
             this.slotPage = new Uint32Array(slots).fill(PAGE_NOT_RESIDENT);
             this.slotPage.set(carry.slotPage);
             this.slotPinned = new Uint8Array(slots);
@@ -270,8 +292,7 @@ class MeshletResidency {
             // make every carried slot look ancient and the freshly touched ones look oldest
             this.frame = carry.frame;
             for (let s = slots - 1; s >= 0; s--) {
-                if (this.slotPage[s] !== PAGE_NOT_RESIDENT && this.slotPage[s] >= world.totalPages) {
-                    // page belonged to a dropped resource
+                if (this.slotPage[s] !== PAGE_NOT_RESIDENT && this.slotPage[s] >= carriedPages) {
                     this.slotPage[s] = PAGE_NOT_RESIDENT;
                     this.slotPinned[s] = 0;
                 }
@@ -312,7 +333,7 @@ class MeshletResidency {
             // failing is dead - its pages are never requested again, so a broken package costs
             // one error line instead of a request per readback for the rest of the session
             failures: 0,
-            retryAfterFrame: 0,
+            retryAt: 0,
             dead: false,
             // per-resource load accounting (pages): roots and playable floor, required vs still
             // outstanding; pages already resident count as required and done
@@ -388,7 +409,7 @@ class MeshletResidency {
                     for (const { localPage, byteOffset } of run.pages) {
                         this._arrivedRoots.push({
                             globalPage: stream.pageBase + localPage,
-                            words: new Uint32Array(bytes, byteOffset, pageWordsSize)
+                            words: pageWords(bytes, byteOffset, pageWordsSize)
                         });
                     }
                 }).catch((err) => {
@@ -639,51 +660,50 @@ class MeshletResidency {
 
     _pump() {
         const maxRuns = this.fastLoad ? MAX_IN_FLIGHT_RUNS * 4 : MAX_IN_FLIGHT_RUNS;
-        while (this._activeRuns < maxRuns && this._queue.length) {
-            // take a batch of queued pages per stream and coalesce into runs
-            const byStream = new Map();
-            for (const page of this._queue) {
-                const stream = this._streamOf(page);
-                let list = byStream.get(stream);
-                if (!list) {
-                    list = []; byStream.set(stream, list);
-                }
-                list.push(page - stream.pageBase);
+        if (this._activeRuns >= maxRuns || !this._queue.length) return;
+        // take a batch of queued pages per stream and coalesce into runs
+        const byStream = new Map();
+        for (const page of this._queue) {
+            const stream = this._streamOf(page);
+            let list = byStream.get(stream);
+            if (!list) {
+                list = []; byStream.set(stream, list);
             }
-            this._queue.length = 0;
+            list.push(page - stream.pageBase);
+        }
+        this._queue.length = 0;
 
-            for (const [stream, localPages] of byStream) {
-                const runs = stream.fetcher.buildRuns(localPages);
-                for (const run of runs) {
-                    this._activeRuns++;
-                    stream.fetcher.fetchRange(run.blob, run.offset, run.length).then((bytes) => {
-                        if (!bytes) {
-                            // scheduler cleared (director destroyed): nothing arrives
-                            for (const { localPage } of run.pages) this._settleFailed(stream.pageBase + localPage);
-                            return;
-                        }
-                        const pageWordsSize = stream.resource.manifest.pageSizeBytes / 4;
-                        // Queue the arrivals; the frame tick installs them against a byte
-                        // budget. Runs coalesce contiguous pages, so a single completion can
-                        // carry hundreds of pages - installing them all here would push
-                        // megabytes of uploads into one frame and show up as a hitch.
-                        for (const { localPage, byteOffset } of run.pages) {
-                            const globalPage = stream.pageBase + localPage;
-                            this._arrived.push({
-                                globalPage,
-                                words: new Uint32Array(bytes, byteOffset, pageWordsSize)
-                            });
-                        }
-                    }).catch((err) => {
-                        Debug.error(`MeshletResidency: run fetch failed: ${err.message}`);
-                        this._failStream(stream, err);
-                        for (const { localPage } of run.pages) {
-                            this._settleFailed(stream.pageBase + localPage);
-                        }
-                    }).finally(() => {
-                        this._activeRuns--;
-                    });
-                }
+        for (const [stream, localPages] of byStream) {
+            const runs = stream.fetcher.buildRuns(localPages);
+            for (const run of runs) {
+                this._activeRuns++;
+                stream.fetcher.fetchRange(run.blob, run.offset, run.length).then((bytes) => {
+                    if (!bytes) {
+                        // scheduler cleared (director destroyed): nothing arrives
+                        for (const { localPage } of run.pages) this._settleFailed(stream.pageBase + localPage);
+                        return;
+                    }
+                    const pageWordsSize = stream.resource.manifest.pageSizeBytes / 4;
+                    // Queue the arrivals; the frame tick installs them against a byte
+                    // budget. Runs coalesce contiguous pages, so a single completion can
+                    // carry hundreds of pages - installing them all here would push
+                    // megabytes of uploads into one frame and show up as a hitch.
+                    for (const { localPage, byteOffset } of run.pages) {
+                        const globalPage = stream.pageBase + localPage;
+                        this._arrived.push({
+                            globalPage,
+                            words: pageWords(bytes, byteOffset, pageWordsSize)
+                        });
+                    }
+                }).catch((err) => {
+                    Debug.error(`MeshletResidency: run fetch failed: ${err.message}`);
+                    this._failStream(stream, err);
+                    for (const { localPage } of run.pages) {
+                        this._settleFailed(stream.pageBase + localPage);
+                    }
+                }).finally(() => {
+                    this._activeRuns--;
+                });
             }
         }
     }
@@ -796,20 +816,21 @@ class MeshletResidency {
      * backs it off exponentially and kills it after repeated failures.
      *
      * @param {object} stream - The stream.
-     * @param {Error} err - The failure.
+     * @param {Error & { status?: number }} err - The failure; `status` is the HTTP status of a
+     * response that was not ok.
      * @private
      */
     _failStream(stream, err) {
-        const status = /\((\d{3})\)/.exec(err?.message ?? '')?.[1];
+        const status = err?.status;
         stream.failures++;
-        if (status === '404' || status === '403' || status === '410' || stream.failures >= 4) {
+        if (status === 404 || status === 403 || status === 410 || stream.failures >= 4) {
             if (!stream.dead) {
                 stream.dead = true;
                 console.error(`MeshletResidency: giving up on ${stream.resource.manifest.blobs[0]?.uri ?? 'a resource'} after ${stream.failures} failed fetch(es): ${err?.message ?? err}`);
             }
             return;
         }
-        stream.retryAfterFrame = this.frame + 60 * (1 << stream.failures);
+        stream.retryAt = now() + RETRY_BASE_MS * (1 << stream.failures);
     }
 
     /** @type {number} - streams given up on after fetch failures. */
@@ -850,6 +871,7 @@ class MeshletResidency {
         // PAGE_REQUEST.USED = resident page the GPU used this frame (touch + protect),
         // PAGE_REQUEST.MISSING = missing page the cut wanted (fetch candidate)
         const missing = [];
+        const time = now();
         const streams = this._streams;
         let si = 0; // streams are ordered by pageBase, pages ascend: one pass tracks the stream
         for (let p = 0; p < world.totalPages; p++) {
@@ -866,7 +888,7 @@ class MeshletResidency {
                 // keep marking such a page every frame, and it is never requested twice
                 while (si + 1 < streams.length && p >= streams[si + 1].pageBase) si++;
                 const stream = streams[si];
-                if (stream.dead || stream.retryAfterFrame > this.frame) continue;
+                if (stream.dead || stream.retryAt > time) continue;
                 missing.push(p);
             }
         }

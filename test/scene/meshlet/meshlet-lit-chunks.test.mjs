@@ -5,7 +5,7 @@ import { CULLFACE_BACK, CULLFACE_NONE } from '../../../src/platform/graphics/con
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import {
     MATERIAL_FLAG_UNLIT, MATERIAL_SLOT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED,
-    MESHLET_COLOR_MODE, MESHLET_MAX_UV_CHANNELS
+    MESHLET_MAX_UV_CHANNELS
 } from '../../../src/scene/meshlet/constants.js';
 import { createMeshletLitMaterial } from '../../../src/scene/meshlet/meshlet-lit-material.js';
 import { createMeshletMaterial } from '../../../src/scene/meshlet/meshlet-material.js';
@@ -326,13 +326,14 @@ describe('meshlet materials', function () {
         [opaque, twoSided, masked].forEach(m => m.destroy());
     });
 
-    it('creates the debug material with the colour-mode uniform and per-bucket culling', function () {
+    it('creates the per-meshlet debug material with per-bucket culling', function () {
         const opaque = createMeshletMaterial(MESHLET_BUCKET_OPAQUE);
         const masked = createMeshletMaterial(MESHLET_BUCKET_MASKED);
         expect(opaque.cull).to.equal(CULLFACE_BACK);
         expect(masked.cull).to.equal(CULLFACE_NONE);
         const vertex = opaque.shaderDesc?.vertexWGSL ?? opaque._shaderDesc?.vertexWGSL ?? '';
-        expect(vertex).to.include(`uniform.colorMode == ${MESHLET_COLOR_MODE.MESHLET}u`);
+        expect(vertex).to.include('output.vColor = meshletColor(meshlet);');
+        expect(vertex).not.to.include('materialTable');
         expect(vertex).to.include('struct MeshletPageLayout');
         expect(vertex).to.include('let hue = f32(h & 65535u) / 65536.0;');
         expect(vertex).to.include('return mix(vec3f(0.02), vec3f(0.8), rgb);');

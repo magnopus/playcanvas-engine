@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 
 import { PAGE_TABLE, PAGE_TABLE_FIELDS } from '../../../src/scene/meshlet/constants.js';
+import { MeshletFetchScheduler } from '../../../src/scene/meshlet/streaming/meshlet-fetch-scheduler.js';
 import { MAX_RUN_BYTES, MeshletPageFetcher, RUN_GAP_BYTES } from '../../../src/scene/meshlet/streaming/meshlet-page-fetcher.js';
 
 const PAGE = 64 * 1024;
@@ -95,23 +96,25 @@ describe('MeshletPageFetcher', function () {
 
         it('requests the byte range of the page\'s shard relative to the base URL', async function () {
             globalThis.fetch = respond(206, PAGE);
-            const fetcher = new MeshletPageFetcher(makeManifest(1, () => 1, () => 0), 'assets/meshlets');
+            const fetcher = new MeshletPageFetcher(makeManifest(1, () => 1, () => 0), 'assets/meshlets', null, new MeshletFetchScheduler());
             const bytes = await fetcher.fetchRange(1, 3 * PAGE, PAGE);
             expect(calls[0].url).to.equal('assets/meshlets/pages_0.dat');
             expect(calls[0].range).to.equal(`bytes=${3 * PAGE}-${4 * PAGE - 1}`);
+            expect(bytes).to.be.instanceOf(Uint8Array);
             expect(bytes.byteLength).to.equal(PAGE);
         });
 
         it('slices the range out of a whole-file response when the host ignores Range', async function () {
             globalThis.fetch = respond(200, 8 * PAGE);
-            const fetcher = new MeshletPageFetcher(makeManifest(1, () => 0, () => 0), 'x');
+            const fetcher = new MeshletPageFetcher(makeManifest(1, () => 0, () => 0), 'x', null, new MeshletFetchScheduler());
             const bytes = await fetcher.fetchRange(0, 2 * PAGE, PAGE);
             expect(bytes.byteLength).to.equal(PAGE);
+            expect(bytes.byteOffset, 'a view into the whole file, not a copy').to.equal(2 * PAGE);
         });
 
         it('throws on an error status', async function () {
             globalThis.fetch = respond(404, 0);
-            const fetcher = new MeshletPageFetcher(makeManifest(1, () => 0, () => 0), 'x');
+            const fetcher = new MeshletPageFetcher(makeManifest(1, () => 0, () => 0), 'x', null, new MeshletFetchScheduler());
             let error = null;
             try {
                 await fetcher.fetchRange(0, 0, PAGE);
@@ -119,6 +122,7 @@ describe('MeshletPageFetcher', function () {
                 error = e;
             }
             expect(error?.message).to.match(/404/);
+            expect(error?.status).to.equal(404);
         });
     });
 });

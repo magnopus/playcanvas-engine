@@ -522,9 +522,6 @@ class MeshletDirector {
     /** @type {number} - consecutive infeasible frames before {@link onBudgetExceeded} fires. */
     budgetOverrunFrames = 120;
 
-    /** @type {number} - legacy overrun multiplier; automatic budget overruns are disabled. */
-    budgetOverrunStep = 1.5;
-
     _infeasibleFrames = 0;
 
     /** @type {Layer|null} - the outline renderer's layer, if registered. */
@@ -641,6 +638,8 @@ class MeshletDirector {
         }
         this._destroyViews();
         this._dropVisCarry();
+        this._retired.forEach(b => b.destroy());
+        this._retired.length = 0;
         this.residency?.destroy();
         if (this._ownsFetchScheduler) this.fetchScheduler.clear();
         this.world.destroy();
@@ -651,8 +650,17 @@ class MeshletDirector {
     }
 
     _destroyViews() {
-        this.views.forEach(v => v.destroy());
+        this.views.forEach(v => this._destroyView(v));
         this.views.clear();
+    }
+
+    /**
+     * @param {MeshletView} view - The view to destroy, after taking it off the outline layer.
+     * @private
+     */
+    _destroyView(view) {
+        this._outlineLayer?.removeMeshInstances(view.meshInstances.slice(0, MESHLET_BUCKET_COUNT));
+        view.destroy();
     }
 
     _dropVisCarry() {
@@ -728,6 +736,7 @@ class MeshletDirector {
         this._applyFetchConcurrency();
 
         this.world = new MeshletWorld(this.device);
+        this._outlineAttached = false;
         this.world.poolBytes = poolBytes;
         this.world.texturePoolBytes = texturePoolBytes;
         this.world.maxFineTextureSize = maxFineTextureSize;
@@ -743,7 +752,7 @@ class MeshletDirector {
         this.budget._lastFetched = 0;
         build(this.world);
         if (this.world.pendingCount === 0) {
-            prevViews.forEach(v => v.destroy());
+            prevViews.forEach(v => this._destroyView(v));
             prevResidency?.destroy();
             prevWorld.destroy();
             return this.world;
@@ -753,7 +762,7 @@ class MeshletDirector {
         const carriedSlots = (prevWorld.finalized && prevWorld.streamed && prevResidency) ?
             this._adoptStreamingState(prevWorld, prevResidency, prevViews) : null;
 
-        prevViews.forEach(v => v.destroy());
+        prevViews.forEach(v => this._destroyView(v));
         prevResidency?.destroy();
         prevWorld.destroy();
 
@@ -961,7 +970,7 @@ class MeshletDirector {
         // drop views whose camera left the set
         this.views.forEach((view, cam) => {
             if (!cameras.includes(cam)) {
-                view.destroy();
+                this._destroyView(view);
                 this.views.delete(cam);
                 this._invalidateCameraFrame(cam);
             }
@@ -1107,7 +1116,6 @@ class MeshletDirector {
                 suggestedBudgetBytes: this.world.poolBytes + rejected * 4,
                 indexDemandRatio: (admitted + rejected) / Math.max(view.indexTotal(), 1),
                 indexCeiling: this.world.indexCeiling,
-                indexOverrun: this.world.indexOverrun,
                 pagesMissing: this.residency?.lastMissingWanted ?? 0,
                 poolPages: this.world.poolSlots,
                 totalPages: this.world.totalPages,
@@ -1274,7 +1282,6 @@ class MeshletDirector {
             suggestedBudgetBytes: suggested,
             indexDemandRatio: indexRatio,
             indexCeiling: world.indexCeiling,
-            indexOverrun: world.indexOverrun,
             pagesMissing: pagesShort,
             poolPages: res ? res.slotPage.length : 0,
             totalPages: world.totalPages
@@ -1375,9 +1382,10 @@ class MeshletDirector {
     setOutlineLayer(layer, color = null, hoverColor = null) {
         const previous = this._outlineLayer;
         if (previous && previous !== layer) {
-            this.views.forEach(v => previous.removeMeshInstances(v.meshInstances));
+            this.views.forEach(v => previous.removeMeshInstances(v.meshInstances.slice(0, MESHLET_BUCKET_COUNT)));
         }
         this._outlineLayer = layer ?? null;
+        this._outlineAttached = !!layer && this.world.outlinedCount > 0;
         if (!layer) return;
 
         this._outlineColor = color ?
@@ -1405,7 +1413,7 @@ class MeshletDirector {
             mi.setParameter('pcOutlineColor', this._outlineColor);
             mi.setParameter('pcOutlineColorHover', this._hoverColor);
         });
-        if (this.world.outlinedCount > 0) {
+        if (this._outlineAttached) {
             this._outlineLayer.addMeshInstances(mis, true);
         }
     }

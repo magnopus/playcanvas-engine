@@ -6,7 +6,7 @@ import { PIXELFORMAT_R32F, SHADERLANGUAGE_WGSL } from '../../platform/graphics/c
 import { Shader } from '../../platform/graphics/shader.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import {
-    cellCullWGSL, instanceCullWGSL, compactMeshletsWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL
+    cellCullWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL
 } from './shaders/meshlet-cull-wgsl.js';
 
 /**
@@ -39,8 +39,6 @@ class MeshletCullShaders {
         this.rootBandArgs = make('RootBandArgs', meshletRootBandArgsWGSL);
         this.rootScatter = make('RootScatter', meshletRootScatterWGSL);
         this.rootAdmit = make('RootAdmit', meshletRootAdmitWGSL);
-        this.instanceCull = make('InstanceCull', instanceCullWGSL);
-        this.compactMeshlets = make('CompactMeshlets', compactMeshletsWGSL);
         this.dispatchArgs = make('DispatchArgs', dispatchArgsWGSL);
         this.meshletCull = make('MeshletCull', meshletCullWGSL);
         this.finalizeArgs = make('FinalizeArgs', finalizeArgsWGSL);
@@ -62,8 +60,6 @@ class MeshletCullShaders {
         this.rootBandArgs?.destroy();
         this.rootScatter?.destroy();
         this.rootAdmit?.destroy();
-        this.instanceCull?.destroy();
-        this.compactMeshlets?.destroy();
         this.dispatchArgs?.destroy();
         this.meshletCull?.destroy();
         this.finalizeArgs?.destroy();

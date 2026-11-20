@@ -240,6 +240,14 @@ describe('WebgpuBuffer.unlock', function () {
         expect(created, 'no reallocation').to.have.lengthOf(1);
     });
 
+    it('rounds sizes of 2 GB and more without 32-bit overflow', function () {
+        const { device, created } = makeDevice();
+        const buffer = new WebgpuBuffer(GPUBufferUsage.INDEX);
+        // 592,047,716 uint32 indices
+        buffer.unlock(device, null, undefined, undefined, 2368190864 + 2);
+        expect(created).to.deep.equal([2368190868]);
+    });
+
     it('sizes from the CPU copy and uploads it when one is given', function () {
         const { device, created, writes } = makeDevice();
         const buffer = new WebgpuBuffer(GPUBufferUsage.INDEX);

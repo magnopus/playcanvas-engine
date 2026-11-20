@@ -8,7 +8,7 @@ import { Frustum } from '../../core/shape/frustum.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { math } from '../../core/math/math.js';
 import { Vec3 } from '../../core/math/vec3.js';
-import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, WORK_ITEM_U32S, claimWordCount } from './constants.js';
+import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, CULL_PARAMS, ROOT_LIST_U32S, claimWordCount } from './constants.js';
 import { MeshletShadowView } from './meshlet-shadow-view.js';
 
 /**
@@ -119,6 +119,13 @@ const addHullPoint = (x, y, z) => {
     );
     return _lightDir.x * x + _lightDir.y * y + _lightDir.z * z;
 };
+
+// orders projected hull points by x, then y
+const compareHullPoints = (a, b) => (_hullPoints[a * 2] - _hullPoints[b * 2]) || (_hullPoints[a * 2 + 1] - _hullPoints[b * 2 + 1]);
+
+// z of the cross product of (a - o) and (b - o): positive for a counter-clockwise turn
+const hullCross = (o, a, b) => (_hullPoints[a * 2] - _hullPoints[o * 2]) * (_hullPoints[b * 2 + 1] - _hullPoints[o * 2 + 1]) -
+    (_hullPoints[a * 2 + 1] - _hullPoints[o * 2 + 1]) * (_hullPoints[b * 2] - _hullPoints[o * 2]);
 
 /**
  * Writes the planes of the region a directional light can carry a caster's shadow into: the
@@ -255,9 +262,6 @@ class MeshletShadowRenderer {
      */
     _claimBits = null;
 
-    /** @type {boolean} - set false to give every cascade its own claim plane (debugging). */
-    shareClaimBits = true;
-
     /**
      * Include spot and omni lights. An omni costs six views - one cull chain per cube face - so
      * a scene with many shadowed point lights is expensive. Set false to keep meshlet shadows to directional lights only.
@@ -267,15 +271,13 @@ class MeshletShadowRenderer {
     localLights = true;
 
     /**
-     * Work items, shared by every shadow view for the same reason as {@link _claimBits}: the
-     * cascades' chains are encoded back to back and each begins by clearing the counters that
-     * index them. Sized from the world's work-item capacity, which on a scattered scene is tens
-     * of MB - per cascade, that adds up faster than anything else here.
+     * Root list, shared by every shadow view for the same reason as {@link _claimBits}: the
+     * cascades' chains are encoded back to back and each rebuilds it from scratch.
      *
      * @type {StorageBuffer|null}
      * @private
      */
-    _workItems = null;
+    _rootList = null;
 
     /**
      * Cull each directional cascade's casters against its caster volume: the part of the
@@ -302,8 +304,8 @@ class MeshletShadowRenderer {
         this.entries.clear();
         this._claimBits?.destroy();
         this._claimBits = null;
-        this._workItems?.destroy();
-        this._workItems = null;
+        this._rootList?.destroy();
+        this._rootList = null;
     }
 
     /**
@@ -669,7 +671,7 @@ class MeshletShadowRenderer {
         culler.cameraLodThreshold = director.shadowMatchCameraLod ?
             director.dagPixelThreshold * director.pixelScale * director.budget.pressureScale * view.pressureScale : 0;
         // the faces share one claim buffer, so its persistent admission bits would mix
-        culler.hysteresis = !this._claimBits;
+        culler.hysteresis = false;
 
         this._setCasterVolume(entry, view, projection.orthoScale, culler);
 
@@ -787,15 +789,13 @@ class MeshletShadowRenderer {
         const count = _hullPoints.length / 2;
         _hullOrder.length = count;
         for (let i = 0; i < count; i++) _hullOrder[i] = i;
-        _hullOrder.sort((a, b) => (_hullPoints[a * 2] - _hullPoints[b * 2]) || (_hullPoints[a * 2 + 1] - _hullPoints[b * 2 + 1]));
-        const cross = (o, a, b) => (_hullPoints[a * 2] - _hullPoints[o * 2]) * (_hullPoints[b * 2 + 1] - _hullPoints[o * 2 + 1]) -
-            (_hullPoints[a * 2 + 1] - _hullPoints[o * 2 + 1]) * (_hullPoints[b * 2] - _hullPoints[o * 2]);
+        _hullOrder.sort(compareHullPoints);
         _hull.length = 0;
         for (let pass = 0; pass < 2; pass++) {
             const start = _hull.length;
             for (let k = 0; k < count; k++) {
                 const i = _hullOrder[pass === 0 ? k : count - 1 - k];
-                while (_hull.length >= start + 2 && cross(_hull[_hull.length - 2], _hull[_hull.length - 1], i) <= 0) _hull.pop();
+                while (_hull.length >= start + 2 && hullCross(_hull[_hull.length - 2], _hull[_hull.length - 1], i) <= 0) _hull.pop();
                 _hull.push(i);
             }
             _hull.pop();
@@ -886,15 +886,14 @@ class MeshletShadowRenderer {
     _createEntry(light, camera, layer) {
         const { director } = this;
         const faces = light.numShadowFaces;
-        // sized exactly as a view sizes its own (one bit per instance-meshlet pair, 32 to a
-        // word; work items for the root list, one per instance - see MeshletWorld#rootListItems)
-        if (this.shareClaimBits && !this._claimBits) {
+        // sized exactly as a view sizes its own (see claimWordCount and MeshletWorld#rootListItems)
+        if (!this._claimBits) {
             const words = claimWordCount(director.world.totalPairs, director.world.instanceCount);
             this._claimBits = new StorageBuffer(this.device, words * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         }
-        if (!this._workItems) {
-            this._workItems = new StorageBuffer(this.device,
-                director.world.rootListItems * WORK_ITEM_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
+        if (!this._rootList) {
+            this._rootList = new StorageBuffer(this.device,
+                director.world.rootListItems * ROOT_LIST_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         }
         this._viewsDirty = true;
         const views = [];
@@ -905,7 +904,7 @@ class MeshletShadowRenderer {
                     cullShaders: director.cullShaders,
                     capCarry: director.takeShadowCapCarry(light.id, c),
                     sharedClaimBits: this._claimBits,
-                    sharedWorkItems: this._workItems,
+                    sharedRootList: this._rootList,
                     initialIndexScale: director.shadowInitialIndexScale
                 }
             );

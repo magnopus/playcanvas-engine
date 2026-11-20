@@ -57,7 +57,6 @@ const makeWorld = () => ({
     cells: { cellCount: 3, boundsBuffer: storage(), instancesBuffer: storage() },
     totalPairs: 1000,
     instanceCount: 130,
-    workItemCapacity: 130,
     pageSizeBytes: 65536,
     totalPages: 12,
     objectDataBuffer: storage(),
@@ -70,20 +69,14 @@ const makeWorld = () => ({
 const makeView = (singlePhase = false) => ({
     singlePhase,
     recordCapacity: 100,
-    workItemCapacity: 130,
-    ensureWorkItems(capacity) {
-        if (capacity <= this.workItemCapacity) return false;
-        this.workItemCapacity = capacity;
-        this.workItemsBuffer = storage(capacity * 8);
-        return true;
-    },
+    rootListCapacity: 130,
     indexCapacity: [10, 20, 30],
     cullParamsBuffer: storage(256),
     countersBuffer: storage(MESHLET_COUNTER_U32S * 4),
     cutBudgetBuffer: storage(24),
     cutBudgetInitial: new Uint32Array(6),
     claimBitsBuffer: storage(64),
-    workItemsBuffer: storage(),
+    rootListBuffer: storage(),
     recordsBuffer: storage(),
     selectedMeshletsBuffer: storage(),
     visBitsBuffer: storage(),
@@ -123,14 +116,13 @@ describe('MeshletCuller', function () {
         const view = makeView();
         const world = makeWorld();
         const culler = new MeshletCuller(device, world, view, shaders);
-        expect(culler.compactMeshlets.getParameter('selectionTopology')).to.equal(world.cut.selectionTopology);
+        expect(culler.cutEmit.getParameter('selectionTopology')).to.equal(world.cut.selectionTopology);
         for (const name of ['objectData', 'meshletData', 'cullParams', 'selectedMeshlets', 'counters', 'records', 'residency', 'requests', 'visBits']) {
             expect(culler.meshletCull.getParameter(name), name).to.equal(culler.meshletCullPhase2.getParameter(name));
         }
         expect(culler.meshletCullPhase2.getParameter('phase')).to.equal(2);
-        expect(culler.compactMeshlets.getParameter('workItems')).to.equal(view.workItemsBuffer);
-        expect(culler.compactMeshlets.getParameter('claimBits')).to.equal(view.claimBitsBuffer);
-        expect(culler.compactMeshlets.getParameter('selectedMeshlets')).to.equal(view.selectedMeshletsBuffer);
+        expect(culler.cutEmit.getParameter('claimBits')).to.equal(view.claimBitsBuffer);
+        expect(culler.cutEmit.getParameter('selectedMeshlets')).to.equal(view.selectedMeshletsBuffer);
         expect(culler.indexWrite.getParameter('drawIndices')).to.equal(view.indexBuffer);
         expect(culler.indexWritePhase2.getParameter('drawIndices')).to.equal(view.indexBuffer);
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
@@ -148,13 +140,13 @@ describe('MeshletCuller', function () {
         expect(culler.rootAdmit).to.have.lengthOf(MESHLET_ROOT_BANDS);
         culler.rootAdmit.forEach((compute, band) => {
             expect(compute.getParameter('rootBand')).to.equal(band);
-            expect(compute.getParameter('rootList')).to.equal(view.workItemsBuffer);
+            expect(compute.getParameter('rootList')).to.equal(view.rootListBuffer);
             expect(compute.getParameter('cutBudget')).to.equal(view.cutBudgetBuffer);
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
                 expect(compute.getParameter(`indexCapacity${b}`)).to.equal(view.indexCapacity[b]);
             }
         });
-        expect(culler.rootClassify.getParameter('rootList')).to.equal(view.workItemsBuffer);
+        expect(culler.rootClassify.getParameter('rootList')).to.equal(view.rootListBuffer);
         expect(culler.rootArgs.getParameter('counterIndex')).to.equal(MESHLET_COUNTER.ROOT_CANDIDATES);
 
         device.gpuProfiler = { enabled: true, passDetail: true, destroy() {} };
@@ -164,7 +156,6 @@ describe('MeshletCuller', function () {
         // the per-instance passes run one workgroup per visible cell, the cut stage from its queue args
         const cellSlot = culler.cellArgs.getParameter('dispatchSlot');
         expect(culler.rootClassify.indirectSlotIndex).to.equal(cellSlot);
-        expect(culler.instanceCull.indirectSlotIndex).to.equal(cellSlot);
         expect(culler.queueStages[0].compute.indirectSlotIndex).to.equal(culler.queueStages[0].args.getParameter('dispatchSlot'));
         expect(log.dispatches[1].name).to.equal('MeshletRootClassify');
         expect(log.dispatches[1].computes).to.deep.equal(['MeshletrootClassify', 'MeshletdispatchArgs',
@@ -182,9 +173,9 @@ describe('MeshletCuller', function () {
         culler.destroy();
     });
 
-    it('rejects a work-item buffer too small to hold the root list', function () {
+    it('rejects a root list buffer too small for the instances', function () {
         const view = makeView();
-        view.workItemCapacity = 10;
+        view.rootListCapacity = 10;
         expect(() => new MeshletCuller(device, makeWorld(), view, shaders)).to.throw(/root list/);
     });
 
@@ -322,28 +313,6 @@ describe('MeshletCuller', function () {
         culler.destroy();
     });
 
-    it('selects the cut by compaction instead when direct emit is off', function () {
-        const world = makeWorld();
-        world.workItemCapacity = 4000;
-        const view = makeView();
-        const culler = new MeshletCuller(device, world, view, shaders);
-        culler.directEmit = false;
-        // compaction needs the worst case of work items, where direct emit kept only the root list
-        expect(view.workItemCapacity).to.equal(4000);
-        expect(culler.instanceCull.getParameter('workItems')).to.equal(view.workItemsBuffer);
-        expect(culler.instanceCull.getParameter('workItemCapacity')).to.equal(4000);
-        expect(culler.rootClassify.getParameter('rootList')).to.equal(view.workItemsBuffer);
-        device.gpuProfiler = { enabled: true, passDetail: true, destroy() {} };
-        culler.beginFrame(planes, camera, 640, viewProj, null);
-        expect(log.dispatches.map(d => d.name)).to.deep.equal([
-            'MeshletCellCull', 'MeshletRootClassify', 'MeshletRootAdmit', 'MeshletResidentCut',
-            'MeshletInstanceCull', 'MeshletCompact', 'MeshletCullPhase1', 'MeshletIndexWrite'
-        ]);
-        expect(log.dispatches[4].computes).to.deep.equal(['MeshletinstanceCull', 'MeshletdispatchArgs']);
-        expect(log.dispatches[5].computes).to.deep.equal(['MeshletcompactMeshlets', 'MeshletdispatchArgs']);
-        culler.destroy();
-    });
-
     it('keeps one compute pass while the profiler only measures the frame total', function () {
         const culler = new MeshletCuller(device, makeWorld(), makeView(), shaders);
         device.gpuProfiler = { enabled: true, passDetail: false, destroy() {} };
@@ -391,7 +360,7 @@ describe('MeshletCuller', function () {
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             expect(culler.finalizeArgs.getParameter(`drawSlot${b}`)).to.equal(b);
         }
-        expect(culler.compactMeshlets.indirectSlotIndex).to.equal(culler.dispatchArgs.getParameter('dispatchSlot'));
+        expect(culler.cutEmit.indirectSlotIndex).to.equal(culler.cutEmitArgs.getParameter('dispatchSlot'));
         expect(culler.meshletCull.indirectSlotIndex).to.equal(culler.selectedArgs.getParameter('dispatchSlot'));
         expect(culler.indexWrite.indirectSlotIndex).to.equal(culler.finalizeArgs.getParameter('dispatchSlot'));
         culler.destroy();
@@ -438,11 +407,11 @@ describe('MeshletCuller', function () {
         view.recordsBuffer = storage();
         view.selectedMeshletsBuffer = storage();
         culler.bindRecordState(view);
-        for (const compute of [culler.compactMeshlets, culler.meshletCull, culler.meshletCullPhase2]) {
+        for (const compute of [culler.cutEmit, culler.meshletCull, culler.meshletCullPhase2]) {
             expect(compute.getParameter('selectedMeshlets')).to.equal(view.selectedMeshletsBuffer);
             expect(compute.getParameter('recordCapacity')).to.equal(500);
         }
-        expect(culler.selectedArgs.getParameter('workItemCapacity')).to.equal(500);
+        expect(culler.selectedArgs.getParameter('itemCapacity')).to.equal(500);
         expect(culler.meshletCullPhase2.getParameter('records')).to.equal(view.recordsBuffer);
         expect(culler.finalizeArgsPhase2.getParameter('recordCapacity')).to.equal(500);
         culler.destroy();

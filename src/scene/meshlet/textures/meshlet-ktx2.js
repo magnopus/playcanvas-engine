@@ -25,7 +25,7 @@ let _jobId = 0;
  *
  * @typedef {(device: import('../../../platform/graphics/graphics-device.js').GraphicsDevice,
  *   url: string, data: ArrayBuffer, callback: (err: string|null, result: object|null) => void,
- *   options: { isKTX2: boolean, isTextureArray?: boolean }) => boolean} MeshletTranscodeFn
+ *   options: { isKTX2: boolean, isTextureArray?: boolean, hasAlpha?: boolean }) => boolean} MeshletTranscodeFn
  */
 
 /**
@@ -34,11 +34,13 @@ let _jobId = 0;
  * @param {MeshletTranscodeFn|null} transcode - The injected transcoder.
  * @param {import('../../../platform/graphics/graphics-device.js').GraphicsDevice} device - The device.
  * @param {ArrayBuffer} bytes - The KTX2 file bytes (a private copy - it is transferred away).
+ * @param {boolean} hasAlpha - Whether the texture family keeps alpha. Every layer of a family
+ * must transcode to the same format, so this comes from the family, not the payload.
  * @returns {Promise<{ format: number, width: number, height: number, levels: ArrayBuffer[] }>}
  * The transcoded level data and its engine pixel format (linear variant - callers building
  * sRGB textures apply the sRGB flag at texture creation).
  */
-function transcodeKtx2(transcode, device, bytes) {
+function transcodeKtx2(transcode, device, bytes, hasAlpha) {
     return new Promise((resolve, reject) => {
         if (!transcode) {
             reject(new Error('MeshletKtx2: no transcoder - the meshlet component system wires basisTranscode; a manually created MeshletDirector must set director.transcode before loading textured assets.'));
@@ -52,7 +54,7 @@ function transcodeKtx2(transcode, device, bytes) {
             } else {
                 resolve(result);
             }
-        }, { isKTX2: true, isTextureArray: true });
+        }, { isKTX2: true, isTextureArray: true, hasAlpha });
         if (!found) {
             reject(new Error('MeshletKtx2: Basis module not initialized - call basisInitialize() before loading textured meshlet assets.'));
         }

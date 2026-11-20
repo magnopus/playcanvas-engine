@@ -14,12 +14,12 @@ import { ShaderChunks } from '../shader-lib/shader-chunks.js';
 import { OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW,
     MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT_ABSENT,
     MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
-    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COMPACT_SLICE, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
+    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED,
     MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, MESHLET_NO_PARENT, OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
     PRIMITIVE_DATA,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED,
     PAGE_NOT_RESIDENT, PAGE_TABLE, PAGE_TABLE_FIELDS,
-    RECORD_U32S, TEXEL_RATE_PER_MIP, WORK_ITEM_U32S,
+    RECORD_U32S, ROOT_LIST_U32S, TEXEL_RATE_PER_MIP,
     MESHLET_COLOR_MODE, claimWordCount } from './constants.js';
 import { createMeshletLitMaterial } from './meshlet-lit-material.js';
 import { createMeshletMaterial } from './meshlet-material.js';
@@ -78,11 +78,10 @@ const SHADOW_VIEW_DRAW_WEIGHT = 0.25;
 
 /**
  * Root list entries a view holds: one per instance. Admission ranks every instance in view, so
- * this scales with the scene, not the budget. It lives in the work-item buffer, which the
- * default (direct emit) selection uses for nothing else.
+ * this scales with the scene, not the budget.
  *
  * @param {number} instanceCount - The world's instances.
- * @returns {number} Work items.
+ * @returns {number} Entries.
  * @ignore
  */
 const rootListItems = instanceCount => Math.max(instanceCount, 4);
@@ -91,7 +90,16 @@ const rootListItems = instanceCount => Math.max(instanceCount, 4);
 // the placements on demand rather than mirrored, so this is all the CPU holds of them.
 const OBJECT_ROW_BATCH = 64 * 1024;
 
+// longest the world bounds stay loose after instances move, in milliseconds
+const WORLD_BOUNDS_REFIT_MS = 1000;
+
+// outline and hover changes up to this many instances write just their flags words
+const FLAG_WRITE_LIMIT = 256;
+
 const _tmpMat = new Mat4();
+
+/** @type {number[]} */
+const _touched = [];
 
 /** @type {{ placement: object, run: number, index: number }} - see MeshletWorld#_locate. */
 const _located = { placement: null, run: 0, index: 0 };
@@ -228,8 +236,6 @@ class MeshletWorld {
     // its own demand-grown copy)
     instanceCount = 0;
 
-    workItemCapacity = 0;
-
     recordCapacity = 0;
 
     /** @type {number[]} - initial per-view index capacity, per draw bucket (MESHLET_BUCKET_*). */
@@ -254,27 +260,57 @@ class MeshletWorld {
     /** @type {BoundingBox} */
     _worldBounds = new BoundingBox();
 
+    /**
+     * True while {@link _worldBounds} may be looser than the instances: moved instances grow it
+     * at once, and it is refitted exactly at most every WORLD_BOUNDS_REFIT_MS.
+     *
+     * @type {boolean}
+     * @private
+     */
     _worldBoundsDirty = false;
 
-    /** @type {BoundingBox} - Current world-space bounds, refreshed after placement transforms change. */
+    /** @type {number} - performance.now() of the last exact refit. @private */
+    _worldBoundsRefitAt = 0;
+
+    /**
+     * Current world-space bounds. Always encloses every instance; after instances move it can be
+     * loose for up to WORLD_BOUNDS_REFIT_MS, so a component moving every frame does not cost a
+     * pass over every instance per frame.
+     *
+     * @type {BoundingBox}
+     */
     get worldBounds() {
-        if (this._worldBoundsDirty) {
-            let initialized = false;
-            for (let instance = 0; instance < this.instanceCount; instance++) {
-                const prim = this._instanceMatrix(instance, _tmpMat);
-                _tmpLocalBox.center.set(prim.aabbCenter[0], prim.aabbCenter[1], prim.aabbCenter[2]);
-                _tmpLocalBox.halfExtents.set(prim.aabbHalfExtents[0], prim.aabbHalfExtents[1], prim.aabbHalfExtents[2]);
-                _tmpBox.setFromTransformedAabb(_tmpLocalBox, _tmpMat);
-                if (initialized) {
-                    this._worldBounds.add(_tmpBox);
-                } else {
-                    this._worldBounds.copy(_tmpBox);
-                    initialized = true;
-                }
-            }
+        if (this._worldBoundsDirty && performance.now() - this._worldBoundsRefitAt >= WORLD_BOUNDS_REFIT_MS) {
             this._worldBoundsDirty = false;
+            this._worldBoundsRefitAt = performance.now();
+            this._worldBounds.center.set(0, 0, 0);
+            this._worldBounds.halfExtents.set(0, 0, 0);
+            this._growWorldBounds(0, this.instanceCount, false);
         }
         return this._worldBounds;
+    }
+
+    /**
+     * Grows {@link _worldBounds} by the world boxes of a range of instances.
+     *
+     * @param {number} first - First instance.
+     * @param {number} count - Instance count.
+     * @param {boolean} initialized - False when the bounds hold nothing yet.
+     * @private
+     */
+    _growWorldBounds(first, count, initialized) {
+        for (let instance = first; instance < first + count; instance++) {
+            const prim = this._instanceMatrix(instance, _tmpMat);
+            _tmpLocalBox.center.set(prim.aabbCenter[0], prim.aabbCenter[1], prim.aabbCenter[2]);
+            _tmpLocalBox.halfExtents.set(prim.aabbHalfExtents[0], prim.aabbHalfExtents[1], prim.aabbHalfExtents[2]);
+            _tmpBox.setFromTransformedAabb(_tmpLocalBox, _tmpMat);
+            if (initialized) {
+                this._worldBounds.add(_tmpBox);
+            } else {
+                this._worldBounds.copy(_tmpBox);
+                initialized = true;
+            }
+        }
     }
 
     /**
@@ -287,14 +323,20 @@ class MeshletWorld {
     contentVersion = 0;
 
     /**
-     * Bumped whenever an instance's matrix, hidden or shadow-casting state changes - the
-     * objectData inputs of CPU root selection, which skips its per-instance pass while this and
-     * its other inputs are unchanged.
+     * Grow-only scratch for generated objectData rows (see _writeObjectRows).
      *
-     * @type {number}
-     * @ignore
+     * @type {Uint32Array|null}
+     * @private
      */
-    objectVersion = 0;
+    _rowScratch = null;
+
+    /**
+     * Float view of {@link _rowScratch}.
+     *
+     * @type {Float32Array|null}
+     * @private
+     */
+    _rowScratchF32 = null;
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
@@ -304,6 +346,11 @@ class MeshletWorld {
     }
 
     destroy() {
+        // carried from the previous world but never consumed by a build
+        this.adoptPagePool?.destroy();
+        this.adoptPagePool = null;
+        this.adoptTextures?.destroy();
+        this.adoptTextures = null;
         this.pagePool?.destroy();
         this.residencyBuffer?.destroy();
         this.requestsBuffer?.destroy();
@@ -383,7 +430,7 @@ class MeshletWorld {
     /** @type {number} - {@link cutQueueCeiling} for a shadow view. */
     shadowCutQueueCeiling = 0;
 
-    /** @type {number} - work items a view allocates for its root list (see rootListItems). */
+    /** @type {number} - entries a view allocates for its root list (see rootListItems). */
     get rootListItems() {
         return rootListItems(this.instanceCount);
     }
@@ -406,14 +453,6 @@ class MeshletWorld {
      * @type {number}
      */
     indexBudgetTotal = 0;
-
-    /**
-     * Extra indices granted above {@link indexBudgetTotal} when the budget turns out to be
-     * unachievable - see {@link MeshletDirector#budgetOverrunStep}. Capped by the device.
-     *
-     * @type {number}
-     */
-    indexOverrun = 0;
 
     /** @type {{ budget: number, fixed: number, perView: number, pagePool: number, indices: number, records: number, cutQueue: number, rootPages: number }|null} */
     budgetBreakdown = null;
@@ -646,7 +685,7 @@ class MeshletWorld {
             totalPages * 4 +                                       // residency
             (totalPages + totalMaterialRows) * 4 +                 // requests + texel-rate marks
             totalMaterialRows * MATERIAL_RECORD_U32S * 4;          // material table
-        const rootListBytes = rootListItems(totalInstances) * WORK_ITEM_U32S * 4;
+        const rootListBytes = rootListItems(totalInstances) * ROOT_LIST_U32S * 4;
         // camera view: own claim plane, own visibility bits, own root list
         const perCamera = (claimWords + pairWords) * 4 + rootListBytes;
         // shadow views: one claim plane and root list shared by every cascade
@@ -710,7 +749,6 @@ class MeshletWorld {
         this.shadowRecordCeiling = Math.floor(shadowRecordBytes / RECORD_BYTES);
         this.shadowCutQueueCeiling = Math.floor(shadowQueueBytes / CUT_QUEUE_ENTRY_BYTES);
         this.indexBudgetTotal = Math.max(Math.floor(indexBytes / 4), 3);
-        this.indexOverrun = 0;
         this.maxIndices = 0;
         this.budgetBreakdown = {
             budget: this.poolBytes,
@@ -974,7 +1012,6 @@ class MeshletWorld {
         this.instanceFlags = instanceFlags;
         this.primitiveRows = primitiveRows;
         this._placementCursor = 0;
-        this.workItemCapacity = 0;
         this.recordCapacity = 0;
         this.indexCapacity = [0, 0, 0];
         this.indexWorst = [0, 0, 0];
@@ -1177,20 +1214,17 @@ class MeshletWorld {
             // One run of the placement list: where each instance's pair bits start within it, and
             // the run's worst-case capacities (every meshlet of every instance drawn).
             let runPairs = 0;
-            let runWorkItems = 0;
             const runCorners = [0, 0, 0];
             for (let i = 0; i < list.count; i++) {
                 const p = list.primIndex[i];
                 const meshletCount = resource.primitives[p].meshletCount;
                 placement.pairOffsets[i] = runPairs;
                 runPairs += meshletCount;
-                runWorkItems += Math.ceil(meshletCount / MESHLET_COMPACT_SLICE);
                 for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) runCorners[b] += primBucketCorners[p][b];
             }
             placement.runPairs = runPairs;
             placement.pairCount = runPairs * repeat;
             this.totalPairs += placement.pairCount;
-            this.workItemCapacity += runWorkItems * repeat;
             this.recordCapacity += placement.pairCount;
             for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) this.indexCapacity[b] += runCorners[b] * repeat;
 
@@ -1479,7 +1513,7 @@ class MeshletWorld {
      */
     get indexCeiling() {
         const device = this.deviceIndexCeiling || Infinity;
-        const budget = this.indexBudgetTotal > 0 ? this.indexBudgetTotal + this.indexOverrun : 0;
+        const budget = this.indexBudgetTotal;
         const capped = this.maxIndices > 0 ? Math.min(this.maxIndices, budget || this.maxIndices) : budget;
         return capped > 0 ? Math.min(capped, device) : device;
     }
@@ -1527,10 +1561,10 @@ class MeshletWorld {
     }
 
     /**
-     * Sets the debug color mode on the bucket materials (0 = engine-lit material shading,
-     * 1 = LOD tint, 2 = per-meshlet colour, 3 = lit materials painted with each pixel's
-     * texture-sample state) - modes 1 and 2 swap in the unlit debug materials (applied to each
-     * view's mesh instances via {@link MeshletView#syncMaterials}), mode 3 keeps the lit ones.
+     * Sets the debug color mode (MESHLET_COLOR_MODE): MESHLET swaps in the unlit per-meshlet
+     * debug materials (applied to each view's mesh instances via
+     * {@link MeshletView#syncMaterials}); TEXTURES keeps the lit ones, painting each pixel with
+     * its texture-sample state.
      *
      * @param {number} mode - The color mode.
      */
@@ -1551,13 +1585,12 @@ class MeshletWorld {
                 m.update();
             });
         }
-        if (mode > 0 && !texDebug) this._debugMaterials.forEach(m => m.setParameter('colorMode', mode));
     }
 
     /**
      * Updates the root transform of an added resource (placement), rewriting its objectData rows.
      * Only the transform-derived fields change; culling uses the new matrix next frame.
-     * Invalidates {@link worldBounds}, which is refreshed on its next access.
+     * Grows {@link worldBounds} to the new placement; it is refitted exactly later.
      *
      * A placement holds one root transform per run of its instance list (see
      * {@link placements}), so the range is widened to the whole runs it touches.
@@ -1589,8 +1622,8 @@ class MeshletWorld {
         }
         const first = instanceBase + firstRun * per;
         const rows = (lastRun - firstRun + 1) * per;
+        this._growWorldBounds(first, rows, true);
         this._worldBoundsDirty = true;
-        this.objectVersion++;
         this.cells?.refit(first, rows);
         this._uploadObjectRows(first, rows);
     }
@@ -1643,7 +1676,6 @@ class MeshletWorld {
         for (let i = instanceBase + start; i < instanceBase + start + count; i++) {
             flags[i] = set ? (flags[i] | flag) : (flags[i] & ~flag);
         }
-        this.objectVersion++;
         this._uploadObjectRows(instanceBase + start, count);
     }
 
@@ -1665,20 +1697,16 @@ class MeshletWorld {
         const flag = hover ? OBJECT_FLAG_HOVERED : OBJECT_FLAG_OUTLINED;
         const set = hover ? this._hovered : this._outlined;
         const flags = this.instanceFlags;
-        let lo = Infinity;
-        let hi = -Infinity;
+        const touched = _touched;
+        touched.length = 0;
         for (const globalIndex of instanceIndices) {
             const index = globalIndex - this.instanceOffset;
             if (index < 0 || index >= this.instanceCount) continue;
             flags[index] = outlined ? (flags[index] | flag) : (flags[index] & ~flag);
             if (outlined) set.add(index); else set.delete(index);
-            lo = Math.min(lo, index);
-            hi = Math.max(hi, index);
+            touched.push(index);
         }
-        if (lo > hi) return;
-        // one contiguous upload covering the touched range - a scattered selection writes a few
-        // extra rows rather than issuing a write per instance
-        this._uploadObjectRows(lo, hi - lo + 1);
+        this._writeFlags(touched);
     }
 
     /**
@@ -1692,15 +1720,42 @@ class MeshletWorld {
         const set = hover ? this._hovered : this._outlined;
         if (set.size === 0) return;
         const flags = this.instanceFlags;
-        let lo = Infinity;
-        let hi = -Infinity;
+        const touched = _touched;
+        touched.length = 0;
         for (const index of set) {
             flags[index] &= ~flag;
-            lo = Math.min(lo, index);
-            hi = Math.max(hi, index);
+            touched.push(index);
         }
         set.clear();
-        this._uploadObjectRows(lo, hi - lo + 1);
+        this._writeFlags(touched);
+    }
+
+    /**
+     * Uploads only the flags word of the given instances' rows. Outline and hover flags change
+     * nothing a shadow map depends on, so unlike {@link _uploadObjectRows} this leaves
+     * {@link contentVersion} alone.
+     *
+     * @param {number[]} indices - Instance indices; reordered in place.
+     * @private
+     */
+    _writeFlags(indices) {
+        const count = indices.length;
+        if (count === 0) return;
+        indices.sort((a, b) => a - b);
+        const lo = indices[0];
+        const span = indices[count - 1] - lo + 1;
+        // one write per instance costs a queue call each: past a few hundred, regenerating the
+        // whole span in batched writes is cheaper
+        if (count > FLAG_WRITE_LIMIT) {
+            this._writeObjectRows(lo, span);
+            return;
+        }
+        const flags = this.instanceFlags;
+        const flagsOffset = OBJECT_DATA.FLAGS * 4;
+        for (let i = 0; i < count; i++) {
+            const index = indices[i];
+            this.objectDataBuffer.write(index * OBJECT_DATA_U32S * 4 + flagsOffset, flags, index, 1);
+        }
     }
 
     /**
@@ -1726,8 +1781,12 @@ class MeshletWorld {
     _writeObjectRows(first, count) {
         if (count <= 0) return;
         const batch = Math.min(count, OBJECT_ROW_BATCH);
-        const u32 = new Uint32Array(batch * OBJECT_DATA_U32S);
-        const f32 = new Float32Array(u32.buffer);
+        if (!this._rowScratch || this._rowScratch.length < batch * OBJECT_DATA_U32S) {
+            this._rowScratch = new Uint32Array(batch * OBJECT_DATA_U32S);
+            this._rowScratchF32 = new Float32Array(this._rowScratch.buffer);
+        }
+        const u32 = this._rowScratch;
+        const f32 = this._rowScratchF32;
         const flags = this.instanceFlags;
         const primitiveBase = this.instanceCount;
         for (let start = first; start < first + count; start += batch) {

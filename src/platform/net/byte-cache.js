@@ -95,6 +95,9 @@ class ByteCacheEntry {
  * evicted beyond it. Defaults to 2 GiB. Lowered automatically when the store runs out of quota.
  * @property {number} [flushDelay] - Milliseconds the index is held in memory after a change before
  * it is written to the store. Defaults to 2000.
+ * @property {number} [maxFileBytes] - Largest whole file {@link ByteCache#putFile} stores. Storing
+ * copies the bytes on the calling thread before it returns, which for a very large response is a
+ * long main-thread stall; larger files are left uncached. Defaults to 64 MiB.
  * @property {(url: string) => (string|null)} [key] - Maps a URL to its cache key, or to null to
  * leave it uncached. Use it to restrict caching to some hosts, or to strip query parameters that
  * change between requests without changing the content (signatures, session tokens). Defaults to
@@ -161,8 +164,16 @@ class ByteCache {
     flushDelay;
 
     /**
+     * Largest whole file {@link ByteCache#putFile} stores, in bytes.
+     *
+     * @type {number}
+     */
+    maxFileBytes;
+
+    /**
      * Resolves once the stored index has been loaded. Until then every lookup misses; writes made
-     * before it resolves are applied once it does.
+     * before it resolves are applied once it does. Chunks left behind by an earlier session that
+     * the index does not reference are deleted in the background afterwards.
      *
      * @type {Promise<void>}
      */
@@ -227,6 +238,15 @@ class ByteCache {
      */
     _writing = new Set();
 
+    /**
+     * Orphaned chunk names being deleted by the startup sweep, with the deletion's promise. A
+     * write to one of these names waits for its deletion, so the two cannot land out of order.
+     *
+     * @type {Map<string, Promise<void>>}
+     * @private
+     */
+    _sweeping = new Map();
+
     /** @private */
     _totalBytes = 0;
 
@@ -235,6 +255,9 @@ class ByteCache {
 
     /** @private */
     _disabled = false;
+
+    /** @private */
+    _storeFailed = false;
 
     /** @private */
     _dirty = false;
@@ -262,6 +285,7 @@ class ByteCache {
         this.chunkSize = Math.max(1, (options.chunkSize ?? 256 * 1024) | 0);
         this.maxBytes = options.maxBytes ?? 2 * 1024 * 1024 * 1024;
         this.flushDelay = options.flushDelay ?? 2000;
+        this.maxFileBytes = options.maxFileBytes ?? 64 * 1024 * 1024;
         this._key = options.key ?? defaultKey;
         this.ready = this._load();
     }
@@ -428,7 +452,8 @@ class ByteCache {
     }
 
     /**
-     * Stores a whole file. The bytes are copied before this returns.
+     * Stores a whole file. The bytes are copied before this returns. A file larger than
+     * {@link ByteCache#maxFileBytes} is not stored.
      *
      * @param {string} url - The URL.
      * @param {ArrayBuffer|ArrayBufferView} data - The file's bytes.
@@ -436,6 +461,7 @@ class ByteCache {
      * @returns {Promise<void>} Resolves when the bytes are written. Never rejects.
      */
     putFile(url, data, type = '') {
+        if (data.byteLength > this.maxFileBytes) return Promise.resolve();
         return this.putRange(url, 0, data, true, type);
     }
 
@@ -506,9 +532,16 @@ class ByteCache {
      * @returns {Promise<void>} Resolves once the index is written.
      */
     destroy() {
-        const flushed = this.ready.then(() => this.flush());
+        // stop lookups and writes now; the final index write below still runs
         this._disabled = true;
-        return flushed;
+        return this.ready.then(() => {
+            if (this._flushTimer !== null) {
+                clearTimeout(this._flushTimer);
+                this._flushTimer = null;
+            }
+            this._flushing = this._flushing.then(() => this._writeIndex(true));
+            return this._flushing;
+        });
     }
 
     /**
@@ -599,7 +632,9 @@ class ByteCache {
                 continue;
             }
             this._writing.add(name);
-            writes.push(this.store.write(name, bytes).then(() => {
+            const removing = this._sweeping.get(name);
+            const write = removing ? removing.then(() => this.store.write(name, bytes)) : this.store.write(name, bytes);
+            writes.push(write.then(() => {
                 // only count it if the entry survived the write
                 if (this._entries.get(key) === entry && !entry.chunks.has(index)) {
                     entry.chunks.add(index);
@@ -696,33 +731,57 @@ class ByteCache {
     }
 
     /**
-     * Loads the index, then deletes stored chunks it does not reference (left behind by a session
-     * that ended before writing its index).
+     * Loads the index, then starts {@link ByteCache#_sweep} without waiting for it.
      *
      * @returns {Promise<void>} Resolves when the cache is usable, or has disabled itself.
      * @private
      */
     async _load() {
+        let cleared = false;
         try {
             await this.store.open();
             const index = await this._readIndex();
             if (index && index.chunkSize !== this.chunkSize) {
                 await this.store.clear();
+                cleared = true;
             } else if (index) {
                 this._adopt(index.entries);
-            }
-
-            const names = await this.store.list();
-            for (const name of names) {
-                if (name !== INDEX_NAME && !this._references(name)) {
-                    this.store.remove(name).catch(() => {});
-                }
             }
         } catch (err) {
             Debug.warn('ByteCache: store unavailable, caching disabled', err);
             this._disabled = true;
+            this._storeFailed = true;
         }
         this._loaded = true;
+        if (!this._storeFailed && !cleared) this._sweep();
+    }
+
+    /**
+     * Deletes stored chunks the index does not reference, left behind by a session that ended
+     * before writing its index. It runs while the cache is in use: each name is checked against
+     * the entries when the listing arrives, and a chunk with a write in flight counts as
+     * referenced.
+     *
+     * @returns {Promise<void>} Resolves when every deletion has settled. Never rejects.
+     * @private
+     */
+    async _sweep() {
+        let names;
+        try {
+            names = await this.store.list();
+        } catch (err) {
+            return;
+        }
+        const removals = [];
+        for (const name of names) {
+            if (name === INDEX_NAME || this._writing.has(name) || this._references(name)) continue;
+            const removal = this.store.remove(name).catch(() => {}).finally(() => {
+                if (this._sweeping.get(name) === removal) this._sweeping.delete(name);
+            });
+            this._sweeping.set(name, removal);
+            removals.push(removal);
+        }
+        await Promise.all(removals);
     }
 
     /**
@@ -788,11 +847,13 @@ class ByteCache {
     /**
      * Merges the stored index (another tab may have written it) and writes the result.
      *
+     * @param {boolean} [closing] - True for the final write from {@link ByteCache#destroy}, which
+     * runs although the cache is already disabled.
      * @returns {Promise<void>} Resolves when written. Never rejects.
      * @private
      */
-    async _writeIndex() {
-        if (!this._dirty || !this._loaded || this._disabled) return;
+    async _writeIndex(closing = false) {
+        if (!this._dirty || !this._loaded || this._storeFailed || (this._disabled && !closing)) return;
         this._dirty = false;
         try {
             const stored = await this._readIndex();

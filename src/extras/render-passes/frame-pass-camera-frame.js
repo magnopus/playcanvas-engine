@@ -916,7 +916,14 @@ class FramePassCameraFrame extends FramePass {
             lastLayerId, lastLayerIsTransparent, !!this.meshletPasses?.middle.length);
         ret.clearRenderTarget = false;
 
-        if (this.meshletPasses?.middle.length) {
+        // the opaque half may have reached the last layer before any transparent one; then
+        // nothing of this part remains for a second pass
+        const { layerList, subLayerList } = this.scenePass.layerComposition;
+        const stopIndex = ret.lastAddedIndex - 1;
+        const reachedLastLayer = stopIndex >= 0 && layerList[stopIndex].id === lastLayerId &&
+            subLayerList[stopIndex] === lastLayerIsTransparent;
+
+        if (this.meshletPasses?.middle.length && !reachedLastLayer) {
             // the rest of the opaque part, picking up where the opaque half stopped
             this.scenePassAfterMeshlets = new RenderPassForward(device, scene, this.cameraComponent);
             this.setupScenePassSettings(this.scenePassAfterMeshlets);

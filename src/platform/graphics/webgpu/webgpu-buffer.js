@@ -1,5 +1,6 @@
 import { TRACEID_RENDER_QUEUE } from '../../../core/constants.js';
 import { Debug, DebugHelper } from '../../../core/debug.js';
+import { math } from '../../../core/math/math.js';
 import { WebgpuDebug } from './webgpu-debug.js';
 
 /**
@@ -86,7 +87,8 @@ class WebgpuBuffer {
 
             // size needs to be a multiple of 4
             // note: based on specs, descriptor.size must be a multiple of 4 if descriptor.mappedAtCreation is true
-            const size = ((storage?.byteLength ?? byteSize) + 3) & ~3;
+            // (not rounded with 32-bit bitwise operators: buffers can exceed 2 GB)
+            const size = math.roundUp(storage?.byteLength ?? byteSize, 4);
 
             this.usageFlags |= GPUBufferUsage.COPY_DST;
             this.allocate(device, size);
@@ -116,7 +118,7 @@ class WebgpuBuffer {
 
         if ((byteLength & 3) !== 0 && byteOffset === 0 && byteLength === storage.byteLength) {
             // Only full uploads can pad with zeros without overwriting live neighboring data.
-            const data = new Uint8Array((byteLength + 3) & ~3);
+            const data = new Uint8Array(math.roundUp(byteLength, 4));
             data.set(new Uint8Array(srcBuffer, srcOffset, byteLength));
             wgpu.queue.writeBuffer(this.buffer, byteOffset, data, 0, data.length);
         } else {

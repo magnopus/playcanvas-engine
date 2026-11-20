@@ -1,5 +1,6 @@
 import { SHADER_FORWARD } from '../constants.js';
 import { RenderPass } from '../../platform/graphics/render-pass.js';
+import { addDirectionalShadowPasses } from '../renderer/render-pass-forward.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
@@ -125,14 +126,13 @@ class RenderPassMeshletDraw extends RenderPass {
     }
 
     /**
-     * Claims this camera's directional shadow passes as before-passes, the same way
-     * RenderPassForward does - this pass is added to the frame graph ahead of the scene
-     * passes, so without the claim the meshlet draws would shade with last frame's shadow
-     * maps. The claim registry (culler.dirLightShadows) makes the later scene passes skip
-     * re-adding them.
+     * Claims this camera's directional shadow passes, as RenderPassForward does: this pass runs
+     * ahead of the scene passes, so without the claim the meshlet draws would shade with last
+     * frame's shadow maps.
      */
     frameUpdate() {
         super.frameUpdate();
+        this.internalBeforePasses.length = 0;
         const camera = this.cameraComponent?.camera;
         const renderer = this.renderer;
         if (!camera) return;
@@ -143,25 +143,7 @@ class RenderPassMeshletDraw extends RenderPass {
         if (step.layer && renderer.scene.clusteredLightingEnabled) {
             renderer.worldClustersAllocator.request(step);
         }
-        const shadowDirLights = renderer.culler.cameraDirShadowLights.get(camera);
-        if (shadowDirLights) {
-            for (let l = 0; l < shadowDirLights.length; l++) {
-                const light = shadowDirLights[l];
-                if (renderer.culler.dirLightShadows.get(light) !== camera) {
-                    renderer.culler.dirLightShadows.set(light, camera);
-                    const shadowPass = renderer._shadowRendererDirectional.getLightRenderPass(light, camera);
-                    if (shadowPass) {
-                        this.beforePasses.push(shadowPass);
-                    }
-                }
-            }
-        }
-    }
-
-    after() {
-        super.after();
-        // dynamically claimed shadow passes are re-added each frame
-        this.beforePasses.length = 0;
+        addDirectionalShadowPasses(renderer, camera, this.internalBeforePasses);
     }
 
     execute() {

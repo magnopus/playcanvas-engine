@@ -97,9 +97,9 @@ describe('WebgpuReadbackPool', function () {
         const view = new DataView(new ArrayBuffer(4));
         await pool.read(storage([1, 2, 3, 4]), 0, 4, view);
         expect(view.getUint8(3)).to.equal(4);
-        const backing = new Uint8Array(8);
-        await pool.read(storage([9, 8]), 0, 2, backing.subarray(5, 7));
-        expect(Array.from(backing)).to.deep.equal([0, 0, 0, 0, 0, 9, 8, 0]);
+        const backing = new Uint8Array(12);
+        await pool.read(storage([9, 8, 7, 6]), 0, 4, backing.subarray(5, 9));
+        expect(Array.from(backing)).to.deep.equal([0, 0, 0, 0, 0, 9, 8, 7, 6, 0, 0, 0]);
         pool.destroy();
     });
 

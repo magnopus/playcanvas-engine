@@ -15,7 +15,11 @@ import { MeshletComponent } from './component.js';
  * @import { MeshletDirector } from '../../../scene/meshlet/meshlet-director.js'
  */
 
-const _properties = ['asset', 'resource', 'baseUrl'];
+const _properties = ['asset', 'resource', 'baseUrl', 'castShadows'];
+
+// shared component statuses for the states with nothing to measure
+const STATUS_NO_GROUP = Object.freeze({ playable: true, failed: false, progress: 1, totalBytes: 0, loadedBytes: 0 });
+const STATUS_NOT_PLACED = Object.freeze({ playable: false, failed: false, progress: 0, totalBytes: 0, loadedBytes: 0 });
 
 // draw indices a fresh world's views start with; demand grows them from there
 const INITIAL_DRAW_INDICES = 2 * 1024 * 1024;
@@ -224,12 +228,21 @@ class MeshletComponentSystem extends ComponentSystem {
     _recordSources = new Map();
 
     /**
-     * Record restores in flight, by resource.
+     * Record restores in flight (or waiting to retry after a failure), by resource. Planning
+     * waits while any are pending.
      *
      * @type {Map<object, Promise<void>>}
      * @private
      */
     _restoring = new Map();
+
+    /**
+     * Consecutive restore failures, by resource, for the retry backoff.
+     *
+     * @type {Map<object, number>}
+     * @private
+     */
+    _restoreFailures = new Map();
 
     /** @type {number} - performance.now() of the last world rebuild. @private */
     _lastRebuild = 0;
@@ -652,7 +665,8 @@ class MeshletComponentSystem extends ComponentSystem {
             enabled: meshletComponent.enabled,
             asset: meshletComponent.asset,
             resource: meshletComponent.resource,
-            baseUrl: meshletComponent.baseUrl
+            baseUrl: meshletComponent.baseUrl,
+            castShadows: meshletComponent.castShadows
         });
     }
 
@@ -762,14 +776,14 @@ class MeshletComponentSystem extends ComponentSystem {
      * @ignore
      */
     _componentStatus(component) {
-        if (!this._group) return { playable: true, failed: false, progress: 1, totalBytes: 0, loadedBytes: 0 };
+        if (!this._group) return STATUS_NO_GROUP;
         const director = this._group.directors[component._partition];
         const resource = component._effectiveResource;
         // not placed yet: the asset is loading, or the rebuild that adds it has not run
         if (!resource || !director || component._placementIndex < 0 || component._placedResource !== resource) {
-            return { playable: false, failed: false, progress: 0, totalBytes: 0, loadedBytes: 0 };
+            return STATUS_NOT_PLACED;
         }
-        return director.resourceStatus(resource) ?? { playable: false, failed: false, progress: 0, totalBytes: 0, loadedBytes: 0 };
+        return director.resourceStatus(resource) ?? STATUS_NOT_PLACED;
     }
 
     /**
@@ -835,12 +849,13 @@ class MeshletComponentSystem extends ComponentSystem {
     /** @private */
     _onFrameRender() {
         if (!this._group || this._suspended) return;
-        if (this._dirty) {
+        // a rebuild waiting on record restores re-plans once they settle
+        if (this._dirty && !this._restoring.size) {
             const now = performance.now();
             const quiet = now - this._dirtyLast >= this._rebuildQuietMs;
             const overdue = now - this._dirtySince >= this._rebuildMaxWaitMs;
             // a world with nothing built yet has nothing to show either way: build at once
-            const built = this._group.directors.some(d => d.world.finalized);
+            const built = this._anyWorldBuilt();
             const waiting = built && this.deferRebuildWhileLoading && this._hasPendingAssets();
             if (!built || (!waiting && (quiet || overdue))) {
                 this._rebuild();
@@ -956,6 +971,7 @@ class MeshletComponentSystem extends ComponentSystem {
 
         const components = [];
         const placed = new Set();
+        const placedResources = new Set();
         const states = [];
         let rebuilt = 0;
         this._group.resize(partitions.length);
@@ -982,12 +998,20 @@ class MeshletComponentSystem extends ComponentSystem {
                 this._buildPartition(world, partition.groups, pi, components);
             });
             for (const g of partition.groups) {
+                placedResources.add(g.resource);
                 for (const component of g.components) placed.add(component);
             }
             states.push(state);
         }
         this._lastRebuild = performance.now();
         this._partitionStates = states;
+        // forget the record sources of resources no world places any more, so they can be freed
+        for (const resource of this._recordSources.keys()) {
+            if (!placedResources.has(resource) && !this._restoring.has(resource)) {
+                this._recordSources.delete(resource);
+                this._restoreFailures.delete(resource);
+            }
+        }
         // components no longer in any world (removed asset, no base URL) stop syncing
         for (const component of this._activeComponents) {
             if (!placed.has(component)) {
@@ -1120,12 +1144,23 @@ class MeshletComponentSystem extends ComponentSystem {
             Debug.error('MeshletComponentSystem: a resource\'s meshlet records were released with no source to restore them from.');
             return;
         }
-        const promise = restoreMeshletRecords(source.url, resource, source.credentials).then(() => {
+        const settle = () => {
+            if (!this._group) return;
             this._restoring.delete(resource);
             this._markDirty();
-        }).catch((err) => {
-            // left released: its world keeps its last build and the rebuild stays pending
-            Debug.error(`MeshletComponentSystem: restoring meshlet records from ${source.url} failed`, err);
+        };
+        const promise = restoreMeshletRecords(source.url, resource, source.credentials).then(() => {
+            this._restoreFailures.delete(resource);
+            settle();
+        }, (err) => {
+            // the world keeps its last build; the rebuild retries the restore after a backoff
+            const failures = (this._restoreFailures.get(resource) ?? 0) + 1;
+            this._restoreFailures.set(resource, failures);
+            const delayMs = Math.min(1000 * 2 ** (failures - 1), 30000);
+            Debug.error(`MeshletComponentSystem: restoring meshlet records from ${source.url} failed, retrying in ${delayMs} ms`, err);
+            return new Promise((resolve) => {
+                setTimeout(resolve, delayMs);
+            }).then(settle);
         });
         this._restoring.set(resource, promise);
     }
@@ -1205,10 +1240,22 @@ class MeshletComponentSystem extends ComponentSystem {
         }
     }
 
+    /**
+     * @returns {boolean} True when any partition's world has finished building.
+     * @private
+     */
+    _anyWorldBuilt() {
+        const directors = this._group.directors;
+        for (let i = 0; i < directors.length; i++) {
+            if (directors[i].world.finalized) return true;
+        }
+        return false;
+    }
+
     /** @private */
     _syncTransforms() {
         const directors = this._group.directors;
-        if (!directors.some(d => d.world.finalized)) return;
+        if (!this._anyWorldBuilt()) return;
 
         const transforms = this._transformQueue;
         for (let i = 0; i < transforms.length; i++) {
@@ -1234,10 +1281,14 @@ class MeshletComponentSystem extends ComponentSystem {
             if (component._placementIndex < 0) continue;
             const world = directors[component._partition]?.world;
             if (!world?.finalized) continue;
-            const hidden = !(component.enabled && component.entity.enabled);
+            const hidden = component._removed || !(component.enabled && component.entity.enabled);
             if (component._hiddenApplied !== hidden) {
                 component._hiddenApplied = hidden;
                 world.setPlacementHidden(component._placementIndex, hidden, component._subBase, component._subCount);
+            }
+            if (component._removed) {
+                component._placementIndex = -1;
+                continue;
             }
             const casts = component.castShadows !== false;
             if (component._castShadowsApplied !== casts) {
@@ -1251,6 +1302,16 @@ class MeshletComponentSystem extends ComponentSystem {
     destroy() {
         super.destroy();
         this.app.off('framerender', this._onFrameRender, this);
+        for (const component of this._playableWatch) {
+            component._settlePlayable({ playable: false, failed: true, progress: 0, totalBytes: 0, loadedBytes: 0 });
+        }
+        this._playableWatch.clear();
+        this._transformQueue.length = 0;
+        this._stateQueue.length = 0;
+        this._activeComponents = [];
+        this._partitionStates = [];
+        this._recordSources.clear();
+        this._restoreFailures.clear();
         this._group?.destroy();
         this._group = null;
         if (this._containerHandler) {

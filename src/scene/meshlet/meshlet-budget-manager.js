@@ -87,7 +87,8 @@ class MeshletBudgetManager {
         }
         const indexTight = indexRatio > this.indexEasedAt;
         if (!residency) {
-            if (!indexTight) this.pressureScale = 1;
+            // ease back like a streamed world: snapping to 1 re-creates the overflow at once
+            if (!indexTight) this.pressureScale = Math.max(this.pressureScale * this.decay, 1);
             return;
         }
 

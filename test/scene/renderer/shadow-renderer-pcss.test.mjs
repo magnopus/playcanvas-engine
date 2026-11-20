@@ -1,8 +1,9 @@
 import { expect } from 'chai';
 
 import { Entity } from '../../../src/framework/entity.js';
-import { SHADOWUPDATE_NONE, SHADOWUPDATE_THISFRAME, SHADOW_PCSS_32F } from '../../../src/scene/constants.js';
+import { LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_SPOT, SHADOWUPDATE_NONE, SHADOWUPDATE_THISFRAME, SHADOW_PCSS_32F } from '../../../src/scene/constants.js';
 import { LightList } from '../../../src/scene/lighting/light-list.js';
+import { ShadowRenderer } from '../../../src/scene/renderer/shadow-renderer.js';
 import { createApp } from '../../app.mjs';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
@@ -131,5 +132,22 @@ describe('PCSS cached cascades', function () {
         const original = fitting();
         update([0]);
         expect(fitting()).to.eql(original);
+    });
+});
+
+describe('PCSS shadow camera clear', function () {
+    const device = { isReverseZ: false };
+    const clearR = (reverseZ, lightType) => {
+        device.isReverseZ = reverseZ;
+        return ShadowRenderer.createShadowCamera(device, SHADOW_PCSS_32F, lightType, 0).clearColor.r;
+    };
+
+    it('clears a directional map to the far depth of the depth convention', function () {
+        expect(clearR(false, LIGHTTYPE_DIRECTIONAL)).to.equal(1);
+        expect(clearR(true, LIGHTTYPE_DIRECTIONAL)).to.equal(0);
+    });
+
+    it('clears a local light map, which stores linear depth, to 1 either way', function () {
+        expect(clearR(true, LIGHTTYPE_SPOT)).to.equal(1);
     });
 });

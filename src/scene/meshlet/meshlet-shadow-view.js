@@ -55,7 +55,7 @@ class MeshletShadowView extends MeshletView {
      * @param {number[]|null} [options.capCarry] - Previous per-bucket demand-grown index
      * capacities (rebuild retention).
      * @param {StorageBuffer|null} [options.sharedClaimBits] - Claim bits shared with the sibling faces.
-     * @param {StorageBuffer|null} [options.sharedWorkItems] - Work items shared with the sibling faces.
+     * @param {StorageBuffer|null} [options.sharedRootList] - Root list shared with the sibling faces.
      * @param {number} [options.initialIndexScale] - Fraction of the world's initial index budget.
      */
     constructor(device, world, renderer, light, face, sceneCamera, options = {}) {
@@ -63,7 +63,7 @@ class MeshletShadowView extends MeshletView {
             capCarry: options.capCarry ?? null,
             cullShaders: options.cullShaders ?? null,
             sharedClaimBits: options.sharedClaimBits ?? null,
-            sharedWorkItems: options.sharedWorkItems ?? null,
+            sharedRootList: options.sharedRootList ?? null,
             initialIndexScale: options.initialIndexScale ?? 1,
             singlePhase: true,
             castShadow: true

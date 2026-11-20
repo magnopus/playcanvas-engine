@@ -15,13 +15,15 @@ describe('MeshletBudgetManager', function () {
         expect(manager.pressureScale).to.be.closeTo(manager.raiseFast ** 2, 1e-9);
     });
 
-    it('holds in the band between eased and starved, and resets a resident world once eased', function () {
+    it('holds in the band between eased and starved, and eases a resident world back once eased', function () {
         const manager = new MeshletBudgetManager();
         manager.pressureScale = 4;
         manager.update(null, 0.7);
         expect(manager.pressureScale, 'held').to.equal(4);
         manager.update(null, 0.5);
-        expect(manager.pressureScale, 'resident worlds have no churn to wait for').to.equal(1);
+        expect(manager.pressureScale, 'decays rather than snapping back into the overflow').to.be.closeTo(4 * manager.decay, 1e-9);
+        for (let i = 0; i < 10000; i++) manager.update(null, 0.5);
+        expect(manager.pressureScale).to.equal(1);
     });
 
     it('coarsens fast on a hard denial and gently on eviction churn', function () {

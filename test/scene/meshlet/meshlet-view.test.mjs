@@ -5,7 +5,7 @@ import { BoundingBox } from '../../../src/core/shape/bounding-box.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { ShaderMaterial } from '../../../src/scene/materials/shader-material.js';
 import {
-    CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, WORK_ITEM_U32S
+    CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, ROOT_LIST_U32S
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
 import { MeshletShadowView } from '../../../src/scene/meshlet/meshlet-shadow-view.js';
@@ -40,7 +40,6 @@ const makeWorld = (device, overrides = {}) => {
     const lit = materials();
     return {
         totalPairs: PAIRS,
-        workItemCapacity: 50,
         rootListItems: 7,
         cut: { rootIndices: [0, 0, 0], rootRecords: 0, stageLevels: [] },
         cells: { cellCount: 1, boundsBuffer: {}, instancesBuffer: {} },
@@ -125,15 +124,14 @@ describe('MeshletView', function () {
         expect(view.cullParamsBuffer.byteSize).to.equal(CULL_PARAMS_VEC4S * 16);
         // the counters, then the visible-cell list (one cell in the mock world) and no chunks
         expect(view.countersBuffer.byteSize).to.equal((MESHLET_VISIBLE_CELLS_BASE + 1) * 4);
-        // direct emit keeps only the root list there, one entry per instance - not the worst case
-        expect(view.workItemsBuffer.byteSize).to.equal(7 * WORK_ITEM_U32S * 4);
-        expect(view.workItemCapacity).to.equal(7);
+        // the root list holds one entry per instance
+        expect(view.rootListBuffer.byteSize).to.equal(7 * ROOT_LIST_U32S * 4);
+        expect(view.rootListCapacity).to.equal(7);
         expect(view.recordCapacity, 'starts at the initial record count').to.equal(100);
         expect(view.recordsBuffer.byteSize).to.equal(100 * RECORD_U32S * 4);
         expect(view.selectedMeshletsBuffer.byteSize).to.equal(100 * 8);
         // pair bits, admission bits, then one off-frustum refinement flag per pair
-        // claim bits, then one finest-cut-level word per instance
-        expect(view.claimBitsBuffer.byteSize).to.equal((Math.ceil((PAIRS * 2 + 7) / 32) + 7 + 2 * Math.ceil(7 / 32)) * 4, 'transient bits, then two persistent admission regions');
+        expect(view.claimBitsBuffer.byteSize).to.equal((Math.ceil((PAIRS * 2 + 7) / 32) + 2 * Math.ceil(7 / 32)) * 4, 'transient bits, then two persistent admission regions');
         expect(view.visBitsBuffer.byteSize).to.equal(pairWords * 4);
         expect(view.indexCapacity).to.deep.equal([300, 60, 30]);
         expect(view.indexBuffer.numIndices).to.equal(390);
@@ -147,19 +145,19 @@ describe('MeshletView', function () {
     });
 
     it('starts a single-phase view on the shared placeholders with one set of instances', function () {
-        const shared = { claim: { byteSize: 8, destroy() {} }, work: { byteSize: 7 * WORK_ITEM_U32S * 4, destroy() {} } };
+        const shared = { claim: { byteSize: 8, destroy() {} }, rootList: { byteSize: 7 * ROOT_LIST_U32S * 4, destroy() {} } };
         const view = makeView({
-            singlePhase: true, castShadow: true, sharedClaimBits: shared.claim, sharedWorkItems: shared.work, initialIndexScale: 0.5
+            singlePhase: true, castShadow: true, sharedClaimBits: shared.claim, sharedRootList: shared.rootList, initialIndexScale: 0.5
         });
         expect(view.visBitsBuffer).to.equal(world.dummyBits);
         expect(view.claimBitsBuffer).to.equal(shared.claim);
-        expect(view.workItemsBuffer).to.equal(shared.work);
+        expect(view.rootListBuffer).to.equal(shared.rootList);
         expect(view.indexCapacity).to.deep.equal([150, 30, 15]);
         expect(view.meshInstances).to.have.lengthOf(MESHLET_BUCKET_COUNT);
         expect(view.meshInstances.every(mi => mi.castShadow && mi.cull), 'casters keep cull on').to.equal(true);
         expect(view.drawPass1).to.equal(undefined);
         let destroyed = 0;
-        shared.claim.destroy = shared.work.destroy = () => destroyed++;
+        shared.claim.destroy = shared.rootList.destroy = () => destroyed++;
         view.destroy();
         expect(destroyed, 'borrowed buffers survive the view').to.equal(0);
     });

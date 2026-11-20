@@ -93,12 +93,6 @@ export const MESHLET_RECORD_STRUCT = [
 ];
 
 /** @type {StructFields} */
-export const MESHLET_WORK_ITEM_STRUCT = [
-    ['instance', 'u32'],
-    ['sliceStart', 'u32', 'first meshlet of the slice, primitive-local']
-];
-
-/** @type {StructFields} */
 export const MESHLET_TEX_RESIDENCY_STRUCT = [
     ['slotFamilyBias', 'u32', 'fineSlotLayer:16 (0xFFFF = tail only) | family:8 | sizeBias:8'],
     ['minLodTailLayer', 'u32', 'minLod:16 (source mips, 0x7FFF = nothing resident) | tailLayer:16']
@@ -130,7 +124,6 @@ export const meshletStructsWGSL = /* wgsl */ `
     ${structWGSL('MeshletData', MESHLET_DATA_STRUCT)}
     ${structWGSL('MeshletMaterial', MESHLET_MATERIAL_STRUCT)}
     ${structWGSL('MeshletRecord', MESHLET_RECORD_STRUCT)}
-    ${structWGSL('MeshletWorkItem', MESHLET_WORK_ITEM_STRUCT)}
     ${structWGSL('MeshletTexResidency', MESHLET_TEX_RESIDENCY_STRUCT)}
 
     fn meshletTexSlotLayer(r : MeshletTexResidency) -> u32 { return r.slotFamilyBias & 0xFFFFu; }
@@ -198,17 +191,6 @@ export const meshletMaterialTableWGSL = /* wgsl */ `
  */
 export const meshletRecordsWGSL = access => /* wgsl */ `
     var<storage, ${access}> records : array<MeshletRecord>;
-`;
-
-/**
- * `workItems : array<MeshletWorkItem>` - one per slice of MESHLET_COMPACT_SLICE meshlets of a
- * surviving instance.
- *
- * @param {string} access - 'read' or 'read_write'.
- * @returns {string} WGSL.
- */
-export const meshletWorkItemsWGSL = access => /* wgsl */ `
-    var<storage, ${access}> workItems : array<MeshletWorkItem>;
 `;
 
 /** `texResidency : array<MeshletTexResidency>` (read). Requires meshletStructsWGSL. */

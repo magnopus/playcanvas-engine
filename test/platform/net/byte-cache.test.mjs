@@ -14,6 +14,10 @@ const URL_B = 'https://example.com/b.bin';
  */
 const bytes = (length, offset = 0) => Uint8Array.from({ length }, (_, i) => (offset + i) & 0xff);
 
+const settle = () => new Promise((resolve) => {
+    setTimeout(resolve, 0);
+});
+
 const makeCache = async (store = new MemoryByteStore(), options = {}) => {
     const cache = new ByteCache(store, { chunkSize: CHUNK, flushDelay: 1e6, ...options });
     await cache.ready;
@@ -55,6 +59,14 @@ describe('ByteCache', function () {
             data.fill(0);
             await stored;
             expect(new Uint8Array((await cache.getFile(URL_A)).data)).to.deep.equal(bytes(32));
+        });
+
+        it('does not store a file larger than maxFileBytes', async function () {
+            const cache = await makeCache(undefined, { maxFileBytes: 32 });
+            await cache.putFile(URL_A, bytes(33));
+            await cache.putFile(URL_B, bytes(32));
+            expect(cache.hasFile(URL_A)).to.equal(false);
+            expect(cache.hasFile(URL_B)).to.equal(true);
         });
 
         it('does not cache URLs the key function rejects', async function () {
@@ -200,6 +212,17 @@ describe('ByteCache', function () {
             expect((await second.getFile(URL_A)).type).to.equal('application/octet-stream');
         });
 
+        it('writes the index on destroy, then stops serving lookups', async function () {
+            const store = new MemoryByteStore();
+            const first = await makeCache(store);
+            await first.putFile(URL_A, bytes(40));
+            await first.destroy();
+            expect(first.hasFile(URL_A)).to.equal(false);
+
+            const second = await makeCache(store);
+            expect(second.hasFile(URL_A)).to.equal(true);
+        });
+
         it('deletes chunks no index references', async function () {
             const store = new MemoryByteStore();
             const first = await makeCache(store);
@@ -212,6 +235,49 @@ describe('ByteCache', function () {
                 setTimeout(resolve, 0);
             });
             expect(await store.list()).to.deep.equal([]);
+        });
+
+        it('is ready once the index loads, without waiting for the orphan sweep', async function () {
+            const store = new MemoryByteStore();
+            const first = await makeCache(store);
+            await first.putFile(URL_A, bytes(40));
+            await first.flush();
+
+            let releaseList;
+            const list = store.list.bind(store);
+            store.list = () => new Promise((resolve) => {
+                releaseList = () => resolve(list());
+            });
+            const second = await makeCache(store);
+            expect(second.hasFile(URL_A), 'served while the sweep is still listing').to.equal(true);
+            releaseList();
+            await settle();
+            expect(second.hasFile(URL_A)).to.equal(true);
+            expect(await second.getFile(URL_A)).to.not.equal(null);
+        });
+
+        it('keeps chunks written while the sweep runs, even over an orphan of the same name', async function () {
+            const store = new MemoryByteStore();
+            const first = await makeCache(store);
+            await first.putFile(URL_A, bytes(40));
+            // never flushed: URL_A's chunks are orphans to the next session
+
+            // the sweep's listing arrives at once, its deletions only when released
+            const removals = [];
+            const remove = store.remove.bind(store);
+            store.remove = name => new Promise((resolve) => {
+                removals.push(() => resolve(remove(name)));
+            });
+            const second = await makeCache(store);
+            await settle();
+            expect(removals.length, 'every orphan is being deleted').to.equal(3);
+
+            const stored = second.putFile(URL_A, bytes(40, 7));
+            for (const release of removals) release();
+            await stored;
+            await settle();
+            expect(second.hasFile(URL_A)).to.equal(true);
+            expect(new Uint8Array((await second.getFile(URL_A)).data)).to.deep.equal(bytes(40, 7));
         });
 
         it('merges entries another cache on the same store flushed', async function () {

@@ -207,6 +207,34 @@ describe('FramePassCameraFrame', function () {
         }
     });
 
+    it('renders each layer once when meshlets split a scene that also has a grab pass', function () {
+        const before = new FramePass(app.graphicsDevice);
+        const middle = new FramePass(app.graphicsDevice);
+        app.renderer.meshletDirector = {
+            buildCameraFramePasses: () => ({ before: [before], middle: [middle] }),
+            wantsSceneDepth: () => false
+        };
+        try {
+            cameraFrame.rendering.sceneColorMap = true;
+            cameraFrame.update();
+            const framePass = cameraFrame.renderPassCamera;
+            // the opaque half already ends at the grab layer: no second opaque pass
+            expect(framePass.scenePassAfterMeshlets).to.equal(null);
+            expect(framePass.scenePassTransparent).to.not.equal(null);
+
+            const rendered = [framePass.scenePass, framePass.scenePassTransparent]
+            .flatMap(pass => pass.layerRenderSteps.map(step => `${step.layer.id}:${step.transparent}`));
+            expect(new Set(rendered).size, rendered.join(' ')).to.equal(rendered.length);
+            expect(framePass.scenePass.layerRenderSteps.every(step => !step.transparent)).to.equal(true);
+        } finally {
+            app.renderer.meshletDirector = null;
+            cameraFrame.destroy();
+            cameraFrame = new CameraFrame(app, app.root.findByName('Camera').camera);
+            before.destroy();
+            middle.destroy();
+        }
+    });
+
     it('blurs the TAA output for the bloom and the high quality depth of field', function () {
         cameraFrame.dof.highQuality = true;
         cameraFrame.update();

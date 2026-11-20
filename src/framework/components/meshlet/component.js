@@ -188,6 +188,15 @@ class MeshletComponent extends Component {
     _stateQueued = false;
 
     /**
+     * Set once the component is removed from its entity. Its instances stay in the world until
+     * the next rebuild, so the state sync hides them meanwhile.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    _removed = false;
+
+    /**
      * Create a new MeshletComponent.
      *
      * @param {MeshletComponentSystem} system - The ComponentSystem that created this Component.
@@ -456,6 +465,8 @@ class MeshletComponent extends Component {
         this._settlePlayable({ playable: false, failed: true, progress: 0, totalBytes: 0, loadedBytes: 0 });
         this.asset = null;
         this._resource = null;
+        this._removed = true;
+        this._queueState();
         this.system._markDirty();
     }
 }

@@ -1,5 +1,6 @@
 import { expect } from 'chai';
 
+import { now } from '../../../src/core/time.js';
 import { PAGE_NOT_RESIDENT, PAGE_REQUEST } from '../../../src/scene/meshlet/constants.js';
 import { FETCH_PRIORITY_ROOTS } from '../../../src/scene/meshlet/streaming/meshlet-fetch-scheduler.js';
 import { MeshletResidency } from '../../../src/scene/meshlet/streaming/meshlet-residency.js';
@@ -91,8 +92,8 @@ describe('MeshletResidency', function () {
             buildRuns: pages => pages.map((p, i) => ({ blob: 0, offset: p * PAGE, length: PAGE, pages: [{ localPage: p, byteOffset: 0 }] })),
             fetchRange: (blob, offset, length, priority) => {
                 fetches.push({ page: offset / PAGE, priority });
-                const bytes = new ArrayBuffer(PAGE);
-                new Uint32Array(bytes)[0] = offset / PAGE;
+                const bytes = new Uint8Array(PAGE);
+                new Uint32Array(bytes.buffer)[0] = offset / PAGE;
                 return Promise.resolve(bytes);
             }
         };
@@ -142,7 +143,7 @@ describe('MeshletResidency', function () {
         const residency = new MeshletResidency(device, world);
         residency._streams[0].fetcher = {
             buildRuns: pages => [{ blob: 0, offset: 0, length: PAGE, pages: pages.map(p => ({ localPage: p, byteOffset: 0 })) }],
-            fetchRange: () => Promise.reject(new Error('404'))
+            fetchRange: () => Promise.reject(Object.assign(new Error('not found'), { status: 404 }))
         };
         await residency.loadRoots();
         expect(residency._streams[0].dead).to.equal(true);
@@ -186,6 +187,61 @@ describe('MeshletResidency', function () {
         residency.destroy();
     });
 
+    it('reads each page of a run out of a view into a larger buffer', async function () {
+        const world = makeWorld(8, 10);
+        const residency = new MeshletResidency(device, world);
+        // pages 3 and 4 in one run, the run 4 bytes into its buffer and page 4 at an odd offset
+        // within it, so one page is read in place and the other copied out
+        const buffer = new ArrayBuffer(4 + 2 * PAGE + 2);
+        const run = new Uint8Array(buffer, 4, 2 * PAGE + 2);
+        new DataView(buffer).setUint32(4, 3, true);
+        new DataView(buffer).setUint32(4 + PAGE + 2, 4, true);
+        residency._streams[0].fetcher = {
+            buildRuns: pages => [{ blob: 0, offset: 0, length: run.byteLength, pages: [{ localPage: pages[0], byteOffset: 0 }, { localPage: pages[1], byteOffset: PAGE + 2 }] }],
+            fetchRange: () => Promise.resolve(run)
+        };
+        residency.inFlight.add(3).add(4);
+        residency._queue.push(3, 4);
+        residency._pump();
+        await Promise.resolve();
+        expect(residency._arrived.map(a => a.words[0])).to.deep.equal([3, 4]);
+        expect(residency._arrived[0].words.buffer, 'aligned page read in place').to.equal(buffer);
+        expect(residency._arrived[1].words.buffer).to.not.equal(buffer);
+        residency.destroy();
+    });
+
+    it('backs a failing stream off for a time, not a number of frames, then kills it', function () {
+        const world = makeWorld(8, 10);
+        const residency = new MeshletResidency(device, world);
+        const stream = residency._streams[0];
+        const fetched = [];
+        stream.fetcher = {
+            buildRuns: pages => pages.map(p => ({ blob: 0, offset: p * PAGE, length: PAGE, pages: [{ localPage: p, byteOffset: 0 }] })),
+            fetchRange: (blob, offset) => {
+                fetched.push(offset / PAGE);
+                return new Promise(() => {});
+            }
+        };
+        residency._failStream(stream, Object.assign(new Error('unavailable'), { status: 503 }));
+        expect(stream.dead).to.equal(false);
+        expect(stream.retryAt).to.be.greaterThan(now());
+
+        const marks = new Uint32Array(10);
+        marks[5] = PAGE_REQUEST.MISSING;
+        residency.frame += 1000;
+        residency._processRequests(marks);
+        expect(fetched, 'still backing off however many frames passed').to.deep.equal([]);
+
+        stream.retryAt = 0;
+        residency._processRequests(marks);
+        expect(fetched).to.deep.equal([5]);
+
+        // a gone resource is given up on at once
+        residency._failStream(stream, Object.assign(new Error('gone'), { status: 410 }));
+        expect(stream.dead).to.equal(true);
+        residency.destroy();
+    });
+
     it('installs arrived pages against the per-frame byte budget', function () {
         const world = makeWorld(8, 10, 2 * PAGE);
         const residency = new MeshletResidency(device, world);
@@ -214,12 +270,32 @@ describe('MeshletResidency', function () {
 
         const smaller = makeWorld(4, 6);   // pages 6..9 dropped
         smaller.cut = { rootPages: [0] };  // pins follow the new world's roots
+        smaller.adoptedPages = 6;
         smaller.residency.set(world.residency.subarray(0, 6));
         const carried = new MeshletResidency(device, smaller, { slotPage: first.slotPage, slotPinned: first.slotPinned, slotLastUsed: first.slotLastUsed, frame: first.frame });
         expect(carried.frame, 'the LRU clock continues').to.equal(40);
         expect(carried.residentPages, 'only the root survives').to.equal(1);
         expect(carried.freeSlots).to.have.lengthOf(3);
         expect(carried.slotPinned[world.residency[0]]).to.equal(1);
+        first.destroy();
+        carried.destroy();
+    });
+
+    it('frees carried slots past the adopted prefix, even when the new world still has those pages', function () {
+        const world = makeWorld(4, 10);
+        const first = new MeshletResidency(device, world);
+        first._installPage(0, words(0), true);
+        first._installPage(8, words(8), false);
+
+        // same page count, but the resource owning pages 6..9 changed: only 0..5 carry
+        const rebuilt = makeWorld(4, 10);
+        rebuilt.cut = { rootPages: [0] };
+        rebuilt.adoptedPages = 6;
+        rebuilt.residency.set(world.residency.subarray(0, 6));
+        const carried = new MeshletResidency(device, rebuilt, { slotPage: first.slotPage, slotPinned: first.slotPinned, slotLastUsed: first.slotLastUsed, frame: first.frame });
+        expect(carried.residentPages).to.equal(1);
+        expect(carried.slotPage.includes(8)).to.equal(false);
+        expect(carried.freeSlots).to.have.lengthOf(3);
         first.destroy();
         carried.destroy();
     });
@@ -231,8 +307,8 @@ describe('MeshletResidency', function () {
             buildRuns: pages => pages.map(p => ({ blob: 0, offset: p * PAGE, length: PAGE, pages: [{ localPage: p, byteOffset: 0 }] })),
             fetchRange: (blob, offset) => {
                 fetched?.push(offset / PAGE);
-                const bytes = new ArrayBuffer(PAGE);
-                new Uint32Array(bytes)[0] = offset / PAGE;
+                const bytes = new Uint8Array(PAGE);
+                new Uint32Array(bytes.buffer)[0] = offset / PAGE;
                 return Promise.resolve(bytes);
             }
         });
@@ -285,7 +361,7 @@ describe('MeshletResidency', function () {
             world.streamInfo[0].resource.manifest.sloppyFlags = true;
             world.cut = { rootPages: [], floorPages: [4] };
             const residency = new MeshletResidency(device, world);
-            residency._streams[0].fetcher = { ...instantFetcher(), fetchRange: () => Promise.reject(new Error('boom (500)')) };
+            residency._streams[0].fetcher = { ...instantFetcher(), fetchRange: () => Promise.reject(Object.assign(new Error('boom'), { status: 500 })) };
             residency.loadRoots();
             residency.loadFloor();
             await settle();
@@ -333,7 +409,7 @@ describe('MeshletResidency', function () {
             world.streamInfo[0].resource.manifest.sloppyFlags = true;
             world.cut = { rootPages: [0], floorPages: [0, 4] };
             const residency = new MeshletResidency(device, world);
-            residency._streams[0].fetcher = { ...instantFetcher(), fetchRange: () => Promise.reject(new Error('gone (404)')) };
+            residency._streams[0].fetcher = { ...instantFetcher(), fetchRange: () => Promise.reject(Object.assign(new Error('gone'), { status: 404 })) };
             residency.loadRoots();
             residency.loadFloor();
             await settle();

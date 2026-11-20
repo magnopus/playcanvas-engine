@@ -350,8 +350,7 @@ describe('MeshletDirector', function () {
         expect(reports, 'the streak restarts on a frame that fits').to.have.lengthOf(0);
         director._checkBudgetFeasible(1.5);
         expect(reports).to.have.lengthOf(1);
-        expect(world.indexOverrun, 'the configured budget remains a limit').to.equal(0);
-        expect(world.indexCeiling).to.equal(1000);
+        expect(world.indexCeiling, 'the configured budget remains a limit').to.equal(1000);
         expect(reports[0].indexDemandRatio).to.equal(1.5);
         expect(reports[0].suggestedBudgetBytes).to.equal(world.poolBytes);
     });

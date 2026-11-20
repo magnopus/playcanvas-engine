@@ -1,3 +1,5 @@
+import { Debug } from '../../../core/debug.js';
+
 /**
  * Fetch priorities, lowest first. Root shards gate rendering anything, geometry pages gate the
  * LOD cut, texture tails gate a texture showing at all, fine mips only sharpen one.
@@ -34,6 +36,11 @@ const PRIORITY_SHARE = [1, 0.5, 0.25, 0.25];
  * @property {number} [priority] - One of the FETCH_PRIORITY_* values; lower dispatches first.
  * @property {(() => boolean)|null} [stillWanted] - Polled when the request reaches the front of
  * the queue; a false answer drops the request unsent and resolves it with null.
+ * @property {boolean} [view] - {@link MeshletFetchScheduler#fetchRange} only: resolve with a
+ * Uint8Array over the response in place of an ArrayBuffer of the range's own, saving a copy when
+ * the request went out wider than the range (merged with neighbours, or widened to the byte
+ * cache's chunks). The view may share its buffer with other requests' views, so it must not be
+ * transferred.
  */
 
 /**
@@ -46,7 +53,8 @@ const PRIORITY_SHARE = [1, 0.5, 0.25, 0.25];
  * each other go out as one Range request and are sliced apart on arrival, and a queued request
  * whose `stillWanted` callback has turned false by the time a slot frees is dropped instead of
  * fetched (a fine mip whose slot was evicted while it waited). Priority is by share, not
- * strict: see {@link PRIORITY_SHARE}.
+ * strict: see {@link PRIORITY_SHARE}. A URL whose host answers a Range request with the whole
+ * file is kept in memory and its later ranges are served from it.
  *
  * @ignore
  */
@@ -85,10 +93,20 @@ class MeshletFetchScheduler {
      * Pending requests, one FIFO per priority. `offset` is -1 for a whole-file request.
      *
      * @type {Array<Array<{ url: string, cacheUrl: string, offset: number, length: number, credentials: string|null,
-     * priority: number, stillWanted: (() => boolean)|null, resolve: Function, reject: Function }>>}
+     * priority: number, stillWanted: (() => boolean)|null, view: boolean, resolve: Function, reject: Function }>>}
      * @private
      */
     _queues = [[], [], [], []];
+
+    /**
+     * Whole files of hosts that ignore the Range header, by cache URL. Each such response
+     * carries the whole file, so keeping the first one costs less than downloading it again
+     * for every later range.
+     *
+     * @type {Map<string, ArrayBuffer>}
+     * @private
+     */
+    _wholeFiles = new Map();
 
     /** @type {number[]} - requests in flight per priority. @private */
     _activeByPriority = [0, 0, 0, 0];
@@ -113,29 +131,33 @@ class MeshletFetchScheduler {
      * @returns {Promise<ArrayBuffer|null>} The bytes, or null when dropped.
      */
     fetchAll(url, options = {}) {
-        return this._enqueue(url, -1, 0, options);
+        return /** @type {Promise<ArrayBuffer|null>} */ (this._enqueue(url, -1, 0, options));
     }
 
     /**
      * Fetches one byte range of a file. A host that ignores the Range header and answers with
-     * the whole file is sliced to the range.
+     * the whole file is sliced to the range. Rejects when the response ends before the range
+     * does.
      *
      * @param {string} url - The URL.
      * @param {number} offset - First byte.
      * @param {number} length - Byte count.
      * @param {MeshletFetchRequestOptions} [options] - Request options.
-     * @returns {Promise<ArrayBuffer|null>} The range's bytes, or null when dropped.
+     * @returns {Promise<ArrayBuffer|Uint8Array|null>} The range's bytes (a Uint8Array when
+     * `options.view` is set), or null when dropped.
      */
     fetchRange(url, offset, length, options = {}) {
         return this._enqueue(url, offset, length, options);
     }
 
     /**
-     * Drops every queued request (each resolves null). Requests in flight complete.
+     * Drops every queued request (each resolves null) and the whole files kept for hosts that
+     * ignore Range. Requests in flight complete.
      */
     clear() {
         const queues = this._queues;
         this._queues = [[], [], [], []];
+        this._wholeFiles.clear();
         for (const queue of queues) {
             this.dropped += queue.length;
             for (const req of queue) req.resolve(null);
@@ -147,12 +169,19 @@ class MeshletFetchScheduler {
      * @param {number} offset - First byte, or -1 for the whole file.
      * @param {number} length - Byte count.
      * @param {MeshletFetchRequestOptions} options - Request options.
-     * @returns {Promise<ArrayBuffer|null>} The bytes, or null when dropped.
+     * @returns {Promise<ArrayBuffer|Uint8Array|null>} The bytes, or null when dropped.
      * @private
      */
     _enqueue(url, offset, length, options) {
-        const cache = this.byteCache;
         const cacheUrl = options.cacheVersion ? `${url}#v=${options.cacheVersion}` : url;
+        const view = offset >= 0 && !!options.view;
+        const whole = offset >= 0 ? this._wholeFiles.get(cacheUrl) : undefined;
+        if (whole) {
+            return new Promise((resolve, reject) => {
+                this._resolveRange({ url, offset, length, view, resolve, reject }, whole, 0, false);
+            });
+        }
+        const cache = this.byteCache;
         if (cache && (offset < 0 ? cache.hasFile(cacheUrl) : cache.hasRange(cacheUrl, offset, length))) {
             const read = offset < 0 ?
                 cache.getFile(cacheUrl).then(hit => hit?.data ?? null) :
@@ -160,7 +189,7 @@ class MeshletFetchScheduler {
             return read.then((bytes) => {
                 if (!bytes) return this._queue(url, offset, length, options);
                 this.cacheHits++;
-                return bytes;
+                return view ? new Uint8Array(bytes) : bytes;
             });
         }
         return this._queue(url, offset, length, options);
@@ -171,14 +200,14 @@ class MeshletFetchScheduler {
      * @param {number} offset - First byte, or -1 for the whole file.
      * @param {number} length - Byte count.
      * @param {MeshletFetchRequestOptions} options - Request options.
-     * @returns {Promise<ArrayBuffer|null>} The bytes, or null when dropped.
+     * @returns {Promise<ArrayBuffer|Uint8Array|null>} The bytes, or null when dropped.
      * @private
      */
-    _queue(url, offset, length, { credentials = null, priority = FETCH_PRIORITY_FINE, stillWanted = null, cacheVersion = null }) {
+    _queue(url, offset, length, { credentials = null, priority = FETCH_PRIORITY_FINE, stillWanted = null, cacheVersion = null, view = false }) {
         return new Promise((resolve, reject) => {
             const p = Math.min(Math.max(priority | 0, 0), this._queues.length - 1);
             const cacheUrl = cacheVersion ? `${url}#v=${cacheVersion}` : url;
-            this._queues[p].push({ url, cacheUrl, offset, length, credentials, priority: p, stillWanted, resolve, reject });
+            this._queues[p].push({ url, cacheUrl, offset, length, credentials, priority: p, stillWanted, view: offset >= 0 && view, resolve, reject });
             this._pump();
         });
     }
@@ -193,6 +222,12 @@ class MeshletFetchScheduler {
             if (head.stillWanted && !head.stillWanted()) {
                 this.dropped++;
                 head.resolve(null);
+                continue;
+            }
+            // queued before an earlier response showed the host ignores Range
+            const whole = head.offset >= 0 ? this._wholeFiles.get(head.cacheUrl) : undefined;
+            if (whole) {
+                this._resolveRange(head, whole, 0, false);
                 continue;
             }
             const batch = [head];
@@ -298,7 +333,7 @@ class MeshletFetchScheduler {
 
         fetch(head.url, init).then((response) => {
             if (!response.ok && response.status !== 206) {
-                throw new Error(`meshlet sidecar fetch failed (${response.status}): ${head.url}`);
+                throw Object.assign(new Error(`meshlet sidecar fetch failed (${response.status}): ${head.url}`), { status: response.status });
             }
             return response.arrayBuffer().then((buffer) => {
                 if (!ranged) {
@@ -308,10 +343,14 @@ class MeshletFetchScheduler {
                 }
                 // a 200 to a Range request is a host that ignored the header and sent the whole
                 // file: the buffer then starts at byte 0, not at `start`
-                const base = response.status === 200 ? 0 : start;
+                const whole = response.status === 200;
+                if (whole) {
+                    Debug.warnOnce(`MeshletFetchScheduler: ${head.url} ignores Range requests; it is kept in memory whole and its ranges are served from there`);
+                    this._wholeFiles.set(cacheUrl, buffer);
+                }
                 // store before resolving: a consumer may transfer the buffer
                 if (cache) {
-                    if (response.status === 200) {
+                    if (whole) {
                         cache.putFile(cacheUrl, buffer);
                     } else {
                         // a short response ran into the end of the file (the widened range may
@@ -319,16 +358,8 @@ class MeshletFetchScheduler {
                         cache.putRange(cacheUrl, start, buffer, buffer.byteLength < end - start);
                     }
                 }
-                for (const req of batch) {
-                    const local = req.offset - base;
-                    if (local < 0 || local >= buffer.byteLength) {
-                        req.reject(new Error(`meshlet sidecar fetch short (${buffer.byteLength} bytes for ${start}-${end - 1}): ${head.url}`));
-                    } else if (batch.length === 1 && base === start && buffer.byteLength === req.length) {
-                        req.resolve(buffer);
-                    } else {
-                        req.resolve(buffer.slice(local, local + req.length));
-                    }
-                }
+                const exclusive = batch.length === 1 && !whole;
+                for (const req of batch) this._resolveRange(req, buffer, whole ? 0 : start, exclusive);
             });
         }).catch((err) => {
             for (const req of batch) req.reject(err);
@@ -337,6 +368,29 @@ class MeshletFetchScheduler {
             this._activeByPriority[head.priority]--;
             this._pump();
         });
+    }
+
+    /**
+     * Settles a range request from a response that holds it.
+     *
+     * @param {{ url: string, offset: number, length: number, view: boolean, resolve: Function, reject: Function }} req - The request.
+     * @param {ArrayBuffer} buffer - The response's bytes.
+     * @param {number} base - File offset of the buffer's first byte.
+     * @param {boolean} exclusive - The buffer belongs to this request alone, so a response of
+     * exactly its range may be handed over as is.
+     * @private
+     */
+    _resolveRange(req, buffer, base, exclusive) {
+        const local = req.offset - base;
+        if (local < 0 || local + req.length > buffer.byteLength) {
+            req.reject(new Error(`meshlet sidecar fetch short: ${req.offset}-${req.offset + req.length - 1} requested, ${base}-${base + buffer.byteLength - 1} received: ${req.url}`));
+        } else if (req.view) {
+            req.resolve(new Uint8Array(buffer, local, req.length));
+        } else if (exclusive && local === 0 && buffer.byteLength === req.length) {
+            req.resolve(buffer);
+        } else {
+            req.resolve(buffer.slice(local, local + req.length));
+        }
     }
 }
 

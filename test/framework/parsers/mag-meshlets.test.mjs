@@ -17,7 +17,7 @@ const SCATTER = [[10, 0, 0], [0, 20, 0]];
 // Builds a minimal streamed-meshlet document: one primitive whose inline geometry is only a
 // 3-vertex placeholder, a v2 stream manifest, a baked one-material table, a texture manifest,
 // one plain node placement and one EXT_mesh_gpu_instancing scatter of the same mesh.
-const buildAsset = ({ version = 2, materialCount = 1, textures = true } = {}) => {
+const buildAsset = ({ version = 2, materialCount = 1, textures = true, quantizedRotation = false } = {}) => {
     const blocks = [];
     const views = [];
     let offset = 0;
@@ -33,20 +33,22 @@ const buildAsset = ({ version = 2, materialCount = 1, textures = true } = {}) =>
     const meshletData = new Uint32Array(MESHLET_COUNT * MESHLET_DATA_U32S).map((_, i) => i * 7);
     const materialTable = new Uint32Array(MATERIAL_RECORD_U32S).map((_, i) => 100 + i);
     const translation = new Float32Array(SCATTER.flat());
-    const rotation = new Float32Array(SCATTER.flatMap(() => [0, 0, 0, 1]));
+    const rotation = quantizedRotation ?
+        new Int16Array(SCATTER.flatMap(() => [0, 0, 0, 32767])) :
+        new Float32Array(SCATTER.flatMap(() => [0, 0, 0, 1]));
     const scale = new Float32Array(SCATTER.flatMap(() => [1, 1, 1]));
     const position = new Float32Array(9);
 
     const accessors = [];
-    const accessor = (typed, componentType, type, components) => {
-        accessors.push({ bufferView: push(typed), componentType, type, count: typed.length / components });
+    const accessor = (typed, componentType, type, components, normalized = false) => {
+        accessors.push({ bufferView: push(typed), componentType, type, count: typed.length / components, normalized });
         return accessors.length - 1;
     };
     const pagesAccessor = accessor(pageTable, U32, 'SCALAR', 1);
     const meshletAccessor = accessor(meshletData, U32, 'SCALAR', 1);
     const tableAccessor = accessor(materialTable, U32, 'SCALAR', 1);
     const tAccessor = accessor(translation, F32, 'VEC3', 3);
-    const rAccessor = accessor(rotation, F32, 'VEC4', 4);
+    const rAccessor = quantizedRotation ? accessor(rotation, 5122, 'VEC4', 4, true) : accessor(rotation, F32, 'VEC4', 4);
     const sAccessor = accessor(scale, F32, 'VEC3', 3);
     const positionAccessor = accessor(position, F32, 'VEC3', 3);
 
@@ -185,6 +187,15 @@ describe('MAG_meshlets extensions', function () {
             expect(translationOf(resource.instances.get(0).matrix)).to.deep.equal([1, 2, 3]);
             expect(translationOf(resource.instances.get(1).matrix)).to.deep.equal(SCATTER[0]);
             expect(translationOf(resource.instances.get(2).matrix)).to.deep.equal(SCATTER[1]);
+        });
+
+        it('dequantizes a normalized integer scatter rotation', function () {
+            const { gltf, bufferViews } = buildAsset({ quantizedRotation: true });
+            const resource = createMeshlets(null, gltf, bufferViews);
+            const m = resource.instances.get(1).matrix;
+            // an identity rotation: unit basis vectors, not a 32767-scaled one
+            expect(Math.hypot(m[0], m[1], m[2])).to.be.closeTo(1, 1e-3);
+            expect(translationOf(m)).to.deep.equal(SCATTER[0]);
         });
 
         it('composes parent transforms and leaves nodes outside the default scene unplaced', function () {

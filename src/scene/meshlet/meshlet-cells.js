@@ -35,6 +35,10 @@ const INDEX_SCALE = 2 ** INDEX_BITS;
 const CLASS_MIN_LOG2 = -8;
 const CLASS_COUNT = 24;
 
+// refit scratch: the cells a moved range touches, and one cell's member spheres
+const _touchedCells = new Set();
+const _cellCenters = new Float32Array(MESHLET_CELL_SIZE * 4);
+
 // spreads the low 8 bits of v so there are two zero bits between each
 const spread = (/** @type {number} */ v) => {
     v = (v | (v << 8)) & 0x00F00F;
@@ -155,12 +159,13 @@ class MeshletCells {
         if (count <= 0) return;
         let lo = Infinity;
         let hi = -1;
-        const touched = new Set();
+        const touched = _touchedCells;
+        touched.clear();
         for (let i = first; i < first + count; i++) {
             touched.add(this.instanceCell[i]);
         }
-        const centers = new Float32Array(MESHLET_CELL_SIZE * 4);
-        touched.forEach((cell) => {
+        const centers = _cellCenters;
+        for (const cell of touched) {
             const start = cell * MESHLET_CELL_SIZE;
             const end = Math.min(start + MESHLET_CELL_SIZE, this.instanceOrder.length);
             for (let p = start; p < end; p++) {
@@ -169,7 +174,7 @@ class MeshletCells {
             this._fitSphere(cell, centers, end - start);
             lo = Math.min(lo, cell);
             hi = Math.max(hi, cell);
-        });
+        }
         if (hi >= lo) {
             this.boundsBuffer?.write(lo * 16, this.spheres, lo * 4, (hi - lo + 1) * 4);
             this.radiiBuffer?.write(lo * 4, this.maxRadii, lo, hi - lo + 1);

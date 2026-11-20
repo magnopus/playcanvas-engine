@@ -4,13 +4,12 @@ import { expect } from 'chai';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import {
     INDIRECT_DRAW_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED,
-    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COMPACT_SLICE, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S,
-    MESHLET_DISPATCH_WIDTH, MESHLET_INDEX_WRITE_RECORDS, OBJECT_BUCKET_SHIFT, OBJECT_DATA, OBJECT_DATA_U32S, PAGE_HEADER, PRIMITIVE_DATA, RECORD_U32S, TEX_RESIDENCY_U32S,
-    WORK_ITEM_U32S
+    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_DATA, MESHLET_DATA_U32S,
+    MESHLET_DISPATCH_WIDTH, MESHLET_INDEX_WRITE_RECORDS, OBJECT_BUCKET_SHIFT, OBJECT_DATA, OBJECT_DATA_U32S, PAGE_HEADER, PRIMITIVE_DATA, RECORD_U32S, TEX_RESIDENCY_U32S
 } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
 import {
-    compactMeshletsWGSL, dispatchArgsWGSL, finalizeArgsWGSL, indexWriteWGSL, instanceCullWGSL, meshletCullWGSL, resetPhase2WGSL
+    dispatchArgsWGSL, finalizeArgsWGSL, indexWriteWGSL, meshletCullWGSL, resetPhase2WGSL
 } from '../../../src/scene/meshlet/shaders/meshlet-cull-wgsl.js';
 import { meshletCutEmitWGSL, meshletCutQueueWGSL } from '../../../src/scene/meshlet/shaders/meshlet-cut-wgsl.js';
 import * as pageWGSL from '../../../src/scene/meshlet/shaders/meshlet-page-wgsl.js';
@@ -23,7 +22,7 @@ import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 // geometry.
 describe('meshlet cull shaders', function () {
 
-    const shaders = { meshletCutQueueWGSL, meshletCutEmitWGSL, instanceCullWGSL, compactMeshletsWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL };
+    const shaders = { meshletCutQueueWGSL, meshletCutEmitWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL };
     const count = (text, re) => (text.match(re) ?? []).length;
 
     it('interpolate every constant', function () {
@@ -36,19 +35,12 @@ describe('meshlet cull shaders', function () {
         // adding a storage binding here silently disables the pipeline on adapters at the
         // default limit; two views of one buffer count twice
         expect(count(meshletCullWGSL, /var<storage/g)).to.be.at.most(10);
-        expect(count(compactMeshletsWGSL, /var<storage/g)).to.be.at.most(10);
         expect(count(meshletCutQueueWGSL, /var<storage/g)).to.be.at.most(10);
         expect(count(meshletCutEmitWGSL, /var<storage/g)).to.be.at.most(10);
     });
 
-    it('size the cull workgroup to the work-item slice and round the fan-out up', function () {
+    it('size the cull workgroup to the cull slice', function () {
         expect(meshletCullWGSL).to.include(`@workgroup_size(${MESHLET_CULL_SLICE})`);
-        // compaction items start at the cut's finest level, not at meshlet 0, and pack
-        // MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE to a workgroup
-        expect(instanceCullWGSL).to.include(`(meshletCount - *start + ${MESHLET_COMPACT_SLICE - 1}u) / ${MESHLET_COMPACT_SLICE}u`);
-        expect(instanceCullWGSL).to.include(`workItems[item] = MeshletWorkItem(laneInstance[lo], laneStart[lo] + slice * ${MESHLET_COMPACT_SLICE}u);`);
-        expect(compactMeshletsWGSL).to.include(`* ${MESHLET_CULL_SLICE / MESHLET_COMPACT_SLICE}u + lane.x / ${MESHLET_COMPACT_SLICE}u`);
-        expect(compactMeshletsWGSL).to.include(`sliceStart + lane.x % ${MESHLET_COMPACT_SLICE}u`);
     });
 
     it('dispatch the cull and index-write passes over a 2D grid to dodge the per-dimension limit', function () {
@@ -128,7 +120,7 @@ describe('meshlet cull shaders', function () {
         const reserveIndices = meshletCullWGSL.indexOf(`atomicAdd(&counters[${MESHLET_COUNTER.CURSOR_BASE}u + bucket]`);
         expect(recordGuard).to.be.at.least(0);
         expect(recordGuard).to.be.below(reserveIndices);
-        expect(meshletCullWGSL).to.include('MeshletRecord(instance, chosen, 0xffffffffu, bucket)');
+        expect(meshletCullWGSL).to.include('MeshletRecord(instance, meshlet, 0xffffffffu, bucket)');
         expect(indexWriteWGSL.indexOf('if (baseIndexOffset == 0xffffffffu)'))
         .to.be.below(indexWriteWGSL.indexOf('let triangleOffset'));
         expect(indexWriteWGSL).to.include(`atomicSub(&counters[${MESHLET_COUNTER.RENDERED}u], 1u)`);
@@ -223,7 +215,6 @@ describe('meshlet cull shaders', function () {
         expectLayout(pageWGSL.MESHLET_DATA_STRUCT, MESHLET_DATA, MESHLET_DATA_U32S);
         expectLayout(pageWGSL.MESHLET_MATERIAL_STRUCT, MATERIAL_RECORD, MATERIAL_RECORD_U32S);
         expect(wgslLayout(pageWGSL.MESHLET_RECORD_STRUCT).size).to.equal(RECORD_U32S * 4);
-        expect(wgslLayout(pageWGSL.MESHLET_WORK_ITEM_STRUCT).size).to.equal(WORK_ITEM_U32S * 4);
         expect(wgslLayout(pageWGSL.MESHLET_TEX_RESIDENCY_STRUCT).size).to.equal(TEX_RESIDENCY_U32S * 4);
         // every enum field is covered by a struct field (nothing addressable only from the CPU)
         const covered = new Set(pageWGSL.MESHLET_OBJECT_STRUCT.map(([f]) => enumName(f)));
@@ -246,7 +237,7 @@ describe('meshlet cull shaders', function () {
 
     it('encode drawn indices as record << 8 | local vertex and read the page header by name', function () {
         expect(indexWriteWGSL).to.include('(recordIndex << 8u) | localVert');
-        expect(meshletCullWGSL).to.include('records[recordIndex] = MeshletRecord(instance, chosen, baseIndexOffset, bucket);');
+        expect(meshletCullWGSL).to.include('records[recordIndex] = MeshletRecord(instance, meshlet, baseIndexOffset, bucket);');
         expect(indexWriteWGSL).to.include(`pagePool[pageBase + ${PAGE_HEADER.MV_COUNT}u]`);
         expect(indexWriteWGSL).to.include(`pagePool[pageBase + ${PAGE_HEADER.VERTEX_COUNT}u]`);
     });
@@ -266,9 +257,9 @@ describe('meshlet cull shaders', function () {
             jsdomTeardown();
         });
 
-        it('compiles the six compute shaders once and owns the placeholder HZB', function () {
+        it('compiles the compute shaders once and owns the placeholder HZB', function () {
             const set = new MeshletCullShaders(device);
-            for (const name of ['instanceCull', 'dispatchArgs', 'meshletCull', 'finalizeArgs', 'indexWrite', 'resetPhase2']) {
+            for (const name of ['cutEmit', 'dispatchArgs', 'meshletCull', 'finalizeArgs', 'indexWrite', 'resetPhase2']) {
                 expect(set[name], name).to.exist;
                 expect(set[name].definition.cshader, `${name} is a compute shader`).to.be.a('string');
             }

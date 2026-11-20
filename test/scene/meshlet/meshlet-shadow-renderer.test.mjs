@@ -7,7 +7,7 @@ import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-gra
 import { LAYERID_WORLD, LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI, LIGHTTYPE_SPOT, SHADOWUPDATE_NONE, SHADOWUPDATE_REALTIME, SHADOWUPDATE_THISFRAME } from '../../../src/scene/constants.js';
 import { GraphNode } from '../../../src/scene/graph-node.js';
 import { ShaderMaterial } from '../../../src/scene/materials/shader-material.js';
-import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, MESHLET_BUCKET_COUNT, WORK_ITEM_U32S } from '../../../src/scene/meshlet/constants.js';
+import { CULL_FLAG_NO_TEXEL_RATE, CULL_FLAG_SHADOW_VIEW, MESHLET_BUCKET_COUNT, ROOT_LIST_U32S } from '../../../src/scene/meshlet/constants.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
 import { MeshletShadowRenderer } from '../../../src/scene/meshlet/meshlet-shadow-renderer.js';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
@@ -36,7 +36,6 @@ const makeWorld = () => {
     return {
         finalized: true,
         totalPairs: PAIRS,
-        workItemCapacity: 50,
         rootListItems: 7,
         cut: { rootIndices: [0, 0, 0], rootRecords: 0, stageLevels: [] },
         cells: { cellCount: 1, boundsBuffer: {}, instancesBuffer: {} },
@@ -162,12 +161,12 @@ describe('MeshletShadowRenderer', function () {
         expect(layer.casters, 'three buckets per face registered as casters').to.have.lengthOf(3 * MESHLET_BUCKET_COUNT);
         expect(entry.views[0].indexCapacity, 'shadow views start at the scaled budget').to.deep.equal([150, 30, 15]);
 
-        // one claim plane and one work-item buffer shared by every face
+        // one claim plane and one root list shared by every face
         const claim = entry.views[0].claimBitsBuffer;
-        expect(entry.views.every(v => v.claimBitsBuffer === claim && v.workItemsBuffer === renderer._workItems)).to.equal(true);
+        expect(entry.views.every(v => v.claimBitsBuffer === claim && v.rootListBuffer === renderer._rootList)).to.equal(true);
         // pair bits, admission bits, then one off-frustum refinement flag per pair
-        expect(claim.byteSize).to.equal((Math.ceil((PAIRS * 2 + 7) / 32) + 7 + 2 * Math.ceil(7 / 32)) * 4, 'transient bits, then two persistent admission regions');
-        expect(renderer._workItems.byteSize, 'the shared root list').to.equal(7 * WORK_ITEM_U32S * 4);
+        expect(claim.byteSize).to.equal((Math.ceil((PAIRS * 2 + 7) / 32) + 2 * Math.ceil(7 / 32)) * 4, 'transient bits, then two persistent admission regions');
+        expect(renderer._rootList.byteSize, 'the shared root list').to.equal(7 * ROOT_LIST_U32S * 4);
         expect(renderer.views).to.have.lengthOf(3);
     });
 
@@ -494,6 +493,6 @@ describe('MeshletShadowRenderer', function () {
         expect(renderer.entries.size).to.equal(0);
         expect(layer.casters).to.have.lengthOf(0);
         expect(renderer._claimBits).to.equal(null);
-        expect(renderer._workItems).to.equal(null);
+        expect(renderer._rootList).to.equal(null);
     });
 });

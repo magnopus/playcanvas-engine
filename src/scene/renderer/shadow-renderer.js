@@ -17,6 +17,7 @@ import {
     EVENT_POSTCULL,
     EVENT_PRECULL,
     LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI,
+    SHADOW_PCSS_32F,
     SHADOWCAMERA_NAME,
     SHADOWUPDATE_NONE,
     shadowTypeInfo
@@ -169,12 +170,10 @@ class ShadowRenderer {
         const isVsm = shadowInfo?.vsm ?? false;
         const isPcf = shadowInfo?.pcf ?? false;
 
-        // don't clear the color buffer if rendering a depth map
-        if (isVsm) {
-            shadowCam.clearColor = new Color(0, 0, 0, 0);
-        } else {
-            shadowCam.clearColor = new Color(1, 1, 1, 1);
-        }
+        // don't clear the color buffer if rendering a depth map. A directional PCSS map stores the
+        // rasterized depth, so with reverse-z its far value, and so its clear value, is 0
+        const clearToZero = isVsm || (device.isReverseZ && shadowType === SHADOW_PCSS_32F && type === LIGHTTYPE_DIRECTIONAL);
+        shadowCam.clearColor = clearToZero ? new Color(0, 0, 0, 0) : new Color(1, 1, 1, 1);
 
         shadowCam.clearDepthBuffer = true;
         shadowCam.clearStencilBuffer = false;

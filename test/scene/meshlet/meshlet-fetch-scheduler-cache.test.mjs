@@ -55,6 +55,15 @@ describe('MeshletFetchScheduler with a ByteCache', function () {
         expect(new Uint8Array(bytes)).to.deep.equal(FILE.slice(100, 150));
     });
 
+    it('resolves a view into the chunk-aligned response instead of copying the range out', async function () {
+        const { scheduler } = await makeScheduler();
+        const bytes = await scheduler.fetchRange(URL, 100, 50, { view: true });
+        expect(bytes).to.be.instanceOf(Uint8Array);
+        expect(bytes.buffer.byteLength, 'the widened 64-191 response').to.equal(128);
+        expect(bytes.byteOffset).to.equal(36);
+        expect(bytes).to.deep.equal(FILE.slice(100, 150));
+    });
+
     it('answers a repeated range from the cache without a fetch', async function () {
         const { scheduler } = await makeScheduler();
         await scheduler.fetchRange(URL, 100, 50);

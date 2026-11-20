@@ -156,7 +156,7 @@ class MiniStats {
         this._resourceCounts = new Map();
         /** @type {Map<string, Graph>} @private */
         this._resourceGraphs = new Map();
-        // magnopus patched - the GPU graph (and the GPU profiler it runs) only from gpuMinSize
+        // the GPU graph, and the GPU profiler it drives, only run from gpuMinSize
         this.gpuMinSize = options.gpuMinSize ?? 1;
         this.gpuTimingMinSize = Math.max(options.gpuTimingMinSize ?? 1, this.gpuMinSize);
         this.cpuTimingMinSize = options.cpuTimingMinSize ?? 1;

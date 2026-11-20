@@ -6,7 +6,7 @@ import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { WebgpuReadbackPool } from '../../platform/graphics/webgpu/webgpu-readback-pool.js';
 import { Debug } from '../../core/debug.js';
 import {
-    CULL_PARAMS_VEC4S, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, WORK_ITEM_U32S
+    CULL_PARAMS_VEC4S, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, ROOT_LIST_U32S
 } from './constants.js';
 import { GraphNode } from '../graph-node.js';
 import { Mesh } from '../mesh.js';
@@ -119,17 +119,16 @@ class MeshletView {
     /** @type {boolean} - false when claimBitsBuffer is borrowed from a sibling-view pool. */
     _ownsClaimBits = true;
 
-    /** @type {boolean} - false when workItemsBuffer is borrowed from a sibling-view pool. */
-    _ownsWorkItems = true;
+    /** @type {boolean} - false when rootListBuffer is borrowed from a sibling-view pool. */
+    _ownsRootList = true;
 
     /**
-     * Work items {@link workItemsBuffer} holds. The default selection (direct emit from the cut
-     * queue) uses the buffer only as the root list, one entry per instance; the compaction path
-     * needs the world's worst case and grows it with {@link ensureWorkItems}.
+     * Instances {@link rootListBuffer} holds root-admission entries for (ROOT_LIST_U32S words
+     * each: the classify-order list, then its band-sorted copy).
      *
      * @type {number}
      */
-    workItemCapacity = 0;
+    rootListCapacity = 0;
 
     _countersData = new Uint32Array(MESHLET_COUNTER_U32S);
 
@@ -249,9 +248,8 @@ class MeshletView {
      * allocating. Only safe between views whose cull chains are encoded strictly back to back
      * (the shadow cascades) - never with a two-phase view, whose phase 2 is encoded later in
      * the frame and still depends on the claim state phase 1 left behind.
-     * @param {StorageBuffer|null} [options.sharedWorkItems] - Work items to borrow, under
-     * exactly the same back-to-back restriction: a two-phase view's phase 2 re-dispatches over
-     * the work items phase 1 produced, so it must own them.
+     * @param {StorageBuffer|null} [options.sharedRootList] - Root list to borrow, under the same
+     * back-to-back restriction.
      * @param {number} [options.initialIndexScale] - Fraction of the world's initial index
      * budget this view starts with. Shadow views take less: the budget is tuned for the camera,
      * and a cascade's cut is coarser, so pre-sizing them for the camera reserves hundreds of MB
@@ -261,7 +259,7 @@ class MeshletView {
         const {
             visCarry = null, capCarry = null, cullShaders = null,
             singlePhase = false, castShadow = false, sharedClaimBits = null,
-            sharedWorkItems = null, initialIndexScale = 1
+            sharedRootList = null, initialIndexScale = 1
         } = options;
         this.device = device;
         this.world = world;
@@ -281,11 +279,11 @@ class MeshletView {
         // demand readbacks go through a pooled staging buffer, the same way the residency's
         // request-marks readback does, rather than allocating a staging buffer per read
         this.readbackPool = new WebgpuReadbackPool(device);
-        this.workItemCapacity = sharedWorkItems ?
-            Math.floor(sharedWorkItems.byteSize / (WORK_ITEM_U32S * BYTES_PER_WORD)) : world.rootListItems;
-        this.workItemsBuffer = sharedWorkItems ??
-            new StorageBuffer(device, this.workItemCapacity * WORK_ITEM_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
-        this._ownsWorkItems = !sharedWorkItems;
+        this.rootListCapacity = sharedRootList ?
+            Math.floor(sharedRootList.byteSize / (ROOT_LIST_U32S * BYTES_PER_WORD)) : world.rootListItems;
+        this.rootListBuffer = sharedRootList ??
+            new StorageBuffer(device, this.rootListCapacity * ROOT_LIST_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
+        this._ownsRootList = !sharedRootList;
         this.recordsBuffer = null; // allocated below, once recordCapacity is known
         this.claimBitsBuffer = sharedClaimBits ?? new StorageBuffer(device, claimWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
         this._ownsClaimBits = !sharedClaimBits;
@@ -314,8 +312,8 @@ class MeshletView {
             this.visBitsBuffer = world.dummyBits;
             this._ownsVisBits = false;
         } else {
+            // WebGPU zero-initialises new buffers
             this.visBitsBuffer = new StorageBuffer(device, pairWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
-            this.visBitsBuffer.write(0, new Uint32Array(pairWords));
             this._ownsVisBits = true;
             if (visCarry && visCarry.words > 0) {
                 const words = Math.min(visCarry.words, pairWords, Math.floor(visCarry.buffer.byteSize / BYTES_PER_WORD));
@@ -385,22 +383,6 @@ class MeshletView {
     }
 
     /**
-     * Grows the work-item buffer to at least `capacity` items, into a buffer this view owns
-     * (a borrowed one is left to its owner). Contents are rewritten every frame.
-     *
-     * @param {number} capacity - Work items wanted.
-     * @returns {boolean} True when the buffer was replaced.
-     */
-    ensureWorkItems(capacity) {
-        if (capacity <= this.workItemCapacity) return false;
-        if (this._ownsWorkItems) this.workItemsBuffer?.destroy();
-        this.workItemCapacity = capacity;
-        this.workItemsBuffer = new StorageBuffer(this.device, capacity * WORK_ITEM_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
-        this._ownsWorkItems = true;
-        return true;
-    }
-
-    /**
      * Reallocates this view's cut queue to the observed demand. Written and consumed within
      * each frame, so nothing copies.
      *
@@ -452,10 +434,10 @@ class MeshletView {
         this.cutBudgetBuffer?.destroy();
         this.cutQueueBuffer?.destroy();
         this.cutQueueBuffer = null;
-        if (this._ownsWorkItems) {
-            this.workItemsBuffer?.destroy();
+        if (this._ownsRootList) {
+            this.rootListBuffer?.destroy();
         }
-        this.workItemsBuffer = null;
+        this.rootListBuffer = null;
         this.recordsBuffer?.destroy();
         this.selectedMeshletsBuffer?.destroy();
         if (this._ownsClaimBits) {

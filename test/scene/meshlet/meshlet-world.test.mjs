@@ -173,7 +173,7 @@ describe('MeshletWorld', function () {
         return world;
     };
 
-    it('refreshes and shrinks world bounds after partial placement transform updates', function () {
+    it('grows world bounds at once after a placement moves, and shrinks them on the next refit', function () {
         const world = buildRuns(new MeshletWorld(device), 2);
         const bounds = world.worldBounds;
         const transform = new Mat4().setScale(10, 2, 3);
@@ -186,6 +186,8 @@ describe('MeshletWorld', function () {
         expect(bounds.getMax().toArray()).to.deep.equal([120, 6, 62]);
 
         world.setPlacementTransform(0, null, 1, 1);
+        expect(world.worldBounds.getMax().toArray(), 'loose until the refit is due').to.deep.equal([120, 6, 62]);
+        world._worldBoundsRefitAt -= 1000;
         expect(world.worldBounds.getMin().toArray()).to.deep.equal([0, 1, 2]);
         expect(world.worldBounds.getMax().toArray()).to.deep.equal([2, 3, 4]);
         world.destroy();
@@ -234,7 +236,6 @@ describe('MeshletWorld', function () {
             expect(meshletData[0 * MESHLET_DATA_U32S + MESHLET_DATA.PAGE]).to.equal(0);
             expect(meshletData[secondResource + 1 * MESHLET_DATA_U32S + MESHLET_DATA.PAGE], 'second resource pages start at 2').to.equal(2 + 1);
             expect(world.totalPages).to.equal(4);
-            expect(world.workItemCapacity).to.equal(2);
             expect(world.recordCapacity).to.equal(2 * MESHLETS);
             expect(world.indexWorst, 'no table, flags 0: everything opaque').to.deep.equal([2 * MESHLETS * TRIANGLES * 3, 0, 0]);
             expect(world.indexCapacity).to.deep.equal(world.indexWorst);
@@ -408,17 +409,18 @@ describe('MeshletWorld', function () {
             world.destroy();
         });
 
-        it('flags outlined instances and uploads one contiguous range', function () {
+        it('flags outlined instances and uploads only their flags words', function () {
             const world = build(new MeshletWorld(device), makeResource(device, { instances: 4 }));
             world.objectDataBuffer.impl.writes.length = 0;
-            world.setInstancesOutlined([1, 3]);
+            const version = world.contentVersion;
+            world.setInstancesOutlined([3, 1]);
             const flag = i => world.instanceFlags[i] & OBJECT_FLAG_OUTLINED;
             expect([flag(0), flag(1), flag(2), flag(3)]).to.deep.equal([0, OBJECT_FLAG_OUTLINED, 0, OBJECT_FLAG_OUTLINED]);
             expect(world.outlinedCount).to.equal(2);
-            const write = world.objectDataBuffer.impl.writes[0];
-            expect(write.offset).to.equal(1 * OBJECT_DATA_U32S * 4);
-            expect(write.data, 'rows 1..3').to.have.lengthOf(3 * OBJECT_DATA_U32S);
-            expect(write.data[2 * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS] & OBJECT_FLAG_OUTLINED, 'the uploaded rows carry the flags').to.equal(OBJECT_FLAG_OUTLINED);
+            const writes = world.objectDataBuffer.impl.writes;
+            expect(writes.map(w => w.offset)).to.deep.equal([1, 3].map(i => (i * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS) * 4));
+            expect(writes.every(w => w.data.length === 1 && (w.data[0] & OBJECT_FLAG_OUTLINED))).to.equal(true);
+            expect(world.contentVersion, 'shadow maps do not depend on outlines').to.equal(version);
             world.clearOutlines();
             expect(world.outlinedCount).to.equal(0);
             expect(flag(1) | flag(3)).to.equal(0);
@@ -456,8 +458,6 @@ describe('MeshletWorld', function () {
             expect(world.indexCeiling, 'device only').to.equal(1000);
             world.indexBudgetTotal = 600;
             expect(world.indexCeiling, 'budget pool').to.equal(600);
-            world.indexOverrun = 100;
-            expect(world.indexCeiling, 'budget plus overrun').to.equal(700);
             world.maxIndices = 500;
             expect(world.indexCeiling, 'maxIndices lowers it').to.equal(500);
             world.destroy();
