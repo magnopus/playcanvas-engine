@@ -437,7 +437,6 @@ class Entity extends GraphNode {
      * } else {
      *     console.log(`No entity found with pointer: ${pointer}`);
      * }
-     * @memberof Entity
      */
     // magnopus patched
     findByObjectModelPointer(pointer) {
@@ -451,7 +450,6 @@ class Entity extends GraphNode {
     /**
      * Get the object model pointer for this entity.
      * @returns {string|undefined} The object model pointer for this entity, or undefined if not set.
-     * @memberof Entity
      */
     get objectModelPointer() {
         return this._objectModelPointer;

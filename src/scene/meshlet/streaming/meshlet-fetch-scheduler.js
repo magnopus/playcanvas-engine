@@ -34,13 +34,13 @@ const PRIORITY_SHARE = [1, 0.5, 0.25, 0.25];
 /**
  * @typedef {object} MeshletFetchRequestOptions
  * @property {string|null} [credentials] - Fetch credentials mode, or null for the default.
- * @property {string|null} [cacheVersion] - Versions the request's {@link MeshletFetchScheduler#byteCache}
+ * @property {string|null} [cacheVersion] - Versions the request's `MeshletFetchScheduler#byteCache`
  * key: the bytes are cached under `<url>#v=<cacheVersion>`, so content replaced behind an
  * unversioned URL (a rebake) misses instead of being served stale. Null keys by the URL alone.
  * @property {number} [priority] - One of the FETCH_PRIORITY_* values; lower dispatches first.
  * @property {(() => boolean)|null} [stillWanted] - Polled when the request reaches the front of
  * the queue; a false answer drops the request unsent and resolves it with null.
- * @property {boolean} [view] - {@link MeshletFetchScheduler#fetchRange} only: resolve with a
+ * @property {boolean} [view] - `MeshletFetchScheduler#fetchRange` only: resolve with a
  * Uint8Array over the response in place of an ArrayBuffer of the range's own, saving a copy when
  * the request went out wider than the range (merged with neighbours, or widened to the byte
  * cache's chunks). The view may share its buffer with other requests' views, so it must not be

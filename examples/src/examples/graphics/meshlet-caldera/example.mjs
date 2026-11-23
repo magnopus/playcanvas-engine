@@ -71,11 +71,11 @@ const BASE = new URLSearchParams(location.search).get('base') ?? './assets/meshl
  * clutter?: string, clutterAll?: string, min: number[], max: number[] }} Region
  */
 /** @type {{ regions: Region[] }} */
-const manifest = await fetch(`${BASE}caldera_scene.json`).then(r => r.json());
+const manifest = await fetch(`${BASE}caldera_scene.json`).then((r) => r.json());
 // ?regions=tile_p,docks loads only those; ?pos=x,y,z&look=x,y,z starts the camera there (glTF metres)
 const params = new URLSearchParams(location.search);
 const only = params.get('regions')?.split(',');
-const regions = manifest.regions.filter(r => r.baked && (!only || only.includes(r.name)));
+const regions = manifest.regions.filter((r) => r.baked && (!only || only.includes(r.name)));
 
 // reverse-z keeps depth precision across the island's view distance (?reverseZ=0 turns it off)
 const device = await createGraphicsDevice(canvas, {
@@ -125,13 +125,14 @@ app.on('destroy', () => {
  * @param {string} url - Asset URL.
  * @returns {Promise<Asset>} The loaded container asset.
  */
-const loadContainer = (name, url) => new Promise((resolve, reject) => {
-    const asset = new Asset(name, 'container', { url });
-    asset.once('load', () => resolve(asset));
-    asset.once('error', reject);
-    app.assets.add(asset);
-    app.assets.load(asset);
-});
+const loadContainer = (name, url) =>
+    new Promise((resolve, reject) => {
+        const asset = new Asset(name, 'container', { url });
+        asset.once('load', () => resolve(asset));
+        asset.once('error', reject);
+        app.assets.add(asset);
+        app.assets.load(asset);
+    });
 
 // every region shares one meshlet world, so the pool covers the sum of their resident sets
 // ?pool=<MiB>: the default suits a handful of regions, the whole island needs about twice that
@@ -152,11 +153,12 @@ app.systems.meshlet.deferRebuildWhileLoading = params.get('progressive') !== '1'
 // their grass, plants and rocks too (CLUTTER=all), where present
 const clutter = params.get('clutter');
 for (const region of regions) {
-    const extra = clutter === 'all' ? region.clutterAll ?? region.clutter : clutter === '1' ? region.clutter : undefined;
+    const extra =
+        clutter === 'all' ? (region.clutterAll ?? region.clutter) : clutter === '1' ? region.clutter : undefined;
     const urls = extra ? [region.url, extra] : [region.url];
     for (const url of urls) {
         const asset = new Asset(region.label, 'container', { url: BASE + url });
-        asset.once('error', err => console.error(`Caldera: failed to load ${url}`, err));
+        asset.once('error', (err) => console.error(`Caldera: failed to load ${url}`, err));
         app.assets.add(asset);
         const entity = new Entity(region.label);
         entity.addComponent('meshlet', { asset });
@@ -182,7 +184,7 @@ if (params.get('shadows') === '1') {
     light.light.shadowResolution = 2048;
     light.light.shadowDistance = 1500;
     const intervals = (params.get('cascadeIntervals') ?? '1,1,2,2').split(',').map(Number);
-    light.light.cascadeUpdateIntervals = intervals.some(v => v > 1) ? intervals : null;
+    light.light.cascadeUpdateIntervals = intervals.some((v) => v > 1) ? intervals : null;
     // ?shadowLod=<multiplier on the LOD error threshold for casters> (4) and
     // ?shadowRootMin=<screen px below which an instance casts no meshlet shadow> (2)
     const group = app.systems.meshlet.group;
@@ -297,15 +299,18 @@ app.on('postrender', () => {
     pickInFlight = true;
     // the world layer only: the water's shader has no pick output
     picker.prepare(camera.camera, app.scene, [app.scene.layers.getLayerByName('World')]);
-    picker.getWorldPointAsync(picker.width * 0.5, picker.height * 0.5).then((point) => {
-        // setting focusPoint re-aims the camera, so it is set once per orbit start and only when hit
-        if (point) {
-            pivotTarget.copy(point);
-            cc.focusPoint = pivotTarget;
-        }
-    }).finally(() => {
-        pickInFlight = false;
-    });
+    picker
+        .getWorldPointAsync(picker.width * 0.5, picker.height * 0.5)
+        .then((point) => {
+            // setting focusPoint re-aims the camera, so it is set once per orbit start and only when hit
+            if (point) {
+                pivotTarget.copy(point);
+                cc.focusPoint = pivotTarget;
+            }
+        })
+        .finally(() => {
+            pickInFlight = false;
+        });
 });
 
 /**
@@ -316,13 +321,20 @@ const frameRegion = (region) => {
     const hi = new Vec3(region.max);
     const center = lo.clone().add(hi).mulScalar(0.5);
     const radius = hi.clone().sub(lo).length() * 0.5;
-    const position = new Vec3(0.6, 0.45, 1).normalize().mulScalar(radius * 1.2).add(center);
+    const position = new Vec3(0.6, 0.45, 1)
+        .normalize()
+        .mulScalar(radius * 1.2)
+        .add(center);
     cc.reset(center, position);
 };
 
 // collision overlays: one translucent material per collision class
 const collisionMaterials = {};
-for (const [cls, color] of [['player_clip', [1, 0.45, 0.1]], ['weapon_clip', [0.2, 0.6, 1]], ['world', [0.3, 1, 0.4]]]) {
+for (const [cls, color] of [
+    ['player_clip', [1, 0.45, 0.1]],
+    ['weapon_clip', [0.2, 0.6, 1]],
+    ['world', [0.3, 1, 0.4]]
+]) {
     const m = new StandardMaterial();
     m.diffuse.set(0, 0, 0);
     m.emissive.set(...color);
@@ -342,18 +354,24 @@ const updateCollision = () => {
     for (const region of regions) {
         if (!region.collision) continue;
         if (show && !collisionEntities.has(region.name)) {
-            collisionEntities.set(region.name, loadContainer(`${region.label} collision`, BASE + region.collision).then((asset) => {
-                const entity = asset.resource.instantiateRenderEntity();
-                for (const cls of Object.keys(collisionMaterials)) {
-                    entity.findByName(cls)?.findComponents('render').forEach((render) => {
-                        render.meshInstances.forEach((mi) => {
-                            mi.material = collisionMaterials[cls];
-                        });
-                    });
-                }
-                app.root.addChild(entity);
-                return entity;
-            }));
+            collisionEntities.set(
+                region.name,
+                loadContainer(`${region.label} collision`, BASE + region.collision).then((asset) => {
+                    const entity = asset.resource.instantiateRenderEntity();
+                    for (const cls of Object.keys(collisionMaterials)) {
+                        entity
+                            .findByName(cls)
+                            ?.findComponents('render')
+                            .forEach((render) => {
+                                render.meshInstances.forEach((mi) => {
+                                    mi.material = collisionMaterials[cls];
+                                });
+                            });
+                    }
+                    app.root.addChild(entity);
+                    return entity;
+                })
+            );
         }
         collisionEntities.get(region.name)?.then((entity) => {
             entity.enabled = show;
@@ -375,7 +393,7 @@ data.set('data', {
     stats: ''
 });
 data.on('data.region:set', (value) => {
-    const region = regions.find(r => r.name === value);
+    const region = regions.find((r) => r.name === value);
     if (region) frameRegion(region);
 });
 data.on('data.visualization:set', (value) => {
@@ -391,7 +409,7 @@ data.on('data.collision:set', updateCollision);
 data.on('data.collisionClass:set', updateCollision);
 
 // open on the first POI rather than the whole-island terrain
-const firstPoi = regions.find(r => r.name !== 'terrain') ?? regions[0];
+const firstPoi = regions.find((r) => r.name !== 'terrain') ?? regions[0];
 if (firstPoi) {
     data.set('data.region', firstPoi.name);
     frameRegion(firstPoi);
@@ -413,10 +431,15 @@ if (startPos) {
 let statFrames = 0;
 app.on('framerender', () => {
     // content past maxWorldMeshlets is split across several worlds: sum their stats
-    const directors = app.systems.meshlet.directors.filter(d => d.world.finalized);
+    const directors = app.systems.meshlet.directors.filter((d) => d.world.finalized);
     if (!directors.length) return;
-    const colorMode = data.get('data.visualization') === 'meshlet' ? MESHLET_COLOR_MODE.MESHLET : MESHLET_COLOR_MODE.LIT;
-    let meshlets = 0, indices = 0, resident = 0, pages = 0, demand = false;
+    const colorMode =
+        data.get('data.visualization') === 'meshlet' ? MESHLET_COLOR_MODE.MESHLET : MESHLET_COLOR_MODE.LIT;
+    let meshlets = 0,
+        indices = 0,
+        resident = 0,
+        pages = 0,
+        demand = false;
     for (const director of directors) {
         director.world.setColorMode(colorMode);
         const view = director.views.get(camera.camera);
@@ -430,8 +453,10 @@ app.on('framerender', () => {
     }
     if (demand && ++statFrames % 30 === 0) {
         const worlds = directors.length > 1 ? ` (${directors.length} worlds)` : '';
-        data.set('data.stats', `${meshlets} meshlets, cut ${(indices / 3e6).toFixed(2)}M tris, ` +
-            `${resident}/${pages} pages${worlds}`);
+        data.set(
+            'data.stats',
+            `${meshlets} meshlets, cut ${(indices / 3e6).toFixed(2)}M tris, ${resident}/${pages} pages${worlds}`
+        );
     }
 });
 

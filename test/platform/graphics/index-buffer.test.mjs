@@ -77,7 +77,7 @@ describe('IndexBuffer', function () {
             const ib = new IndexBuffer(device, INDEXFORMAT_UINT32, 25, BUFFER_STATIC, undefined, { gpuOnly: true });
             expect(device._vram.ib - before).to.equal(100);
             // the null impl never reports itself initialized; stand in for a real backend
-            ib.impl.initialized = true;
+            Object.defineProperty(ib.impl, 'initialized', { value: true });
             ib.impl.destroy = () => { };
             ib.destroy();
             expect(device._vram.ib).to.equal(before);

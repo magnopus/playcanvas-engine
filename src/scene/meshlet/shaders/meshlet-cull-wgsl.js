@@ -9,12 +9,11 @@
  * - counters: MESHLET_COUNTER.* — records, then per-bucket cursors, committed
  *   ends and unclamped demand (the demand block survives the phase-2 reset; the CPU grows the
  *   index buffer from it). Bucket order is opaque, opaque-two-sided, masked (MESHLET_BUCKET_*).
- * - cullParams: array<vec4f>, rows CULL_PARAMS.* (planes, camera, LOD, view-projection,
+ * - cullParams: a uniform array<vec4f>, rows CULL_PARAMS.* (planes, camera, LOD, view-projection,
  *   streaming, view direction). orthoScale > 0 selects the orthographic LOD projection (shadow
  *   cascades); CULL_FLAG_NO_TEXEL_RATE suppresses the texture-mip feedback.
  *   All are float-encoded and read back through u32() where integral, matching the mipCount
  *   convention.
- * - cutBudget: CUT_BUDGET.* — the capacity the root admission and the cut charged this frame.
  * - residency: page -> pool slot (PAGE_NOT_RESIDENT when absent); requests: page marks then
  *   texel-rate marks; claimBits / visBits: one bit per (instance, meshlet) pair.
  * - drawn index format: (recordIndex << 8) | meshletLocalVertexIndex
@@ -29,7 +28,7 @@ import {
     PAGE_REQUEST, TEXEL_RATE_PER_MIP
 } from '../constants.js';
 import {
-    meshletBucketWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL,
+    meshletBucketWGSL, meshletCullParamsWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL,
     meshletHzbVisibleWGSL
 } from './meshlet-cull-common-wgsl.js';
 import {
@@ -49,7 +48,7 @@ export const cellCullWGSL = /* wgsl */ `
     var<storage, read> cellBounds : array<vec4f>;
     // per cell, the radius of its largest member
     var<storage, read> cellMaxRadius : array<f32>;
-    var<storage, read> cullParams : array<vec4f>;
+    ${meshletCullParamsWGSL}
     var<storage, read_write> counters : array<atomic<u32>>;
 
     @compute @workgroup_size(${MESHLET_CELL_CULL_WORKGROUP})
@@ -66,11 +65,11 @@ export const cellCullWGSL = /* wgsl */ `
         // fraction of it for one admitted last frame). Every member lies inside the cell sphere and
         // is no larger than its largest, so if that one at the cell's nearest point is under the
         // smallest such cut, classification would drop them all.
-        let bands = cullParams[${CULL_PARAMS.ROOT_BANDS}u];
+        let bands = uniform.cullParams[${CULL_PARAMS.ROOT_BANDS}u];
         if (bands.w > 0.0) {
-            let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
+            let priority = uniform.cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
             let gap = max(distance(sphere.xyz, priority.xyz) - sphere.w, 1e-4);
-            if (cellMaxRadius[cell] * priority.w / gap < bands.w * cullParams[${CULL_PARAMS.BUCKET_ROOT}u].w) {
+            if (cellMaxRadius[cell] * priority.w / gap < bands.w * uniform.cullParams[${CULL_PARAMS.BUCKET_ROOT}u].w) {
                 return;
             }
         }
@@ -121,14 +120,14 @@ export const meshletCullWGSL = /* wgsl */ `
     var<storage, read> selectedMeshlets : array<vec2u>;
     ${meshletRecordsWGSL('read_write')}
 
-    var<storage, read> cullParams : array<vec4f>;
+    ${meshletCullParamsWGSL}
     var<storage, read_write> counters : array<atomic<u32>>;
     var<storage, read_write> requests : array<atomic<u32>>;
     var<storage, read_write> visBits : array<atomic<u32>>;
     var hzbTexture : texture_2d<f32>;
 
     fn viewProj() -> mat4x4f {
-        return mat4x4f(cullParams[${CULL_PARAMS.VIEW_PROJ}u], cullParams[${CULL_PARAMS.VIEW_PROJ + 1}u], cullParams[${CULL_PARAMS.VIEW_PROJ + 2}u], cullParams[${CULL_PARAMS.VIEW_PROJ + 3}u]);
+        return mat4x4f(uniform.cullParams[${CULL_PARAMS.VIEW_PROJ}u], uniform.cullParams[${CULL_PARAMS.VIEW_PROJ + 1}u], uniform.cullParams[${CULL_PARAMS.VIEW_PROJ + 2}u], uniform.cullParams[${CULL_PARAMS.VIEW_PROJ + 3}u]);
     }
 
     ${meshletHzbVisibleWGSL}
@@ -136,7 +135,7 @@ export const meshletCullWGSL = /* wgsl */ `
     // conservative occlusion test of a world-space sphere against the max-depth HZB, from this
     // frame's camera. Returns true when potentially visible.
     fn hzbVisible(center : vec3f, radius : f32, camPos : vec3f) -> bool {
-        return hzbVisibleFrom(viewProj(), camPos, cullParams[${CULL_PARAMS.VIEW_DIR}u].xyz, center, radius);
+        return hzbVisibleFrom(viewProj(), camPos, uniform.cullParams[${CULL_PARAMS.VIEW_DIR}u].xyz, center, radius);
     }
 
     @compute @workgroup_size(${MESHLET_CULL_SLICE})
@@ -151,10 +150,10 @@ export const meshletCullWGSL = /* wgsl */ `
 
         let worldMatrix = meshletInstanceMatrix(instance);
         let maxScale = objectData[instance].maxScale;
-        let camPos = cullParams[${CULL_PARAMS.CAMERA}u].xyz;
-        let projScale = cullParams[${CULL_PARAMS.CAMERA}u].w;
-        let orthoScale = cullParams[${CULL_PARAMS.STREAMING}u].y;
-        let cullFlags = u32(cullParams[${CULL_PARAMS.STREAMING}u].z);
+        let camPos = uniform.cullParams[${CULL_PARAMS.CAMERA}u].xyz;
+        let projScale = uniform.cullParams[${CULL_PARAMS.CAMERA}u].w;
+        let orthoScale = uniform.cullParams[${CULL_PARAMS.STREAMING}u].y;
+        let cullFlags = u32(uniform.cullParams[${CULL_PARAMS.STREAMING}u].z);
 
         // frustum: world-space meshlet bounding sphere
         let localSphere = meshletData[meshlet].sphere;
@@ -185,7 +184,7 @@ export const meshletCullWGSL = /* wgsl */ `
                 let axis = normalize((worldMatrix * vec4f(meshletConeAxis(meshlet), 0.0)).xyz);
                 // under ortho every ray is parallel, and apex - camPos would be a catastrophic
                 // ~1e6 subtraction anyway - use the view direction directly
-                let view = select(apex - camPos, cullParams[${CULL_PARAMS.VIEW_DIR}u].xyz, orthoScale > 0.0);
+                let view = select(apex - camPos, uniform.cullParams[${CULL_PARAMS.VIEW_DIR}u].xyz, orthoScale > 0.0);
                 if (dot(normalize(view), axis) >= coneCutoff + 1e-3 && dot(view, view) > 1e-10) {
                     return;
                 }
@@ -236,7 +235,7 @@ export const meshletCullWGSL = /* wgsl */ `
             let texelRate = clamp(u32(${TEXEL_RATE_PER_MIP}.0 * log2(max(screenPx / uvSpan, 1.0))) + 1u, 1u, 4095u);
             // a handful of material words take a mark from every drawn cluster: read first so
             // only a higher rate pays for the contended atomic
-            let mark = u32(cullParams[${CULL_PARAMS.STREAMING}u].x) + primitive.material;
+            let mark = u32(uniform.cullParams[${CULL_PARAMS.STREAMING}u].x) + primitive.material;
             if (atomicLoad(&requests[mark]) < texelRate) { atomicMax(&requests[mark], texelRate); }
         }
 
@@ -282,7 +281,6 @@ export const finalizeArgsWGSL = /* wgsl */ `
     uniform indexCapacity0 : u32;
     uniform indexCapacity1 : u32;
 
-    var<storage, read_write> cutBudget : array<atomic<u32>>;
     var<storage, read_write> counters : array<atomic<u32>>;
     var<storage, read_write> indirectDraw : array<u32>;
     var<storage, read_write> indirectDispatch : array<u32>;
@@ -309,7 +307,7 @@ export const finalizeArgsWGSL = /* wgsl */ `
 
         // record demand is the whole cut's, charged and rejected, not just what this phase drew
         atomicMax(&counters[${MESHLET_COUNTER.RECORD_DEMAND}u],
-                  atomicLoad(&cutBudget[${CUT_BUDGET.RECORDS}u]) + atomicLoad(&cutBudget[${CUT_BUDGET.REJECTED_RECORDS}u]));
+                  atomicLoad(&counters[${CUT_BUDGET.RECORDS}u]) + atomicLoad(&counters[${CUT_BUDGET.REJECTED_RECORDS}u]));
         let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity);
         atomicAdd(&counters[${MESHLET_COUNTER.RENDERED}u], recordCount);
         // index write: MESHLET_INDEX_WRITE_RECORDS records per workgroup

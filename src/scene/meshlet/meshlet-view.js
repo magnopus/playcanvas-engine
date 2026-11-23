@@ -5,7 +5,7 @@ import { IndexBuffer } from '../../platform/graphics/index-buffer.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { WebgpuReadbackPool } from '../../platform/graphics/webgpu/webgpu-readback-pool.js';
 import {
-    CULL_PARAMS_VEC4S, claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, ROOT_LIST_U32S, CUT_BUDGET_U32S
+    claimWordCount, MESHLET_BUCKET_COUNT, MESHLET_COUNTER, MESHLET_COUNTER_U32S, MESHLET_VISIBLE_CELLS_BASE, RECORD_U32S, ROOT_LIST_U32S
 } from './constants.js';
 import { GraphNode } from '../graph-node.js';
 import { Mesh } from '../mesh.js';
@@ -39,8 +39,7 @@ const INDEX_GROW_STEP = 1.5;
 // starve thresholds, so it holds its current error scale
 const ROOT_REJECTED_PRESSURE = 0.7;
 
-// bytes per vec4 row of the cull parameter block, and per u32 of a word-addressed buffer
-const BYTES_PER_VEC4 = 16;
+// bytes per u32 of a word-addressed buffer
 const BYTES_PER_WORD = 4;
 
 // Initial cut queue entries (8 bytes each). It grows to the queued-task demand by readback; an
@@ -122,9 +121,6 @@ class MeshletView {
     /** @type {number[]} - this view's index capacity per bucket: its slice of the index buffer. */
     indexCapacity = [];
 
-    /** @type {StorageBuffer} - the cull parameter block. */
-    cullParamsBuffer;
-
     /** @type {StorageBuffer} - the cull counters, then this frame's visible cells. */
     countersBuffer;
 
@@ -148,12 +144,6 @@ class MeshletView {
 
     /** @type {StorageBuffer|null} - this frame's selected meshlets, one entry per record. */
     selectedMeshletsBuffer = null;
-
-    /** @type {StorageBuffer} - per-bucket used indices, used records, rejected record demand and admitted roots' queue entries. */
-    cutBudgetBuffer;
-
-    /** @type {Uint32Array} - what {@link cutBudgetBuffer} is reset to each frame. */
-    cutBudgetInitial;
 
     /** @type {Mesh|null} @private */
     _mesh = null;
@@ -320,7 +310,6 @@ class MeshletView {
         // the claim plane also holds one off-frustum refinement flag per pair after the
         // admission bits (see meshletCutWGSL)
         const claimWords = claimWordCount(world.totalPairs, world.instanceCount);
-        this.cullParamsBuffer = new StorageBuffer(device, CULL_PARAMS_VEC4S * BYTES_PER_VEC4, BUFFERUSAGE_COPY_DST);
         // the counters, then this frame's visible-cell list (see MESHLET_VISIBLE_CELLS_BASE)
         const counterWords = MESHLET_VISIBLE_CELLS_BASE + (world.cells?.cellCount ?? 0);
         this.countersBuffer = new StorageBuffer(device, counterWords * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST | BUFFERUSAGE_COPY_SRC);
@@ -343,8 +332,6 @@ class MeshletView {
         this.recordCapacity = Math.min(recordCeiling, world.initialRecords || recordCeiling);
         this.selectedMeshletsBuffer = new StorageBuffer(device, Math.max(this.recordCapacity * 8, 16), BUFFERUSAGE_COPY_DST);
         // used indices per bucket, used records, rejected record demand, admitted roots' queue entries
-        this.cutBudgetBuffer = new StorageBuffer(device, CUT_BUDGET_U32S * BYTES_PER_WORD, BUFFERUSAGE_COPY_DST);
-        this.cutBudgetInitial = new Uint32Array(CUT_BUDGET_U32S);
         // the queued cut's task queue (see MeshletCuller#queueCut), demand-grown like the records
         this.cutQueueCapacity = Math.min(CUT_QUEUE_INITIAL, this.cutQueueCeiling);
         this.cutQueueBuffer = new StorageBuffer(device, this.cutQueueCapacity * 8, BUFFERUSAGE_COPY_DST);
@@ -456,9 +443,7 @@ class MeshletView {
         this.culler = null;
         this.hzb = null;
         this.readbackPool?.destroy();
-        this.cullParamsBuffer?.destroy();
         this.countersBuffer?.destroy();
-        this.cutBudgetBuffer?.destroy();
         this.cutQueueBuffer?.destroy();
         this.cutQueueBuffer = null;
         if (this._ownsRootList) {

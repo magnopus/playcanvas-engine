@@ -42,7 +42,7 @@ import { MeshletTextures, MESHLET_TEX_FAMILIES } from './textures/meshlet-textur
  * is fetched from, in place of appending it to the resource's base URL.
  * @property {RequestCredentials|null} [credentials] - Fetch credentials mode for the requests.
  * @property {string|null} [cacheVersion] - Versions the sidecars' persistent cache keys (see
- * {@link MeshletFetchScheduler#byteCache}); the world sets it to the resource's bake stamp.
+ * `MeshletFetchScheduler#byteCache`); the world sets it to the resource's bake stamp.
  */
 
 /** Page attribute streams this build can place (see meshletPageLayoutWGSL). */

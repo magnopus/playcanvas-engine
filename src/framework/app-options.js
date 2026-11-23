@@ -16,12 +16,16 @@
  */
 
 /**
+ * @typedef {object} AppUrlResolverOptions
+ * @property {Asset} [asset] - The asset being loaded.
+ * @property {string} [baseUrl] - The original URL used as the base for relative paths.
+ * @property {ResourceHandler} [handler] - The resource handler requesting the URL.
+ */
+
+/**
  * @callback AppUrlResolver
  * @param {{ load: string, original: string }} url - The current load/original URL pair.
- * @param {object} options - Context for the resolution.
- * @param {Asset} [options.asset] - The asset being loaded.
- * @param {string} [options.baseUrl] - The original URL used as the base for relative paths.
- * @param {ResourceHandler} [options.handler] - The resource handler requesting the URL.
+ * @param {AppUrlResolverOptions} options - Context for the resolution.
  * @returns {string|{load?: string, original?: string}|undefined|null} The rewritten URL, or an
  * object containing updated load and/or original URLs.
  */

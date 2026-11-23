@@ -4,7 +4,7 @@ import {
     OBJECT_FLAG_NO_SHADOW
 } from '../constants.js';
 import {
-    meshletBucketWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL, meshletHzbVisibleWGSL,
+    meshletBucketWGSL, meshletCullParamsWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL, meshletHzbVisibleWGSL,
     meshletRequestPagesWGSL, meshletVisibleCellWGSL
 } from './meshlet-cull-common-wgsl.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
@@ -36,7 +36,7 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
     // word base of the band-sorted copy, which follows this classify-order list
     uniform sortedBase: u32;
     ${meshletObjectDataWGSL}
-    var<storage, read> cullParams: array<vec4f>;
+    ${meshletCullParamsWGSL}
     var<storage, read> claimBits: array<u32>;
     var<storage, read_write> counters: array<atomic<u32>>;
     var<storage, read_write> rootList: array<u32>;
@@ -61,13 +61,13 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
         if (position >= uniform.instanceCount) { return; }
         let instance = cellInstances[position];
         let object = objectData[instance];
-        let shadow = (u32(cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_SHADOW_VIEW}u) != 0u;
+        let shadow = (u32(uniform.cullParams[${CULL_PARAMS.STREAMING}u].z) & ${CULL_FLAG_SHADOW_VIEW}u) != 0u;
         if ((object.flags & ${OBJECT_FLAG_HIDDEN}u) != 0u ||
             (shadow && (object.flags & ${OBJECT_FLAG_NO_SHADOW}u) != 0u)) { return; }
-        let priority = cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
-        let bands = cullParams[${CULL_PARAMS.ROOT_BANDS}u];
+        let priority = uniform.cullParams[${CULL_PARAMS.ROOT_PRIORITY}u];
+        let bands = uniform.cullParams[${CULL_PARAMS.ROOT_BANDS}u];
         // the instance's draw bucket sets its size cut (see OBJECT_BUCKET_SHIFT)
-        let bucketRoot = cullParams[${CULL_PARAMS.BUCKET_ROOT}u];
+        let bucketRoot = uniform.cullParams[${CULL_PARAMS.BUCKET_ROOT}u];
         let rootMin = bucketRoot[min((object.flags >> ${OBJECT_BUCKET_SHIFT}u) & 3u, 2u)];
 
         let sphere = meshletPrimitiveData(instance).sphere;
@@ -87,12 +87,12 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
             return;
         }
         // wholly behind what last frame drew, as seen from last frame's camera
-        let prevCamera = cullParams[${CULL_PARAMS.PREV_CAMERA}u];
+        let prevCamera = uniform.cullParams[${CULL_PARAMS.PREV_CAMERA}u];
         if (prevCamera.w != 0.0) {
             let prevViewProj = mat4x4f(
-                cullParams[${CULL_PARAMS.PREV_VIEW_PROJ}u], cullParams[${CULL_PARAMS.PREV_VIEW_PROJ + 1}u],
-                cullParams[${CULL_PARAMS.PREV_VIEW_PROJ + 2}u], cullParams[${CULL_PARAMS.PREV_VIEW_PROJ + 3}u]);
-            if (!hzbVisibleFrom(prevViewProj, prevCamera.xyz, cullParams[${CULL_PARAMS.PREV_VIEW_DIR}u].xyz, center, radius)) {
+                uniform.cullParams[${CULL_PARAMS.PREV_VIEW_PROJ}u], uniform.cullParams[${CULL_PARAMS.PREV_VIEW_PROJ + 1}u],
+                uniform.cullParams[${CULL_PARAMS.PREV_VIEW_PROJ + 2}u], uniform.cullParams[${CULL_PARAMS.PREV_VIEW_PROJ + 3}u]);
+            if (!hzbVisibleFrom(prevViewProj, prevCamera.xyz, uniform.cullParams[${CULL_PARAMS.PREV_VIEW_DIR}u].xyz, center, radius)) {
                 atomicAdd(&counters[${MESHLET_COUNTER.ROOT_OCCLUDED}u], 1u);
                 return;
             }
@@ -191,8 +191,6 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     var<storage, read> residency: array<u32>;
     var<storage, read_write> requests: array<atomic<u32>>;
     var<storage, read_write> claimBits: array<atomic<u32>>;
-    // CUT_BUDGET.*
-    var<storage, read_write> cutBudget: array<atomic<u32>>;
     var<storage, read_write> counters: array<atomic<u32>>;
     var<storage, read> rootList: array<u32>;
     var<storage, read> rootBands: array<u32>;
@@ -224,8 +222,8 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         let indexLimit = u32(f32(capacity) * uniform.rootShare);
         let recordLimit = u32(f32(uniform.recordCapacity) * uniform.rootShare);
         atomicAdd(&counters[${MESHLET_COUNTER.DEMAND_BASE}u + bucket], indices);
-        let indexBefore = atomicAdd(&cutBudget[${CUT_BUDGET.INDICES_BASE}u + bucket], indices);
-        let recordBefore = atomicAdd(&cutBudget[${CUT_BUDGET.RECORDS}u], records);
+        let indexBefore = atomicAdd(&counters[${CUT_BUDGET.INDICES_BASE}u + bucket], indices);
+        let recordBefore = atomicAdd(&counters[${CUT_BUDGET.RECORDS}u], records);
         // the root-owned task list follows the root page list, then the root lists for the
         // emit pass (see meshletCutEmitWGSL)
         let ownedStart = pageStart + pageCount;
@@ -239,17 +237,17 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
         // only once admitted, so their total never passes the limit. Reserving the ranges
         // directly would need a compare-exchange loop, serialising every instance in view on one
         // counter.
-        let queueBefore = atomicAdd(&cutBudget[${CUT_BUDGET.QUEUE}u], queueNeed);
+        let queueBefore = atomicAdd(&counters[${CUT_BUDGET.QUEUE}u], queueNeed);
         let queueFits = queueBefore + queueNeed <= u32(f32(uniform.queueCapacity) * uniform.rootShare);
         if (!queueFits) {
             atomicAdd(&counters[${MESHLET_COUNTER.CUT_QUEUE_REJECTED}u], queueNeed);
         }
         let fits = queueFits && indexBefore + indices <= indexLimit && recordBefore + records <= recordLimit;
         if (!fits) {
-            atomicSub(&cutBudget[${CUT_BUDGET.QUEUE}u], queueNeed);
-            atomicSub(&cutBudget[${CUT_BUDGET.INDICES_BASE}u + bucket], indices);
-            atomicSub(&cutBudget[${CUT_BUDGET.RECORDS}u], records);
-            atomicAdd(&cutBudget[${CUT_BUDGET.REJECTED_RECORDS}u], records);
+            atomicSub(&counters[${CUT_BUDGET.QUEUE}u], queueNeed);
+            atomicSub(&counters[${CUT_BUDGET.INDICES_BASE}u + bucket], indices);
+            atomicSub(&counters[${CUT_BUDGET.RECORDS}u], records);
+            atomicAdd(&counters[${CUT_BUDGET.REJECTED_RECORDS}u], records);
             atomicAdd(&counters[${MESHLET_COUNTER.ROOT_REJECTED_BASE}u + bucket], indices);
             atomicAdd(&counters[${MESHLET_COUNTER.ROOT_REJECTED_INSTANCES}u], 1u);
             return;

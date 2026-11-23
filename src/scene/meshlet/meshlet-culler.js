@@ -271,7 +271,7 @@ class MeshletCuller {
         this.cellCull.setParameter('cellCount', cells.cellCount);
         this.cellCull.setParameter('cellBounds', cells.boundsBuffer);
         this.cellCull.setParameter('cellMaxRadius', cells.radiiBuffer);
-        this.cellCull.setParameter('cullParams', view.cullParamsBuffer);
+        this.cellCull.setParameter('cullParams[0]', this.cullParams);
         this.cellCull.setParameter('counters', view.countersBuffer);
         const cellGroups = Math.ceil(cells.cellCount / MESHLET_CELL_CULL_WORKGROUP);
         this.cellCull.setupDispatch(Math.min(cellGroups, MESHLET_DISPATCH_WIDTH), Math.ceil(cellGroups / MESHLET_DISPATCH_WIDTH));
@@ -303,11 +303,10 @@ class MeshletCuller {
             compute.setParameter('cutGroups', world.cut.groups);
             compute.setParameter('meshletData', world.meshletDataBuffer);
             compute.setParameter('objectData', world.objectDataBuffer);
-            compute.setParameter('cullParams', view.cullParamsBuffer);
+            compute.setParameter('cullParams[0]', this.cullParams);
             compute.setParameter('residency', world.residencyBuffer);
             compute.setParameter('requests', world.requestsBuffer);
             compute.setParameter('claimBits', view.claimBitsBuffer);
-            compute.setParameter('cutBudget', view.cutBudgetBuffer);
             compute.setParameter('counters', view.countersBuffer);
             return { args, compute };
         });
@@ -330,7 +329,7 @@ class MeshletCuller {
         this.rootClassify.setParameter('instanceCount', world.instanceCount);
         this.rootClassify.setParameter('sortedBase', world.instanceCount);
         this.rootClassify.setParameter('objectData', world.objectDataBuffer);
-        this.rootClassify.setParameter('cullParams', view.cullParamsBuffer);
+        this.rootClassify.setParameter('cullParams[0]', this.cullParams);
         this.rootClassify.setParameter('claimBits', view.claimBitsBuffer);
         this.rootClassify.setParameter('rootList', view.rootListBuffer);
         this.rootClassify.setParameter('rootBands', this.rootBandsBuffer);
@@ -363,7 +362,6 @@ class MeshletCuller {
             compute.setParameter('residency', world.residencyBuffer);
             compute.setParameter('requests', world.requestsBuffer);
             compute.setParameter('claimBits', view.claimBitsBuffer);
-            compute.setParameter('cutBudget', view.cutBudgetBuffer);
             compute.setParameter('counters', view.countersBuffer);
             compute.setParameter('rootList', view.rootListBuffer);
             compute.setParameter('rootBands', this.rootBandsBuffer);
@@ -414,7 +412,7 @@ class MeshletCuller {
             bindCapacities(meshletCull, view);
             meshletCull.setParameter('objectData', world.objectDataBuffer);
             meshletCull.setParameter('meshletData', world.meshletDataBuffer);
-            meshletCull.setParameter('cullParams', view.cullParamsBuffer);
+            meshletCull.setParameter('cullParams[0]', this.cullParams);
             meshletCull.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
             meshletCull.setParameter('counters', view.countersBuffer);
             meshletCull.setParameter('records', view.recordsBuffer);
@@ -425,7 +423,6 @@ class MeshletCuller {
         this.meshletCullPhase2.setParameter('phase', 2);
 
         for (const finalizeArgs of [this.finalizeArgs, this.finalizeArgsPhase2]) {
-            finalizeArgs.setParameter('cutBudget', view.cutBudgetBuffer);
             finalizeArgs.setParameter('recordCapacity', view.recordCapacity);
             bindCapacities(finalizeArgs, view);
             finalizeArgs.setParameter('counters', view.countersBuffer);
@@ -658,15 +655,12 @@ class MeshletCuller {
         params[row(CULL_PARAMS.BUCKET_ROOT) + 3] = this.rootHysteresis;
         params[row(CULL_PARAMS.ROOT_BANDS) + 3] = minRoot;
 
-        // queue.writeBuffer executes before this frame's command buffer, so these clears land
-        // ahead of every dispatch below. The requests buffer is not cleared here - the residency
-        // manager clears it in-encoder after its readback copy, or the copy would see zeros.
-        // The counters buffer clears in-encoder for the same reason: the director's index-demand
-        // readback copy is encoded earlier this frame and must see last frame's values.
-        view.cullParamsBuffer.write(0, params);
-        view.cutBudgetBuffer.write(0, view.cutBudgetInitial);
+        // The cull parameters reach the shaders as uniforms, copied when each compute is
+        // dispatched below. The counters (the cut budget among them) clear in-encoder: the
+        // director's index-demand readback copy is encoded earlier this frame and must see last
+        // frame's values. The requests buffer is the residency's to clear, after its readback.
         const encoder = device.getCommandEncoder();
-        // only the counters - the visible-cell and chunk lists after them are written up to their counts
+        // only the counters - the visible-cell list after them is written up to its count
         encoder.clearBuffer(view.countersBuffer.impl.buffer, 0, MESHLET_COUNTER_CLEAR_U32S * 4);
         encoder.clearBuffer(this.rootBandsBuffer.impl.buffer, 0, this.rootBandsBuffer.byteSize);
         // Claim bits clear on the GPU (one bit per instance-meshlet pair reaches tens of MB),

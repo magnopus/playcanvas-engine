@@ -53,7 +53,6 @@ function texelCoordSolidAngle(u, v, size) {
  *
  * magnopus patched version of shFromCubemap
  *
- * @async
  * @param {import('../../platform/graphics/graphics-device.js').GraphicsDevice} device - The graphics device
  * @param {import('../../platform/graphics/texture.js').Texture} source - The source cubemap texture (must be RGBA8 format and synced to CPU)
  * @param {boolean} [dontFlipX] - If true, doesn't flip the X direction when calculating coefficients

@@ -83,7 +83,9 @@ const manifestFile = sceneName === 'default' ? 'scene.json' : `scene.${(sceneNam
 const manifestUrl = new URL(`./assets/meshlets/${sceneDir}/${manifestFile}`, document.baseURI);
 const response = await fetch(manifestUrl);
 if (!response.ok) {
-    throw new Error(`Cannot load Zorah (${response.status}) from ${manifestUrl.pathname}; see assets/meshlets/README.md.`);
+    throw new Error(
+        `Cannot load Zorah (${response.status}) from ${manifestUrl.pathname}; see assets/meshlets/README.md.`
+    );
 }
 const scene = await response.json();
 if (scene.version !== 1 || !scene.entities?.length) {
@@ -134,7 +136,7 @@ window.addEventListener('resize', resize);
 app.on('destroy', () => window.removeEventListener('resize', resize));
 
 // the manifests' budgets only cover the bake's size, too little for the larger scenes
-const defaultPoolMiB = sceneName === 'default' ? scene.meshletPoolMiB ?? 4096 : 16384;
+const defaultPoolMiB = sceneName === 'default' ? (scene.meshletPoolMiB ?? 4096) : 16384;
 app.systems.meshlet.poolBytes = (Number(params.get('pool')) || defaultPoolMiB) * 1024 * 1024;
 app.systems.meshlet.texturePoolBytes = (Number(params.get('texPool')) || 2048) * 1024 * 1024;
 app.systems.meshlet.maxFineTextureSize = Number(params.get('maxTex')) || 4096;
@@ -182,7 +184,7 @@ const splitSun = (source, maxLuminance) => {
     for (let y = 0; y < height; y++) {
         // texel rows run from straight up to straight down, columns around atan(x, z)
         const elevation = (0.5 - (y + 0.5) / height) * Math.PI;
-        const solidAngle = Math.cos(elevation) * (Math.PI / height) * (2 * Math.PI / width);
+        const solidAngle = Math.cos(elevation) * (Math.PI / height) * ((2 * Math.PI) / width);
         for (let x = 0; x < width; x++) {
             const i = (y * width + x) * 4;
             const e = dst[i + 3];
@@ -196,14 +198,16 @@ const splitSun = (source, maxLuminance) => {
             removed[0] += dst[i] * cut;
             removed[1] += dst[i + 1] * cut;
             removed[2] += dst[i + 2] * cut;
-            const azimuth = ((x + 0.5) / width * 2 - 1) * Math.PI;
+            const azimuth = (((x + 0.5) / width) * 2 - 1) * Math.PI;
             const weight = (lum - maxLuminance) * solidAngle;
             toSun.x += Math.cos(elevation) * Math.sin(azimuth) * weight;
             toSun.y += Math.sin(elevation) * weight;
             toSun.z += Math.cos(elevation) * Math.cos(azimuth) * weight;
 
-            const k = maxLuminance / lum * f;
-            const r = dst[i] * k, g = dst[i + 1] * k, b = dst[i + 2] * k;
+            const k = (maxLuminance / lum) * f;
+            const r = dst[i] * k,
+                g = dst[i + 1] * k,
+                b = dst[i + 2] * k;
             const exponent = Math.floor(Math.log2(Math.max(r, g, b))) + 1;
             const scale = 256 / 2 ** exponent;
             dst[i] = r * scale;
@@ -273,7 +277,13 @@ const PALETTE = [
     [/Gold|Gilt/i, [0.8, 0.5, 0.12], 1, 0.28, 0.1],
     [/Copper|RoofOxid/i, [0.1, 0.28, 0.22], 0.6, 0.5, 0.1],
     [/Mountains/i, [0.22, 0.19, 0.16], 0, 1, 0.1],
-    [/Bush|Leaves|Leaf|Grass|Hedge|Flower|Plant|Palm|Dryopteris|Dypsis|Howea|Strelitzia|Moss/i, [0.045, 0.11, 0.03], 0, 0.7, 0.35],
+    [
+        /Bush|Leaves|Leaf|Grass|Hedge|Flower|Plant|Palm|Dryopteris|Dypsis|Howea|Strelitzia|Moss/i,
+        [0.045, 0.11, 0.03],
+        0,
+        0.7,
+        0.35
+    ],
     [/Bark|Trunk|Root|Branch|Stem|Firewood|Wood/i, [0.1, 0.065, 0.04], 0, 0.85, 0.2],
     [/Soil|Dirt|Dry|Mud/i, [0.07, 0.05, 0.035], 0, 1, 0.15],
     [/Metal|Iron|Grate|Rail|Gate|Frame|Lamp|Armour|Spitzer|Jensen/i, [0.035, 0.035, 0.04], 0.85, 0.42, 0.1],
@@ -299,7 +309,11 @@ const tintMaterials = (resource) => {
     const materials = resource.data?.materials;
     // record layout (MATERIAL_RECORD): rgba base colour at 0, metallic at 8, roughness at 9
     if (!table || !materials || materials.length < meshlet.materialCount) {
-        console.warn('Zorah: cannot tint', { table: !!table, materials: materials?.length, count: meshlet?.materialCount });
+        console.warn('Zorah: cannot tint', {
+            table: !!table,
+            materials: materials?.length,
+            count: meshlet?.materialCount
+        });
         return;
     }
     const f32 = new Float32Array(table.buffer, table.byteOffset, table.length);
@@ -334,7 +348,9 @@ for (const asset of assets.values()) {
     const resource = asset.resource.meshlets?.[0];
     const materials = asset.resource.data?.materials;
     if (!resource || !materials) continue;
-    const letters = resource.primitives.map(p => /Mountains_Background_([A-Z])/i.exec(materials[p.materialIndex]?.name ?? '')?.[1]?.toUpperCase());
+    const letters = resource.primitives.map((p) =>
+        /Mountains_Background_([A-Z])/i.exec(materials[p.materialIndex]?.name ?? '')?.[1]?.toUpperCase()
+    );
     resource.instances = resource.instances.filter((primIndex) => {
         const letter = letters[primIndex];
         return !letter || keepMountains.has(letter);
@@ -359,7 +375,7 @@ const styleInlineSurfaces = (root) => {
     const seen = new Set();
     for (const render of root.findComponents('render')) {
         const instances = render.meshInstances;
-        if (instances.length && instances.every(mi => HIDDEN.test(mi.material.name))) {
+        if (instances.length && instances.every((mi) => HIDDEN.test(mi.material.name))) {
             render.enabled = false;
             continue;
         }
@@ -407,7 +423,7 @@ for (const entry of scene.entities) {
         child.enabled = model.visible;
         child.addComponent('meshlet', { asset, castShadows: model.shadowCaster });
         // Blended surfaces remain inline for the ordinary sorted forward renderer.
-        if (asset.resource.renders.some(render => render.resource.meshes.length > 0)) {
+        if (asset.resource.renders.some((render) => render.resource.meshes.length > 0)) {
             const inline = asset.resource.instantiateRenderEntity({ skipBlendedShadowCasters: true });
             styleInlineSurfaces(inline);
             child.addChild(inline);
@@ -430,8 +446,10 @@ let anyBounds = false;
 for (const entry of scene.entities) {
     const { min, max } = entry.bounds ?? {};
     if (!min || Math.max(max[0] - min[0], max[2] - min[2]) > 500) continue;
-    const box = new BoundingBox(new Vec3((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2),
-        new Vec3((max[0] - min[0]) / 2, (max[1] - min[1]) / 2, (max[2] - min[2]) / 2));
+    const box = new BoundingBox(
+        new Vec3((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2),
+        new Vec3((max[0] - min[0]) / 2, (max[1] - min[1]) / 2, (max[2] - min[2]) / 2)
+    );
     if (anyBounds) sceneBounds.add(box);
     else sceneBounds.copy(box);
     anyBounds = true;
@@ -446,7 +464,7 @@ const sun = new Entity('Sun');
 sun.addComponent('light', {
     type: 'directional',
     color: SUN.color,
-    intensity: SUN.irradiance / Math.PI * HDRI.intensity,
+    intensity: (SUN.irradiance / Math.PI) * HDRI.intensity,
     castShadows: true,
     numCascades: 1,
     shadowResolution: 8192,
@@ -485,7 +503,13 @@ const lookFrom = (position, target) => {
 };
 if (params.get('view') === 'start') {
     const start = new Vec3(...scene.start.position);
-    lookFrom(scene.start.position, start.clone().add(new Vec3(0, 0, -10)).toArray());
+    lookFrom(
+        scene.start.position,
+        start
+            .clone()
+            .add(new Vec3(0, 0, -10))
+            .toArray()
+    );
 } else {
     lookFrom(HERO.position, HERO.target);
 }
@@ -536,14 +560,17 @@ app.on('postrender', () => {
     pickRequested = false;
     pickInFlight = true;
     picker.prepare(camera.camera, app.scene, [app.scene.layers.getLayerByName('World')]);
-    picker.getWorldPointAsync(picker.width * 0.5, picker.height * 0.5).then((point) => {
-        if (point) {
-            pivotTarget.copy(point);
-            controls.focusPoint = pivotTarget;
-        }
-    }).finally(() => {
-        pickInFlight = false;
-    });
+    picker
+        .getWorldPointAsync(picker.width * 0.5, picker.height * 0.5)
+        .then((point) => {
+            if (point) {
+                pivotTarget.copy(point);
+                controls.focusPoint = pivotTarget;
+            }
+        })
+        .finally(() => {
+            pickInFlight = false;
+        });
 });
 
 data.set('data', {
@@ -628,7 +655,7 @@ data.on('data.teleport:set', (/** @type {string} */ name) => {
         lookFrom(HERO.position, HERO.target);
         return;
     }
-    const spot = scene.teleports?.find(t => t.name === name);
+    const spot = scene.teleports?.find((t) => t.name === name);
     if (!spot) return;
     // keep looking along the current heading from the new spot
     const forward = camera.forward.clone();
@@ -639,7 +666,8 @@ data.on('data.teleport:set', (/** @type {string} */ name) => {
 // view is running into: instances the root budget rejected (missing), the cut's index demand
 // against the budget (LOD pressure coarsens everything), or pages still streaming in. Occlusion
 // does not reduce the first two: roots are admitted, and demand counted, before the occlusion test.
-const count = (/** @type {number} */ n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : `${n}`);
+const count = (/** @type {number} */ n) =>
+    n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : `${n}`;
 const sum3 = (/** @type {number[]} */ a) => a[0] + a[1] + a[2];
 let statsAt = 0;
 app.on('update', () => {
@@ -688,15 +716,30 @@ app.on('update', () => {
         budget.rootShortfall += director.residency?.rootShortfallPages ?? 0;
     }
     const threshold = app.systems.meshlet.dagPixelThreshold;
-    data.set('data.statsRoots', `admitted ${count(budget.admitted)} idx, rejected ${count(budget.rejected)} idx ` +
-        `(${budget.rejectedInstances} instances missing), unready ${budget.unready}, skipped as occluded ${budget.occluded}`);
-    data.set('data.statsDemand', `cut ${count(budget.demand)} of ${count(budget.ceiling)} idx ` +
-        `(${(budget.demand / Math.max(budget.ceiling, 1)).toFixed(2)}x), buffers ${count(budget.capacity)}`);
-    data.set('data.statsPressure', `${budget.pressure.toFixed(2)}x (error ${(threshold * budget.pressure).toFixed(1)} px of ${threshold})`);
-    data.set('data.statsPages', `${count(budget.resident)} of ${count(budget.slots)} resident, ${budget.missing} missing, ` +
-        `${budget.rootShortfall} root short`);
-    data.set('data.stats', `${count(budget.drawn)} meshlets drawn, ${count(budget.candidates)} instances in view ` +
-        `(${count(budget.subpixel)} too small), ${budget.worlds} worlds`);
+    data.set(
+        'data.statsRoots',
+        `admitted ${count(budget.admitted)} idx, rejected ${count(budget.rejected)} idx ` +
+            `(${budget.rejectedInstances} instances missing), unready ${budget.unready}, skipped as occluded ${budget.occluded}`
+    );
+    data.set(
+        'data.statsDemand',
+        `cut ${count(budget.demand)} of ${count(budget.ceiling)} idx ` +
+            `(${(budget.demand / Math.max(budget.ceiling, 1)).toFixed(2)}x), buffers ${count(budget.capacity)}`
+    );
+    data.set(
+        'data.statsPressure',
+        `${budget.pressure.toFixed(2)}x (error ${(threshold * budget.pressure).toFixed(1)} px of ${threshold})`
+    );
+    data.set(
+        'data.statsPages',
+        `${count(budget.resident)} of ${count(budget.slots)} resident, ${budget.missing} missing, ` +
+            `${budget.rootShortfall} root short`
+    );
+    data.set(
+        'data.stats',
+        `${count(budget.drawn)} meshlets drawn, ${count(budget.candidates)} instances in view ` +
+            `(${count(budget.subpixel)} too small), ${budget.worlds} worlds`
+    );
 });
 
 app.start();

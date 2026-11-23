@@ -292,12 +292,13 @@ export const MESHLET_BUCKET_MASKED = 2;
  * Counter buffer words: [0] unused, [1] recordCount, then three MESHLET_BUCKET_COUNT
  * blocks - index cursors, committed ends, unclamped index demand - then the frame's rendered
  * meshlet count across both phases and peak per-phase record demand, the root admission
- * counters, the visible cell count, the cut queue's cursor and current stage range and the
- * instances root admission skipped as occluded, padded to a multiple of 4 words.
+ * counters, the visible cell count, the cut queue's cursor and current stage range, the
+ * instances root admission skipped as occluded, then the cut budget (CUT_BUDGET), padded to a
+ * multiple of 4 words.
  *
  * @type {number}
  */
-export const MESHLET_COUNTER_U32S = 32;
+export const MESHLET_COUNTER_U32S = 40;
 
 /**
  * Word offsets into the counter buffer; the three per-bucket blocks are indexed as
@@ -329,21 +330,20 @@ export const MESHLET_COUNTER = {
 };
 
 /**
- * Word offsets into a view's cut budget buffer: the capacity the root admission and the cut
- * stages have charged this frame, reset from the CPU before the chain runs. The index words
- * are per bucket, `INDICES_BASE + bucket`.
+ * Word offsets of the cut budget in the counter buffer: the capacity the root admission and the
+ * cut stages have charged this frame. They live with the counters, which clear at the start of
+ * the chain, rather than in a buffer of their own: the cut and root admission shaders are at the
+ * eight storage bindings WebGPU guarantees per stage. The index words are per bucket,
+ * `INDICES_BASE + bucket`; the phase-2 reset leaves them alone.
  *
  * @ignore
  */
 export const CUT_BUDGET = {
-    INDICES_BASE: 0,     // indices charged per bucket (MESHLET_BUCKET_COUNT words)
-    RECORDS: 3,          // records charged
-    REJECTED_RECORDS: 4, // records of roots and refinements that did not fit (still demand)
-    QUEUE: 5             // cut queue entries admitted roots have claimed
+    INDICES_BASE: 31,     // indices charged per bucket (MESHLET_BUCKET_COUNT words)
+    RECORDS: 34,          // records charged
+    REJECTED_RECORDS: 35, // records of roots and refinements that did not fit (still demand)
+    QUEUE: 36             // cut queue entries admitted roots have claimed
 };
-
-/** u32 words in a view's cut budget buffer. @type {number} */
-export const CUT_BUDGET_U32S = 6;
 
 /**
  * Leading counter-buffer words cleared every frame: the counters themselves. The visible-cell

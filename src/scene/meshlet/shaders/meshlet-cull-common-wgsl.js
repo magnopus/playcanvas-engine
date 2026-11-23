@@ -1,5 +1,5 @@
 import {
-    CULL_PARAMS, INDIRECT_DISPATCH_U32S, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
+    CULL_PARAMS, CULL_PARAMS_VEC4S, INDIRECT_DISPATCH_U32S, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE,
     MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER, MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED,
     MESHLET_FLAG_TWO_SIDED, MESHLET_VISIBLE_CELLS_BASE, PAGE_NOT_RESIDENT, PAGE_REQUEST
 } from '../constants.js';
@@ -10,6 +10,16 @@ import {
  *
  * @ignore
  */
+
+/**
+ * The view's cull parameters (rows CULL_PARAMS.*), declared as a uniform array: as a storage
+ * buffer they would take one of the eight storage bindings WebGPU guarantees per stage.
+ *
+ * @ignore
+ */
+export const meshletCullParamsWGSL = /* wgsl */ `
+    uniform cullParams: array<vec4f, ${CULL_PARAMS_VEC4S}>;
+`;
 
 /**
  * `meshletGroupIndex(group)`: the linear index of a workgroup in a two-dimensional dispatch grid
@@ -99,12 +109,12 @@ export const meshletRequestPagesWGSL = /* wgsl */ `
 export const meshletCullVolumeWGSL = /* wgsl */ `
     fn meshletInCullVolume(center: vec3f, radius: f32) -> bool {
         for (var p = 0u; p < ${CULL_PARAMS.PLANE_COUNT}u; p++) {
-            let plane = cullParams[${CULL_PARAMS.PLANES}u + p];
+            let plane = uniform.cullParams[${CULL_PARAMS.PLANES}u + p];
             if (dot(plane.xyz, center) + plane.w < -radius) { return false; }
         }
-        let extra = u32(cullParams[${CULL_PARAMS.STREAMING}u].w);
+        let extra = u32(uniform.cullParams[${CULL_PARAMS.STREAMING}u].w);
         for (var p = 0u; p < extra; p++) {
-            let plane = cullParams[${CULL_PARAMS.CASTER_PLANES}u + p];
+            let plane = uniform.cullParams[${CULL_PARAMS.CASTER_PLANES}u + p];
             if (dot(plane.xyz, center) + plane.w < -radius) { return false; }
         }
         return true;
@@ -197,9 +207,9 @@ fn hzbVisibleFrom(viewProjMatrix : mat4x4f, camPos : vec3f, viewDir : vec3f, cen
     let uvMin = clamp(vec2f(ndcMin.x, -ndcMax.y) * 0.5 + 0.5, vec2f(0.0), vec2f(1.0));
     let uvMax = clamp(vec2f(ndcMax.x, -ndcMin.y) * 0.5 + 0.5, vec2f(0.0), vec2f(1.0));
 
-    let hzbSize = cullParams[${CULL_PARAMS.LOD}u].yz;
+    let hzbSize = uniform.cullParams[${CULL_PARAMS.LOD}u].yz;
     let rectPx = (uvMax - uvMin) * hzbSize;
-    let mipCount = u32(cullParams[${CULL_PARAMS.LOD}u].w);
+    let mipCount = u32(uniform.cullParams[${CULL_PARAMS.LOD}u].w);
     // the mip where the rect is at most one texel wide straddles at most 2x2 texels, so the four
     // corner samples cover it. One mip finer often still fits, with tighter depths.
     var mip = min(u32(max(ceil(log2(max(max(rectPx.x, rectPx.y), 1.0))), 0.0)), mipCount - 1u);

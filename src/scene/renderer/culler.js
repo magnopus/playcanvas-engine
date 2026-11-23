@@ -97,9 +97,6 @@ class Culler {
      * @param {CulledInstances} culledInstances - Stores culled instances.
      */
     cullMeshInstances(camera, drawCalls, culledInstances) {
-        // #if _PROFILER
-        const cullTime = now();
-        // #endif
         // magnopus patched
         let cleanupNeeded = false;
         const opaque = culledInstances.opaque;
@@ -139,7 +136,7 @@ class Culler {
         }
 
         // #if _PROFILER
-        this.renderer._cullTime += now() - cullTime;
+        // cull time is measured by cullComposition, which covers this call
         this.renderer._numDrawCallsCulled += doCull ? count : 0;
         // #endif
         // magnopus patched
