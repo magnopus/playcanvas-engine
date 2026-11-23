@@ -61,6 +61,7 @@ import {
     TextureHandler,
     TouchDevice,
     Vec3,
+    basisInitialize,
     createGraphicsDevice,
     math
 } from 'playcanvas';
@@ -73,11 +74,18 @@ import { runLoadBenchmark, startLoadProbe } from './load-benchmark.mjs';
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
+// streamed textures are KTX2 / Basis
+basisInitialize({
+    glueUrl: './assets/wasm/basis/basis.wasm.js',
+    wasmUrl: './assets/wasm/basis/basis.wasm.wasm',
+    fallbackUrl: './assets/wasm/basis/basis.js'
+});
+
 const params = new URLSearchParams(location.search);
+const sceneDir = (params.get('dir') ?? 'zorah').replace(/[^\w.-]/g, '');
 const sceneName = params.get('scene');
-const manifestFile =
-    sceneName === 'default' ? 'scene.json' : `scene.${(sceneName ?? 'all').replace(/[^\w.-]/g, '')}.json`;
-const manifestUrl = new URL(`./assets/meshlets/zorah/${manifestFile}`, document.baseURI);
+const manifestFile = sceneName === 'default' ? 'scene.json' : `scene.${(sceneName ?? 'all').replace(/[^\w.-]/g, '')}.json`;
+const manifestUrl = new URL(`./assets/meshlets/${sceneDir}/${manifestFile}`, document.baseURI);
 const response = await fetch(manifestUrl);
 if (!response.ok) {
     throw new Error(
@@ -93,9 +101,15 @@ if (scene.version !== 1 || !scene.entities?.length) {
 // warm light
 const HERO = { position: [55.34, 6.45, 0.32], target: [46.38, 5.8, 0.53] };
 
-// The sky and ambient light come from the Rhodes Memorial HDRI (Poly Haven, CC0), and the sun light
-// from its sun disk (see splitSun). The intensity scales the sky, and the sun light with it.
-const HDRI = { url: './assets/hdri/rhodes_memorial_4k.hdr', intensity: 1.2, sunLuminance: 20 };
+// Prefer Zorah's own neutral stone-terrace HDRI if present in the bake folder, falling back to
+// Rhodes Memorial. The intensity scales the sky, and the sun light with it.
+const zorahHdriUrl = `./assets/meshlets/${sceneDir}/pizzo_pernice_4k.hdr`;
+const hasZorahHdri = (await fetch(zorahHdriUrl, { method: 'HEAD' })).ok;
+const HDRI = {
+    url: hasZorahHdri ? zorahHdriUrl : './assets/hdri/rhodes_memorial_4k.hdr',
+    intensity: 1.2,
+    sunLuminance: 20
+};
 
 const device = await createGraphicsDevice(canvas, {
     deviceTypes: [deviceType],
@@ -146,6 +160,8 @@ app.on('destroy', () => window.removeEventListener('resize', resize));
 // the manifests' budgets only cover the bake's size, too little for the larger scenes
 const defaultPoolMiB = sceneName === 'default' ? (scene.meshletPoolMiB ?? 4096) : 16384;
 app.systems.meshlet.poolBytes = (Number(params.get('pool')) || defaultPoolMiB) * 1024 * 1024;
+app.systems.meshlet.texturePoolBytes = (Number(params.get('texPool')) || 2048) * 1024 * 1024;
+app.systems.meshlet.maxFineTextureSize = Number(params.get('maxTex')) || 4096;
 app.systems.meshlet.occlusion = true;
 app.systems.meshlet.cssPixels = true;
 app.systems.meshlet.deferRebuildWhileLoading = true;
@@ -363,7 +379,11 @@ for (const asset of assets.values()) {
     });
 }
 if (params.get('tint') !== '0') {
-    for (const asset of assets.values()) tintMaterials(asset.resource);
+    const forceTint = params.get('tint') === '1';
+    for (const asset of assets.values()) {
+        const hasTextures = Boolean(asset.resource.meshlets?.[0]?.textureManifest?.arrays?.length);
+        if (forceTint || !hasTextures) tintMaterials(asset.resource);
+    }
 }
 
 /**
