@@ -230,20 +230,94 @@ describe('FramePassCameraFrame', function () {
         expect(taaExposure.value).to.equal(1);
     });
 
-    it('renders the scene whole into a render target sized to the camera viewport', function () {
+    describe('viewport', function () {
 
-        // a viewport covering a quarter of the output. The scene render target is sized to it, so the
-        // scene passes must fill it - applying the viewport again would shrink the scene to a
-        // sixteenth of the output
-        cameraFrame.cameraComponent.rect.set(0.5, 0, 0.5, 0.5);
-        cameraFrame.rendering.sceneColorMap = true;
-        cameraFrame.update();
+        // the output the camera frame writes to is the back buffer, whose size is the app's
+        const outputViewport = (rect) => {
+            const { width, height } = app.graphicsDevice;
+            return [
+                Math.floor(rect[0] * width),
+                Math.floor(rect[1] * height),
+                Math.floor(rect[2] * width),
+                Math.floor(rect[3] * height)
+            ];
+        };
 
-        const { scenePass, scenePassTransparent } = cameraFrame.renderPassCamera;
-        expect(scenePass.fullViewport).to.equal(true);
-        if (scenePassTransparent) {
-            expect(scenePassTransparent.fullViewport).to.equal(true);
-        }
+        const components = v => [v.x, v.y, v.z, v.w];
+
+        it('renders the scene whole into a render target sized to the camera viewport', function () {
+
+            // the scene render target is sized to the viewport, so the scene passes must fill it -
+            // applying the viewport again would shrink the scene to a fraction of the output
+            cameraFrame.cameraComponent.rect.set(0.5, 0, 0.5, 0.5);
+            cameraFrame.rendering.sceneColorMap = true;
+            cameraFrame.update();
+
+            const { scenePass, scenePassTransparent } = cameraFrame.renderPassCamera;
+            expect(scenePass.fullViewport).to.equal(true);
+            if (scenePassTransparent) {
+                expect(scenePassTransparent.fullViewport).to.equal(true);
+            }
+        });
+
+        it('sizes the scene render target to the camera viewport, scaled by the render target scale', function () {
+            const { cameraComponent } = cameraFrame;
+            cameraComponent.rect.set(0.5, 0, 0.5, 0.25);
+            cameraFrame.rendering.renderTargetScale = 0.5;
+            cameraFrame.update();
+
+            const { renderPassCamera } = cameraFrame;
+            expect(renderPassCamera.scenePass.scaleX).to.equal(0.25);
+            expect(renderPassCamera.scenePass.scaleY).to.equal(0.125);
+
+            // the viewport can change on any frame
+            cameraComponent.rect.set(0, 0, 1, 1);
+            renderPassCamera.updateSceneScale();
+            expect(renderPassCamera.scenePass.scaleX).to.equal(0.5);
+            expect(renderPassCamera.scenePass.scaleY).to.equal(0.5);
+        });
+
+        it('writes the final image to the camera viewport without clearing the output render target', function () {
+            cameraFrame.cameraComponent.rect.set(0.5, 0, 0.5, 0.5);
+            cameraFrame.update();
+
+            const { composePass } = cameraFrame.renderPassCamera;
+            cameraFrame.renderPassCamera.updateOutputViewport();
+
+            expect(components(composePass.viewport)).to.deep.equal(outputViewport([0.5, 0, 0.5, 0.5]));
+            expect(composePass.colorArrayOps[0].clear).to.equal(false);
+            expect(composePass.depthStencilOps.clearDepth).to.equal(false);
+            expect(composePass.depthStencilOps.clearStencil).to.equal(false);
+        });
+
+        it('clears the output render target when the camera covers all of it', function () {
+            cameraFrame.update();
+
+            const { composePass } = cameraFrame.renderPassCamera;
+            cameraFrame.renderPassCamera.updateOutputViewport();
+
+            expect(composePass.viewport).to.equal(undefined);
+            expect(composePass.colorArrayOps[0].clear).to.equal(true);
+        });
+
+        it('keeps the output render target when the passes are re-created', function () {
+            cameraFrame.cameraComponent.rect.set(0, 0, 0.5, 0.5);
+            cameraFrame.update();
+            cameraFrame.renderPassCamera.updateOutputViewport();
+            expect(cameraFrame.renderPassCamera.composePass.colorArrayOps[0].clear).to.equal(false);
+
+            // adding or removing layers re-creates the passes, with the compose pass clearing again
+            const { renderPassCamera } = cameraFrame;
+            const previousComposePass = renderPassCamera.composePass;
+            renderPassCamera.layersDirty = true;
+            cameraFrame.update();
+            expect(renderPassCamera.composePass).to.not.equal(previousComposePass);
+            renderPassCamera.updateOutputViewport();
+
+            // it must not erase what other cameras rendered outside of the viewport
+            expect(renderPassCamera.composePass.colorArrayOps[0].clear).to.equal(false);
+            expect(components(renderPassCamera.composePass.viewport)).to.deep.equal(outputViewport([0, 0, 0.5, 0.5]));
+        });
     });
 
     it('removes and destroys its own pass when disabled, returning the camera to its own rendering', function () {
