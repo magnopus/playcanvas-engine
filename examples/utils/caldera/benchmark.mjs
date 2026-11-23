@@ -31,7 +31,18 @@
  *                       with a single pass.
  *   --out <file>        Also write the JSON result here.
  *   --timeout <s>       Give up after this many seconds (default 1800).
- *   --param k=v         Extra example URL parameter, repeatable.
+ *   --param k=v         Extra example URL parameter, repeatable. Useful ones: dagPixel=<px> (LOD
+ *                       error target, lower is finer), benchDwell=<s> (seconds each jump is
+ *                       watched, default 8), cacheReads=<n>.
+ *   --example <name>    caldera (default) or zorah. Zorah supports --load only.
+ *   --load              Measure loading instead of flying the route: milestones (containers loaded,
+ *                       playable, settled), world rebuilds, main-thread long tasks, requests and
+ *                       byte-cache use. Combine with --profile for a CPU breakdown.
+ *   --repeat <n>        Run n times and print the median (default 1). Each run is a new browser.
+ *   --user-data <dir>   Chrome profile directory kept between runs, so an OPFS cache (--cache)
+ *                       filled by one run is warm for the next. Without it every run is cold.
+ *   --throttle <Mbit>   Limit download bandwidth (with --latency <ms>, default 0), to stand in for
+ *                       a remote host: localhost makes the network look free.
  *
  * Environment: CHROME_PATH overrides the Chrome executable (default: the installed Google Chrome).
  */
@@ -68,9 +79,11 @@ const timeoutMs = Number(flags.get('timeout') ?? 1800) * 1000;
 
 const query = new URLSearchParams({
     deviceType: 'webgpu',
-    benchmark: '1',
-    pool: String(flags.get('pool') ?? 4096)
+    benchmark: flags.get('load') ? 'load' : '1'
 });
+const example = String(flags.get('example') ?? 'caldera');
+// Zorah sizes its own pool unless told to; Caldera's whole island needs 4 GiB
+if (flags.get('pool') || example === 'caldera') query.set('pool', String(flags.get('pool') ?? 4096));
 if (flags.get('speed')) query.set('benchSpeed', String(flags.get('speed')));
 if (flags.get('passes')) query.set('benchPasses', String(flags.get('passes')));
 if (flags.get('regions')) query.set('regions', String(flags.get('regions')));
@@ -81,7 +94,7 @@ for (const kv of extraParams) {
     query.set(k, v.join('='));
 }
 
-const baseUrl = flags.get('url') ?? `http://localhost:${port}/iframe/graphics_meshlet-caldera.html`;
+const baseUrl = flags.get('url') ?? `http://localhost:${port}/iframe/graphics_meshlet-${example}.html`;
 const url = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}${query}`;
 
 /**
@@ -147,11 +160,12 @@ const row = stats => [
     String(stats.over33).padStart(6),
     String(stats.over50).padStart(6),
     String(stats.over100).padStart(7),
-    stats.lastSlowMs === undefined ? '' : `${String(stats.lastSlowMs).padStart(10)}`
+    stats.lastSlowMs === undefined ? '' : `${String(stats.lastSlowMs).padStart(10)}`,
+    stats.lastPageMs === undefined ? '' : `${String(stats.lastPageMs).padStart(10)} ${String(stats.settledMs ?? 'n/a').padStart(9)} ${String(stats.pages).padStart(7)}`
 ].join(' ');
 
 const header = `${'frames'.padStart(6)} ${'avg'.padStart(7)} ${'p95'.padStart(7)} ${'p99'.padStart(7)} ${'max'.padStart(7)} ${'>33ms'.padStart(6)} ${'>50ms'.padStart(6)} ${'>100ms'.padStart(7)}`;
-const jumpHeader = `${header} ${'lastSlowMs'.padStart(10)}`;
+const jumpHeader = `${header} ${'lastSlowMs'.padStart(10)} ${'lastPageMs'.padStart(10)} ${'settledMs'.padStart(9)} ${'pages'.padStart(7)}`;
 
 /**
  * @param {object} results - The example's results.
@@ -162,7 +176,10 @@ const printResults = (results) => {
         console.log(`\n== ${mode} pass (${pass.seconds}s${pass.settledBeforeStart ? '' : ', start did not fully settle'}) ==`);
         console.log(`${'overall'.padEnd(34)} ${header}`);
         console.log(`${''.padEnd(34)} ${row(pass)}`);
-        console.log(`GPU avg ${pass.gpuAvgMs ?? 'n/a'} ms, pages fetched ${pass.pagesFetched}, evicted ${pass.pagesEvicted}`);
+        console.log(`GPU avg ${pass.gpuAvgMs ?? 'n/a'} ms, pages fetched ${pass.pagesFetched}, evicted ${pass.pagesEvicted}, installed but already unwanted ${pass.pagesUnwanted}, dropped unsent ${pass.pagesDropped}`);
+        if (pass.missingAvg !== undefined) {
+            console.log(`Pages wanted but not resident per frame: avg ${pass.missingAvg}, p95 ${pass.missingP95}, frames with any ${pass.missingFramesPct}%`);
+        }
         if (pass.gpuPasses) {
             console.log(`GPU ms per frame by pass: ${Object.entries(pass.gpuPasses).map(([name, ms]) => `${name} ${ms}`).join(', ')}`);
         }
@@ -201,12 +218,11 @@ const printProfile = (profile) => {
     }
 };
 
-const main = async () => {
-    await ensureServer();
-
+const runOnce = async () => {
     const browser = await launch({
         ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: 'chrome' }),
         headless: !!flags.get('headless'),
+        ...(flags.get('user-data') ? { userDataDir: path.resolve(String(flags.get('user-data'))) } : {}),
         defaultViewport: { width: 1920, height: 1080 },
         args: [
             '--enable-unsafe-webgpu',
@@ -240,6 +256,17 @@ const main = async () => {
             console.error(`page error: ${err.message}`);
         });
 
+        if (flags.get('throttle')) {
+            const net = await page.createCDPSession();
+            await net.send('Network.enable');
+            await net.send('Network.emulateNetworkConditions', {
+                offline: false,
+                latency: Number(flags.get('latency') ?? 0),
+                downloadThroughput: Number(flags.get('throttle')) * 125000,
+                uploadThroughput: -1
+            });
+        }
+
         console.log(`Opening ${url}`);
         const client = flags.get('profile') ? await page.createCDPSession() : null;
         if (client) {
@@ -258,13 +285,108 @@ const main = async () => {
         if (flags.get('trace')) await page.tracing.stop();
         if (client) printProfile((await client.send('Profiler.stop')).profile);
 
-        printResults(result);
-        if (flags.get('out')) {
-            fs.writeFileSync(String(flags.get('out')), JSON.stringify(result, null, 2));
-            console.log(`\nWrote ${flags.get('out')}`);
-        }
+        return result;
     } finally {
         await browser.close();
+    }
+};
+
+/**
+ * @param {number[]} values - Numbers.
+ * @returns {number} The median.
+ */
+const median = (values) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+};
+
+/**
+ * Prints one load run.
+ *
+ * @param {object} load - The example's `load` section.
+ */
+const printLoad = (load) => {
+    const m = load.milestonesMs;
+    const ms = v => (v === null ? 'n/a' : `${(v / 1000).toFixed(2)} s`);
+    console.log(`\n${example} load: pool ${load.pool} MiB, ${load.device}, cache ${load.cache ? 'on' : 'off'}`);
+    console.log(`  script ready      ${ms(m.scriptReady)}   (imports + device init, before any content)`);
+    console.log(`  scene created     ${ms(m.sceneCreated)}`);
+    console.log(`  first container   ${ms(m.firstContainer)}`);
+    console.log(`  all containers    ${ms(m.allContainers)}   (${load.containers.loaded}/${load.containers.total})`);
+    console.log(`  playable          ${ms(m.playable)}`);
+    console.log(`  settled           ${ms(m.settled)}   (playable floor met, demand settled)`);
+    console.log(`  pages quiet       ${ms(m.pagesQuiet)}   (last page request)`);
+    console.log(`  pages requested   ${load.pageTimeline.map(t => `${(t.atMs / 1000).toFixed(0)}s:${t.pages}`).join(' ')}`);
+    const r = load.rebuilds;
+    console.log(`  rebuilds          ${r.count} (${r.beforePlayable} before playable), ${r.totalMs} ms total, longest ${r.longestMs} ms`);
+    const a = load.mainThread.untilPlayable;
+    const b = load.mainThread.untilSettled;
+    console.log(`  long tasks        until playable: ${a.count}, ${a.blockingMs} ms over 50 ms, longest ${a.longestMs} ms; until settled: ${b.count}, ${b.blockingMs} ms, longest ${b.longestMs} ms`);
+    console.log(`  longest tasks     ${load.mainThread.top.map(t => `${t.ms}ms@${(t.atMs / 1000).toFixed(1)}s`).join(', ')}`);
+    if (load.samples?.length) {
+        console.log('  streaming         t(s)  frames  inFlight  queued  runs  arrived  resident  missing  cacheHits');
+        load.samples.filter((_, i) => i % 2 === 1).forEach((x) => {
+            console.log(`                    ${(x.atMs / 1000).toFixed(1).padStart(5)} ${String(x.frames).padStart(7)} ${String(x.inFlight).padStart(9)} ${String(x.queued).padStart(7)} ${String(x.runs).padStart(5)} ${String(x.arrived).padStart(8)} ${String(x.resident).padStart(9)} ${String(x.missing).padStart(8)} ${String(x.cacheHits).padStart(10)}`);
+        });
+    }
+    if (load.slowFrames?.length) {
+        console.log(`  slow frames (> 100 ms): ${load.slowFrames.length}; t(s) wall cpu gpu (ms)`);
+        load.slowFrames.slice(0, 60).forEach((f) => {
+            console.log(`                    ${(f.atMs / 1000).toFixed(1).padStart(5)} ${String(f.dtMs).padStart(6)} ${String(f.cpuMs).padStart(5)} ${String(f.gpuMs ?? 'n/a').padStart(6)}`);
+        });
+    }
+    if (load.idleRead) console.log(`  idle cache reads  ${load.idleRead.reads} reads of 768 KB after the load, 8 concurrent: ${load.idleRead.avgMs} ms each, ${load.idleRead.MBps} MB/s`);
+    if (load.cutTables) {
+        const c = load.cutTables;
+        console.log(`  GPU tables        ${c.worlds} world(s), ${c.meshlets} meshlets: records ${c.recordsMB.toFixed(0)} MB, cut groups ${c.cutMB.toFixed(0)} MB, topology ${c.topologyMB.toFixed(0)} MB`);
+    }
+    const n = load.network;
+    console.log(`  network           ${n.requests} requests, ${n.bodyMB} MB body, ${n.transferMB} MB on the wire; scheduler ${JSON.stringify(n.scheduler)}, pages fetched ${n.pagesFetched}`);
+    if (load.byteCache) {
+        console.log(`  byte cache        ${load.byteCache.hits} hits, ${load.byteCache.readMB} MB read, ${load.byteCache.writtenMB} MB written, ${load.byteCache.entries} entries`);
+    }
+    console.log(`  frames ${load.frames}, JS heap ${load.jsHeapMB ?? 'n/a'} MB`);
+};
+
+/**
+ * Prints the median of each milestone across runs.
+ *
+ * @param {object[]} loads - The runs' `load` sections.
+ */
+const printLoadSummary = (loads) => {
+    const keys = Object.keys(loads[0].milestonesMs);
+    console.log(`\n== Median of ${loads.length} runs (s) ==`);
+    console.log(['run', ...keys, 'rebuilds ms', 'blocked ms'].map(k => k.padStart(14)).join(''));
+    loads.forEach((load, i) => {
+        const cells = keys.map(k => (load.milestonesMs[k] === null ? 'n/a' : (load.milestonesMs[k] / 1000).toFixed(2)));
+        console.log([String(i + 1), ...cells, String(load.rebuilds.totalMs), String(load.mainThread.untilSettled.blockingMs)].map(c => c.padStart(14)).join(''));
+    });
+    if (loads.length > 1) {
+        const cells = keys.map((k) => {
+            const values = loads.map(l => l.milestonesMs[k]).filter(v => v !== null);
+            return values.length ? (median(values) / 1000).toFixed(2) : 'n/a';
+        });
+        console.log(['median', ...cells, String(median(loads.map(l => l.rebuilds.totalMs))), String(median(loads.map(l => l.mainThread.untilSettled.blockingMs)))].map(c => c.padStart(14)).join(''));
+    }
+};
+
+const main = async () => {
+    await ensureServer();
+    const repeat = Math.max(1, Number(flags.get('repeat') ?? 1));
+    const results = [];
+    for (let i = 0; i < repeat; i++) {
+        if (repeat > 1) console.log(`\n##### Run ${i + 1} of ${repeat} #####`);
+        const result = await runOnce(); // eslint-disable-line no-await-in-loop
+        results.push(result);
+        if (result.load) printLoad(result.load);
+        else printResults(result);
+    }
+    if (results[0].load) printLoadSummary(results.map(r => r.load));
+    if (flags.get('out')) {
+        const out = repeat > 1 || results[0].load ? results : results[0];
+        fs.writeFileSync(String(flags.get('out')), JSON.stringify(out, null, 2));
+        console.log(`\nWrote ${flags.get('out')}`);
     }
 };
 

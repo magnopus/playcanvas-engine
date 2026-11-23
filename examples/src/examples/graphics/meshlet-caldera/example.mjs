@@ -51,7 +51,7 @@ import { Water } from 'playcanvas/scripts/esm/water.mjs';
 
 import { data, deviceType } from 'examples/context';
 
-import { runBenchmark, showGpuStats } from './benchmark.mjs';
+import { runBenchmark, runLoadBenchmark, showGpuStats, startLoadProbe } from './benchmark.mjs';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -142,6 +142,9 @@ if (params.get('worldMeshlets')) app.systems.meshlet.maxWorldMeshlets = Number(p
 app.systems.meshlet.occlusion = true;
 // ?cssPixels=0: measure the LOD threshold in render target pixels (finer on high-density displays)
 app.systems.meshlet.cssPixels = params.get('cssPixels') !== '0';
+
+// ?benchmark=load: records the load timeline from here on, see benchmark.mjs
+const loadProbe = params.get('benchmark') === 'load' ? startLoadProbe(app, params) : null;
 
 const scene = new Entity('Caldera');
 app.root.addChild(scene);
@@ -468,6 +471,9 @@ if (params.get('gpuStats') === '1') {
 // ?benchmark=1: run by `npm run bench:caldera`, see benchmark.mjs
 if (params.get('benchmark') === '1') {
     runBenchmark({ app, camera, controls: cc, params, manifest, deviceType });
+}
+if (loadProbe) {
+    runLoadBenchmark({ app, probe: loadProbe, params, deviceType });
 }
 
 app.start();

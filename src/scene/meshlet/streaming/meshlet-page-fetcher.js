@@ -79,15 +79,18 @@ class MeshletPageFetcher {
      * @param {number} offset - Byte offset.
      * @param {number} length - Byte length.
      * @param {number} [priority] - Scheduler priority (FETCH_PRIORITY_*); demand pages by default.
+     * @param {(() => boolean)|null} [stillWanted] - Polled when the request reaches the front of
+     * the scheduler's queue; a false answer drops it unsent.
      * @returns {Promise<Uint8Array|null>} A view of the bytes, possibly into a larger response
      * buffer shared with other ranges (not to be transferred), or null when the scheduler
      * dropped the request.
      */
-    fetchRange(blobIndex, offset, length, priority = FETCH_PRIORITY_PAGES) {
+    fetchRange(blobIndex, offset, length, priority = FETCH_PRIORITY_PAGES, stillWanted = null) {
         return /** @type {Promise<Uint8Array|null>} */ (this.scheduler.fetchRange(this._blobUrl(blobIndex), offset, length, {
             credentials: this.credentials,
             cacheVersion: this.cacheVersion,
             priority,
+            stillWanted,
             view: true
         }));
     }

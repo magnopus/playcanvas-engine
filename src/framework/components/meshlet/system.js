@@ -7,6 +7,7 @@ import { ComponentSystem } from '../system.js';
 import { MeshletComponent } from './component.js';
 import { MESHLET_DEFAULTS } from './meshlet-defaults.js';
 import { MeshletPlayableTracker } from './meshlet-playable-tracker.js';
+import { MeshletCutTableStore } from './meshlet-cut-table-store.js';
 import { MeshletRecordStore } from './meshlet-record-store.js';
 import { applyWorldSettings, buildPartition, groupComponents, planWorlds, worldMeshletLimit } from './meshlet-world-planner.js';
 
@@ -193,6 +194,14 @@ class MeshletComponentSystem extends ComponentSystem {
     _records;
 
     /**
+     * Saves and loads the worlds' cut tables through the byte cache.
+     *
+     * @type {MeshletCutTableStore}
+     * @private
+     */
+    _cutTables;
+
+    /**
      * Tracks when the content and the components waited on become playable.
      *
      * @type {MeshletPlayableTracker}
@@ -230,6 +239,9 @@ class MeshletComponentSystem extends ComponentSystem {
 
         // a settled restore re-plans the rebuild that waited for it
         this._records = new MeshletRecordStore(() => this._markDirty());
+        // the system stays dirty while it waits for a load, so settling needs no nudge: marking it
+        // dirty again would restart the quiet window and add rebuilds
+        this._cutTables = new MeshletCutTableStore(() => {});
         this._playable = new MeshletPlayableTracker(this);
 
         // Resource handlers are created before component systems, so register glTF meshlet support
@@ -937,7 +949,7 @@ class MeshletComponentSystem extends ComponentSystem {
     _onFrameRender() {
         if (!this._group || this._suspended) return;
         // a rebuild waiting on record restores re-plans once they settle
-        if (this._dirty && !this._records.restoring) {
+        if (this._dirty && !this._records.restoring && !this._cutTables.loading) {
             const now = performance.now();
             const quiet = now - this._dirtyLast >= this._rebuildQuietMs;
             const overdue = now - this._dirtySince >= this._rebuildMaxWaitMs;
@@ -974,7 +986,16 @@ class MeshletComponentSystem extends ComponentSystem {
                 }
             }
         }
-        if (restoring) {
+        // and the cut tables saved by an earlier build, which spare it deriving them again
+        const cache = this.byteCache;
+        let loadingTables = false;
+        for (const plan of plans) {
+            if (plan.keep) continue;
+            for (const group of plan.groups) {
+                if (this._cutTables.request(group, cache)) loadingTables = true;
+            }
+        }
+        if (restoring || loadingTables) {
             this._dirty = true;
             return;
         }
@@ -989,6 +1010,7 @@ class MeshletComponentSystem extends ComponentSystem {
         const placedResources = new Set();
         const states = [];
         let rebuilt = 0;
+        const rebuiltGroups = [];
         this._group.resize(plans.length);
         for (let pi = 0; pi < plans.length; pi++) {
             const { groups, state, keep } = plans[pi];
@@ -1004,6 +1026,7 @@ class MeshletComponentSystem extends ComponentSystem {
                 continue;
             }
             rebuilt++;
+            rebuiltGroups.push(...groups);
             this._group.directors[pi].rebuild((world) => {
                 applyWorldSettings(world, settings, state.poolBytes, state.texturePoolBytes);
                 buildPartition(world, groups, pi, components);
@@ -1017,6 +1040,7 @@ class MeshletComponentSystem extends ComponentSystem {
         this._lastRebuild = performance.now();
         this._partitionStates = states;
         this._records.retain(placedResources);
+        this._cutTables.finish(rebuiltGroups, cache);
         // components no longer in any world (removed asset, no base URL) stop syncing
         for (const component of this._activeComponents) {
             if (!placed.has(component)) {
@@ -1115,6 +1139,7 @@ class MeshletComponentSystem extends ComponentSystem {
         this.app.off('framerender', this._onFrameRender, this);
         this._playable.destroy();
         this._records.destroy();
+        this._cutTables.destroy();
         this._transformQueue.length = 0;
         this._stateQueue.length = 0;
         this._activeComponents = [];

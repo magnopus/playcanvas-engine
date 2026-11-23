@@ -66,6 +66,23 @@ class MeshletPrimitive {
 
     /** @type {number} - the first meshlet's flags. @ignore */
     _firstFlags = 0;
+
+    /**
+     * Cut tables loaded from the byte cache for the next world build to use (see
+     * MeshletCutData), or null. Dropped once the build is done.
+     *
+     * @type {import('./meshlet-cut-table.js').CutTable|null}
+     * @ignore
+     */
+    _cutTable = null;
+
+    /**
+     * Cut tables the last world build had to compute, waiting to be saved to the byte cache.
+     *
+     * @type {import('./meshlet-cut-table.js').CutTable|null}
+     * @ignore
+     */
+    _builtCutTable = null;
 }
 
 /**

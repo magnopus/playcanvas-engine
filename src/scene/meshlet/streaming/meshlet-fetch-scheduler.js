@@ -16,6 +16,13 @@ export const FETCH_PRIORITY_FINE = 3;
 /** Default cap on sidecar requests in flight. */
 export const MAX_CONCURRENT_FETCHES = 16;
 
+/**
+ * Default cap on byte cache reads in flight. Cache hits skip the HTTP queue, and a scene's first
+ * frames ask for thousands of runs at once; read all together, the store's file opens contend and
+ * every read finishes late. Each read is itself several chunk reads wide.
+ */
+export const MAX_CONCURRENT_CACHE_READS = 8;
+
 /** Queued byte ranges on one URL closer than this merge into a single Range request. */
 export const COALESCE_GAP_BYTES = 256 * 1024;
 
@@ -115,6 +122,32 @@ class MeshletFetchScheduler {
     /** @type {number[]} - requests in flight per priority. @private */
     _activeByPriority = [0, 0, 0, 0];
 
+    /** @type {number} - byte cache reads completed. */
+    cacheReads = 0;
+
+    /** @type {number} - bytes those reads returned. */
+    cacheReadBytes = 0;
+
+    /** @type {number} - total ms those reads took once started. */
+    cacheReadMs = 0;
+
+    /** @type {number} - total ms they waited for a slot before starting. */
+    cacheWaitMs = 0;
+
+    /** @type {number} - cap on byte cache reads in flight. */
+    maxConcurrentCacheReads = MAX_CONCURRENT_CACHE_READS;
+
+    /** @type {number} - byte cache reads in flight. @private */
+    _cacheActive = 0;
+
+    /**
+     * Byte cache reads waiting for a slot, one FIFO per priority, most urgent served first.
+     *
+     * @type {Array<Array<{ queuedAt: number, read: () => Promise<any>, stillWanted: (() => boolean)|null, resolve: Function, reject: Function }>>}
+     * @private
+     */
+    _cacheQueues = [[], [], [], []];
+
     /**
      * @param {number} [maxConcurrent] - Cap on requests in flight.
      */
@@ -162,6 +195,11 @@ class MeshletFetchScheduler {
         const queues = this._queues;
         this._queues = [[], [], [], []];
         this._wholeFiles.clear();
+        for (const queue of this._cacheQueues) {
+            this.dropped += queue.length;
+            for (const job of queue) job.resolve(undefined);
+            queue.length = 0;
+        }
         for (const queue of queues) {
             this.dropped += queue.length;
             for (const req of queue) req.resolve(null);
@@ -187,16 +225,61 @@ class MeshletFetchScheduler {
         }
         const cache = this.byteCache;
         if (cache && (offset < 0 ? cache.hasFile(cacheUrl) : cache.hasRange(cacheUrl, offset, length))) {
-            const read = offset < 0 ?
+            const read = () => (offset < 0 ?
                 cache.getFile(cacheUrl).then(hit => hit?.data ?? null) :
-                cache.getRange(cacheUrl, offset, length);
-            return read.then((bytes) => {
+                cache.getRange(cacheUrl, offset, length));
+            return this._readCached(read, options).then((bytes) => {
+                if (bytes === undefined) return null; // dropped while waiting: no longer wanted
                 if (!bytes) return this._queue(url, offset, length, options);
                 this.cacheHits++;
                 return view ? new Uint8Array(bytes) : bytes;
             });
         }
         return this._queue(url, offset, length, options);
+    }
+
+    /**
+     * Runs a byte cache read once fewer than {@link maxConcurrentCacheReads} are in flight, most
+     * urgent priority first. A read whose `stillWanted` has turned false by then is not made.
+     *
+     * @param {() => Promise<ArrayBuffer|null>} read - Starts the read.
+     * @param {MeshletFetchRequestOptions} options - The request's options.
+     * @returns {Promise<ArrayBuffer|null|undefined>} The bytes, null when the cache lost them,
+     * or undefined when the read was dropped.
+     * @private
+     */
+    _readCached(read, { priority = FETCH_PRIORITY_FINE, stillWanted = null }) {
+        return new Promise((resolve, reject) => {
+            const p = Math.min(Math.max(priority | 0, 0), this._cacheQueues.length - 1);
+            this._cacheQueues[p].push({ queuedAt: performance.now(), read, stillWanted, resolve, reject });
+            this._pumpCache();
+        });
+    }
+
+    /** @private */
+    _pumpCache() {
+        while (this._cacheActive < this.maxConcurrentCacheReads) {
+            const queue = this._cacheQueues.find(q => q.length > 0);
+            if (!queue) break;
+            const job = /** @type {NonNullable<typeof queue[0]>} */ (queue.shift());
+            if (job.stillWanted && !job.stillWanted()) {
+                this.dropped++;
+                job.resolve(undefined);
+                continue;
+            }
+            this._cacheActive++;
+            const started = performance.now();
+            this.cacheWaitMs += started - job.queuedAt;
+            job.read().then((bytes) => {
+                this.cacheReads++;
+                this.cacheReadMs += performance.now() - started;
+                this.cacheReadBytes += bytes?.byteLength ?? 0;
+                job.resolve(bytes);
+            }, job.reject).finally(() => {
+                this._cacheActive--;
+                this._pumpCache();
+            });
+        }
     }
 
     /**

@@ -58,6 +58,14 @@ class ByteCacheEntry {
     used = 0;
 
     /**
+     * True when the whole file is one value in the store (see {@link ByteCache#putFile}) rather
+     * than chunks. Its `chunks` then hold every index, so lookups work unchanged.
+     *
+     * @type {boolean}
+     */
+    whole = false;
+
+    /**
      * @param {string} key - The cache key.
      * @param {string} name - The hash of the key.
      */
@@ -76,9 +84,12 @@ class ByteCacheEntry {
  * evicted beyond it. Defaults to 2 GiB. Lowered automatically when the store runs out of quota.
  * @property {number} [flushDelay] - Milliseconds the index is held in memory after a change before
  * it is written to the store. Defaults to 2000.
- * @property {number} [maxFileBytes] - Largest whole file {@link ByteCache#putFile} stores. Storing
- * copies the bytes on the calling thread before it returns, which for a very large response is a
- * long main-thread stall; larger files are left uncached. Defaults to 64 MiB.
+ * @property {number} [maxFileBytes] - Largest whole file {@link ByteCache#putFile} copies before it
+ * returns. A larger file is stored as a single value, written in the background in steps that
+ * yield to the event loop, so a very large response does not stall the main thread; the caller
+ * must then leave the buffer attached (not transfer it) until the returned promise resolves, or
+ * the file is not stored. A single value is read back with one ranged read instead of one per
+ * chunk. Defaults to 64 MiB.
  * @property {(url: string) => (string|null)} [key] - Maps a URL to its cache key, or to null to
  * leave it uncached. Use it to restrict caching to some hosts, or to strip query parameters that
  * change between requests without changing the content (signatures, session tokens). Defaults to
@@ -256,6 +267,14 @@ class ByteCache {
     _flushing = Promise.resolve();
 
     /**
+     * Writes in flight, for {@link ByteCache#whenStored}.
+     *
+     * @type {Set<Promise<void>>}
+     * @private
+     */
+    _pending = new Set();
+
+    /**
      * Creates a new ByteCache and starts loading its index from the store.
      *
      * @param {ByteStore} store - The storage backend.
@@ -346,6 +365,21 @@ class ByteCache {
         const first = Math.floor(offset / chunkSize);
         const last = Math.floor((offset + length - 1) / chunkSize);
 
+        if (entry.whole) {
+            const data = await this.store.readRange(this._wholeName(entry.name), offset, length).catch(() => null);
+            if (this._entries.get(entry.key) !== entry) return null;
+            if (!data || data.byteLength !== length) {
+                // lost behind our back: another tab evicted it, or the browser cleared storage
+                this._removeEntry(entry);
+                this._scheduleFlush();
+                return null;
+            }
+            this._touch(entry);
+            this.hits++;
+            this.bytesRead += length;
+            return data;
+        }
+
         const reads = [];
         for (let i = first; i <= last; i++) {
             reads.push(this.store.read(this._chunkName(entry, i)).catch(() => null));
@@ -429,12 +463,14 @@ class ByteCache {
         }
         if (!slices.length && !eof && !type) return Promise.resolve();
 
-        return this.ready.then(() => this._store(key, slices, eof ? end : -1, type));
+        return this._track(this.ready.then(() => this._store(key, slices, eof ? end : -1, type)));
     }
 
     /**
-     * Stores a whole file. The bytes are copied before this returns. A file larger than
-     * {@link ByteCache#maxFileBytes} is not stored.
+     * Stores a whole file. The bytes are copied before this returns, except for a file larger than
+     * {@link ByteCache#maxFileBytes}: that is written to the store as one value in steps that yield,
+     * so the caller's buffer must stay attached until the returned promise resolves. If it is
+     * detached first (transferred to a worker) the file is not stored.
      *
      * @param {string} url - The URL.
      * @param {ArrayBuffer|ArrayBufferView} data - The file's bytes.
@@ -442,8 +478,94 @@ class ByteCache {
      * @returns {Promise<void>} Resolves when the bytes are written. Never rejects.
      */
     putFile(url, data, type = '') {
-        if (data.byteLength > this.maxFileBytes) return Promise.resolve();
+        if (data.byteLength > this.maxFileBytes) return this._track(this._putFileWhole(url, toBytes(data), type));
         return this.putRange(url, 0, data, true, type);
+    }
+
+    /**
+     * Resolves once every write started so far has finished, so a page about to close, or a test,
+     * knows the bytes are stored. Call {@link ByteCache#flush} after it to write the index.
+     *
+     * @returns {Promise<void>} Resolves when no write is in flight.
+     */
+    async whenStored() {
+        while (this._pending.size) {
+            await Promise.all([...this._pending]); // eslint-disable-line no-await-in-loop
+        }
+    }
+
+    /**
+     * Stores a large file as one value, so reading it back, whole or in part, is a single ranged
+     * read. The entry only exists once the value is completely written.
+     *
+     * @param {string} url - The URL.
+     * @param {Uint8Array} bytes - A view of the file's bytes, left attached by the caller.
+     * @param {string} type - The response's content type.
+     * @returns {Promise<void>} Resolves when the file is stored, or storing stopped. Never rejects.
+     * @private
+     */
+    async _putFileWhole(url, bytes, type) {
+        const key = this._disabled ? null : this._key(url);
+        if (key === null) return;
+        const size = bytes.byteLength;
+        await this.ready;
+        // the cache was closed, or the buffer was transferred away while the index loaded
+        if (this._disabled || bytes.byteLength !== size) return;
+
+        let entry = this._entries.get(key);
+        if (entry) {
+            if (entry.size === size && entry.chunks.size === Math.ceil(size / this.chunkSize)) return;
+            // partly stored, or the content changed size: replace it
+            this._removeEntry(entry);
+        }
+        const name = hash53(key);
+        if (this._names.has(name)) {
+            Debug.warnOnce(`ByteCache: key hash collision, not caching ${key}`);
+            return;
+        }
+        const valueName = this._wholeName(name);
+        if (this._writing.has(valueName)) return;
+
+        this._writing.add(valueName);
+        try {
+            const removing = this._sweeping.get(valueName);
+            if (removing) await removing;
+            await this.store.writeLarge(valueName, bytes);
+        } catch (err) {
+            this.store.remove(valueName).catch(() => {});
+            this._onWriteError(err);
+            return;
+        } finally {
+            this._writing.delete(valueName);
+        }
+        if (this._disabled || this._names.has(name)) return;
+
+        entry = new ByteCacheEntry(key, name);
+        entry.size = size;
+        entry.type = type;
+        entry.whole = true;
+        for (let i = 0, n = Math.ceil(size / this.chunkSize); i < n; i++) entry.chunks.add(i);
+        entry.bytes = size;
+        this._entries.set(key, entry);
+        this._names.set(name, entry);
+        this._removed.delete(name);
+        this._totalBytes += size;
+        this.bytesWritten += size;
+        this._touch(entry);
+        this._evict(this.maxBytes);
+    }
+
+    /**
+     * Tracks a write so {@link ByteCache#whenStored} can wait for it.
+     *
+     * @param {Promise<void>} promise - The write.
+     * @returns {Promise<void>} The same promise.
+     * @private
+     */
+    _track(promise) {
+        this._pending.add(promise);
+        promise.finally(() => this._pending.delete(promise));
+        return promise;
     }
 
     /**
@@ -544,6 +666,15 @@ class ByteCache {
      */
     _chunkName(entry, index) {
         return `${entry.name}.${index}`;
+    }
+
+    /**
+     * @param {string} name - An entry's name.
+     * @returns {string} The name of the store value holding the entry's whole file.
+     * @private
+     */
+    _wholeName(name) {
+        return `${name}.w`;
     }
 
     /**
@@ -681,8 +812,12 @@ class ByteCache {
         this._names.delete(entry.name);
         this._removed.add(entry.name);
         this._totalBytes -= entry.bytes;
-        for (const index of entry.chunks) {
-            this.store.remove(this._chunkName(entry, index)).catch(() => {});
+        if (entry.whole) {
+            this.store.remove(this._wholeName(entry.name)).catch(() => {});
+        } else {
+            for (const index of entry.chunks) {
+                this.store.remove(this._chunkName(entry, index)).catch(() => {});
+            }
         }
         entry.chunks.clear();
         entry.bytes = 0;
@@ -695,7 +830,11 @@ class ByteCache {
      * @private
      */
     _dropChunk(entry, index) {
-        if (entry.chunks.delete(index)) {
+        if (entry.whole) {
+            // one value: a lost part means the whole file is gone
+            this._removeEntry(entry);
+            this._scheduleFlush();
+        } else if (entry.chunks.delete(index)) {
             const length = this._chunkLength(entry, index);
             entry.bytes -= length;
             this._totalBytes -= length;
@@ -787,7 +926,7 @@ class ByteCache {
      * Adds stored entries this cache does not know, and merges the chunks of those it does. The
      * stored index may hold another tab's writes.
      *
-     * @param {Array<{ k: string, n: string, s: number, t: string, c: number[], u: number }>} records - Serialized entries.
+     * @param {Array<{ k: string, n: string, s: number, t: string, c: number[], u: number, w?: number }>} records - Serialized entries.
      * @private
      */
     _adopt(records) {
@@ -805,6 +944,18 @@ class ByteCache {
                 continue;
             }
             entry.used = Math.max(entry.used, record.u ?? 0);
+            if (record.w) {
+                // a whole-file value: every chunk of it counts as stored
+                if (!entry.whole && entry.chunks.size) continue;
+                if (!entry.whole && record.s >= 0) {
+                    entry.whole = true;
+                    for (let i = 0, n = Math.ceil(record.s / this.chunkSize); i < n; i++) entry.chunks.add(i);
+                    entry.bytes = record.s;
+                    this._totalBytes += record.s;
+                }
+                continue;
+            }
+            if (entry.whole) continue;
             for (const index of record.c) {
                 if (!entry.chunks.has(index)) {
                     entry.chunks.add(index);
@@ -824,7 +975,9 @@ class ByteCache {
     _references(name) {
         const dot = name.lastIndexOf('.');
         const entry = dot < 0 ? undefined : this._names.get(name.slice(0, dot));
-        return !!entry && entry.chunks.has(Number(name.slice(dot + 1)));
+        if (!entry) return false;
+        const suffix = name.slice(dot + 1);
+        return entry.whole ? suffix === 'w' : entry.chunks.has(Number(suffix));
     }
 
     /**
@@ -847,7 +1000,7 @@ class ByteCache {
             const entries = [];
             for (const entry of this._entries.values()) {
                 if (entry.chunks.size) {
-                    entries.push({ k: entry.key, n: entry.name, s: entry.size, t: entry.type, c: [...entry.chunks], u: entry.used });
+                    entries.push({ k: entry.key, n: entry.name, s: entry.size, t: entry.type, c: entry.whole ? [] : [...entry.chunks], u: entry.used, ...(entry.whole ? { w: 1 } : {}) });
                 }
             }
             const json = JSON.stringify({ version: INDEX_VERSION, chunkSize: this.chunkSize, entries });

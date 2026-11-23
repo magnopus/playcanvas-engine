@@ -41,6 +41,36 @@ class ByteStore {
     }
 
     /**
+     * Reads part of a value.
+     *
+     * @param {string} name - The value's name.
+     * @param {number} offset - First byte.
+     * @param {number} length - Byte count.
+     * @returns {Promise<ArrayBuffer|null>} The bytes, or null when the name is not stored or holds
+     * fewer than `offset + length` bytes. The base implementation reads the whole value; stores
+     * that can read a range cheaply override it.
+     */
+    readRange(name, offset, length) {
+        return this.read(name).then((data) => {
+            return data && data.byteLength >= offset + length ? data.slice(offset, offset + length) : null;
+        });
+    }
+
+    /**
+     * Writes a very large value. The store should write it in steps that yield to the event loop
+     * rather than copy it at once, and the value only counts as stored when the promise resolves.
+     * The caller must leave `data` attached (not transfer its buffer) until then. The base
+     * implementation copies the bytes and calls {@link ByteStore#write}.
+     *
+     * @param {string} name - The value's name.
+     * @param {Uint8Array} data - The bytes.
+     * @returns {Promise<void>} Resolves when the value is stored.
+     */
+    writeLarge(name, data) {
+        return this.write(name, data.slice());
+    }
+
+    /**
      * Removes a value. Removing a name that is not stored is not an error.
      *
      * @param {string} name - The value's name.

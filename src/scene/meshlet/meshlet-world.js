@@ -1,5 +1,6 @@
 import { MeshletCells } from './meshlet-cells.js';
 import { MeshletCutData } from './meshlet-cut-data.js';
+import { buildCutTable, fingerprintRecords } from './meshlet-cut-table.js';
 import { MeshletInstanceList } from './meshlet-instance-list.js';
 import { MeshletMaterialTable, bucketOfMeshletFlags, meshletFlagsOfBucket } from './meshlet-material-table.js';
 import { resolveMeshletBudget, rootListItems } from './meshlet-world-budget.js';
@@ -1333,6 +1334,20 @@ class MeshletWorld {
                     records[row + MESHLET_DATA.FLAGS] = (records[row + MESHLET_DATA.FLAGS] & ~(MESHLET_FLAG_ALPHA_MASKED | MESHLET_FLAG_TWO_SIDED)) | bucketBits;
                 }
                 return records;
+            },
+            // The cut tables come from the primitive's own records, whose pages are still local:
+            // a table loaded from the byte cache for this primitive when it matches them, else one
+            // built now, which the system saves for the next load.
+            cutTable: (first) => {
+                const { prim, pageBase } = primRecords.get(first);
+                let table = prim._cutTable;
+                if (table && (table.count !== prim.meshletCount || table.fingerprint !== fingerprintRecords(prim.meshletData))) {
+                    table = null;
+                }
+                if (!table) {
+                    table = prim._builtCutTable = buildCutTable(prim.meshletData);
+                }
+                return { table, pageBase };
             },
             done: (first, records) => {
                 const count = records.length / MESHLET_DATA_U32S;

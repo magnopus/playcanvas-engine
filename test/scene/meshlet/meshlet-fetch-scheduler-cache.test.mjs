@@ -100,4 +100,50 @@ describe('MeshletFetchScheduler with a ByteCache', function () {
         expect(calls).to.deep.equal(['all']);
         expect(new Uint8Array(bytes)).to.deep.equal(FILE.slice(500, 800));
     });
+
+    it('caps the cache reads in flight and serves the most urgent first', async function () {
+        const { scheduler, cache } = await makeScheduler();
+        await scheduler.fetchAll(URL);
+        await settle();
+        expect(cache.hasFile(URL)).to.equal(true);
+
+        scheduler.maxConcurrentCacheReads = 2;
+        let active = 0;
+        let peak = 0;
+        const originalGetRange = cache.getRange.bind(cache);
+        cache.getRange = async (...args) => {
+            active++;
+            peak = Math.max(peak, active);
+            await settle();
+            const result = await originalGetRange(...args);
+            active--;
+            return result;
+        };
+        const order = [];
+        const requests = [
+            scheduler.fetchRange(URL, 0, 10, { priority: 3 }).then(() => order.push('fine-a')),
+            scheduler.fetchRange(URL, 10, 10, { priority: 3 }).then(() => order.push('fine-b')),
+            scheduler.fetchRange(URL, 20, 10, { priority: 3 }).then(() => order.push('fine-c')),
+            scheduler.fetchRange(URL, 30, 10, { priority: 0 }).then(() => order.push('roots'))
+        ];
+        await Promise.all(requests);
+        expect(peak).to.equal(2);
+        // the two reads already started finish first; the roots read overtakes the waiting fine one
+        expect(order.indexOf('roots')).to.be.lessThan(order.indexOf('fine-c'));
+        expect(calls).to.deep.equal(['all']);
+    });
+
+    it('does not read a cached range whose request is no longer wanted', async function () {
+        const { scheduler, cache } = await makeScheduler();
+        await scheduler.fetchAll(URL);
+        await settle();
+        scheduler.maxConcurrentCacheReads = 1;
+        let wanted = true;
+        const first = scheduler.fetchRange(URL, 0, 10);
+        const second = scheduler.fetchRange(URL, 10, 10, { stillWanted: () => wanted });
+        wanted = false;
+        await first;
+        expect(await second).to.equal(null);
+        expect(cache.hits).to.be.lessThan(3);
+    });
 });

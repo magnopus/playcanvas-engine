@@ -61,12 +61,78 @@ describe('ByteCache', function () {
             expect(new Uint8Array((await cache.getFile(URL_A)).data)).to.deep.equal(bytes(32));
         });
 
-        it('does not store a file larger than maxFileBytes', async function () {
-            const cache = await makeCache(undefined, { maxFileBytes: 32 });
-            await cache.putFile(URL_A, bytes(33));
-            await cache.putFile(URL_B, bytes(32));
+        it('stores a file larger than maxFileBytes in windows, the size only once all are stored', async function () {
+            const cache = await makeCache(undefined, { maxFileBytes: 32, chunkSize: 1024 * 1024 });
+            // 20 MiB: three windows of 8 MiB
+            const data = new Uint8Array(20 * 1024 * 1024 + 5);
+            data.forEach((_, i) => {
+                data[i] = i & 0xff;
+            });
+            const stored = cache.putFile(URL_A, data);
+            expect(cache.hasFile(URL_A)).to.equal(false);
+            await stored;
+            expect(cache.hasFile(URL_A)).to.equal(true);
+            const hit = await cache.getFile(URL_A);
+            expect(hit.data.byteLength).to.equal(data.byteLength);
+            expect(new Uint8Array(hit.data, 8 * 1024 * 1024 - 3, 8)).to.deep.equal(data.subarray(8 * 1024 * 1024 - 3, 8 * 1024 * 1024 + 5));
+        });
+
+        it('does not serve a large file whose buffer was transferred away before it was stored', async function () {
+            const cache = await makeCache(undefined, { maxFileBytes: 32, chunkSize: 1024 * 1024 });
+            const data = new Uint8Array(20 * 1024 * 1024);
+            const stored = cache.putFile(URL_A, data);
+            structuredClone(data.buffer, { transfer: [data.buffer] });
+            await stored;
+            expect(cache.hasFile(URL_A)).to.equal(false);
+        });
+
+        it('serves ranges of a large stored file, which is one value in the store', async function () {
+            const store = new MemoryByteStore();
+            const cache = await makeCache(store, { maxFileBytes: 32 });
+            await cache.putFile(URL_A, bytes(100));
+            expect((await store.list()).filter(n => n.endsWith('.w'))).to.have.lengthOf(1);
+            expect(cache.hasRange(URL_A, 40, 30)).to.equal(true);
+            expect(new Uint8Array(await cache.getRange(URL_A, 40, 30))).to.deep.equal(bytes(30, 40));
+            expect(cache.hasRange(URL_A, 90, 20)).to.equal(false);
+        });
+
+        it('finds a large stored file again after a reload, and the sweep keeps its value', async function () {
+            const store = new MemoryByteStore();
+            const first = await makeCache(store, { maxFileBytes: 32 });
+            await first.putFile(URL_A, bytes(100));
+            await first.flush();
+            const second = await makeCache(store, { maxFileBytes: 32 });
+            await settle();
+            expect(second.hasFile(URL_A)).to.equal(true);
+            expect(new Uint8Array((await second.getFile(URL_A)).data)).to.deep.equal(bytes(100));
+            expect(second.totalBytes).to.equal(100);
+        });
+
+        it('evicts a large stored file with its value', async function () {
+            const store = new MemoryByteStore();
+            const cache = await makeCache(store, { maxFileBytes: 32, maxBytes: 150 });
+            await cache.putFile(URL_A, bytes(100));
+            await cache.putFile(URL_B, bytes(100));
+            await settle();
             expect(cache.hasFile(URL_A)).to.equal(false);
             expect(cache.hasFile(URL_B)).to.equal(true);
+            expect((await store.list()).filter(n => n.endsWith('.w'))).to.have.lengthOf(1);
+        });
+
+        it('whenStored waits for a large file to be written', async function () {
+            const cache = await makeCache(undefined, { maxFileBytes: 32 });
+            cache.putFile(URL_A, bytes(100));
+            await cache.whenStored();
+            expect(cache.hasFile(URL_A)).to.equal(true);
+        });
+
+        it('copies a file up to maxFileBytes before returning', async function () {
+            const cache = await makeCache(undefined, { maxFileBytes: 32 });
+            const data = bytes(32);
+            const stored = cache.putFile(URL_B, data);
+            data.fill(0);
+            await stored;
+            expect(new Uint8Array((await cache.getFile(URL_B)).data)).to.deep.equal(bytes(32));
         });
 
         it('does not cache URLs the key function rejects', async function () {

@@ -19,6 +19,7 @@
 //   ?view=start                begin at the manifest's start pose instead of the hero view
 //   ?scale=<0.25..1>           scene render scale, TAA upscales to the output (default 0.6)
 //   ?ssao=0                    start with SSAO off
+//   ?cache=1                   keep fetched bytes in an OPFS cache (a reload reads from disk)
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
@@ -28,6 +29,7 @@ import {
     Asset,
     AssetListLoader,
     BLEND_NORMAL,
+    ByteCache,
     CameraComponentSystem,
     CameraFrame,
     Color,
@@ -39,6 +41,7 @@ import {
     Keyboard,
     LightComponentSystem,
     MeshletComponentSystem,
+    OpfsByteStore,
     Mouse,
     PIXELFORMAT_RGBA8,
     Picker,
@@ -64,6 +67,8 @@ import {
 import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
 
 import { data, deviceType } from 'examples/context';
+
+import { runLoadBenchmark, startLoadProbe } from './load-benchmark.mjs';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -115,6 +120,23 @@ options.resourceHandlers = [ContainerHandler, TextureHandler];
 
 const app = new AppBase(canvas);
 app.init(options);
+
+// ?benchmark=load: records the load timeline, see load-benchmark.mjs
+const loadProbe = params.get('benchmark') === 'load' ? startLoadProbe(app, params) : null;
+
+// ?cache=1 keeps fetched bytes in an OPFS cache, so a reload reads them from disk. The cap is
+// above the default 2 GiB: the whole scene is about 5.5 GB.
+if (params.get('cache') === '1') {
+    // ?cacheChunk=<KiB> sets the storage granularity (default 256); a larger chunk is fewer file
+    // operations per read, but a cold fetch is widened to whole chunks
+    const chunkKiB = Number(params.get('cacheChunk')) || 256;
+    const byteCache = new ByteCache(new OpfsByteStore(`zorah-${chunkKiB}`), {
+        maxBytes: 12 * 1024 * 1024 * 1024,
+        chunkSize: chunkKiB * 1024
+    });
+    app.loader.byteCache = byteCache;
+    app.systems.meshlet.byteCache = byteCache;
+}
 app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
 app.setCanvasResolution(RESOLUTION_AUTO);
 const resize = () => app.resizeCanvas();
@@ -723,3 +745,7 @@ app.on('update', () => {
 });
 
 app.start();
+
+if (loadProbe) {
+    runLoadBenchmark({ app, probe: loadProbe, params, deviceType });
+}

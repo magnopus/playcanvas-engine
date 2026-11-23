@@ -1,5 +1,8 @@
 import { ByteStore } from './byte-store.js';
 
+/** Bytes handed to the file writer per step of {@link OpfsByteStore#writeLarge}. */
+const LARGE_WRITE_WINDOW = 8 * 1024 * 1024;
+
 /**
  * A {@link ByteStore} in the Origin Private File System: one file per value inside a directory of
  * the origin's private file system. Persistent across sessions and suited to large values, but
@@ -65,6 +68,34 @@ class OpfsByteStore extends ByteStore {
             return await file.arrayBuffer();
         } catch (err) {
             return null;
+        }
+    }
+
+    async readRange(name, offset, length) {
+        try {
+            const handle = await this._dir.getFileHandle(name);
+            const file = await handle.getFile();
+            if (file.size < offset + length) return null;
+            return await file.slice(offset, offset + length).arrayBuffer();
+        } catch (err) {
+            return null;
+        }
+    }
+
+    async writeLarge(name, data) {
+        const size = data.byteLength;
+        const handle = await this._dir.getFileHandle(name, { create: true });
+        const writable = await handle.createWritable();
+        try {
+            for (let offset = 0; offset < size; offset += LARGE_WRITE_WINDOW) {
+                // the caller's buffer was transferred away mid-write: do not store a truncated value
+                if (data.byteLength !== size) throw new Error('OpfsByteStore: buffer detached while writing');
+                await writable.write(data.subarray(offset, Math.min(offset + LARGE_WRITE_WINDOW, size))); // eslint-disable-line no-await-in-loop
+            }
+            await writable.close();
+        } catch (err) {
+            await writable.abort().catch(() => {});
+            throw err;
         }
     }
 

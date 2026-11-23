@@ -257,8 +257,23 @@ class MeshletResidency {
     /** @type {boolean} - set by destroy; in-flight completions check it. @private */
     _destroyed = false;
 
+    /**
+     * Whether a queued run none of whose pages the latest demand wants is dropped instead of
+     * fetched. The view moves on while runs wait for the scheduler (its slots, a slow link), and
+     * fetching what is no longer in the cut only delays the pages that are.
+     *
+     * @type {boolean}
+     */
+    dropUnwanted = true;
+
     // stats
     residentPages = 0;
+
+    /** @type {number} - demand pages installed that the latest demand no longer wanted. */
+    installedUnwanted = 0;
+
+    /** @type {number} - demand pages in runs the scheduler dropped as unwanted before sending. */
+    droppedPages = 0;
 
     fetchedPages = 0;
 
@@ -640,6 +655,7 @@ class MeshletResidency {
             const { globalPage, words } = this._arrived[this._arrivedHead++];
             this._settleFloor(globalPage);
             this.inFlight.delete(globalPage);
+            if (this._protected && !this._protected.has(globalPage)) this.installedUnwanted++;
             this._installPage(globalPage, words, false);
             spent += pageBytes;
         }
@@ -693,9 +709,12 @@ class MeshletResidency {
             const runs = stream.fetcher.buildRuns(localPages);
             for (const run of runs) {
                 this._activeRuns++;
-                stream.fetcher.fetchRange(run.blob, run.offset, run.length).then((bytes) => {
+                const stillWanted = this.dropUnwanted ? () => this._runWanted(stream, run) : null;
+                stream.fetcher.fetchRange(run.blob, run.offset, run.length, undefined, stillWanted).then((bytes) => {
                     if (!bytes) {
-                        // scheduler cleared (director destroyed): nothing arrives
+                        // dropped as unwanted, or the scheduler was cleared (director destroyed):
+                        // nothing arrives, and demand may ask for these pages again
+                        this.droppedPages += run.pages.length;
                         for (const { localPage } of run.pages) this._settleFailed(stream.pageBase + localPage);
                         return;
                     }
@@ -722,6 +741,23 @@ class MeshletResidency {
                 });
             }
         }
+    }
+
+    /**
+     * Whether any page of a queued run is still in the cut the latest readback asked for.
+     *
+     * @param {object} stream - The run's stream.
+     * @param {{ pages: Array<{ localPage: number }> }} run - The run.
+     * @returns {boolean} False when none is.
+     * @private
+     */
+    _runWanted(stream, run) {
+        const wanted = this._protected;
+        if (!wanted) return true;
+        for (const { localPage } of run.pages) {
+            if (wanted.has(stream.pageBase + localPage)) return true;
+        }
+        return false;
     }
 
     /**
