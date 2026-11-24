@@ -382,6 +382,127 @@ describe('ByteCache', function () {
         });
     });
 
+    describe('store backlog', function () {
+
+        /**
+         * A store whose writes wait until released, standing in for one slower than the network.
+         */
+        class SlowStore extends MemoryByteStore {
+            gate = null;
+
+            release = () => {};
+
+            hold() {
+                this.gate = new Promise((resolve) => {
+                    this.release = resolve;
+                });
+            }
+
+            async write(name, data) {
+                if (this.gate && name !== 'index-v1') await this.gate;
+                return super.write(name, data);
+            }
+        }
+
+        it('drops a response while the store is maxPendingBytes behind, then caches again', async function () {
+            const store = new SlowStore();
+            const cache = await makeCache(store, { maxPendingBytes: 48 });
+            store.hold();
+            const first = cache.putFile(URL_A, bytes(32));
+            // 32 pending + 32 more is over the cap
+            await cache.putFile(URL_B, bytes(32));
+            expect(cache.droppedWrites).to.equal(1);
+            store.release();
+            await first;
+            expect(cache.hasFile(URL_A)).to.equal(true);
+            expect(cache.hasFile(URL_B)).to.equal(false);
+            // caught up: stored again
+            await cache.putFile(URL_B, bytes(32));
+            expect(cache.hasFile(URL_B)).to.equal(true);
+        });
+
+        it('admits a write larger than the cap when nothing is pending', async function () {
+            const cache = await makeCache(new MemoryByteStore(), { maxPendingBytes: 16 });
+            await cache.putFile(URL_A, bytes(40));
+            expect(cache.hasFile(URL_A)).to.equal(true);
+            expect(cache.droppedWrites).to.equal(0);
+        });
+
+        it('counts the bytes of chunks the store detached', async function () {
+            // a store that takes ownership the way a worker store does: by transferring the buffer
+            class DetachingStore extends MemoryByteStore {
+                write(name, data) {
+                    const copy = data.slice();
+                    structuredClone(data.buffer, { transfer: [data.buffer] });
+                    return super.write(name, copy);
+                }
+            }
+            const cache = await makeCache(new DetachingStore());
+            await cache.putFile(URL_A, bytes(40));
+            expect(cache.totalBytes).to.equal(40);
+            const hit = await cache.getFile(URL_A);
+            expect(new Uint8Array(hit.data)).to.deep.equal(bytes(40));
+        });
+    });
+
+    describe('#lendFile', function () {
+
+        /**
+         * A store that takes a lent buffer and hands back a copy, as the worker store does.
+         */
+        class TakingStore extends MemoryByteStore {
+            lost = false;
+
+            writeLent(name, buffer) {
+                const copy = buffer.slice(0);
+                const taken = structuredClone(buffer, { transfer: [buffer] });
+                return {
+                    returned: this.lost ? Promise.reject(new Error('lost')) : Promise.resolve(taken),
+                    stored: this.write(name, new Uint8Array(copy))
+                };
+            }
+        }
+
+        it('stores a large file and hands back a buffer with the same bytes', async function () {
+            const cache = await makeCache(new TakingStore(), { maxFileBytes: 32 });
+            const lent = bytes(100).buffer;
+            const returned = await cache.lendFile(URL_A, lent, 'model/gltf-binary');
+            expect(lent.byteLength).to.equal(0);
+            expect(new Uint8Array(returned)).to.deep.equal(bytes(100));
+            await cache.whenStored();
+            const hit = await cache.getFile(URL_A);
+            expect(new Uint8Array(hit.data)).to.deep.equal(bytes(100));
+            expect(hit.type).to.equal('model/gltf-binary');
+        });
+
+        it('stores a small file the usual way, returning the same buffer', async function () {
+            const cache = await makeCache(new TakingStore(), { maxFileBytes: 32 });
+            const lent = bytes(20).buffer;
+            expect(await cache.lendFile(URL_A, lent)).to.equal(lent);
+            await cache.whenStored();
+            expect(cache.hasFile(URL_A)).to.equal(true);
+        });
+
+        it('returns the buffer untouched when the file is already stored', async function () {
+            const cache = await makeCache(new TakingStore(), { maxFileBytes: 32 });
+            await cache.lendFile(URL_A, bytes(100).buffer);
+            await cache.whenStored();
+            const lent = bytes(100).buffer;
+            expect(await cache.lendFile(URL_A, lent)).to.equal(lent);
+        });
+
+        it('rejects when the store loses the buffer', async function () {
+            const store = new TakingStore();
+            store.lost = true;
+            const cache = await makeCache(store, { maxFileBytes: 32 });
+            let error = null;
+            await cache.lendFile(URL_A, bytes(100).buffer).catch((err) => {
+                error = err;
+            });
+            expect(error?.message).to.equal('lost');
+        });
+    });
+
     describe('#clear', function () {
 
         it('empties the cache and its store', async function () {

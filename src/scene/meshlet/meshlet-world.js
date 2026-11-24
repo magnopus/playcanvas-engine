@@ -2,6 +2,7 @@ import { MeshletCells } from './meshlet-cells.js';
 import { MeshletCutData } from './meshlet-cut-data.js';
 import { buildCutTable, fingerprintRecords } from './meshlet-cut-table.js';
 import { MeshletInstanceList } from './meshlet-instance-list.js';
+import { primitiveRootPages, primitiveStats } from './meshlet-resource.js';
 import { MeshletMaterialTable, bucketOfMeshletFlags, meshletFlagsOfBucket } from './meshlet-material-table.js';
 import { resolveMeshletBudget, rootListItems } from './meshlet-world-budget.js';
 import { meshletBakeStamp } from './streaming/meshlet-bake-stamp.js';
@@ -16,7 +17,7 @@ import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { ShaderChunks } from '../shader-lib/shader-chunks.js';
 import { OBJECT_BUCKET_SHIFT, OBJECT_FLAG_NO_SHADOW,
     MATERIAL_RECORD, MATERIAL_RECORD_U32S, MESHLET_BUCKET_COUNT, MESHLET_DATA, MESHLET_DATA_U32S,
-    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS, MESHLET_NO_PARENT,
+    MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, MESHLET_MAX_UV_CHANNELS,
     OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
     PRIMITIVE_DATA,
     OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED,
@@ -101,41 +102,6 @@ const maxStorageBytes = (device) => {
         limits.maxBufferSize ?? Number.MAX_SAFE_INTEGER,
         limits.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER
     );
-};
-
-/**
- * The primitive-local pages of a primitive's root clusters (those without a parent): what the
- * residency pins for as long as the primitive is placed. Kept on the primitive, with
- * {@link primitiveStats}, so a resource whose records were released can still be laid out.
- *
- * @param {MeshletPrimitive} prim - The primitive.
- * @returns {number[]} Its root pages (may repeat).
- */
-const primitiveRootPages = (prim) => {
-    if (!prim._rootPages) {
-        const data = prim.meshletData;
-        const pages = [];
-        for (let m = 0; m < prim.meshletCount; m++) {
-            const row = m * MESHLET_DATA_U32S;
-            if (data[row + MESHLET_DATA.PARENT] === MESHLET_NO_PARENT) pages.push(data[row + MESHLET_DATA.PAGE]);
-        }
-        prim._rootPages = pages;
-    }
-    return prim._rootPages;
-};
-
-/**
- * Caches a primitive's index count and its first meshlet's flags (see {@link primitiveRootPages}).
- *
- * @param {MeshletPrimitive} prim - The primitive.
- */
-const primitiveStats = (prim) => {
-    if (prim._indexCount >= 0) return;
-    const src = prim.meshletData;
-    let triangles = 0;
-    for (let m = 0; m < prim.meshletCount; m++) triangles += src[m * MESHLET_DATA_U32S + MESHLET_DATA.TRIANGLE_COUNT];
-    prim._indexCount = triangles * 3;
-    prim._firstFlags = prim.meshletCount ? src[MESHLET_DATA.FLAGS] : 0;
 };
 
 /**
@@ -1313,11 +1279,16 @@ class MeshletWorld {
         // One primitive's records at a time: a copy of the resource's (which stay untouched for
         // later rebuilds) with page indices rebased and the draw bucket stamped, handed to the
         // cut tables to complete, then uploaded to their place. Only primitives some instance
-        // uses are visited. Consecutive primitives - mostly visited in meshlet order - gather in
-        // a staging array and go up in one write.
+        // uses are visited. Consecutive primitives - mostly visited in meshlet order - are copied
+        // straight into a staging array and go up in one write; a primitive larger than that
+        // goes through one scratch array reused for every such primitive. A fresh copy per
+        // primitive would allocate as much again as the whole world's records. (Writing into a
+        // buffer created mapped was measured slower: Chrome's mapping is slow to write and to
+        // allocate at this size.)
         const staging = new Uint32Array(Math.min(totalMeshlets, RECORD_UPLOAD_BATCH) * MESHLET_DATA_U32S);
         let stagedFirst = 0;
         let stagedCount = 0;
+        let scratch = null;
         const flush = () => {
             if (stagedCount) meshletDataBuffer.write(stagedFirst * recordBytes, staging, 0, stagedCount * MESHLET_DATA_U32S);
             stagedCount = 0;
@@ -1327,8 +1298,18 @@ class MeshletWorld {
             get: (first) => {
                 const { prim, pageBase, bucketBits } = primRecords.get(first);
                 Debug.assert(prim.meshletData, 'MeshletWorld: building with released meshlet records - restore them first');
-                const records = prim.meshletData.slice();
-                for (let m = 0; m < prim.meshletCount; m++) {
+                const count = prim.meshletCount;
+                let records;
+                if (count > RECORD_UPLOAD_BATCH) {
+                    if (!scratch || scratch.length < count * MESHLET_DATA_U32S) scratch = new Uint32Array(count * MESHLET_DATA_U32S);
+                    records = scratch.subarray(0, count * MESHLET_DATA_U32S);
+                } else {
+                    if (stagedCount && (first !== stagedFirst + stagedCount || stagedCount + count > RECORD_UPLOAD_BATCH)) flush();
+                    if (!stagedCount) stagedFirst = first;
+                    records = staging.subarray(stagedCount * MESHLET_DATA_U32S, (stagedCount + count) * MESHLET_DATA_U32S);
+                }
+                records.set(prim.meshletData);
+                for (let m = 0; m < count; m++) {
                     const row = m * MESHLET_DATA_U32S;
                     records[row + MESHLET_DATA.PAGE] += pageBase;
                     records[row + MESHLET_DATA.FLAGS] = (records[row + MESHLET_DATA.FLAGS] & ~(MESHLET_FLAG_ALPHA_MASKED | MESHLET_FLAG_TWO_SIDED)) | bucketBits;
@@ -1336,8 +1317,8 @@ class MeshletWorld {
                 return records;
             },
             // The cut tables come from the primitive's own records, whose pages are still local:
-            // a table loaded from the byte cache for this primitive when it matches them, else one
-            // built now, which the system saves for the next load.
+            // one built when the resource was prepared or loaded from the byte cache, when it
+            // matches them, else one built now, which the system saves for the next load.
             cutTable: (first) => {
                 const { prim, pageBase } = primRecords.get(first);
                 let table = prim._cutTable;
@@ -1349,16 +1330,14 @@ class MeshletWorld {
                 }
                 return { table, pageBase };
             },
+            // the records are already in place: in the staging array, or in the scratch array,
+            // which goes up now as the next large primitive reuses it
             done: (first, records) => {
                 const count = records.length / MESHLET_DATA_U32S;
                 if (count > RECORD_UPLOAD_BATCH) {
-                    flush();
                     meshletDataBuffer.write(first * recordBytes, records);
                     return;
                 }
-                if (stagedCount && (first !== stagedFirst + stagedCount || stagedCount + count > RECORD_UPLOAD_BATCH)) flush();
-                if (!stagedCount) stagedFirst = first;
-                staging.set(records, stagedCount * MESHLET_DATA_U32S);
                 stagedCount += count;
             }
         };

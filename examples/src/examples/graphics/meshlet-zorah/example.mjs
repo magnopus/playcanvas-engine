@@ -20,6 +20,7 @@
 //   ?scale=<0.25..1>           scene render scale, TAA upscales to the output (default 0.6)
 //   ?ssao=0                    start with SSAO off
 //   ?cache=1                   keep fetched bytes in an OPFS cache (a reload reads from disk)
+//   ?textures=0                skip the streamed textures, geometry only
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
@@ -78,7 +79,8 @@ window.focus();
 basisInitialize({
     glueUrl: './assets/wasm/basis/basis.wasm.js',
     wasmUrl: './assets/wasm/basis/basis.wasm.wasm',
-    fallbackUrl: './assets/wasm/basis/basis.js'
+    fallbackUrl: './assets/wasm/basis/basis.js',
+    numWorkers: Math.min(navigator.hardwareConcurrency - 1, 8) || 4
 });
 
 const params = new URLSearchParams(location.search);
@@ -146,7 +148,10 @@ if (params.get('cache') === '1') {
     const chunkKiB = Number(params.get('cacheChunk')) || 256;
     const byteCache = new ByteCache(new OpfsByteStore(`zorah-${chunkKiB}`), {
         maxBytes: 12 * 1024 * 1024 * 1024,
-        chunkSize: chunkKiB * 1024
+        chunkSize: chunkKiB * 1024,
+        // whole files (the containers, the HDRI) are stored as one value each rather than as
+        // chunks, so a container is read back in one read instead of ~80
+        maxFileBytes: 1024 * 1024
     });
     app.loader.byteCache = byteCache;
     app.systems.meshlet.byteCache = byteCache;
@@ -377,6 +382,23 @@ for (const asset of assets.values()) {
         const letter = letters[primIndex];
         return !letter || keepMountains.has(letter);
     });
+}
+// ?textures=0 drops the streamed textures before the worlds are built, to measure geometry alone:
+// no texture arrays are created or fetched, and every material slot is marked absent so the
+// shading falls back to the material factors (the palette below then applies)
+if (params.get('textures') === '0') {
+    for (const asset of assets.values()) {
+        const meshlet = asset.resource.meshlets?.[0];
+        if (!meshlet?.textureManifest) continue;
+        meshlet.textureManifest = null;
+        const table = meshlet.materialTable;
+        if (!table) continue;
+        // record layout (MATERIAL_RECORD): flags at 11 with slot-present bits 8-11, slot words 12-15
+        for (let record = 0; record < table.length; record += 32) {
+            table[record + 11] &= ~0xF00;
+            for (let s = 0; s < 4; s++) table[record + 12 + s] = 0xFFFF; // MATERIAL_SLOT_ABSENT
+        }
+    }
 }
 if (params.get('tint') !== '0') {
     const forceTint = params.get('tint') === '1';

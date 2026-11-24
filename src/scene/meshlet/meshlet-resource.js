@@ -1,5 +1,6 @@
 import { Debug } from '../../core/debug.js';
-import { MESHLET_DATA_U32S, PAGE_TABLE_FIELDS } from './constants.js';
+import { MESHLET_DATA, MESHLET_DATA_U32S, MESHLET_NO_PARENT, PAGE_TABLE_FIELDS } from './constants.js';
+import { buildCutTable } from './meshlet-cut-table.js';
 import { MeshletInstanceList } from './meshlet-instance-list.js';
 
 /**
@@ -68,8 +69,9 @@ class MeshletPrimitive {
     _firstFlags = 0;
 
     /**
-     * Cut tables loaded from the byte cache for the next world build to use (see
-     * MeshletCutData), or null. Dropped once the build is done.
+     * Cut tables for the next world build to use (see MeshletCutData), built by
+     * {@link MeshletResource#prepare} or loaded from the byte cache, or null. Dropped once the
+     * build is done.
      *
      * @type {import('./meshlet-cut-table.js').CutTable|null}
      * @ignore
@@ -84,6 +86,43 @@ class MeshletPrimitive {
      */
     _builtCutTable = null;
 }
+
+/**
+ * The primitive-local pages of a primitive's root clusters (those without a parent): what the
+ * residency pins for as long as the primitive is placed. Kept on the primitive, with
+ * {@link primitiveStats}, so a resource whose records were released can still be laid out.
+ *
+ * @param {MeshletPrimitive} prim - The primitive.
+ * @returns {number[]} Its root pages (may repeat).
+ * @ignore
+ */
+const primitiveRootPages = (prim) => {
+    if (!prim._rootPages) {
+        const data = prim.meshletData;
+        const pages = [];
+        for (let m = 0; m < prim.meshletCount; m++) {
+            const row = m * MESHLET_DATA_U32S;
+            if (data[row + MESHLET_DATA.PARENT] === MESHLET_NO_PARENT) pages.push(data[row + MESHLET_DATA.PAGE]);
+        }
+        prim._rootPages = pages;
+    }
+    return prim._rootPages;
+};
+
+/**
+ * Caches a primitive's index count and its first meshlet's flags (see {@link primitiveRootPages}).
+ *
+ * @param {MeshletPrimitive} prim - The primitive.
+ * @ignore
+ */
+const primitiveStats = (prim) => {
+    if (prim._indexCount >= 0) return;
+    const src = prim.meshletData;
+    let triangles = 0;
+    for (let m = 0; m < prim.meshletCount; m++) triangles += src[m * MESHLET_DATA_U32S + MESHLET_DATA.TRIANGLE_COUNT];
+    prim._indexCount = triangles * 3;
+    prim._firstFlags = prim.meshletCount ? src[MESHLET_DATA.FLAGS] : 0;
+};
 
 /**
  * Parsed streamed-meshlet asset: the resident per-meshlet records of every primitive plus the
@@ -215,6 +254,29 @@ class MeshletResource {
             prim.meshletDataF32 = new Float32Array(records[i].buffer, records[i].byteOffset, records[i].length);
         });
     }
+
+    /**
+     * Derives, from the records alone, what a world build would otherwise derive itself: each
+     * primitive's root pages, index count and cut tables. Called as each resource arrives, so a
+     * large scene does this while the rest of it downloads, rather than all at once inside the
+     * build that waits for the last container. A primitive whose tables cannot be built (an
+     * invalid DAG) is left to the build, which reports it.
+     */
+    prepare() {
+        for (const prim of this.primitives) {
+            if (!prim.meshletData) continue;
+            primitiveRootPages(prim);
+            primitiveStats(prim);
+            if (!prim._cutTable) {
+                try {
+                    // built here rather than loaded, so the system's cut-table store saves it
+                    prim._cutTable = prim._builtCutTable = buildCutTable(prim.meshletData);
+                } catch (err) {
+                    prim._cutTable = prim._builtCutTable = null;
+                }
+            }
+        }
+    }
 }
 
-export { MeshletResource, MeshletPrimitive };
+export { MeshletResource, MeshletPrimitive, primitiveRootPages, primitiveStats };

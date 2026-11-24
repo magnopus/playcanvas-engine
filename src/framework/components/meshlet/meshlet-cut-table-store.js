@@ -99,6 +99,8 @@ class MeshletCutTableStore {
         const resource = group.resource;
         if (this._loading.has(resource)) return true;
         if (!cache || this._asked.has(resource) || resource.totalMeshlets < this.minMeshlets) return false;
+        // tables built as the resource arrived (MeshletResource#prepare) need no cache read
+        if (resource.primitives.every(prim => prim._cutTable)) return false;
         this._asked.add(resource);
         const key = this.keyOf(group);
         if (!key || !cache.accepts(key)) return false;

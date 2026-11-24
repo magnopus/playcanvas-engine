@@ -424,6 +424,9 @@ const magMeshlets = {
     handlesPrimitive: hasMeshletExtension,
     createResources: (device, gltf, bufferViews) => {
         const resource = createMeshlets(device, gltf, bufferViews);
+        // derive the build's per-primitive tables now, while the scene's other containers are
+        // still arriving, instead of in the world build that waits for all of them
+        resource?.prepare();
         return resource ? [resource] : [];
     },
     placesInstances: true

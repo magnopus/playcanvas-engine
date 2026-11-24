@@ -623,9 +623,6 @@ class Http {
         // an XML response is delivered as responseXML, which a cache hit cannot reproduce
         if (!cache || response == null || contentType === Http.ContentType.XML) return;
         switch (xhr.responseType) {
-            case Http.ResponseType.ARRAY_BUFFER:
-                cache.putFile(url, response, contentType);
-                break;
             case Http.ResponseType.BLOB:
                 if (response.size <= cache.maxFileBytes) {
                     response.arrayBuffer().then(data => cache.putFile(url, data, contentType || response.type), () => {});
@@ -717,6 +714,19 @@ class Http {
         }
         // only a complete response: a 206 is a partial one, and file:// responses arrive as status 0
         if (xhr._byteCacheUrl && xhr.status === 200) {
+            const cache = this.byteCache;
+            if (cache && xhr.responseType === Http.ResponseType.ARRAY_BUFFER && xhr.response &&
+                contentType !== Http.ContentType.XML) {
+                // a large file is lent to the cache, whose store copies it off the main thread,
+                // and comes back as a new buffer holding the same bytes
+                cache.lendFile(xhr._byteCacheUrl, xhr.response, contentType ?? '').then((data) => {
+                    options.callback(null, data);
+                }, () => {
+                    // the store lost the buffer: fetch the file again, past the cache
+                    this.request(method, url, { ...options, byteCache: false }, options.callback);
+                });
+                return;
+            }
             this._storeInCache(xhr._byteCacheUrl, xhr, contentType ?? '');
         }
 

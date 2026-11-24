@@ -32,8 +32,8 @@ class ByteStore {
      * Writes a value, replacing any value already stored under the name.
      *
      * @param {string} name - The value's name.
-     * @param {Uint8Array} data - The bytes. The store may keep a reference, so the caller must
-     * not modify them afterwards.
+     * @param {Uint8Array} data - The bytes. The store may keep a reference, or transfer the
+     * buffer to a worker (detaching it), so the caller must not use them afterwards.
      * @returns {Promise<void>} Resolves when the value is stored.
      */
     write(name, data) {
@@ -68,6 +68,23 @@ class ByteStore {
      */
     writeLarge(name, data) {
         return this.write(name, data.slice());
+    }
+
+    /**
+     * Writes a very large value from a buffer the caller lends to the store, for a caller that
+     * needs the bytes itself straight afterwards. The store may transfer the buffer (to a worker
+     * that copies it there, sparing the main thread the copy), so the caller must use the buffer
+     * `returned` resolves with in place of the one it passed. The base implementation hands the
+     * same buffer back at once and writes it with {@link ByteStore#writeLarge}.
+     *
+     * @param {string} name - The value's name.
+     * @param {ArrayBuffer} buffer - The bytes.
+     * @returns {{ returned: Promise<ArrayBuffer>, stored: Promise<void> }} `returned` resolves with
+     * the bytes for the caller, and rejects if the store lost them; `stored` resolves when the
+     * value is stored.
+     */
+    writeLent(name, buffer) {
+        return { returned: Promise.resolve(buffer), stored: this.writeLarge(name, new Uint8Array(buffer)) };
     }
 
     /**
