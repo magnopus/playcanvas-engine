@@ -138,6 +138,26 @@ const mime = (file) => {
             return 'image/webp';
         case '.wasm':
             return 'application/wasm';
+        case '.glb':
+            return 'model/gltf-binary';
+        case '.ktx2':
+            return 'image/ktx2';
+        case '.hdr':
+            return 'image/vnd.radiance';
+        case '.mp4':
+            return 'video/mp4';
+        // Binary data served as text is decoded as text by the browser whenever the response is
+        // inspected (an open DevTools network panel): on the main thread, at about 100 ms for a
+        // streamed meshlet page range, which stalls every frame while content streams in.
+        case '.bin':
+        case '.dat':
+        case '.basis':
+        case '.dds':
+        case '.drc':
+        case '.ply':
+        case '.sog':
+        case '.spz':
+            return 'application/octet-stream';
     }
     return TEXT;
 };

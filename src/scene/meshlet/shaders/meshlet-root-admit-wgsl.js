@@ -5,7 +5,7 @@ import {
 } from '../constants.js';
 import {
     meshletBucketWGSL, meshletCullParamsWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL, meshletHzbVisibleWGSL,
-    meshletRequestPagesWGSL, meshletVisibleCellWGSL
+    meshletRequestPagesWGSL, meshletStridedMainWGSL, meshletVisibleCellWGSL
 } from './meshlet-cull-common-wgsl.js';
 import { meshletStructsWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
@@ -53,8 +53,15 @@ export const meshletRootClassifyWGSL = /* wgsl */ `
     ${meshletVisibleCellWGSL}
     ${meshletCullVolumeWGSL}
 
-    @compute @workgroup_size(${MESHLET_CELL_SIZE})
-    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+    // one virtual workgroup per visible cell; the list holds at most one entry per cell
+    fn meshletItemGroups() -> u32 {
+        return min(atomicLoad(&counters[${MESHLET_COUNTER.VISIBLE_CELLS}u]),
+                   (uniform.instanceCount + ${MESHLET_CELL_SIZE - 1}u) / ${MESHLET_CELL_SIZE}u);
+    }
+
+    ${meshletStridedMainWGSL(MESHLET_CELL_SIZE)}
+
+    fn meshletItem(group: vec3u, lane: vec3u) {
         let cell = meshletVisibleCell(group);
         if (cell == 0xFFFFFFFFu) { return; }
         let position = cell * ${MESHLET_CELL_SIZE}u + lane.x;
@@ -152,8 +159,14 @@ export const meshletRootScatterWGSL = /* wgsl */ `
 
     ${meshletDispatchGroupWGSL}
 
-    @compute @workgroup_size(${MESHLET_LIST_WORKGROUP})
-    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+    fn meshletItemGroups() -> u32 {
+        let count = min(atomicLoad(&counters[${MESHLET_COUNTER.ROOT_CANDIDATES}u]), uniform.sortedBase);
+        return (count + ${MESHLET_LIST_WORKGROUP - 1}u) / ${MESHLET_LIST_WORKGROUP}u;
+    }
+
+    ${meshletStridedMainWGSL(MESHLET_LIST_WORKGROUP)}
+
+    fn meshletItem(group: vec3u, lane: vec3u) {
         let index = meshletGroupIndex(group) * ${MESHLET_LIST_WORKGROUP}u + lane.x;
         if (index >= min(atomicLoad(&counters[${MESHLET_COUNTER.ROOT_CANDIDATES}u]), uniform.sortedBase)) { return; }
         let entry = rootList[index];
@@ -198,8 +211,13 @@ export const meshletRootAdmitWGSL = /* wgsl */ `
     ${meshletRequestPagesWGSL}
     ${meshletDispatchGroupWGSL}
 
-    @compute @workgroup_size(${MESHLET_LIST_WORKGROUP})
-    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+    fn meshletItemGroups() -> u32 {
+        return (rootBands[uniform.rootBand] + ${MESHLET_LIST_WORKGROUP - 1}u) / ${MESHLET_LIST_WORKGROUP}u;
+    }
+
+    ${meshletStridedMainWGSL(MESHLET_LIST_WORKGROUP)}
+
+    fn meshletItem(group: vec3u, lane: vec3u) {
         let index = meshletGroupIndex(group) * ${MESHLET_LIST_WORKGROUP}u + lane.x;
         if (index >= rootBands[uniform.rootBand]) { return; }
         let entry = rootList[uniform.sortedBase + rootBands[${2 * MESHLET_ROOT_BANDS}u + uniform.rootBand] + index];

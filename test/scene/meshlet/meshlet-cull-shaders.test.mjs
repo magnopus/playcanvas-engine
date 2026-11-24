@@ -25,6 +25,10 @@ describe('meshlet cull shaders', function () {
     .flatMap(module => Object.entries(module))
     .filter(([, text]) => typeof text === 'string' && text.includes('@compute')));
 
+    // the shared snippets, with the entry point template instantiated
+    const commonSnippets = Object.fromEntries(Object.entries(commonWGSL)
+    .map(([name, snippet]) => [name, typeof snippet === 'function' ? snippet(64) : snippet]));
+
     const count = (text, re) => (text.match(re) ?? []).length;
 
     // the u32 indices a shader reads or writes in a buffer: `buffer[N]`, or `buffer[N + bucket]`
@@ -34,7 +38,7 @@ describe('meshlet cull shaders', function () {
 
     it('interpolate every constant', function () {
         expect(Object.keys(compute)).to.include.members(['meshletCullWGSL', 'meshletCutQueueWGSL', 'meshletRootAdmitWGSL']);
-        for (const [name, text] of Object.entries({ ...compute, ...commonWGSL })) {
+        for (const [name, text] of Object.entries({ ...compute, ...commonSnippets })) {
             expect(text, name).to.not.match(/\$\{|undefined|NaN/);
         }
     });
@@ -77,7 +81,7 @@ describe('meshlet cull shaders', function () {
     });
 
     it('stay within the parameter rows the culler uploads', function () {
-        for (const [name, text] of Object.entries({ ...compute, ...commonWGSL })) {
+        for (const [name, text] of Object.entries({ ...compute, ...commonSnippets })) {
             for (const row of indices(text, 'cullParams')) {
                 expect(row, name).to.be.below(CULL_PARAMS_VEC4S);
             }
@@ -95,7 +99,7 @@ describe('meshlet cull shaders', function () {
     });
 
     it('keep the per-frame counters inside the cleared block and the cell list after it', function () {
-        for (const [name, text] of Object.entries({ ...compute, ...commonWGSL })) {
+        for (const [name, text] of Object.entries({ ...compute, ...commonSnippets })) {
             for (const index of indices(text, 'counters')) {
                 expect(index, name).to.be.below(MESHLET_COUNTER_CLEAR_U32S);
             }

@@ -700,3 +700,15 @@ export const claimWordCount = (totalPairs, instanceCount) => claimPersistBase(to
  * @ignore
  */
 export const MESHLET_DISPATCH_WIDTH = 4096;
+
+/**
+ * Workgroups dispatched for each pass whose work is sized on the GPU (the cut stages, root
+ * admission, the cluster cull, the index write). They are dispatched directly, this many
+ * workgroups at a time, each looping over a share of the work, rather than with indirect
+ * arguments: browsers validate every indirect dispatch on the GPU process's main thread, and at
+ * a few hundred dispatches a frame that validation alone saturates it. Large enough to fill a
+ * large GPU; a workgroup with nothing to do reads one counter and exits.
+ *
+ * @ignore
+ */
+export const MESHLET_STRIDED_GROUPS = 1024;

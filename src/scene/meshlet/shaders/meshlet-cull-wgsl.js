@@ -29,7 +29,7 @@ import {
 } from '../constants.js';
 import {
     meshletBucketWGSL, meshletCullParamsWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL,
-    meshletHzbVisibleWGSL
+    meshletHzbVisibleWGSL, meshletStridedMainWGSL
 } from './meshlet-cull-common-wgsl.js';
 import {
     meshletDataWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL
@@ -138,8 +138,14 @@ export const meshletCullWGSL = /* wgsl */ `
         return hzbVisibleFrom(viewProj(), camPos, uniform.cullParams[${CULL_PARAMS.VIEW_DIR}u].xyz, center, radius);
     }
 
-    @compute @workgroup_size(${MESHLET_CULL_SLICE})
-    fn main(@builtin(workgroup_id) workgroupId : vec3u, @builtin(local_invocation_id) localId : vec3u) {
+    fn meshletItemGroups() -> u32 {
+        let count = min(atomicLoad(&counters[${MESHLET_COUNTER.SELECTED}u]), uniform.recordCapacity);
+        return (count + ${MESHLET_CULL_SLICE - 1}u) / ${MESHLET_CULL_SLICE}u;
+    }
+
+    ${meshletStridedMainWGSL(MESHLET_CULL_SLICE)}
+
+    fn meshletItem(workgroupId : vec3u, localId : vec3u) {
         let selectedIndex = meshletGroupIndex(workgroupId) * ${MESHLET_CULL_SLICE}u + localId.x;
         if (selectedIndex >= min(atomicLoad(&counters[${MESHLET_COUNTER.SELECTED}u]), uniform.recordCapacity)) { return; }
         let selected = selectedMeshlets[selectedIndex];
@@ -338,8 +344,14 @@ export const indexWriteWGSL = /* wgsl */ `
     ${meshletPageLayoutWGSL}
     ${meshletDispatchGroupWGSL}
 
-    @compute @workgroup_size(${MESHLET_INDEX_WRITE_WORKGROUP})
-    fn main(@builtin(workgroup_id) workgroupId : vec3u, @builtin(local_invocation_id) localId : vec3u) {
+    fn meshletItemGroups() -> u32 {
+        let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity);
+        return (recordCount + ${MESHLET_INDEX_WRITE_RECORDS - 1}u) / ${MESHLET_INDEX_WRITE_RECORDS}u;
+    }
+
+    ${meshletStridedMainWGSL(MESHLET_INDEX_WRITE_WORKGROUP)}
+
+    fn meshletItem(workgroupId : vec3u, localId : vec3u) {
         let lanes = ${MESHLET_INDEX_WRITE_WORKGROUP / MESHLET_INDEX_WRITE_RECORDS}u;
         let lane = localId.x % lanes;
         let recordIndex = meshletGroupIndex(workgroupId) * ${MESHLET_INDEX_WRITE_RECORDS}u + localId.x / lanes;

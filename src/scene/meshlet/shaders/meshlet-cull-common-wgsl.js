@@ -22,14 +22,45 @@ export const meshletCullParamsWGSL = /* wgsl */ `
 `;
 
 /**
+ * The entry point of a pass dispatched with a fixed number of workgroups (MESHLET_STRIDED_GROUPS)
+ * while its work is sized on the GPU: each workgroup loops over the virtual workgroups
+ * `meshletItemGroups()` counts, a stride of the dispatch size apart, running
+ * `meshletItem(group, lane)` for each as the indirect dispatch it replaces ran `main` - the
+ * group is the virtual one, in the same two-dimensional layout (see meshletGroupIndex). The
+ * including shader provides both functions; neither may use a workgroup barrier.
+ *
+ * @param {number} workgroupSize - The workgroup size.
+ * @returns {string} The entry point.
+ * @ignore
+ */
+export const meshletStridedMainWGSL = workgroupSize => /* wgsl */ `
+    var<workgroup> meshletGroupCount: u32;
+
+    @compute @workgroup_size(${workgroupSize})
+    fn main(@builtin(workgroup_id) workgroup: vec3u, @builtin(num_workgroups) workgroups: vec3u,
+            @builtin(local_invocation_id) lane: vec3u, @builtin(local_invocation_index) laneIndex: u32) {
+        // one lane reads the counters, rather than every thread of every workgroup the same words
+        if (laneIndex == 0u) { meshletGroupCount = meshletItemGroups(); }
+        let groups = workgroupUniformLoad(&meshletGroupCount);
+        for (var g = workgroup.x; g < groups; g += workgroups.x) {
+            meshletItem(meshletGroupOf(g), lane);
+        }
+    }
+`;
+
+/**
  * `meshletGroupIndex(group)`: the linear index of a workgroup in a two-dimensional dispatch grid
- * MESHLET_DISPATCH_WIDTH wide (see {@link meshletDispatchArgsWGSL}).
+ * MESHLET_DISPATCH_WIDTH wide (see {@link meshletDispatchArgsWGSL}), and `meshletGroupOf(index)`,
+ * its inverse.
  *
  * @ignore
  */
 export const meshletDispatchGroupWGSL = /* wgsl */ `
     fn meshletGroupIndex(group: vec3u) -> u32 {
         return group.y * ${MESHLET_DISPATCH_WIDTH}u + group.x;
+    }
+    fn meshletGroupOf(index: u32) -> vec3u {
+        return vec3u(index % ${MESHLET_DISPATCH_WIDTH}u, index / ${MESHLET_DISPATCH_WIDTH}u, 0u);
     }
 `;
 

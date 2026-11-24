@@ -4,8 +4,15 @@ import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-gra
 import { Texture } from '../../../src/platform/graphics/texture.js';
 import {
     CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, MESHLET_BUCKET_COUNT, MESHLET_CELL_CULL_WORKGROUP, MESHLET_COUNTER,
-    MESHLET_COUNTER_CLEAR_U32S, MESHLET_COUNTER_U32S, MESHLET_DISPATCH_WIDTH, MESHLET_LIST_WORKGROUP, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS, MESHLET_ROOT_BAND_OCTAVES, claimPersistBase
+    MESHLET_COUNTER_CLEAR_U32S, MESHLET_COUNTER_U32S, MESHLET_DISPATCH_WIDTH, MESHLET_LIST_WORKGROUP, MESHLET_ROOT_BANDS, MESHLET_ROOT_BAND_MAX_PIXELS, MESHLET_ROOT_BAND_OCTAVES, MESHLET_STRIDED_GROUPS, claimPersistBase
 } from '../../../src/scene/meshlet/constants.js';
+
+/**
+ * @param {import('../../../src/platform/graphics/compute.js').Compute} compute - A compute.
+ * @returns {boolean} Whether it is dispatched directly with the strided workgroup count, as every
+ * pass sized on the GPU is (see MESHLET_STRIDED_GROUPS).
+ */
+const strided = compute => compute.indirectSlotIndex === -1 && compute.countX === MESHLET_STRIDED_GROUPS;
 import { FramePassMeshletCompute } from '../../../src/scene/meshlet/frame-pass-meshlet-compute.js';
 import { MeshletCullShaders } from '../../../src/scene/meshlet/meshlet-cull-shaders.js';
 import { MeshletCuller } from '../../../src/scene/meshlet/meshlet-culler.js';
@@ -189,20 +196,19 @@ describe('MeshletCuller', function () {
         culler.beginFrame(planes, camera, 640, viewProj, null);
         expect(log.dispatches[0].name).to.equal('MeshletCellCull');
         expect(log.dispatches[0].computes).to.deep.equal(['MeshletcellCull', 'MeshletdispatchArgs']);
-        // the per-instance passes run one workgroup per visible cell, the cut stage from its queue args
-        const cellSlot = culler.cellArgs.getParameter('dispatchSlot');
-        expect(culler.rootClassify.indirectSlotIndex).to.equal(cellSlot);
-        expect(culler.queueStages[0].compute.indirectSlotIndex).to.equal(culler.queueStages[0].args.getParameter('dispatchSlot'));
+        // the passes sized on the GPU are dispatched directly, each workgroup looping over its share
+        expect(strided(culler.rootClassify), 'root classify').to.equal(true);
+        expect(strided(culler.queueStages[0].compute), 'cut stage').to.equal(true);
         expect(log.dispatches[1].name).to.equal('MeshletRootClassify');
         expect(log.dispatches[1].computes).to.deep.equal(['MeshletrootClassify', 'MeshletdispatchArgs',
             'MeshletrootBandArgs', 'MeshletrootScatter']);
         expect(log.dispatches[2].name).to.equal('MeshletRootAdmit');
         expect(log.dispatches[2].computes).to.deep.equal(Array.from({ length: MESHLET_ROOT_BANDS }, (_, band) => `MeshletRootAdmit${band}`));
         // the scatter walks every candidate; each band pass only its own band's range
-        expect(culler.rootScatter.indirectSlotIndex).to.equal(culler.rootArgs.getParameter('dispatchSlot'));
-        const firstBandSlot = culler.rootBandArgs.getParameter('firstSlot');
+        expect(strided(culler.rootScatter), 'root scatter').to.equal(true);
         culler.rootAdmit.forEach((compute, band) => {
-            expect(compute.indirectSlotIndex).to.equal(firstBandSlot + band);
+            expect(strided(compute), `band ${band}`).to.equal(true);
+            expect(compute.getParameter('rootBand')).to.equal(band);
             expect(compute.getParameter('sortedBase')).to.equal(130);
         });
         expect(culler.rootScatter.getParameter('sortedBase')).to.equal(130);
@@ -425,9 +431,9 @@ describe('MeshletCuller', function () {
         for (let b = 0; b < MESHLET_BUCKET_COUNT; b++) {
             expect(culler.finalizeArgs.getParameter(`drawSlot${b}`)).to.equal(b);
         }
-        expect(culler.cutEmit.indirectSlotIndex).to.equal(culler.cutEmitArgs.getParameter('dispatchSlot'));
-        expect(culler.meshletCull.indirectSlotIndex).to.equal(culler.selectedArgs.getParameter('dispatchSlot'));
-        expect(culler.indexWrite.indirectSlotIndex).to.equal(culler.finalizeArgs.getParameter('dispatchSlot'));
+        expect(strided(culler.cutEmit), 'cut emit').to.equal(true);
+        expect(strided(culler.meshletCull), 'cluster cull').to.equal(true);
+        expect(strided(culler.indexWrite), 'index write').to.equal(true);
         culler.destroy();
     });
 

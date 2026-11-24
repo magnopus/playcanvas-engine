@@ -3,7 +3,8 @@ import {
     MESHLET_NO_PARENT
 } from '../constants.js';
 import {
-    meshletBucketWGSL, meshletCullParamsWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL, meshletRequestPagesWGSL
+    meshletBucketWGSL, meshletCullParamsWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL, meshletRequestPagesWGSL,
+    meshletStridedMainWGSL
 } from './meshlet-cull-common-wgsl.js';
 import { meshletStructsWGSL, meshletDataWGSL, meshletObjectDataWGSL } from './meshlet-page-wgsl.js';
 
@@ -174,8 +175,14 @@ export const meshletCutQueueWGSL = cutShader(/* wgsl */ `
 
     ${meshletCutEnqueueWGSL}
 
-    @compute @workgroup_size(${MESHLET_LIST_WORKGROUP})
-    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+    fn meshletItemGroups() -> u32 {
+        let count = atomicLoad(&counters[${MESHLET_COUNTER.CUT_STAGE_END}u]) - atomicLoad(&counters[${MESHLET_COUNTER.CUT_STAGE_BEGIN}u]);
+        return (count + ${MESHLET_LIST_WORKGROUP - 1}u) / ${MESHLET_LIST_WORKGROUP}u;
+    }
+
+    ${meshletStridedMainWGSL(MESHLET_LIST_WORKGROUP)}
+
+    fn meshletItem(group: vec3u, lane: vec3u) {
         let begin = atomicLoad(&counters[${MESHLET_COUNTER.CUT_STAGE_BEGIN}u]);
         let index = begin + meshletGroupIndex(group) * ${MESHLET_LIST_WORKGROUP}u + lane.x;
         if (index >= atomicLoad(&counters[${MESHLET_COUNTER.CUT_STAGE_END}u])) { return; }
@@ -262,8 +269,14 @@ export const meshletCutEmitWGSL = /* wgsl */ `
         return meshletData[meshlet].triangleCount != 0u;
     }
 
-    @compute @workgroup_size(${MESHLET_LIST_WORKGROUP})
-    fn main(@builtin(workgroup_id) group: vec3u, @builtin(local_invocation_id) lane: vec3u) {
+    fn meshletItemGroups() -> u32 {
+        let count = min(atomicLoad(&counters[${MESHLET_COUNTER.CUT_QUEUE_END}u]), uniform.queueCapacity);
+        return (count + ${MESHLET_LIST_WORKGROUP - 1}u) / ${MESHLET_LIST_WORKGROUP}u;
+    }
+
+    ${meshletStridedMainWGSL(MESHLET_LIST_WORKGROUP)}
+
+    fn meshletItem(group: vec3u, lane: vec3u) {
         let index = meshletGroupIndex(group) * ${MESHLET_LIST_WORKGROUP}u + lane.x;
         if (index >= min(atomicLoad(&counters[${MESHLET_COUNTER.CUT_QUEUE_END}u]), uniform.queueCapacity)) { return; }
         let entry = cutQueue[index];

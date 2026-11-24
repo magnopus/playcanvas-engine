@@ -4,7 +4,7 @@ import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import {
     CULL_PARAMS, CULL_PARAMS_VEC4S, MESHLET_BUCKET_COUNT, MESHLET_CELL_CULL_WORKGROUP, MESHLET_COUNTER,
     MESHLET_COUNTER_CLEAR_U32S, MESHLET_CULL_SLICE, MESHLET_DISPATCH_WIDTH, MESHLET_LIST_WORKGROUP, MESHLET_ROOT_BANDS,
-    MESHLET_ROOT_BAND_MAX_PIXELS, MESHLET_ROOT_BAND_OCTAVES, ROOT_LIST_U32S, claimPersistBase
+    MESHLET_ROOT_BAND_MAX_PIXELS, MESHLET_ROOT_BAND_OCTAVES, MESHLET_STRIDED_GROUPS, ROOT_LIST_U32S, claimPersistBase
 } from './constants.js';
 import { MeshletCullShaders } from './meshlet-cull-shaders.js';
 import { TRACEID_GPU_TIMINGS } from '../../core/constants.js';
@@ -703,23 +703,23 @@ class MeshletCuller {
         // the per-cell passes all run one workgroup per visible cell, from the one argument slot
         this.cellArgs.setParameter('dispatchSlot', this._dispatchSlotCells);
         this.cellArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
-        this.rootClassify.setupIndirectDispatch(this._dispatchSlotCells);
+        this.rootClassify.setupDispatch(MESHLET_STRIDED_GROUPS);
         const queueStages = this.queueStages;
         for (let index = 0; index < queueStages.length; index++) {
             const { args, compute } = queueStages[index];
             args.setParameter('dispatchSlot', this._dispatchSlotStages + index);
             args.setParameter('indirectDispatch', device.indirectDispatchBuffer);
             args.setupDispatch(1);
-            compute.setupIndirectDispatch(this._dispatchSlotStages + index);
+            compute.setupDispatch(MESHLET_STRIDED_GROUPS);
         }
 
         this.rootArgs.setParameter('dispatchSlot', this._dispatchSlotRoots);
         this.rootArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
         this.rootBandArgs.setParameter('firstSlot', this._dispatchSlotBands);
         this.rootBandArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
-        this.rootScatter.setupIndirectDispatch(this._dispatchSlotRoots);
+        this.rootScatter.setupDispatch(MESHLET_STRIDED_GROUPS);
         for (let band = 0; band < MESHLET_ROOT_BANDS; band++) {
-            this.rootAdmit[band].setupIndirectDispatch(this._dispatchSlotBands + band);
+            this.rootAdmit[band].setupDispatch(MESHLET_STRIDED_GROUPS);
         }
         this.selectedArgs.setParameter('dispatchSlot', this._dispatchSlotSelected);
         this.selectedArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
@@ -737,11 +737,11 @@ class MeshletCuller {
         this.cutEmitArgs.setParameter('dispatchSlot', this._dispatchSlotCull);
         this.cutEmitArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
         this.cutEmitArgs.setupDispatch(1);
-        this.cutEmit.setupIndirectDispatch(this._dispatchSlotCull);
+        this.cutEmit.setupDispatch(MESHLET_STRIDED_GROUPS);
         this.selectedArgs.setupDispatch(1);
-        this.meshletCull.setupIndirectDispatch(this._dispatchSlotSelected);
+        this.meshletCull.setupDispatch(MESHLET_STRIDED_GROUPS);
         this.finalizeArgs.setupDispatch(1);
-        this.indexWrite.setupIndirectDispatch(this._dispatchSlotWrite);
+        this.indexWrite.setupDispatch(MESHLET_STRIDED_GROUPS);
 
         const chains = this._chains;
         const names = this._passNames;
@@ -785,9 +785,9 @@ class MeshletCuller {
         this.finalizeArgsPhase2.setParameter('dispatchSlot', this._dispatchSlotWrite);
 
         this.resetPhase2.setupDispatch(1);
-        this.meshletCullPhase2.setupIndirectDispatch(this._dispatchSlotSelected);
+        this.meshletCullPhase2.setupDispatch(MESHLET_STRIDED_GROUPS);
         this.finalizeArgsPhase2.setupDispatch(1);
-        this.indexWritePhase2.setupIndirectDispatch(this._dispatchSlotWrite);
+        this.indexWritePhase2.setupDispatch(MESHLET_STRIDED_GROUPS);
 
         device.computeDispatch(this._chains.phase2, this._passNames.cullPhase2);
     }
