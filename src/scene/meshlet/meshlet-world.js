@@ -48,7 +48,8 @@ import { MeshletTextures, MESHLET_TEX_FAMILIES } from './textures/meshlet-textur
  */
 
 /** Page attribute streams this build can place (see meshletPageLayoutWGSL). */
-const KNOWN_LAYOUT_KEYS = new Set(['positions', 'normals', 'tangents', 'uvComponents', 'colors']);
+// uvEncoding names the v3 compact pages' unorm16 UVs; the pages flag their encoding themselves
+const KNOWN_LAYOUT_KEYS = new Set(['positions', 'normals', 'tangents', 'uvComponents', 'uvEncoding', 'colors']);
 
 // meshlet records (128 bytes each) gathered per upload while building a world: 16 MB
 const RECORD_UPLOAD_BATCH = 128 * 1024;

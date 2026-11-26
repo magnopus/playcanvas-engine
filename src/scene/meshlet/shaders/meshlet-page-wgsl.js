@@ -1,6 +1,6 @@
 import {
-    MATERIAL_TEXTURE_SLOTS, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HAS_TANGENTS, PAGE_FLAG_WIDE_POSITIONS, PAGE_HEADER,
-    PAGE_HEADER_BYTES
+    MATERIAL_TEXTURE_SLOTS, MESHLET_PAGE_SLOT_SHIFT, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HAS_TANGENTS, PAGE_FLAG_COMPACT,
+    PAGE_FLAG_WIDE_POSITIONS, PAGE_HEADER, PAGE_HEADER_BYTES, PAGE_UV_BOX_WORDS
 } from '../constants.js';
 
 /**
@@ -50,7 +50,7 @@ export const MESHLET_PRIMITIVE_STRUCT = [
 
 /** @type {StructFields} */
 export const MESHLET_DATA_STRUCT = [
-    ['verticesOffset', 'u32', 'page-local, into the meshlet-vertex table'],
+    ['verticesOffset', 'u32', 'page-local: into the meshlet-vertex table, or the first vertex on a compact page'],
     ['triangleCount', 'u32'],
     ['vertexCount', 'u32'],
     ['triangleOffset', 'u32', 'page-local byte offset into the corner stream'],
@@ -58,7 +58,7 @@ export const MESHLET_DATA_STRUCT = [
     ['coneApex', 'vec3f'],
     ['coneAxis', 'array<f32, 3>'],
     ['coneCutoff', 'f32', '>= 1 disables the cone test'],
-    ['uvChannelMask', 'u32'],
+    ['uvChannelMask', 'u32', 'mask:16 | compact-page UV box slot:16'],
     ['parentSphere', 'vec4f'],
     ['clusterError', 'f32'],
     ['parentError', 'f32', '~1e30 at DAG roots'],
@@ -258,11 +258,18 @@ export const meshletNormalMatrixWGSL = /* wgsl */ `
 
 /**
  * The SoA layout of one resident page and the vertex decode over it. Requires
- * `pagePool : array<u32>`. A page is: header (PAGE_HEADER_BYTES) | positions (u16x4 anchor-
- * relative, or i32x3 when PAGE_FLAG_WIDE_POSITIONS) | oct16 normals | oct16_sign tangents when
- * the resource has them | UV floats | rgba8 vertex colours when the resource has them | the
- * meshlet-vertex remap table | the u8 triangle corner stream. The attribute layout is per resource, so its
- * parameters come from the instance's primitive row in objectData.
+ * `pagePool : array<u32>`. A page is: header (PAGE_HEADER_BYTES) | positions | oct16 normals |
+ * oct16_sign tangents when the resource has them | UVs | rgba8 vertex colours when the resource
+ * has them | a per-meshlet table | the u8 triangle corner stream. Two encodings, chosen per page:
+ *
+ * - v2: positions u16x4 anchor-relative (i32x3 when PAGE_FLAG_WIDE_POSITIONS), UVs f32x2 per
+ *   channel, and the table is the meshlet-vertex remap (u32 page vertex per meshlet corner slot).
+ * - v3 (PAGE_FLAG_COMPACT): each meshlet's vertices are its own, in order, so a meshlet's vertex
+ *   i is page vertex verticesOffset + i; positions u16x3 packed (i32x3 when wide); UVs unorm16x2
+ *   per channel, and the table holds each meshlet's UV box per channel (f32 origin, f32 extent).
+ *
+ * The attribute layout is per resource, so its parameters come from the instance's primitive
+ * row in objectData.
  */
 export const meshletPageLayoutWGSL = /* wgsl */ `
     struct MeshletPageLayout {
@@ -270,11 +277,14 @@ export const meshletPageLayoutWGSL = /* wgsl */ `
         normalBase : u32,
         tangentBase : u32,        // equals uvBase when the page carries no tangents
         uvBase : u32,
-        colorBase : u32,          // equals meshletVertexBase when the page carries no colours
-        meshletVertexBase : u32,  // the per-meshlet vertex remap table
-        meshletVertexCount : u32,
-        anchor : vec3i,           // grid anchor the compact u16 positions are relative to
-        widePositions : bool
+        colorBase : u32,          // equals the table base when the page carries no colours
+        meshletVertexBase : u32,  // v2: the per-meshlet vertex remap table
+        uvBoxBase : u32,          // compact: the per-meshlet UV box table
+        triangleByteBase : u32,   // byte index of the u8 corner stream in pagePool
+        uvWordsPerVertex : u32,
+        anchor : vec3i,           // grid anchor the u16 positions are relative to
+        widePositions : bool,
+        compact : bool
     };
 
     fn meshletPageLayout(pageBase : u32, hasTangents : bool, uvFloatsPerVertex : u32, hasColors : bool) -> MeshletPageLayout {
@@ -282,15 +292,29 @@ export const meshletPageLayoutWGSL = /* wgsl */ `
         let vertexCount = pagePool[pageBase + ${PAGE_HEADER.VERTEX_COUNT}u];
         let flags = pagePool[pageBase + ${PAGE_HEADER.FLAGS}u];
         pageLayout.widePositions = (flags & ${PAGE_FLAG_WIDE_POSITIONS}u) != 0u;
+        pageLayout.compact = (flags & ${PAGE_FLAG_COMPACT}u) != 0u;
         pageLayout.anchor = vec3i(i32(pagePool[pageBase + ${PAGE_HEADER.ANCHOR_X}u]), i32(pagePool[pageBase + ${PAGE_HEADER.ANCHOR_Y}u]), i32(pagePool[pageBase + ${PAGE_HEADER.ANCHOR_Z}u]));
         pageLayout.positionBase = pageBase + ${PAGE_HEADER_BYTES / 4}u;
-        pageLayout.normalBase = pageLayout.positionBase + select(vertexCount * 2u, vertexCount * 3u, pageLayout.widePositions);
+        // narrow positions: u16x4 (two words), or u16x3 packed and padded to a word on compact pages
+        let narrowWords = select(vertexCount * 2u, (vertexCount * 3u + 1u) / 2u, pageLayout.compact);
+        pageLayout.normalBase = pageLayout.positionBase + select(narrowWords, vertexCount * 3u, pageLayout.widePositions);
         pageLayout.tangentBase = pageLayout.normalBase + vertexCount;
         pageLayout.uvBase = pageLayout.tangentBase + select(0u, vertexCount, hasTangents);
-        pageLayout.colorBase = pageLayout.uvBase + vertexCount * uvFloatsPerVertex;
-        pageLayout.meshletVertexBase = pageLayout.colorBase + select(0u, vertexCount, hasColors);
-        pageLayout.meshletVertexCount = pagePool[pageBase + ${PAGE_HEADER.MV_COUNT}u];
+        // one unorm16x2 word per channel on compact pages, two f32 otherwise
+        pageLayout.uvWordsPerVertex = select(uvFloatsPerVertex, uvFloatsPerVertex / 2u, pageLayout.compact);
+        pageLayout.colorBase = pageLayout.uvBase + vertexCount * pageLayout.uvWordsPerVertex;
+        let tableBase = pageLayout.colorBase + select(0u, vertexCount, hasColors);
+        pageLayout.meshletVertexBase = tableBase;
+        pageLayout.uvBoxBase = tableBase;
+        let meshletCount = pagePool[pageBase + ${PAGE_HEADER.MESHLET_COUNT}u];
+        let tableWords = select(pagePool[pageBase + ${PAGE_HEADER.MV_COUNT}u], meshletCount * (uvFloatsPerVertex / 2u) * ${PAGE_UV_BOX_WORDS}u, pageLayout.compact);
+        pageLayout.triangleByteBase = (tableBase + tableWords) * 4u;
         return pageLayout;
+    }
+
+    // one u16 of a packed u16 stream starting at word base
+    fn meshletPageU16(base : u32, index : u32) -> i32 {
+        return i32((pagePool[base + (index >> 1u)] >> ((index & 1u) * 16u)) & 0xFFFFu);
     }
 
     // dequantised local-space position of one page vertex on the instance's grid
@@ -299,6 +323,9 @@ export const meshletPageLayoutWGSL = /* wgsl */ `
         if (pageLayout.widePositions) {
             let b = pageLayout.positionBase + vertex * 3u;
             coord = vec3i(i32(pagePool[b]), i32(pagePool[b + 1u]), i32(pagePool[b + 2u]));
+        } else if (pageLayout.compact) {
+            let h = vertex * 3u;
+            coord = pageLayout.anchor + vec3i(meshletPageU16(pageLayout.positionBase, h), meshletPageU16(pageLayout.positionBase, h + 1u), meshletPageU16(pageLayout.positionBase, h + 2u));
         } else {
             let b = pageLayout.positionBase + vertex * 2u;
             let word0 = pagePool[b];
@@ -306,6 +333,19 @@ export const meshletPageLayoutWGSL = /* wgsl */ `
             coord = pageLayout.anchor + vec3i(i32(word0 & 0xFFFFu), i32(word0 >> 16u), i32(word1 & 0xFFFFu));
         }
         return vec3f(coord) * gridStep + gridOrigin;
+    }
+
+    // UV channel of one page vertex; pageSlot is the meshlet's UV box on a compact page
+    fn meshletPageUv(pageLayout : MeshletPageLayout, vertex : u32, pageSlot : u32, channel : u32) -> vec2f {
+        if (pageLayout.compact) {
+            let word = pagePool[pageLayout.uvBase + vertex * pageLayout.uvWordsPerVertex + channel];
+            let boxWord = pageLayout.uvBoxBase + (pageSlot * pageLayout.uvWordsPerVertex + channel) * ${PAGE_UV_BOX_WORDS}u;
+            let origin = vec2f(bitcast<f32>(pagePool[boxWord]), bitcast<f32>(pagePool[boxWord + 1u]));
+            let extent = vec2f(bitcast<f32>(pagePool[boxWord + 2u]), bitcast<f32>(pagePool[boxWord + 3u]));
+            return origin + vec2f(f32(word & 0xFFFFu), f32(word >> 16u)) / 65535.0 * extent;
+        }
+        let b = pageLayout.uvBase + vertex * pageLayout.uvWordsPerVertex + channel * 2u;
+        return vec2f(bitcast<f32>(pagePool[b]), bitcast<f32>(pagePool[b + 1u]));
     }
 
     // COLOR_0 of one page vertex (rgba8 unorm, r in the low byte); only meaningful when the
@@ -330,7 +370,8 @@ export const meshletFetchVertexWGSL = /* wgsl */ `
         hasTangents : bool,
         hasColors : bool,
         pageLayout : MeshletPageLayout,
-        vertex : u32              // page vertex index
+        vertex : u32,             // page vertex index
+        pageSlot : u32            // the meshlet's UV box on a compact page
     };
 
     fn meshletFetchVertex(drawIndex : u32, pageSizeWords : u32) -> MeshletVertex {
@@ -345,7 +386,13 @@ export const meshletFetchVertexWGSL = /* wgsl */ `
         v.hasColors = (flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
         let pageBase = residency[meshletData[v.meshlet].page] * pageSizeWords;
         v.pageLayout = meshletPageLayout(pageBase, v.hasTangents, v.primitive.uvFloatsPerVertex, v.hasColors);
-        v.vertex = pagePool[v.pageLayout.meshletVertexBase + meshletData[v.meshlet].verticesOffset + decoded.y];
+        let meshletVertex = meshletData[v.meshlet].verticesOffset + decoded.y;
+        if (v.pageLayout.compact) {
+            v.vertex = meshletVertex;
+        } else {
+            v.vertex = pagePool[v.pageLayout.meshletVertexBase + meshletVertex];
+        }
+        v.pageSlot = meshletData[v.meshlet].uvChannelMask >> ${MESHLET_PAGE_SLOT_SHIFT}u;
         return v;
     }
 `;

@@ -17,7 +17,8 @@
  * - [3] u32 triangleOffset (page-local, logical u8 corner index)
  * - [4-7] f32 bounding sphere (cx, cy, cz, r)
  * - [8-10] f32 cone apex, [11-13] f32 cone axis, [14] f32 cone cutoff
- * - [15] u32 uvChannelMask
+ * - [15] u32 uvChannelMask in the low 16 bits; on a compact page the meshlet's slot in the
+ *   page's UV box table in the high 16 bits (see {@link PAGE_FLAG_COMPACT})
  * - [16-19] f32 parent bounding sphere
  * - [20] f32 clusterError, [21] f32 parentError (~1e30 at DAG roots)
  * - [22] u32 lodLevel
@@ -582,6 +583,27 @@ export const PAGE_FLAG_ROOT = 1 << 1;
 
 /** Positions stored as absolute i32x3 grid coords instead of anchor-relative u16x4. @type {number} */
 export const PAGE_FLAG_WIDE_POSITIONS = 1 << 2;
+
+/**
+ * A v3 compact page (header version {@link PAGE_FORMAT_VERSION_COMPACT}): each meshlet stores
+ * its own vertices in meshlet order, so there is no meshlet-vertex table; narrow positions are
+ * packed u16x3; UVs are unorm16x2 per channel against the meshlet's UV box, a table of
+ * {@link PAGE_UV_BOX_WORDS} f32 per meshlet per channel after the vertex streams; the meshlet's
+ * slot in that table is the high bits of its uvChannelMask word ({@link MESHLET_PAGE_SLOT_SHIFT}).
+ * Pages carry the flag themselves, so v2 and v3 assets share a world.
+ *
+ * @type {number}
+ */
+export const PAGE_FLAG_COMPACT = 1 << 3;
+
+/** Page header version of a {@link PAGE_FLAG_COMPACT} page. @type {number} */
+export const PAGE_FORMAT_VERSION_COMPACT = 3;
+
+/** f32 words per meshlet per UV channel in a compact page's UV box table: origin u, v, extent u, v. @type {number} */
+export const PAGE_UV_BOX_WORDS = 4;
+
+/** Bit offset of a meshlet's compact-page slot in its uvChannelMask word. @type {number} */
+export const MESHLET_PAGE_SLOT_SHIFT = 16;
 
 /** u32 fields per binary page table entry. @type {number} */
 export const PAGE_TABLE_FIELDS = 8;

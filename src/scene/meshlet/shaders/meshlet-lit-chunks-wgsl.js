@@ -186,11 +186,10 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
         dMeshletPickId = meshletPrimitive.pickIdBase + meshletInstance;
 
         ${uvs.map(n => /* wgsl */ `
-        // channel ${n}: two floats per channel per vertex, present when the page carries them
+        // channel ${n}, present when the page carries it
         dMeshletUv${n} = vec2f(0.0);
         if (meshletUvFloats >= ${2 * (n + 1)}u) {
-            let meshletUv${n}Word = meshletLayout.uvBase + meshletVert * meshletUvFloats + ${2 * n}u;
-            dMeshletUv${n} = vec2f(bitcast<f32>(pagePool[meshletUv${n}Word]), bitcast<f32>(pagePool[meshletUv${n}Word + 1u]));
+            dMeshletUv${n} = meshletPageUv(meshletLayout, meshletVert, meshletFetched.pageSlot, ${n}u);
         }`).join('')}
         ${tan ? /* wgsl */ `
         // A resource without tangents can share a world with one that has them. Zero leaves

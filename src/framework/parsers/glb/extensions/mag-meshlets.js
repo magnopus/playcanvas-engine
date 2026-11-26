@@ -170,8 +170,9 @@ const createMeshlets = (device, gltf, bufferViews) => {
         return null;
     }
 
-    if (manifestDef.version !== 2) {
-        Debug.error(`glTF ${streamExtensionName} version ${manifestDef.version} is not supported, expected 2. Re-bake the asset with current gltf-tools.`);
+    // v3 differs only in its pages, which flag themselves PAGE_FLAG_COMPACT and decode per page
+    if (manifestDef.version !== 2 && manifestDef.version !== 3) {
+        Debug.error(`glTF ${streamExtensionName} version ${manifestDef.version} is not supported, expected 2 or 3. Re-bake the asset with current gltf-tools.`);
         return null;
     }
 

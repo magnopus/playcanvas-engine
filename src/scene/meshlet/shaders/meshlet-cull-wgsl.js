@@ -378,11 +378,10 @@ export const indexWriteWGSL = /* wgsl */ `
         let hasTangents = (objectData[instance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
         let hasColors = (objectData[instance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
 
-        // the u8 triangle corner stream follows the page's meshlet-vertex table (shared layout
-        // in meshlet-page-wgsl.js)
+        // the u8 triangle corner stream ends the page (shared layout in meshlet-page-wgsl.js)
         let pageBase = residency[page] * uniform.pageSizeWords;
         let pageLayout = meshletPageLayout(pageBase, hasTangents, uvFloatsPerVertex, hasColors);
-        let triangleStreamByte = (pageLayout.meshletVertexBase + pageLayout.meshletVertexCount) * 4u + triangleOffset;
+        let triangleStreamByte = pageLayout.triangleByteBase + triangleOffset;
         let worldMatrix = meshletInstanceMatrix(instance);
         let mirrored = dot(cross(worldMatrix[0].xyz, worldMatrix[1].xyz), worldMatrix[2].xyz) < 0.0;
 

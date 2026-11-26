@@ -77,8 +77,12 @@ const THUMBNAIL_URL = /^\/thumbnails\/([^/]+)_(large|small)\.webp$/;
 const TEXT = 'text/plain; charset=utf-8';
 const TYPES_DIR = '../build';
 const HASH_ALGORITHM = 'sha1';
+// Files larger than this are not hashed for change detection (see hashFile).
+const MAX_HASHED_BYTES = 8 * 1024 * 1024;
 /** @type {StaticRoute[]} */
 const STATIC_ROUTES = [
+    // the Zorah bake being written in WSL, served in place (first match wins, so it precedes assets/)
+    { url: '/static/assets/meshlets/zorah4k-new/', root: '/home/adrian/zorah-work/zorah4k-new' },
     { url: '/static/assets/', root: 'assets' },
     { url: '/static/scripts/', root: '../scripts' },
     { url: '/icons/', root: 'src/static/icons' },
@@ -176,6 +180,13 @@ const isInside = (file, root) => {
  * @returns {Promise<string | null>} file hash.
  */
 const hashFile = async (file) => {
+    // Bulk asset data (meshlet page shards, texture containers, splats) is not hashed: reading
+    // gigabytes at startup kept the server from answering any request until it finished. A file
+    // without a hash counts as changed when the watcher reports it.
+    const stat = await fs.promises.stat(file).then(value => value, () => null);
+    if (!stat || stat.size > MAX_HASHED_BYTES) {
+        return null;
+    }
     const data = await fs.promises.readFile(file).then(value => value, () => null);
     return data && createHash(HASH_ALGORITHM).update(data).digest('base64url');
 };
