@@ -1,0 +1,47 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@deno/installer-shell-setup@*": "0.3.4"
+  },
+  "jsr": {
+    "@deno/installer-shell-setup@0.3.4": {
+      "integrity": "48665d1a737d487cce6874bc97bba70a5aeffa7053aca3f60df93c6fab8963b4"
+    }
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@playcanvas/eslint-config@3.0.0",
+        "npm:@rollup/plugin-strip@3.0.4",
+        "npm:@types/node@24.13.5",
+        "npm:@types/webxr@~0.5.24",
+        "npm:@webgpu/types@~0.1.70",
+        "npm:acorn@8.18.0",
+        "npm:c8@12.0.0",
+        "npm:canvas@3.2.3",
+        "npm:chai@6.2.2",
+        "npm:esbuild-visualizer@0.7.0",
+        "npm:esbuild@0.28.2",
+        "npm:eslint@9.39.5",
+        "npm:fflate@0.8.3",
+        "npm:globals@17.12.0",
+        "npm:jscc@1.1.1",
+        "npm:jsdom@30.1.0",
+        "npm:mocha@12.0.2",
+        "npm:nise@6.1.5",
+        "npm:publint@0.3.24",
+        "npm:rollup-plugin-dts@6.5.1",
+        "npm:rollup@4.63.3",
+        "npm:serve@14.2.6",
+        "npm:sinon@22.1.0",
+        "npm:turbo@2.10.13",
+        "npm:typedoc-plugin-mdn-links@5.1.1",
+        "npm:typedoc-plugin-merge-modules@7.0.0",
+        "npm:typedoc-plugin-missing-exports@4.1.4",
+        "npm:typedoc@0.28.20",
+        "npm:typescript@5.9.3",
+        "npm:webgpu@0.6.1"
+      ]
+    }
+  }
+}

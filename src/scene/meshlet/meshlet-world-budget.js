@@ -1,6 +1,6 @@
 import { Debug } from '../../core/debug.js';
 import {
-    claimWordCount, MATERIAL_RECORD_U32S, MESHLET_DATA_U32S, OBJECT_DATA_U32S, RECORD_U32S, ROOT_LIST_U32S
+    claimWordCount, MATERIAL_RECORD_U32S, MESHLET_BUCKET_COUNT, MESHLET_DATA_U32S, OBJECT_DATA_U32S, RECORD_U32S, ROOT_LIST_U32S
 } from './constants.js';
 import { DEMAND_SLOT_RESERVE } from './streaming/meshlet-residency.js';
 
@@ -12,8 +12,9 @@ const BYTES_PER_MB = 1024 * 1024;
 // empty scene.
 const MIN_INDEX_BUDGET_BYTES = 16 * 1024 * 1024;
 
-// Bytes per record a view holds: the record itself and its selected-meshlet entry.
-const RECORD_BYTES = RECORD_U32S * 4 + 8;
+// Bytes per record a view holds: the record in each bucket's interleaved range (see
+// MeshletView) and its selected-meshlet entry.
+const RECORD_BYTES = MESHLET_BUCKET_COUNT * RECORD_U32S * 4 + 8;
 
 // Bytes per cut queue entry: an (instance, group row) pair.
 const CUT_QUEUE_ENTRY_BYTES = 8;
@@ -182,9 +183,14 @@ function resolveMeshletBudget(settings, counts) {
     const records = recordBytes * views + shadowRecordBytes * shadows;
     const cutQueue = queueBytes * views + shadowQueueBytes * shadows;
     const indexBytes = Math.max(drawBytes - records - cutQueue, MIN_INDEX_BUDGET_BYTES);
+    // The draws read triangles straight from the page pool, so the index share allocates
+    // nothing: it stays as the draw budget, in the four-byte indices it was sized as, and its
+    // bytes go to the page pool instead, up to every page.
+    const indexBudgetTotal = Math.max(Math.floor(indexBytes / 4), 3);
+    if (allPages > 0) pagePool = Math.max(pagePool, Math.min(pagePool + indexBytes, allPages));
     return {
         pagePoolBytes: pagePool,
-        indexBudgetTotal: Math.max(Math.floor(indexBytes / 4), 3),
+        indexBudgetTotal,
         recordCeiling: Math.floor(recordBytes / RECORD_BYTES),
         cutQueueCeiling: Math.floor(queueBytes / CUT_QUEUE_ENTRY_BYTES),
         shadowRecordCeiling: Math.floor(shadowRecordBytes / RECORD_BYTES),
@@ -194,7 +200,7 @@ function resolveMeshletBudget(settings, counts) {
             fixed,
             perView: reserved - fixed,
             pagePool,
-            indices: indexBytes,
+            indices: 0,
             records,
             cutQueue,
             rootPages

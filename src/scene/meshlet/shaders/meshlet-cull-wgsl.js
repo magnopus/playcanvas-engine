@@ -6,9 +6,9 @@
  * The world's buffers are read through the typed views in meshlet-page-wgsl.js
  * (`objectData[instance].flags`, `meshletData[meshlet].page`, ...); their layouts are the
  * OBJECT_DATA / MESHLET_DATA enums in constants.js. The remaining raw buffers:
- * - counters: MESHLET_COUNTER.* — records, then per-bucket cursors, committed
- *   ends and unclamped demand (the demand block survives the phase-2 reset; the CPU grows the
- *   index buffer from it). Bucket order is opaque, opaque-two-sided, masked (MESHLET_BUCKET_*).
+ * - counters: MESHLET_COUNTER.* — records, then per-bucket record slot cursors and unclamped
+ *   index demand (the demand block survives the phase-2 reset; the CPU sizes the views' index
+ *   budgets from it). Bucket order is opaque, opaque-two-sided, masked (MESHLET_BUCKET_*).
  * - cullParams: a uniform array<vec4f>, rows CULL_PARAMS.* (planes, camera, LOD, view-projection,
  *   streaming, view direction). orthoScale > 0 selects the orthographic LOD projection (shadow
  *   cascades); CULL_FLAG_NO_TEXEL_RATE suppresses the texture-mip feedback.
@@ -16,23 +16,23 @@
  *   convention.
  * - residency: page -> pool slot (PAGE_NOT_RESIDENT when absent); requests: page marks then
  *   texel-rate marks; claimBits / visBits: one bit per (instance, meshlet) pair.
- * - drawn index format: (recordIndex << 8) | meshletLocalVertexIndex
+ * - records: interleaved by bucket, slot s of bucket b at s * MESHLET_BUCKET_COUNT + b; the
+ *   draws read them by instance index (see meshletFetchVertexWGSL)
  *
  * @ignore
  */
 
 import {
-    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, CUT_BUDGET, INDIRECT_DRAW_U32S, MESHLET_BUCKET_OPAQUE,
-    MESHLET_CELL_CULL_WORKGROUP, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_INDEX_WRITE_WORKGROUP,
-    MESHLET_INDEX_WRITE_RECORDS, MESHLET_VISIBLE_CELLS_BASE, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HAS_COLORS,
-    PAGE_REQUEST, TEXEL_RATE_PER_MIP
+    CULL_FLAG_NO_TEXEL_RATE, CULL_PARAMS, CUT_BUDGET, INDIRECT_DRAW_U32S, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_OPAQUE,
+    MESHLET_CELL_CULL_WORKGROUP, MESHLET_COUNTER, MESHLET_CULL_SLICE, MESHLET_DRAW_BUCKET_SHIFT,
+    MESHLET_VISIBLE_CELLS_BASE, PAGE_REQUEST, TEXEL_RATE_PER_MIP
 } from '../constants.js';
 import {
     meshletBucketWGSL, meshletCullParamsWGSL, meshletCullVolumeWGSL, meshletDispatchArgsWGSL, meshletDispatchGroupWGSL,
     meshletHzbVisibleWGSL, meshletStridedMainWGSL
 } from './meshlet-cull-common-wgsl.js';
 import {
-    meshletDataWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL
+    meshletDataWGSL, meshletObjectDataWGSL, meshletRecordsWGSL, meshletStructsWGSL
 } from './meshlet-page-wgsl.js';
 
 /**
@@ -102,8 +102,7 @@ export const dispatchArgsWGSL = /* wgsl */ `
 
 /**
  * Meshlet culling: one thread per meshlet in the compacted resident cut. Tests the frustum
- * sphere, cone backface and occlusion. Survivors reserve an index range in their bucket and
- * append a record.
+ * sphere, cone backface and occlusion. Survivors append a record to their bucket.
  */
 export const meshletCullWGSL = /* wgsl */ `
     ${meshletCullVolumeWGSL}
@@ -254,144 +253,51 @@ export const meshletCullWGSL = /* wgsl */ `
             return;
         }
 
-        // Reserve only the drawn range here. The selection pass already reported capacity
-        // demand for the complete cut, independently of either phase's occlusion results.
-        let indexNeed = triangleCount * 3u;
-        let capacity = meshletBucketCapacity(bucket);
+        // The selection pass already reported capacity demand for the complete cut,
+        // independently of either phase's occlusion results. The total record count bounds every
+        // bucket's slots, so a slot that passed it always fits its bucket's interleaved range.
         let recordIndex = atomicAdd(&counters[${MESHLET_COUNTER.RECORDS}u], 1u);
         if (recordIndex >= uniform.recordCapacity) {
             return;
         }
-        let cursor = atomicAdd(&counters[${MESHLET_COUNTER.CURSOR_BASE}u + bucket], indexNeed);
-        if (cursor + indexNeed > capacity) {
-            records[recordIndex] = MeshletRecord(instance, meshlet, 0xffffffffu, bucket);
-            return;
-        }
-        atomicMax(&counters[${MESHLET_COUNTER.COMMITTED_BASE}u + bucket], cursor + indexNeed);
-        let baseIndexOffset = meshletBucketBase(bucket) + cursor;
-
-        records[recordIndex] = MeshletRecord(instance, meshlet, baseIndexOffset, bucket);
+        let slot = atomicAdd(&counters[${MESHLET_COUNTER.CURSOR_BASE}u + bucket], 1u);
+        records[slot * ${MESHLET_BUCKET_COUNT}u + bucket] = MeshletRecord(instance, meshlet);
     }
 `;
 
 /**
- * Finalizes the frame's GPU-written arguments: one DrawIndexedIndirectArgs per bucket and the
- * index-write pass's indirect dispatch args. One thread.
+ * Finalizes the frame's GPU-written draw arguments: one DrawIndirectArgs per bucket, an instance
+ * per drawn meshlet (see meshletFetchVertexWGSL). One thread.
  */
 export const finalizeArgsWGSL = /* wgsl */ `
     uniform drawSlot0 : u32;
     uniform drawSlot1 : u32;
     uniform drawSlot2 : u32;
-    uniform dispatchSlot : u32;
     uniform recordCapacity : u32;
-    uniform indexCapacity0 : u32;
-    uniform indexCapacity1 : u32;
+    uniform cornersPerMeshlet : u32;
 
     var<storage, read_write> counters : array<atomic<u32>>;
     var<storage, read_write> indirectDraw : array<u32>;
-    var<storage, read_write> indirectDispatch : array<u32>;
 
-    ${meshletDispatchArgsWGSL}
-
-    fn writeDraw(slot : u32, indexCount : u32, firstIndex : u32) {
+    fn writeDraw(slot : u32, bucket : u32) {
         let base = slot * ${INDIRECT_DRAW_U32S}u;
-        indirectDraw[base + 0u] = indexCount;
-        indirectDraw[base + 1u] = 1u;
-        indirectDraw[base + 2u] = firstIndex;
+        indirectDraw[base + 0u] = uniform.cornersPerMeshlet;
+        indirectDraw[base + 1u] = atomicLoad(&counters[${MESHLET_COUNTER.CURSOR_BASE}u + bucket]);
+        indirectDraw[base + 2u] = bucket << ${MESHLET_DRAW_BUCKET_SHIFT}u;
         indirectDraw[base + 3u] = 0u;
-        indirectDraw[base + 4u] = 0u;
     }
 
     @compute @workgroup_size(1)
     fn main() {
-        // committed ends are contiguous: once a reservation overflows, every later reservation
-        // starts beyond it and overflows too, so [0, committedEnd) is fully written
-        writeDraw(uniform.drawSlot0, atomicLoad(&counters[${MESHLET_COUNTER.COMMITTED_BASE}u]), 0u);
-        writeDraw(uniform.drawSlot1, atomicLoad(&counters[${MESHLET_COUNTER.COMMITTED_BASE + 1}u]), uniform.indexCapacity0);
-        writeDraw(uniform.drawSlot2, atomicLoad(&counters[${MESHLET_COUNTER.COMMITTED_BASE + 2}u]),
-                  uniform.indexCapacity0 + uniform.indexCapacity1);
+        writeDraw(uniform.drawSlot0, 0u);
+        writeDraw(uniform.drawSlot1, 1u);
+        writeDraw(uniform.drawSlot2, 2u);
 
         // record demand is the whole cut's, charged and rejected, not just what this phase drew
         atomicMax(&counters[${MESHLET_COUNTER.RECORD_DEMAND}u],
                   atomicLoad(&counters[${CUT_BUDGET.RECORDS}u]) + atomicLoad(&counters[${CUT_BUDGET.REJECTED_RECORDS}u]));
         let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity);
         atomicAdd(&counters[${MESHLET_COUNTER.RENDERED}u], recordCount);
-        // index write: MESHLET_INDEX_WRITE_RECORDS records per workgroup
-        meshletWriteDispatch(uniform.dispatchSlot, (recordCount + ${MESHLET_INDEX_WRITE_RECORDS - 1}u) / ${MESHLET_INDEX_WRITE_RECORDS}u);
-    }
-`;
-
-/**
- * Index generation: each workgroup expands MESHLET_INDEX_WRITE_RECORDS surviving records, a
- * slice of threads per record, from the meshlet's u8 corner stream in the page pool into the
- * global index buffer as (recordIndex << 8) | localVertex.
- */
-export const indexWriteWGSL = /* wgsl */ `
-    ${meshletStructsWGSL}
-
-    uniform recordCapacity : u32;
-    uniform pageSizeWords : u32;
-
-    ${meshletDataWGSL}
-    ${meshletObjectDataWGSL}
-    ${meshletRecordsWGSL('read')}
-
-    var<storage, read> pagePool : array<u32>;
-    var<storage, read> residency : array<u32>;
-    var<storage, read_write> counters : array<atomic<u32>>;
-    var<storage, read_write> drawIndices : array<u32>;
-
-    ${meshletPageLayoutWGSL}
-    ${meshletDispatchGroupWGSL}
-
-    fn meshletItemGroups() -> u32 {
-        let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity);
-        return (recordCount + ${MESHLET_INDEX_WRITE_RECORDS - 1}u) / ${MESHLET_INDEX_WRITE_RECORDS}u;
-    }
-
-    ${meshletStridedMainWGSL(MESHLET_INDEX_WRITE_WORKGROUP)}
-
-    fn meshletItem(workgroupId : vec3u, localId : vec3u) {
-        let lanes = ${MESHLET_INDEX_WRITE_WORKGROUP / MESHLET_INDEX_WRITE_RECORDS}u;
-        let lane = localId.x % lanes;
-        let recordIndex = meshletGroupIndex(workgroupId) * ${MESHLET_INDEX_WRITE_RECORDS}u + localId.x / lanes;
-        let recordCount = min(atomicLoad(&counters[${MESHLET_COUNTER.RECORDS}u]), uniform.recordCapacity);
-        if (recordIndex >= recordCount) {
-            return;
-        }
-
-        let instance = records[recordIndex].instance;
-        let meshlet = records[recordIndex].meshlet;
-        let baseIndexOffset = records[recordIndex].baseIndexOffset;
-        if (baseIndexOffset == 0xffffffffu) {
-            if (lane == 0u) {
-                atomicSub(&counters[${MESHLET_COUNTER.RENDERED}u], 1u);
-            }
-            return;
-        }
-        let triangleOffset = meshletData[meshlet].triangleOffset;
-        let cornerCount = meshletData[meshlet].triangleCount * 3u;
-        let page = meshletData[meshlet].page;
-
-        // per-instance page attribute layout (resources may differ)
-        let uvFloatsPerVertex = meshletPrimitiveData(instance).uvFloatsPerVertex;
-        let hasTangents = (objectData[instance].flags & ${OBJECT_FLAG_HAS_TANGENTS}u) != 0u;
-        let hasColors = (objectData[instance].flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
-
-        // the u8 triangle corner stream ends the page (shared layout in meshlet-page-wgsl.js)
-        let pageBase = residency[page] * uniform.pageSizeWords;
-        let pageLayout = meshletPageLayout(pageBase, hasTangents, uvFloatsPerVertex, hasColors);
-        let triangleStreamByte = pageLayout.triangleByteBase + triangleOffset;
-        let worldMatrix = meshletInstanceMatrix(instance);
-        let mirrored = dot(cross(worldMatrix[0].xyz, worldMatrix[1].xyz), worldMatrix[2].xyz) < 0.0;
-
-        for (var corner = lane; corner < cornerCount; corner += lanes) {
-            let triangleCorner = corner % 3u;
-            let sourceCorner = select(corner, corner - triangleCorner + (3u - triangleCorner) % 3u, mirrored);
-            let byteIndex = triangleStreamByte + sourceCorner;
-            let localVert = (pagePool[byteIndex >> 2u] >> ((byteIndex & 3u) * 8u)) & 0xFFu;
-            drawIndices[baseIndexOffset + corner] = (recordIndex << 8u) | localVert;
-        }
     }
 `;
 

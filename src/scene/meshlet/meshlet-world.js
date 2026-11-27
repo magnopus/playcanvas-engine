@@ -89,6 +89,10 @@ const _familyName = family => `${MESHLET_TEX_FAMILIES[family].charAt(0).toUpperC
 const _tailBindName = family => `meshletTail${_familyName(family)}`;
 const _fineBindName = family => `meshletFine${_familyName(family)}`;
 
+// Most triangle corners any view's index budget may reach: the cut and admission shaders add
+// per-bucket capacities as u32, which must not wrap.
+const MAX_INDEX_BUDGET = 2 ** 30;
+
 /**
  * Largest storage buffer the device can bind, in bytes: both the buffer size and the storage
  * binding limits apply, and exceeding either fails creation with a validation error instead of
@@ -590,6 +594,14 @@ class MeshletWorld {
      */
     deviceIndexCeiling = 0;
 
+    /**
+     * Triangles of the world's largest meshlet. Each drawn meshlet is one instance of this many
+     * triangles (see meshletFetchVertexWGSL); the excess collapses to degenerate triangles.
+     *
+     * @type {number}
+     */
+    maxMeshletTriangles = 1;
+
     /** @type {number} - total (instance, meshlet) pairs, sizing the claim bitmask. */
     totalPairs = 0;
 
@@ -796,6 +808,7 @@ class MeshletWorld {
         this.recordCapacity = 0;
         this.indexCapacity = [0, 0, 0];
         this.indexWorst = [0, 0, 0];
+        this.maxMeshletTriangles = 1;
 
         // One pick id per instance (see pickRecords), from one block of the engine's picker
         // space, so they never collide with mesh instance ids.
@@ -1249,8 +1262,9 @@ class MeshletWorld {
      */
     _initIndexCapacities() {
         this.indexWorst = this.indexCapacity.slice();
-        // u32 indices, in a buffer bound both as an index buffer and as storage
-        this.deviceIndexCeiling = Math.floor(maxStorageBytes(this.device) / 4);
+        // nothing is allocated for the indices; the ceiling only keeps the shaders' u32 capacity
+        // sums from wrapping
+        this.deviceIndexCeiling = MAX_INDEX_BUDGET;
         const totalIndexWanted = this.indexCapacity.reduce((a, b) => a + b, 0);
         let indexTarget = Math.min(totalIndexWanted, this.indexCeiling);
         if (this.initialIndices > 0) indexTarget = Math.min(indexTarget, this.initialIndices);
@@ -1312,6 +1326,9 @@ class MeshletWorld {
                 records.set(prim.meshletData);
                 for (let m = 0; m < count; m++) {
                     const row = m * MESHLET_DATA_U32S;
+                    if (records[row + MESHLET_DATA.TRIANGLE_COUNT] > this.maxMeshletTriangles) {
+                        this.maxMeshletTriangles = records[row + MESHLET_DATA.TRIANGLE_COUNT];
+                    }
                     records[row + MESHLET_DATA.PAGE] += pageBase;
                     records[row + MESHLET_DATA.FLAGS] = (records[row + MESHLET_DATA.FLAGS] & ~(MESHLET_FLAG_ALPHA_MASKED | MESHLET_FLAG_TWO_SIDED)) | bucketBits;
                 }

@@ -83,6 +83,8 @@ const MAX_HASHED_BYTES = 8 * 1024 * 1024;
 const STATIC_ROUTES = [
     // the Zorah bake being written in WSL, served in place (first match wins, so it precedes assets/)
     { url: '/static/assets/meshlets/zorah4k-new/', root: '/home/adrian/zorah-work/zorah4k-new' },
+    { url: '/static/assets/meshlets/bistro/', root: '/home/adrian/zorah-work/bistro' },
+    { url: '/static/assets/meshlets/zorah4k-v2/', root: '/home/adrian/zorah-work/zorah4k-v2' },
     { url: '/static/assets/', root: 'assets' },
     { url: '/static/scripts/', root: '../scripts' },
     { url: '/icons/', root: 'src/static/icons' },

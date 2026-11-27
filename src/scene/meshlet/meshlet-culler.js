@@ -58,7 +58,6 @@ const makePassNames = suffix => ({
     residentCut: `MeshletResidentCut${suffix}`,
     cutEmit: `MeshletCutEmit${suffix}`,
     cullPhase1: `MeshletCullPhase1${suffix}`,
-    indexWrite: `MeshletIndexWrite${suffix}`,
     cullPhase2: `MeshletCullPhase2${suffix}`
 });
 
@@ -391,7 +390,6 @@ class MeshletCuller {
         this.selectedArgs = makeCompute('dispatchArgs');
         this.meshletCull = makeCompute('meshletCull');
         this.finalizeArgs = makeCompute('finalizeArgs');
-        this.indexWrite = makeCompute('indexWrite');
         this.resetPhase2 = makeCompute('resetPhase2');
 
         // the phase-2 chain uses its own compute instances (sharing the shaders): uniform writes
@@ -399,7 +397,6 @@ class MeshletCuller {
         // dispatched twice per frame would give both dispatches the later uniform values
         this.meshletCullPhase2 = new Compute(device, this.meshletCull.shader, 'MeshletMeshletCullP2');
         this.finalizeArgsPhase2 = new Compute(device, this.finalizeArgs.shader, 'MeshletFinalizeArgsP2');
-        this.indexWritePhase2 = new Compute(device, this.indexWrite.shader, 'MeshletIndexWriteP2');
 
         // static parameters - the same bindings for a stage's phase-1 and phase-2 instances
         this.selectedArgs.setParameter('itemCapacity', view.recordCapacity);
@@ -424,20 +421,8 @@ class MeshletCuller {
 
         for (const finalizeArgs of [this.finalizeArgs, this.finalizeArgsPhase2]) {
             finalizeArgs.setParameter('recordCapacity', view.recordCapacity);
-            bindCapacities(finalizeArgs, view);
+            finalizeArgs.setParameter('cornersPerMeshlet', world.maxMeshletTriangles * 3);
             finalizeArgs.setParameter('counters', view.countersBuffer);
-        }
-
-        for (const indexWrite of [this.indexWrite, this.indexWritePhase2]) {
-            indexWrite.setParameter('recordCapacity', view.recordCapacity);
-            indexWrite.setParameter('pageSizeWords', world.pageSizeBytes / 4);
-            indexWrite.setParameter('objectData', world.objectDataBuffer);
-            indexWrite.setParameter('meshletData', world.meshletDataBuffer);
-            indexWrite.setParameter('pagePool', world.pagePool);
-            indexWrite.setParameter('residency', world.residencyBuffer);
-            indexWrite.setParameter('counters', view.countersBuffer);
-            indexWrite.setParameter('records', view.recordsBuffer);
-            indexWrite.setParameter('drawIndices', view.indexBuffer);
         }
 
         this.resetPhase2.setParameter('counters', view.countersBuffer);
@@ -460,7 +445,6 @@ class MeshletCuller {
         // the selected cut, emitted from the queue
         const select = [this.cutEmitArgs, this.cutEmit, this.selectedArgs];
         const cull = [this.meshletCull, this.finalizeArgs];
-        const write = [this.indexWrite];
 
         this._chains = {
             cells,
@@ -469,10 +453,9 @@ class MeshletCuller {
             cut,
             select,
             cull,
-            write,
             // the whole phase-1 chain in one compute pass
-            phase1: [...cells, ...classifyScatter, ...this.rootAdmit, ...cut, ...select, ...cull, ...write],
-            phase2: [this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2, this.indexWritePhase2]
+            phase1: [...cells, ...classifyScatter, ...this.rootAdmit, ...cut, ...select, ...cull],
+            phase2: [this.resetPhase2, this.meshletCullPhase2, this.finalizeArgsPhase2]
         };
     }
 
@@ -488,17 +471,14 @@ class MeshletCuller {
     }
 
     /**
-     * Re-applies the index capacities and the index buffer binding after
-     * {@link MeshletView#growIndexBuffer}. Call before this frame's chains are encoded.
+     * Re-applies the index capacities after {@link MeshletView#growIndexBuffer}. Call before
+     * this frame's chains are encoded.
      *
      * @param {MeshletView} view - The view.
      */
     bindIndexState(view) {
-        for (const compute of [...this.queueStages.map(s => s.compute), ...this.rootAdmit, this.meshletCull, this.meshletCullPhase2, this.finalizeArgs, this.finalizeArgsPhase2]) {
+        for (const compute of [...this.queueStages.map(s => s.compute), ...this.rootAdmit, this.meshletCull, this.meshletCullPhase2]) {
             bindCapacities(compute, view);
-        }
-        for (const compute of [this.indexWrite, this.indexWritePhase2]) {
-            compute.setParameter('drawIndices', view.indexBuffer);
         }
     }
 
@@ -516,7 +496,7 @@ class MeshletCuller {
             compute.setParameter('selectedMeshlets', view.selectedMeshletsBuffer);
         }
         for (const compute of [...this.queueStages.map(s => s.compute), ...this.rootAdmit]) compute.setParameter('recordCapacity', view.recordCapacity);
-        for (const compute of [this.meshletCull, this.meshletCullPhase2, this.indexWrite, this.indexWritePhase2]) {
+        for (const compute of [this.meshletCull, this.meshletCullPhase2]) {
             compute.setParameter('records', view.recordsBuffer);
             compute.setParameter('recordCapacity', view.recordCapacity);
         }
@@ -693,7 +673,6 @@ class MeshletCuller {
         this._dispatchSlotRoots = device.getIndirectDispatchSlot();
         this._dispatchSlotBands = device.getIndirectDispatchSlot(MESHLET_ROOT_BANDS);
         this._dispatchSlotSelected = device.getIndirectDispatchSlot();
-        this._dispatchSlotWrite = device.getIndirectDispatchSlot();
 
         this._hzbTexture = twoPhase ? hzb.texture : null;
         this.meshletCull.setParameter('hzbTexture', this._hzbTexture ?? this.dummyHzb);
@@ -725,8 +704,6 @@ class MeshletCuller {
         this.selectedArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
 
         this.finalizeArgs.setParameter('indirectDraw', device.indirectDrawBuffer);
-        this.finalizeArgs.setParameter('indirectDispatch', device.indirectDispatchBuffer);
-        this.finalizeArgs.setParameter('dispatchSlot', this._dispatchSlotWrite);
 
         // phase-1 (or single-phase) chain
         this.meshletCull.setParameter('phase', twoPhase ? 1 : 0);
@@ -741,7 +718,6 @@ class MeshletCuller {
         this.selectedArgs.setupDispatch(1);
         this.meshletCull.setupDispatch(MESHLET_STRIDED_GROUPS);
         this.finalizeArgs.setupDispatch(1);
-        this.indexWrite.setupDispatch(MESHLET_STRIDED_GROUPS);
 
         const chains = this._chains;
         const names = this._passNames;
@@ -756,7 +732,6 @@ class MeshletCuller {
             if (chains.cut.length) device.computeDispatch(chains.cut, names.residentCut);
             device.computeDispatch(chains.select, names.cutEmit);
             device.computeDispatch(chains.cull, names.cullPhase1);
-            device.computeDispatch(chains.write, names.indexWrite);
         } else {
             // one pass: every dispatch is its own usage scope, so the indirect arguments one
             // writes are visible to the next without a pass boundary
@@ -781,13 +756,10 @@ class MeshletCuller {
             this.finalizeArgsPhase2.setParameter(DRAW_SLOT_NAMES[b], this._drawSlots[MESHLET_BUCKET_COUNT + b]);
         }
         this.finalizeArgsPhase2.setParameter('indirectDraw', device.indirectDrawBuffer);
-        this.finalizeArgsPhase2.setParameter('indirectDispatch', device.indirectDispatchBuffer);
-        this.finalizeArgsPhase2.setParameter('dispatchSlot', this._dispatchSlotWrite);
 
         this.resetPhase2.setupDispatch(1);
         this.meshletCullPhase2.setupDispatch(MESHLET_STRIDED_GROUPS);
         this.finalizeArgsPhase2.setupDispatch(1);
-        this.indexWritePhase2.setupDispatch(MESHLET_STRIDED_GROUPS);
 
         device.computeDispatch(this._chains.phase2, this._passNames.cullPhase2);
     }

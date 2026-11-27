@@ -6,7 +6,7 @@ import { PIXELFORMAT_R32F, SHADERLANGUAGE_WGSL } from '../../platform/graphics/c
 import { Shader } from '../../platform/graphics/shader.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import {
-    cellCullWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, indexWriteWGSL, resetPhase2WGSL
+    cellCullWGSL, dispatchArgsWGSL, meshletCullWGSL, finalizeArgsWGSL, resetPhase2WGSL
 } from './shaders/meshlet-cull-wgsl.js';
 
 /**
@@ -26,7 +26,6 @@ const SHADERS = {
     dispatchArgs: dispatchArgsWGSL,
     meshletCull: meshletCullWGSL,
     finalizeArgs: finalizeArgsWGSL,
-    indexWrite: indexWriteWGSL,
     resetPhase2: resetPhase2WGSL
 };
 

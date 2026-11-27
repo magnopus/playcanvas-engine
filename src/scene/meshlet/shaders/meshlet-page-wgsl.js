@@ -1,5 +1,5 @@
 import {
-    MATERIAL_TEXTURE_SLOTS, MESHLET_PAGE_SLOT_SHIFT, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HAS_TANGENTS, PAGE_FLAG_COMPACT,
+    MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_DRAW_BUCKET_SHIFT, MESHLET_PAGE_SLOT_SHIFT, OBJECT_FLAG_HAS_COLORS, OBJECT_FLAG_HAS_TANGENTS, PAGE_FLAG_COMPACT,
     PAGE_FLAG_WIDE_POSITIONS, PAGE_HEADER, PAGE_HEADER_BYTES, PAGE_UV_BOX_WORDS
 } from '../constants.js';
 
@@ -88,9 +88,7 @@ export const MESHLET_MATERIAL_STRUCT = [
 /** @type {StructFields} */
 export const MESHLET_RECORD_STRUCT = [
     ['instance', 'u32'],
-    ['meshlet', 'u32', 'world-global meshlet id'],
-    ['baseIndexOffset', 'u32', 'first draw index of the meshlet\'s triangles'],
-    ['bucket', 'u32', 'MESHLET_BUCKET_*']
+    ['meshlet', 'u32', 'world-global meshlet id']
 ];
 
 /** @type {StructFields} */
@@ -197,16 +195,6 @@ export const meshletRecordsWGSL = access => /* wgsl */ `
 /** `texResidency : array<MeshletTexResidency>` (read). Requires meshletStructsWGSL. */
 export const meshletTexResidencyWGSL = /* wgsl */ `
     var<storage, read> texResidency : array<MeshletTexResidency>;
-`;
-
-/**
- * `meshletDecodeDrawIndex(index)`: splits a drawn index into (record, local vertex). The
- * index-write pass encodes `record << 8 | localVertex`, so a meshlet holds at most 256 vertices.
- */
-export const meshletDecodeDrawIndexWGSL = /* wgsl */ `
-    fn meshletDecodeDrawIndex(index : u32) -> vec2u {
-        return vec2u(index >> 8u, index & 0xFFu);
-    }
 `;
 
 /**
@@ -356,11 +344,16 @@ export const meshletPageLayoutWGSL = /* wgsl */ `
 `;
 
 /**
- * `meshletFetchVertex(drawIndex, pageSizeWords)`: the vertex pull every meshlet vertex stage
- * starts with - decodes a drawn index, finds its record's instance and meshlet, lays out the
- * meshlet's resident page for the instance's resource and reads the page vertex the corner
- * refers to. Requires meshletStructsWGSL, meshletDecodeDrawIndexWGSL, meshletPageLayoutWGSL and
- * the `records`, `meshletData`, `objectData`, `residency` and `pagePool` buffers.
+ * `meshletFetchVertex(instanceIndex, vertexIndex, pageSizeWords)`: the vertex pull every meshlet
+ * vertex stage starts with. A bucket's draw is one instance per drawn meshlet with a fixed vertex
+ * count (the world's largest meshlet's corners), starting at vertex `bucket <<
+ * MESHLET_DRAW_BUCKET_SHIFT`: the instance index is the bucket's record slot, the low vertex
+ * bits the corner. Finds the record's instance and meshlet, lays out the meshlet's resident page
+ * for the instance's resource, reads the corner's local vertex from the page's u8 triangle stream
+ * (winding reversed for a mirrored instance) and resolves the page vertex. Corners past the
+ * meshlet's triangles all read its first corner, so their triangles are degenerate and never
+ * rasterise. Requires meshletStructsWGSL, meshletPageLayoutWGSL and the `records`, `meshletData`,
+ * `objectData`, `residency` and `pagePool` buffers.
  */
 export const meshletFetchVertexWGSL = /* wgsl */ `
     struct MeshletVertex {
@@ -374,11 +367,12 @@ export const meshletFetchVertexWGSL = /* wgsl */ `
         pageSlot : u32            // the meshlet's UV box on a compact page
     };
 
-    fn meshletFetchVertex(drawIndex : u32, pageSizeWords : u32) -> MeshletVertex {
-        let decoded = meshletDecodeDrawIndex(drawIndex);
+    fn meshletFetchVertex(instanceIndex : u32, vertexIndex : u32, pageSizeWords : u32) -> MeshletVertex {
+        let bucket = vertexIndex >> ${MESHLET_DRAW_BUCKET_SHIFT}u;
+        let record = records[instanceIndex * ${MESHLET_BUCKET_COUNT}u + bucket];
         var v : MeshletVertex;
-        v.instance = records[decoded.x].instance;
-        v.meshlet = records[decoded.x].meshlet;
+        v.instance = record.instance;
+        v.meshlet = record.meshlet;
         // per-primitive page attribute layout and position grid (resources may differ)
         v.primitive = meshletPrimitiveData(v.instance);
         let flags = objectData[v.instance].flags;
@@ -386,7 +380,22 @@ export const meshletFetchVertexWGSL = /* wgsl */ `
         v.hasColors = (flags & ${OBJECT_FLAG_HAS_COLORS}u) != 0u;
         let pageBase = residency[meshletData[v.meshlet].page] * pageSizeWords;
         v.pageLayout = meshletPageLayout(pageBase, v.hasTangents, v.primitive.uvFloatsPerVertex, v.hasColors);
-        let meshletVertex = meshletData[v.meshlet].verticesOffset + decoded.y;
+
+        // the corner's local vertex, from the u8 triangle stream ending the page
+        var corner = vertexIndex & ${(1 << MESHLET_DRAW_BUCKET_SHIFT) - 1}u;
+        if (corner >= meshletData[v.meshlet].triangleCount * 3u) {
+            corner = 0u;
+        } else {
+            let rows = objectData[v.instance].matrixRows;
+            // det of the upper 3x3 (the rows' determinant equals the matrix's)
+            if (dot(cross(rows[0].xyz, rows[1].xyz), rows[2].xyz) < 0.0) {
+                let triangleCorner = corner % 3u;
+                corner = corner - triangleCorner + (3u - triangleCorner) % 3u;
+            }
+        }
+        let byteIndex = v.pageLayout.triangleByteBase + meshletData[v.meshlet].triangleOffset + corner;
+        let localVertex = (pagePool[byteIndex >> 2u] >> ((byteIndex & 3u) * 8u)) & 0xFFu;
+        let meshletVertex = meshletData[v.meshlet].verticesOffset + localVertex;
         if (v.pageLayout.compact) {
             v.vertex = meshletVertex;
         } else {

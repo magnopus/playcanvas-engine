@@ -21,6 +21,9 @@
 //   ?ssao=0                    start with SSAO off
 //   ?cache=1                   keep fetched bytes in an OPFS cache (a reload reads from disk)
 //   ?textures=0                skip the streamed textures, geometry only
+//   ?threshold=<px>            DAG LOD error threshold in pixels (default 4)
+//   ?worldMeshlets=<millions>  most meshlets per world (default 12); smaller splits into more worlds
+//   ?basisWorkers=<n>          texture transcode workers (default min(cores - 1, 8))
 
 import {
     ADDRESS_CLAMP_TO_EDGE,
@@ -46,6 +49,7 @@ import {
     Mouse,
     PIXELFORMAT_RGBA8,
     Picker,
+    Quat,
     RenderComponentSystem,
     RESOLUTION_AUTO,
     SSAOTYPE_COMBINE,
@@ -75,15 +79,15 @@ import { runLoadBenchmark, startLoadProbe } from './load-benchmark.mjs';
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
+const params = new URLSearchParams(location.search);
+
 // streamed textures are KTX2 / Basis
 basisInitialize({
     glueUrl: './assets/wasm/basis/basis.wasm.js',
     wasmUrl: './assets/wasm/basis/basis.wasm.wasm',
     fallbackUrl: './assets/wasm/basis/basis.js',
-    numWorkers: Math.min(navigator.hardwareConcurrency - 1, 8) || 4
+    numWorkers: Number(params.get('basisWorkers')) || Math.min(navigator.hardwareConcurrency - 1, 8) || 4
 });
-
-const params = new URLSearchParams(location.search);
 const sceneDir = (params.get('dir') ?? 'zorah').replace(/[^\w.-]/g, '');
 const sceneName = params.get('scene');
 const manifestFile = sceneName === 'default' ? 'scene.json' : `scene.${(sceneName ?? 'all').replace(/[^\w.-]/g, '')}.json`;
@@ -167,6 +171,11 @@ const defaultPoolMiB = sceneName === 'default' ? (scene.meshletPoolMiB ?? 4096) 
 app.systems.meshlet.poolBytes = (Number(params.get('pool')) || defaultPoolMiB) * 1024 * 1024;
 app.systems.meshlet.texturePoolBytes = (Number(params.get('texPool')) || 2048) * 1024 * 1024;
 app.systems.meshlet.maxFineTextureSize = Number(params.get('maxTex')) || 4096;
+// ?worldMeshlets=<millions> splits the scene into worlds of at most that many meshlets: each
+// world has its own page pool, which one storage buffer caps at the device limit (2 GB)
+if (params.get('worldMeshlets')) {
+    app.systems.meshlet.maxWorldMeshlets = Number(params.get('worldMeshlets')) * 1024 * 1024;
+}
 app.systems.meshlet.occlusion = true;
 app.systems.meshlet.cssPixels = true;
 app.systems.meshlet.deferRebuildWhileLoading = true;
@@ -410,8 +419,8 @@ if (params.get('tint') !== '0') {
 
 /**
  * The blended surfaces draw through the ordinary renderer with the export's bare glTF material,
- * an opaque white. Fog and reflection cards are dropped, and water and glass get a translucent
- * look.
+ * an opaque white. Fog and reflection cards are dropped, and untextured water and glass get a
+ * translucent look.
  *
  * @param {Entity} root - The instantiated render entity.
  */
@@ -428,6 +437,8 @@ const styleInlineSurfaces = (root) => {
             seen.add(material);
             const water = /Water/i.test(material.name);
             if (!water && !/Glass/i.test(material.name)) continue;
+            // a bake that keeps inline surfaces' textures (stained glass) brings its own look
+            if (material.diffuseMap) continue;
             material.diffuse = water ? new Color(0.02, 0.12, 0.15) : new Color(0.7, 0.8, 0.85);
             material.metalness = 0;
             material.gloss = 0.95;
@@ -546,14 +557,10 @@ const lookFrom = (position, target) => {
     controls.reset(new Vec3(...target), eye);
 };
 if (params.get('view') === 'start') {
+    // look along the start pose's forward axis
     const start = new Vec3(...scene.start.position);
-    lookFrom(
-        scene.start.position,
-        start
-            .clone()
-            .add(new Vec3(0, 0, -10))
-            .toArray()
-    );
+    const forward = new Quat(...(scene.start.rotation ?? [0, 0, 0, 1])).transformVector(new Vec3(0, 0, -10));
+    lookFrom(scene.start.position, start.clone().add(forward).toArray());
 } else {
     lookFrom(HERO.position, HERO.target);
 }
@@ -566,6 +573,9 @@ cameraFrame.rendering.samples = 1;
 cameraFrame.rendering.toneMapping = device.isHdr ? TONEMAP_NONE : TONEMAP_ACES2;
 cameraFrame.bloom.enabled = false;
 cameraFrame.taa.enabled = true;
+// transmissive glass (Bistro) refracts the scene colour: without the grab it samples the engine's
+// pink missing-texture substitute. A manifest without glass skips the per-frame copy.
+cameraFrame.rendering.sceneColorMap = !!scene.sceneColorMap;
 // The scene renders at a fraction of the output and TAA accumulates the jittered frames back to full
 // resolution, so the meshlet raster, the lit shading and the HZB all run on fewer pixels (the DAG
 // cut measures against the scaled scene target too). ?scale=1 renders at full resolution.
@@ -618,7 +628,7 @@ app.on('postrender', () => {
 });
 
 data.set('data', {
-    threshold: 4,
+    threshold: Number(params.get('threshold')) || 4,
     sunIntensity: sun.light.intensity,
     skyIntensity: app.scene.skyboxIntensity,
     shadows: true,

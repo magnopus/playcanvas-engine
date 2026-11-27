@@ -5,7 +5,7 @@ import {
     OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED
 } from '../constants.js';
 import {
-    meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL, meshletDecodeTangentWGSL, meshletFetchVertexWGSL,
+    meshletDataWGSL, meshletDecodeOct16WGSL, meshletDecodeTangentWGSL, meshletFetchVertexWGSL,
     meshletMaterialTableWGSL, meshletNormalMatrixWGSL, meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL,
     meshletStructsWGSL, meshletTexResidencyWGSL
 } from './meshlet-page-wgsl.js';
@@ -130,7 +130,6 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     `;
 
     const litEngineCodeVS = /* wgsl */ `
-        ${meshletDecodeDrawIndexWGSL}
         ${meshletDecodeOct16WGSL}
         ${tan ? meshletDecodeTangentWGSL : ''}
         ${meshletPageLayoutWGSL}
@@ -138,7 +137,7 @@ function buildMeshletLitChunks({ textures = false, uvChannels = 0, tangents = fa
     `;
 
     const litEngineMainStartVS = /* wgsl */ `
-        let meshletFetched = meshletFetchVertex(pcVertexIndex, uniform.pageSizeWords);
+        let meshletFetched = meshletFetchVertex(pcInstanceIndex, pcVertexIndex, uniform.pageSizeWords);
         let meshletInstance = meshletFetched.instance;
         let meshletIndex = meshletFetched.meshlet;
         let meshletPrimitive = meshletFetched.primitive;

@@ -2,7 +2,7 @@ import { CULLFACE_NONE } from '../../platform/graphics/constants.js';
 import { ShaderMaterial } from '../materials/shader-material.js';
 import { MESHLET_BUCKET_OPAQUE } from './constants.js';
 import {
-    meshletDataWGSL, meshletDecodeDrawIndexWGSL, meshletDecodeOct16WGSL, meshletFetchVertexWGSL, meshletNormalMatrixWGSL,
+    meshletDataWGSL, meshletDecodeOct16WGSL, meshletFetchVertexWGSL, meshletNormalMatrixWGSL,
     meshletObjectDataWGSL, meshletPageLayoutWGSL, meshletRecordsWGSL, meshletStructsWGSL
 } from './shaders/meshlet-page-wgsl.js';
 
@@ -31,7 +31,6 @@ const vertexWGSL = /* wgsl */ `
     varying vColor : vec3f;
     varying vNormal : vec3f;
 
-    ${meshletDecodeDrawIndexWGSL}
     ${meshletDecodeOct16WGSL}
     ${meshletPageLayoutWGSL}
     ${meshletFetchVertexWGSL}
@@ -51,7 +50,7 @@ const vertexWGSL = /* wgsl */ `
     fn vertexMain(input : VertexInput) -> VertexOutput {
         var output : VertexOutput;
 
-        let fetched = meshletFetchVertex(input.vertexIndex, uniform.pageSizeWords);
+        let fetched = meshletFetchVertex(input.instanceIndex, input.vertexIndex, uniform.pageSizeWords);
         let primitive = fetched.primitive;
         let localPos = meshletPagePosition(fetched.pageLayout, fetched.vertex, primitive.gridOrigin, primitive.gridStep);
 

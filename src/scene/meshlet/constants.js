@@ -217,21 +217,24 @@ export const CULL_FLAG_SHADOW_VIEW = 1 << 2;
  */
 export const MESHLET_CELL_SIZE = 64;
 
-/** Threads per workgroup of the index-write pass. @type {number} */
-export const MESHLET_INDEX_WRITE_WORKGROUP = 64;
-
 /**
- * Records (meshlets) expanded per index-write workgroup, each by WORKGROUP / RECORDS threads.
- * One record per workgroup leaves the pass bound by each group's chain of dependent loads
- * (record, meshlet, object, page) rather than by the writes; several records per group keep
- * several chains in flight and cut the group count.
+ * u32 per draw record: [instance, meshlet]. Records are interleaved by draw bucket - slot s of
+ * bucket b is record s * MESHLET_BUCKET_COUNT + b - so each bucket's draw reads its own records
+ * by instance index, with no index buffer.
  *
  * @type {number}
  */
-export const MESHLET_INDEX_WRITE_RECORDS = 8;
+export const RECORD_U32S = 2;
 
-/** u32 per draw record: [instance, meshlet, base index offset, bucket]. @type {number} */
-export const RECORD_U32S = 4;
+/**
+ * A bucket's draw starts at vertex `bucket << MESHLET_DRAW_BUCKET_SHIFT`, which is how its vertex
+ * shader learns the bucket: `firstInstance` would need the optional indirect-first-instance
+ * feature in an indirect draw, `firstVertex` does not. The corner within the meshlet is the low
+ * bits, so a meshlet holds fewer than 2^16 / 3 triangles.
+ *
+ * @type {number}
+ */
+export const MESHLET_DRAW_BUCKET_SHIFT = 16;
 
 /** u32 per DrawIndexedIndirect argument block, as WebGPU defines it. @type {number} */
 export const INDIRECT_DRAW_U32S = 5;
@@ -309,8 +312,8 @@ export const MESHLET_COUNTER_U32S = 40;
  */
 export const MESHLET_COUNTER = {
     RECORDS: 1,
-    CURSOR_BASE: 2,     // index cursor per bucket (reservation)
-    COMMITTED_BASE: 5,  // highest reservation that fit per bucket - the draw's index count
+    CURSOR_BASE: 2,     // record slot cursor per bucket - the draw's instance count
+    COMMITTED_BASE: 5,  // unused
     DEMAND_BASE: 8,     // unclamped demand per bucket - survives the phase-2 reset
     RENDERED: 11,
     RECORD_DEMAND: 12,

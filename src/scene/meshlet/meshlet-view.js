@@ -1,7 +1,6 @@
 import {
-    BUFFERUSAGE_COPY_DST, BUFFERUSAGE_COPY_SRC, BUFFER_STATIC, INDEXFORMAT_UINT32, PRIMITIVE_TRIANGLES
+    BUFFERUSAGE_COPY_DST, BUFFERUSAGE_COPY_SRC, PRIMITIVE_TRIANGLES
 } from '../../platform/graphics/constants.js';
-import { IndexBuffer } from '../../platform/graphics/index-buffer.js';
 import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { WebgpuReadbackPool } from '../../platform/graphics/webgpu/webgpu-readback-pool.js';
 import {
@@ -21,10 +20,6 @@ import { visWordCount } from './meshlet-world-budget.js';
  * @import { MeshletHzb } from './meshlet-hzb.js'
  * @import { Texture } from '../../platform/graphics/texture.js'
  */
-
-// the draw index buffer is never smaller than one triangle, so an empty view still binds a
-// valid buffer
-const MIN_INDICES = 3;
 
 // smallest share of a view's index capacity a bucket keeps when capacity follows demand
 const RESLICE_FLOOR = 0.02;
@@ -48,6 +43,16 @@ const CUT_QUEUE_INITIAL = 1 << 16;
 
 // words of a view's cut budget: used indices per bucket, used records, rejected record demand,
 // then the cut queue entries admitted roots claimed
+
+/**
+ * Bytes of a records buffer: every bucket's interleaved range can hold the whole capacity, as
+ * the cull bounds the total record count, not each bucket's.
+ *
+ * @param {number} capacity - Records.
+ * @returns {number} Bytes.
+ * @ignore
+ */
+const recordsBytes = capacity => Math.max(capacity * MESHLET_BUCKET_COUNT * RECORD_U32S * BYTES_PER_WORD, 16);
 
 /**
  * @param {ArrayLike<number>} values - Per-bucket values.
@@ -109,16 +114,20 @@ class MeshletView {
 
     /**
      * One mesh instance per bucket per phase - phase 1 first, then phase 2 (a single-phase view
-     * has one set). They share one mesh, whose index buffer is {@link indexBuffer}.
+     * has one set). They share one non-indexed mesh: each draws an instance per drawn meshlet
+     * from the records (see meshletFetchVertexWGSL).
      *
      * @type {MeshInstance[]}
      */
     meshInstances = [];
 
-    /** @type {IndexBuffer|null} - the GPU-written draw indices. */
-    indexBuffer = null;
-
-    /** @type {number[]} - this view's index capacity per bucket: its slice of the index buffer. */
+    /**
+     * This view's index budget per bucket, in triangle corners. Nothing is allocated for it: it
+     * bounds the geometry root admission and the cut may select, which the draws then read
+     * straight from the page pool.
+     *
+     * @type {number[]}
+     */
     indexCapacity = [];
 
     /** @type {StorageBuffer} - the cull counters, then this frame's visible cells. */
@@ -362,11 +371,9 @@ class MeshletView {
                 world.indexWorst[b]));
         }
         this._clampToCeiling(this.indexCapacity);
-        this._allocIndexBuffer();
 
         const mesh = new Mesh(device);
-        mesh.indexBuffer[0] = this.indexBuffer;
-        mesh.primitive[0] = { type: PRIMITIVE_TRIANGLES, base: 0, count: 0, indexed: true };
+        mesh.primitive[0] = { type: PRIMITIVE_TRIANGLES, base: 0, count: 0, indexed: false };
         this._mesh = mesh;
 
         // materials are shared across views; the per-view records buffer rides as an instance
@@ -384,7 +391,7 @@ class MeshletView {
         }
         this._appliedMaterials = world.bucketMaterials;
 
-        this.recordsBuffer = new StorageBuffer(device, Math.max(this.recordCapacity * RECORD_U32S * BYTES_PER_WORD, 16), BUFFERUSAGE_COPY_DST);
+        this.recordsBuffer = new StorageBuffer(device, recordsBytes(this.recordCapacity), BUFFERUSAGE_COPY_DST);
         this.meshInstances.forEach(mi => mi.setParameter('records', this.recordsBuffer));
 
         this.culler = new MeshletCuller(device, world, this, cullShaders);
@@ -432,7 +439,7 @@ class MeshletView {
         this.selectedMeshletsBuffer.destroy();
         this.selectedMeshletsBuffer = new StorageBuffer(this.device, Math.max(target * 8, 16), BUFFERUSAGE_COPY_DST);
         const old = this.recordsBuffer;
-        this.recordsBuffer = new StorageBuffer(this.device, Math.max(target * RECORD_U32S * BYTES_PER_WORD, 16), BUFFERUSAGE_COPY_DST);
+        this.recordsBuffer = new StorageBuffer(this.device, recordsBytes(target), BUFFERUSAGE_COPY_DST);
         this.meshInstances.forEach(mi => mi.setParameter('records', this.recordsBuffer));
         old.destroy();
         return true;
@@ -460,10 +467,8 @@ class MeshletView {
             this.visBitsBuffer?.destroy();
         }
         this.visBitsBuffer = null;
-        // the shared mesh owns the index buffer - the last mesh instance destroy releases both
         this.meshInstances.forEach(mi => mi.destroy());
         this.meshInstances = [];
-        this.indexBuffer = null;
         this._mesh = null;
     }
 
@@ -555,27 +560,6 @@ class MeshletView {
     }
 
     /**
-     * Allocates this view's index buffer at the current capacity, replacing (and destroying) the
-     * previous one. No initial data: every index is written by the index-write pass before any
-     * draw reads it (finalizeArgs bounds each draw to the committed end), so uploading a zeroed
-     * copy of a buffer this size is pure cost - gpuOnly also skips IndexBuffer's CPU shadow copy.
-     * The capacity is clamped to the device's limits (see {@link _clampToCeiling}), so the
-     * allocation itself cannot fail validation.
-     *
-     * @private
-     */
-    _allocIndexBuffer() {
-        const old = this.indexBuffer;
-        const total = Math.max(this.indexTotal(), MIN_INDICES);
-        this.indexBuffer = new IndexBuffer(this.device, INDEXFORMAT_UINT32, total, BUFFER_STATIC,
-            undefined, { storage: true, gpuOnly: true });
-        if (this._mesh) this._mesh.indexBuffer[0] = this.indexBuffer;
-        // previous frames' submissions hold their own reference; this frame onwards encodes
-        // against the new buffer only
-        old?.destroy();
-    }
-
-    /**
      * This view's index demand as a fraction of its budget. Rejected refinements contribute
      * to demand while the complete coarse replacement remains visible. The budget manager
      * adjusts the error threshold to reduce repeated capacity-limited refinement attempts.
@@ -649,7 +633,6 @@ class MeshletView {
         // the ceiling applies to the total, and taking the per-bucket max above can push it
         // back over
         this._clampToCeiling(this.indexCapacity);
-        this._allocIndexBuffer();
         return true;
     }
 
@@ -685,7 +668,6 @@ class MeshletView {
         if (!changed) return false;
 
         this.indexCapacity = next;
-        this._allocIndexBuffer();
         return true;
     }
 
