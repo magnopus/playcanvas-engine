@@ -1,0 +1,184 @@
+import { expect } from 'chai';
+
+import {
+    CULL_PARAMS, CULL_PARAMS_VEC4S, CUT_BUDGET, INDIRECT_DISPATCH_U32S, INDIRECT_DRAW_U32S, MATERIAL_RECORD, MATERIAL_RECORD_U32S, MATERIAL_SLOT,
+    MATERIAL_TEXTURE_SLOTS, MESHLET_BUCKET_COUNT, MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_COLOR_MODE,
+    MESHLET_MAX_UV_CHANNELS,
+    MESHLET_COUNTER, MESHLET_COUNTER_CLEAR_U32S, MESHLET_DATA,
+    MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COUNTER_U32S, MESHLET_CULL_SLICE, MESHLET_DATA_U32S,
+    MESHLET_DISPATCH_WIDTH, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_DAG_ROOT, MESHLET_FLAG_TWO_SIDED,
+    MESHLET_INDEX_WRITE_WORKGROUP,
+    OBJECT_DATA, OBJECT_DATA_U32S, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HOVERED, OBJECT_FLAG_OUTLINED, PRIMITIVE_DATA,
+    PAGE_HEADER, PAGE_HEADER_BYTES, PAGE_TABLE, PAGE_TABLE_FIELDS, RECORD_U32S, TEX_RESIDENCY_U32S, TEXEL_RATE_PER_MIP,
+    ROOT_LIST_U32S, claimPersistBase, claimWordCount
+} from '../../../src/scene/meshlet/constants.js';
+import { MeshletInstanceList } from '../../../src/scene/meshlet/meshlet-instance-list.js';
+import { MeshletPrimitive, MeshletResource } from '../../../src/scene/meshlet/meshlet-resource.js';
+
+// These constants are the runtime half of a contract with gltf-tools' MAG_meshlets_gpu /
+// MAG_meshlets_stream v2 format and with the WGSL cull shaders. The relations below are the
+// ones the shaders and the world's buffer sizing depend on; a change here must be deliberate.
+describe('meshlet constants', function () {
+
+    it('keeps the GPU record sizes at the baked layout', function () {
+        expect(MESHLET_DATA_U32S).to.equal(32);
+        expect(MATERIAL_RECORD_U32S).to.equal(32);
+        expect(PAGE_TABLE_FIELDS).to.equal(8);
+        expect(PAGE_HEADER_BYTES).to.equal(48);
+    });
+
+    it('sizes the counter buffer to its last word, padded to 4, with no two counters sharing a word', function () {
+        const words = [];
+        for (const [name, index] of Object.entries(MESHLET_COUNTER)) {
+            const span = name.endsWith('_BASE') ? MESHLET_BUCKET_COUNT : 1;
+            for (let k = 0; k < span; k++) words.push(index + k);
+        }
+        for (const [name, index] of Object.entries(CUT_BUDGET)) {
+            const span = name.endsWith('_BASE') ? MESHLET_BUCKET_COUNT : 1;
+            for (let k = 0; k < span; k++) words.push(index + k);
+        }
+        expect(new Set(words).size, 'distinct words').to.equal(words.length);
+        const needed = Math.max(...words) + 1;
+        expect(MESHLET_COUNTER_U32S).to.be.at.least(needed);
+        expect(MESHLET_COUNTER_U32S % 4).to.equal(0);
+        expect(MESHLET_COUNTER_U32S - needed).to.be.below(4);
+    });
+
+    it('lays the claim plane out as transient bits, then two persistent admission regions', function () {
+        for (const [pairs, instances] of [[1000, 130], [31, 1], [64, 64], [1 << 20, 100000]]) {
+            const persist = claimPersistBase(pairs, instances);
+            expect(persist * 32, 'after the pair, admission and refinement bits').to.be.at.least(2 * pairs + instances);
+            expect(claimWordCount(pairs, instances) - persist).to.equal(2 * Math.ceil(instances / 32));
+        }
+    });
+
+    it('numbers the draw buckets contiguously in index-buffer order', function () {
+        expect([MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_BUCKET_MASKED]).to.deep.equal([0, 1, 2]);
+        expect(MESHLET_BUCKET_COUNT).to.equal(3);
+    });
+
+    it('keeps the meshlet and object flag bits distinct', function () {
+        const meshletFlags = [MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_DAG_ROOT, MESHLET_FLAG_TWO_SIDED];
+        const objectFlags = [OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HAS_TANGENTS, OBJECT_FLAG_OUTLINED, OBJECT_FLAG_HOVERED];
+        for (const set of [meshletFlags, objectFlags]) {
+            const union = set.reduce((a, b) => a | b, 0);
+            expect(set.reduce((a, b) => a + b, 0), 'flags overlap').to.equal(union);
+            set.forEach(f => expect(f & (f - 1), 'flag is a single bit').to.equal(0));
+        }
+    });
+
+    it('keeps the page table and header offsets within their records', function () {
+        Object.values(PAGE_TABLE).forEach(v => expect(v).to.be.below(PAGE_TABLE_FIELDS));
+        Object.values(PAGE_HEADER).forEach(v => expect(v * 4).to.be.below(PAGE_HEADER_BYTES));
+    });
+
+    it('keeps every record field inside its record', function () {
+        Object.values(MESHLET_DATA).forEach(v => expect(v).to.be.below(MESHLET_DATA_U32S));
+        Object.values(OBJECT_DATA).forEach(v => expect(v).to.be.below(OBJECT_DATA_U32S));
+        Object.values(PRIMITIVE_DATA).forEach(v => expect(v).to.be.below(OBJECT_DATA_U32S));
+        expect(OBJECT_DATA.FIRST_PAIR_BIT).to.equal(OBJECT_DATA_U32S - 1);
+        // the primitive row is read through the instance struct's words: the matrix rows hold
+        // sphere, grid and meshlet range, and the primitive word holds the pick id base
+        expect(OBJECT_DATA.PRIMITIVE).to.equal(PRIMITIVE_DATA.PICK_ID_BASE);
+        expect(PRIMITIVE_DATA.UV_FLOATS_PER_VERTEX).to.be.below(OBJECT_DATA.PRIMITIVE);
+        expect(MESHLET_DATA.SPHERE + 4).to.be.at.most(MESHLET_DATA.CONE_APEX);
+        expect(MESHLET_DATA.GROUP_SPHERE + 4).to.be.at.most(MESHLET_DATA.PARENT);
+    });
+
+    it('lays the material record out with the slot words followed by their transforms', function () {
+        Object.values(MATERIAL_RECORD).forEach(v => expect(v).to.be.below(MATERIAL_RECORD_U32S));
+        expect(MATERIAL_RECORD.SLOT_WORDS + MATERIAL_TEXTURE_SLOTS).to.equal(MATERIAL_RECORD.SLOT_TRANSFORMS);
+        expect(MATERIAL_RECORD.SLOT_TRANSFORMS + 2 * MATERIAL_TEXTURE_SLOTS).to.be.at.most(MATERIAL_RECORD_U32S);
+        expect(Object.values(MATERIAL_SLOT).sort()).to.deep.equal([0, 1, 2, 3]);
+        expect(TEX_RESIDENCY_U32S).to.equal(2);
+        expect(MESHLET_MAX_UV_CHANNELS, 'per-instance lightmaps address UV channels 0-4').to.equal(5);
+        expect(new Set(Object.values(MESHLET_COLOR_MODE)).size).to.equal(3);
+    });
+
+    it('lays the cut budget out in the cleared counter block, after the counters', function () {
+        expect(CUT_BUDGET.INDICES_BASE + MESHLET_BUCKET_COUNT).to.equal(CUT_BUDGET.RECORDS);
+        const words = [CUT_BUDGET.RECORDS, CUT_BUDGET.REJECTED_RECORDS, CUT_BUDGET.QUEUE];
+        expect(new Set(words).size).to.equal(words.length);
+        expect(CUT_BUDGET.INDICES_BASE).to.be.above(Math.max(...Object.values(MESHLET_COUNTER)));
+        expect(Math.max(...words)).to.be.below(MESHLET_COUNTER_CLEAR_U32S);
+    });
+
+    it('lays the counter blocks out contiguously, one word per bucket', function () {
+        expect(MESHLET_COUNTER.COMMITTED_BASE).to.equal(MESHLET_COUNTER.CURSOR_BASE + MESHLET_BUCKET_COUNT);
+        expect(MESHLET_COUNTER.DEMAND_BASE).to.equal(MESHLET_COUNTER.COMMITTED_BASE + MESHLET_BUCKET_COUNT);
+        expect(MESHLET_COUNTER.DEMAND_BASE + MESHLET_BUCKET_COUNT).to.be.at.most(MESHLET_COUNTER_U32S);
+    });
+
+    it('matches the WebGPU indirect argument layouts and the record strides', function () {
+        expect(INDIRECT_DRAW_U32S, 'DrawIndexedIndirect args').to.equal(5);
+        expect(INDIRECT_DISPATCH_U32S, 'DispatchWorkgroupsIndirect args').to.equal(3);
+        expect(RECORD_U32S).to.equal(4);
+        expect(ROOT_LIST_U32S).to.equal(2);
+    });
+
+    it('keeps the texture feedback scale and the material slot count the shaders assume', function () {
+        expect(TEXEL_RATE_PER_MIP).to.equal(16);
+        expect(MATERIAL_TEXTURE_SLOTS).to.equal(4);
+    });
+
+    it('uses a power-of-two dispatch grid and a workgroup-sized cull slice', function () {
+        expect(MESHLET_DISPATCH_WIDTH & (MESHLET_DISPATCH_WIDTH - 1)).to.equal(0);
+        expect(MESHLET_CULL_SLICE & (MESHLET_CULL_SLICE - 1)).to.equal(0);
+        expect(MESHLET_CULL_SLICE).to.be.at.most(256);
+        expect(MESHLET_INDEX_WRITE_WORKGROUP).to.be.at.most(256);
+    });
+
+    it('lays the cull parameter rows out back to back inside the parameter block', function () {
+        expect(CULL_PARAMS.PLANES).to.equal(0);
+        expect(CULL_PARAMS.PLANES + CULL_PARAMS.PLANE_COUNT).to.equal(CULL_PARAMS.CAMERA);
+        expect(CULL_PARAMS.CAMERA + 1).to.equal(CULL_PARAMS.LOD);
+        expect(CULL_PARAMS.LOD + 1).to.equal(CULL_PARAMS.VIEW_PROJ);
+        expect(CULL_PARAMS.VIEW_PROJ + 4, 'a 4x4 matrix').to.equal(CULL_PARAMS.STREAMING);
+        expect(CULL_PARAMS.STREAMING + 1).to.equal(CULL_PARAMS.VIEW_DIR);
+        expect(CULL_PARAMS.VIEW_DIR).to.be.below(CULL_PARAMS_VEC4S);
+    });
+});
+
+describe('MeshletResource', function () {
+
+    const makePrimitive = (meshletCount) => {
+        const prim = new MeshletPrimitive();
+        prim.meshletData = new Uint32Array(meshletCount * MESHLET_DATA_U32S);
+        prim.meshletDataF32 = new Float32Array(prim.meshletData.buffer);
+        prim.meshletCount = meshletCount;
+        prim.lods = [];
+        prim.aabbCenter = [0, 0, 0];
+        prim.aabbHalfExtents = [1, 1, 1];
+        return prim;
+    };
+
+    const makeManifest = pageCount => ({
+        blobs: [{ uri: 'pages_roots.dat', byteLength: 0 }],
+        pageTable: new Uint32Array(pageCount * PAGE_TABLE_FIELDS),
+        pageCount,
+        rootPages: [0],
+        attributeLayout: {},
+        pageSizeBytes: 65536,
+        pageAlignment: 256,
+        positionGrid: { origin: [0, 0, 0], step: 0.01, bits: 16 }
+    });
+
+    it('totals the meshlets across primitives and keeps the placements it is given', function () {
+        const instances = [{ primIndex: 0, matrix: new Float32Array(16) }, { primIndex: 1, matrix: new Float32Array(16) }];
+        const resource = new MeshletResource([makePrimitive(5), makePrimitive(7)], makeManifest(3), instances);
+        expect(resource.totalMeshlets).to.equal(12);
+        expect(resource.instances).to.be.an.instanceof(MeshletInstanceList);
+        expect(Array.from(resource.instances.primIndex)).to.deep.equal([0, 1]);
+        expect(resource.instances.transforms, 'one transform per distinct matrix').to.have.lengthOf(2 * 12);
+        expect(resource.materialTable).to.equal(null);
+        expect(resource.textureManifest).to.equal(null);
+    });
+
+    it('defaults to no placements and releases its data on destroy', function () {
+        const resource = new MeshletResource([makePrimitive(1)], makeManifest(1));
+        expect(resource.instances.count).to.equal(0);
+        resource.destroy();
+        expect(resource.primitives).to.deep.equal([]);
+        expect(resource.manifest).to.equal(null);
+    });
+});

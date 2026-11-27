@@ -45,6 +45,9 @@ class IndexBuffer {
      * @param {object} [options] - Object for passing optional arguments.
      * @param {boolean} [options.storage] - Defines if the index buffer can be used as a storage
      * buffer by a compute shader. Defaults to false. Only supported on WebGPU.
+     * @param {boolean} [options.gpuOnly] - When no initial data is given, skips allocating the
+     * CPU copy of the indices, for buffers whose contents are only written on the GPU. The copy
+     * is allocated by {@link IndexBuffer#lock} if it is ever requested. Defaults to false.
      * @example
      * // Create an index buffer holding 3 16-bit indices. The buffer is marked as
      * // static, hinting that the buffer will never be modified.
@@ -73,6 +76,10 @@ class IndexBuffer {
 
         if (initialData) {
             this.setData(initialData);
+        } else if (options?.gpuOnly) {
+            // unlock() without storage allocates the GPU buffer from numBytes and uploads nothing
+            this.storage = null;
+            this.unlock();
         } else {
             this.storage = new ArrayBuffer(this.numBytes);
         }
@@ -97,7 +104,9 @@ class IndexBuffer {
 
         if (this.impl.initialized) {
             this.impl.destroy(device);
-            this.adjustVramSizeTracking(device._vram, -this.storage.byteLength);
+            // numBytes, not storage.byteLength: they are equal by construction (setData
+            // rejects a mismatch) and storage may never have been allocated
+            this.adjustVramSizeTracking(device._vram, -this.numBytes);
         }
     }
 
@@ -117,11 +126,12 @@ class IndexBuffer {
 
     /**
      * Called when the rendering context is restored. Recreates the GPU buffer and uploads from
-     * {@link IndexBuffer#lock|lock} storage.
+     * {@link IndexBuffer#lock|lock} storage, if any.
      *
      * @ignore
      */
     restoreContext() {
+        // without a CPU copy (gpuOnly) the buffer is recreated empty for its owner to rewrite
         this.unlock();
     }
 
@@ -152,10 +162,12 @@ class IndexBuffer {
      *
      * @returns {ArrayBuffer|ArrayBufferView} The memory that stores the buffer's indices. This
      * matches whatever was supplied as the initial data: an {@link ArrayBuffer} when none was
-     * provided, otherwise the {@link ArrayBuffer} or typed array that was passed in. Use
-     * {@link ArrayBuffer.isView} to distinguish the two before accessing it.
+     * provided (allocated on the first call), otherwise the {@link ArrayBuffer} or typed array
+     * that was passed in. Use {@link ArrayBuffer.isView} to distinguish the two before
+     * accessing it.
      */
     lock() {
+        this.storage ??= new ArrayBuffer(this.numBytes);
         return this.storage;
     }
 

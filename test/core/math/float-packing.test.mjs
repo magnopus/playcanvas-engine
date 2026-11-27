@@ -65,4 +65,27 @@ describe('FloatPacking', function () {
             }
         });
     });
+
+    describe('#half2Float', function () {
+
+        it('decodes normal values, signed zeros and infinities', function () {
+            expect(FloatPacking.half2Float(0x3e00)).to.equal(1.5);
+            expect(FloatPacking.half2Float(0xc000)).to.equal(-2);
+            expect(FloatPacking.half2Float(0x0000)).to.equal(0);
+            expect(Object.is(FloatPacking.half2Float(0x8000), -0)).to.equal(true);
+            expect(FloatPacking.half2Float(0x7c00)).to.equal(Infinity);
+            expect(FloatPacking.half2Float(0xfc00)).to.equal(-Infinity);
+            expect(FloatPacking.half2Float(0x7e00)).to.be.NaN;
+        });
+
+        it('decodes denormals', function () {
+            expect(FloatPacking.half2Float(0x0001)).to.equal(2 ** -24);
+        });
+
+        it('round-trips the values float2Half packs exactly', function () {
+            for (const value of [0.5, 1, 65504, -0.25, 6.103515625e-5]) {
+                expect(FloatPacking.half2Float(FloatPacking.float2Half(value)), String(value)).to.equal(value);
+            }
+        });
+    });
 });

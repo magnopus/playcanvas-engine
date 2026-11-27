@@ -468,6 +468,9 @@ class GSplatProjector {
         if (stereo) {
             cdefines.set('GSPLAT_XR', '');
         }
+        if (this.device.isReverseZ) {
+            cdefines.set('REVERSE_Z', '');
+        }
 
         // Format-specific defines.
         const colorStream = wbFormat.getStream('dataColor');
@@ -749,6 +752,7 @@ class GSplatProjector {
         const cam = cameraComponent.camera;
         const orthographic = cam.projection === PROJECTION_ORTHOGRAPHIC;
         const webgpu = this.device.isWebGPU;
+        const reverseZ = this.device.isReverseZ;
         // focal length in pixels per axis (they differ when the viewport's pixel aspect doesn't
         // match the projection's)
         let focal, focalY;
@@ -769,7 +773,7 @@ class GSplatProjector {
             // canonical (unflipped) projection - the cache stores canonical clip positions, and
             // the raster VS applies the per-pass target flip using the projectionFlipY uniform
             const view = cam.viewMatrix;
-            _viewProjMat.mul2(Camera.applyShaderProjectionTransform(cam.projectionMatrix, _shaderProjMat, false, webgpu), view);
+            _viewProjMat.mul2(Camera.applyShaderProjectionTransform(cam.projectionMatrix, _shaderProjMat, false, webgpu, reverseZ), view);
             _viewProjData.set(_viewProjMat.data);
             _viewData.set(view.data);
             focal = viewportWidth * Math.abs(_shaderProjMat.data[0]);

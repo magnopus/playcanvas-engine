@@ -1,5 +1,6 @@
 import { TRACEID_RENDER_QUEUE } from '../../../core/constants.js';
 import { Debug, DebugHelper } from '../../../core/debug.js';
+import { math } from '../../../core/math/math.js';
 import { WebgpuDebug } from './webgpu-debug.js';
 
 /**
@@ -66,11 +67,13 @@ class WebgpuBuffer {
 
     /**
      * @param {WebgpuGraphicsDevice} device - Graphics device.
-     * @param {ArrayBuffer|ArrayBufferView} storage - CPU storage to upload.
+     * @param {ArrayBuffer|ArrayBufferView|null} storage - CPU storage to upload, or null to
+     * allocate only (contents written on the GPU).
      * @param {number} [byteOffset] - Byte offset in both the storage and GPU buffer. Defaults to 0.
      * @param {number} [byteLength] - Number of bytes to upload. Defaults to the remaining storage.
+     * @param {number} [byteSize] - Size to allocate when there is no storage to size it from.
      */
-    unlock(device, storage, byteOffset = 0, byteLength = storage.byteLength - byteOffset) {
+    unlock(device, storage, byteOffset = 0, byteLength = storage ? storage.byteLength - byteOffset : 0, byteSize) {
 
         const wgpu = device.wgpu;
 
@@ -80,11 +83,12 @@ class WebgpuBuffer {
         if (!this.buffer) {
             // Initialize all contents on first use, matching the WebGL allocation path.
             byteOffset = 0;
-            byteLength = storage.byteLength;
+            byteLength = storage?.byteLength ?? 0;
 
             // size needs to be a multiple of 4
             // note: based on specs, descriptor.size must be a multiple of 4 if descriptor.mappedAtCreation is true
-            const size = (storage.byteLength + 3) & ~3;
+            // (not rounded with 32-bit bitwise operators: buffers can exceed 2 GB)
+            const size = math.roundUp(storage?.byteLength ?? byteSize, 4);
 
             this.usageFlags |= GPUBufferUsage.COPY_DST;
             this.allocate(device, size);
@@ -103,6 +107,9 @@ class WebgpuBuffer {
             // this.buffer.unmap();
         }
 
+        // nothing to upload: the buffer's contents are written on the GPU
+        if (!storage) return;
+
         // copy data to the gpu buffer
         Debug.trace(TRACEID_RENDER_QUEUE, `writeBuffer: ${this.buffer.label}`);
         const srcOffset = (storage.byteOffset ?? 0) + byteOffset;
@@ -111,7 +118,7 @@ class WebgpuBuffer {
 
         if ((byteLength & 3) !== 0 && byteOffset === 0 && byteLength === storage.byteLength) {
             // Only full uploads can pad with zeros without overwriting live neighboring data.
-            const data = new Uint8Array((byteLength + 3) & ~3);
+            const data = new Uint8Array(math.roundUp(byteLength, 4));
             data.set(new Uint8Array(srcBuffer, srcOffset, byteLength));
             wgpu.queue.writeBuffer(this.buffer, byteOffset, data, 0, data.length);
         } else {

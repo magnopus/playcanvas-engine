@@ -216,8 +216,9 @@ function BasisWorker() {
         const width = basisFile.getWidth();
         const height = basisFile.getHeight();
         const levels = basisFile.getLevels();
-        const hasAlpha = !!basisFile.getHasAlpha();
-        const isUASTC = basisFile.isUASTC && basisFile.isUASTC();
+        // a texture array's layers share one format: its alpha is the caller's, not each payload's
+        const hasAlpha = options.hasAlpha ?? (!!options.isTextureArray || !!basisFile.getHasAlpha());
+        const isUASTC = !!options.isTextureArray || (basisFile.isUASTC && basisFile.isUASTC());
 
         // a six-face file is a cubemap; faces are transcoded into per-mip arrays
         const cubemap = !!options.isCubemap;
@@ -240,8 +241,10 @@ function BasisWorker() {
             // in order to unswizzle we need gggr8888
             basisFormat = BASIS_FORMAT.cTFRGBA32;
         } else {
-            // select output format based on supported formats and the image dimensions
-            basisFormat = selectBasisFormat(format, hasAlpha, width, height, options.deviceDetails);
+            // select output format based on supported formats and the image dimensions. Texture
+            // arrays need a format every layer shares, so etc1 / no-compression fall back to rgba32
+            basisFormat = options.isTextureArray && (format === 'none' || format === 'etc1') ?
+                BASIS_FORMAT.cTFRGBA32 : selectBasisFormat(format, hasAlpha, width, height, options.deviceDetails);
         }
 
         if (!basisFile.startTranscoding()) {

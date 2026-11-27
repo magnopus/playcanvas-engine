@@ -12,6 +12,8 @@ export default /* wgsl */`
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
+    #include "litEngineMainStartPS"
+
     #ifdef CLIP_PLANES
         applyClipPlanes(vPositionW);
     #endif
@@ -40,6 +42,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         output.color = float2vec4(vLinearDepth);
     #endif
 
+    #include "litEngineMainEndPS"
     #include "litUserMainEndPS"
 
     return output;

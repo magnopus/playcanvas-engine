@@ -1109,6 +1109,20 @@ class Mesh extends RefCountedObject {
         // release existing IB
         this._destroyIndexBuffer(RENDERSTYLE_WIREFRAME);
 
+        // a gpuOnly index buffer has no CPU copy to build the lines from (lock() would allocate
+        // zeros), so the wireframe draws nothing
+        if (this.indexBuffer[RENDERSTYLE_SOLID]?.storage === null) {
+            Debug.warnOnce('Mesh: a wireframe cannot be generated from an index buffer created with gpuOnly.');
+            this.primitive[RENDERSTYLE_WIREFRAME] = {
+                type: PRIMITIVE_LINES,
+                base: 0,
+                baseVertex: 0,
+                count: 0,
+                indexed: false
+            };
+            return;
+        }
+
         const numVertices = this.vertexBuffer.numVertices;
 
         let lines;
@@ -1122,7 +1136,7 @@ class Mesh extends RefCountedObject {
             const baseVertex = this.primitive[RENDERSTYLE_SOLID].baseVertex || 0;
             const indexBuffer = this.indexBuffer[RENDERSTYLE_SOLID];
             const indicesArrayType = typedArrayIndexFormats[indexBuffer.format];
-            const srcIndices = new indicesArrayType(indexBuffer.storage);
+            const srcIndices = new indicesArrayType(indexBuffer.lock());
             const tmpIndices = new indicesArrayType(count * 2);
             const seen = new Set();
 

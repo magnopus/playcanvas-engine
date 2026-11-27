@@ -1,0 +1,436 @@
+import { Debug } from '../../../../core/debug.js';
+import { Mat4 } from '../../../../core/math/mat4.js';
+import { Quat } from '../../../../core/math/quat.js';
+import { Vec3 } from '../../../../core/math/vec3.js';
+import { http, Http } from '../../../../platform/net/http.js';
+import { PAGE_SIZE_BYTES } from '../../../../scene/meshlet/constants.js';
+import { MeshletResource, MeshletPrimitive } from '../../../../scene/meshlet/meshlet-resource.js';
+import { MeshletInstanceListBuilder } from '../../../../scene/meshlet/meshlet-instance-list.js';
+import { GltfAccessor } from '../gltf-accessor.js';
+
+// MAG_meshlets_gpu + MAG_meshlets_stream: streamed Nanite-style meshlet DAG assets
+// produced by gltf-tools. The per-primitive extension carries a single resident meshletData
+// accessor (32 u32 per meshlet, the exact GPU layout); the root extension carries the stream
+// manifest (binary page table, shard blob URIs, uniform page size, position grid). See the
+// gltf-tools specs MAG_meshlets_gpu.md / MAG_meshlets_stream.md.
+
+const gpuExtensionName = 'MAG_meshlets_gpu';
+const streamExtensionName = 'MAG_meshlets_stream';
+
+/**
+ * @import { GraphicsDevice } from '../../../../platform/graphics/graphics-device.js'
+ * @import { GlbResourceExtension } from '../../glb-resource-extension.js'
+ */
+
+/**
+ * Whether a glTF primitive is a streamed meshlet primitive. Its inline geometry is only a
+ * placeholder (a 3-vertex AABB proxy), so the regular mesh path must skip it.
+ *
+ * @param {object} primitive - The glTF primitive definition.
+ * @returns {boolean} True when the primitive carries the MAG_meshlets_gpu extension.
+ * @ignore
+ */
+const hasMeshletExtension = (primitive) => {
+    return !!primitive?.extensions?.[gpuExtensionName];
+};
+
+const _nodePos = new Vec3();
+const _nodeMat = new Mat4();
+const _parentMat = new Mat4();
+const _nodeRot = new Quat();
+const _nodeScale = new Vec3();
+
+/**
+ * Computes the document-space transform of every glTF node in the default scene (every node
+ * when the document has no scene). Nodes outside it are not placed. Held flat rather than one
+ * Mat4 per node: a bake can carry millions of placement nodes.
+ *
+ * @param {object} gltf - The glTF document.
+ * @returns {{ matrices: Float32Array, placed: Uint8Array }} 16 floats per node index, and 1
+ * for each node in the scene.
+ */
+const computeNodeWorldTransforms = (gltf) => {
+    const nodes = gltf.nodes ?? [];
+    const matrices = new Float32Array(nodes.length * 16);
+    const placed = new Uint8Array(nodes.length);
+
+    // iterative depth-first walk: bakes can nest deep enough to overflow a recursive one
+    const stack = [];
+    const walk = (root) => {
+        stack.push(root, -1);
+        while (stack.length) {
+            const parent = stack.pop();
+            const index = stack.pop();
+            const node = nodes[index];
+            if (!node) continue;
+            const m = _nodeMat;
+            if (node.matrix) {
+                m.set(node.matrix);
+            } else {
+                const t = node.translation;
+                const r = node.rotation;
+                const sc = node.scale;
+                _nodePos.set(t?.[0] ?? 0, t?.[1] ?? 0, t?.[2] ?? 0);
+                _nodeRot.set(r?.[0] ?? 0, r?.[1] ?? 0, r?.[2] ?? 0, r?.[3] ?? 1);
+                _nodeScale.set(sc?.[0] ?? 1, sc?.[1] ?? 1, sc?.[2] ?? 1);
+                m.setTRS(_nodePos, _nodeRot, _nodeScale);
+            }
+            if (parent >= 0) {
+                _parentMat.data.set(matrices.subarray(parent * 16, parent * 16 + 16));
+                m.mul2(_parentMat, m);
+            }
+            matrices.set(m.data, index * 16);
+            placed[index] = 1;
+            const children = node.children;
+            if (children) {
+                for (let i = 0; i < children.length; i++) stack.push(children[i], index);
+            }
+        }
+    };
+
+    const sceneDef = gltf.scenes?.[gltf.scene ?? 0];
+    if (sceneDef?.nodes) {
+        for (let i = 0; i < sceneDef.nodes.length; i++) walk(sceneDef.nodes[i]);
+    } else {
+        // no scene: walk from the roots, the nodes no other node lists as a child
+        const isChild = new Uint8Array(nodes.length);
+        for (let i = 0; i < nodes.length; i++) {
+            const children = nodes[i].children;
+            if (children) {
+                for (let c = 0; c < children.length; c++) isChild[children[c]] = 1;
+            }
+        }
+        for (let i = 0; i < nodes.length; i++) {
+            if (!isChild[i]) walk(i);
+        }
+    }
+    return { matrices, placed };
+};
+
+const _scatterMat = new Mat4();
+const _scatterPos = new Vec3();
+const _scatterRot = new Quat();
+const _scatterScale = new Vec3();
+
+/**
+ * Reads a float accessor of `components`-wide elements as a flat Float32Array (the
+ * EXT_mesh_gpu_instancing TRS attributes).
+ *
+ * @param {number|undefined} index - The accessor index, or undefined when the attribute is absent.
+ * @param {object[]} accessors - The glTF accessors.
+ * @param {Uint8Array[]} bufferViews - The decoded buffer views.
+ * @param {number} components - Elements per entry (3 for translation / scale, 4 for rotation).
+ * @returns {Float32Array|null} The flat data, or null when absent or too short.
+ */
+const readVecAccessor = (index, accessors, bufferViews, components) => {
+    const accessor = accessors?.[index];
+    if (!accessor) return null;
+    // normalized integer ROTATION / SCALE (quantized scatters) are dequantized
+    const data = GltfAccessor.getDataFloat32(accessor, bufferViews);
+    if (!data || data.length < components) return null;
+    return data instanceof Float32Array ? data : Float32Array.from(data);
+};
+
+/**
+ * Reads a SCALAR u32 accessor as a Uint32Array view over its buffer view (no copy).
+ *
+ * @param {number|undefined} index - The accessor index.
+ * @param {object[]} accessors - The glTF accessors.
+ * @param {Uint8Array[]} bufferViews - The decoded buffer views.
+ * @returns {Uint32Array|null} The data, or null when the accessor is absent.
+ */
+const readU32Accessor = (index, accessors, bufferViews) => {
+    const accessor = accessors?.[index];
+    if (!accessor) return null;
+    const data = GltfAccessor.getData(accessor, bufferViews, true);
+    if (!data) return null;
+    // widen narrower component types element by element - a reinterpreting view would read
+    // their bytes as 32-bit words
+    return data instanceof Uint32Array ? data : Uint32Array.from(data);
+};
+
+/**
+ * Parses the document's streamed meshlet primitives into a single {@link MeshletResource}:
+ * one entry per MAG_meshlets_gpu primitive, one instance per (node placement, primitive) -
+ * expanding EXT_mesh_gpu_instancing scatters - plus the stream manifest, the optional baked
+ * material table and the optional MAG_texture_streaming manifest.
+ *
+ * Documents with an unsupported extension version are rejected with a Debug error.
+ *
+ * @param {GraphicsDevice} device - The graphics device.
+ * @param {object} gltf - The glTF document.
+ * @param {Uint8Array[]} bufferViews - The decoded buffer views.
+ * @returns {MeshletResource|null} The resource, or null when the document carries no streamed
+ * meshlet primitives.
+ * @ignore
+ */
+const createMeshlets = (device, gltf, bufferViews) => {
+    const manifestDef = gltf.extensions?.[streamExtensionName];
+    if (!manifestDef) {
+        return null;
+    }
+
+    // v3 differs only in its pages, which flag themselves PAGE_FLAG_COMPACT and decode per page
+    if (manifestDef.version !== 2 && manifestDef.version !== 3) {
+        Debug.error(`glTF ${streamExtensionName} version ${manifestDef.version} is not supported, expected 2 or 3. Re-bake the asset with current gltf-tools.`);
+        return null;
+    }
+
+    // copied: a view would keep the whole GLB buffer alive after the meshlet records, the bulk of
+    // it, are released (MeshletResource#releaseRecords)
+    const pageTable = readU32Accessor(manifestDef.pagesAccessor, gltf.accessors, bufferViews)?.slice();
+    if (!pageTable) {
+        Debug.error(`glTF ${streamExtensionName} manifest has no readable page table accessor.`);
+        return null;
+    }
+
+    const manifest = {
+        blobs: manifestDef.blobs ?? [],
+        pageTable,
+        pageCount: manifestDef.pageCount ?? 0,
+        rootPages: manifestDef.rootPages ?? [],
+        attributeLayout: manifestDef.attributeLayout ?? {},
+        pageSizeBytes: manifestDef.pageSizeBytes ?? PAGE_SIZE_BYTES,
+        pageAlignment: manifestDef.pageAlignment ?? 256,
+        positionGrid: manifestDef.positionGrid ?? null,
+        // the meshlet records carry MESHLET_FLAG_SLOPPY (absent on older bakes)
+        sloppyFlags: manifestDef.sloppyFlags === true,
+        // unique per bake run: versions the sidecars' persistent cache keys (absent on older
+        // bakes, which are stamped by a hash of their page table instead)
+        bakeId: typeof manifestDef.bakeId === 'string' ? manifestDef.bakeId : null
+    };
+
+    // the page pool is one array of fixed-size slots shared by every resource, so a page of any
+    // other size would be copied truncated or overrun its slot
+    if (manifest.pageSizeBytes !== PAGE_SIZE_BYTES) {
+        Debug.error(`glTF ${streamExtensionName} page size ${manifest.pageSizeBytes} is not supported, expected ${PAGE_SIZE_BYTES}. Re-bake the asset with current gltf-tools.`);
+        return null;
+    }
+
+    if (!manifest.positionGrid) {
+        Debug.error(`glTF ${streamExtensionName} v2 manifest is missing positionGrid.`);
+        return null;
+    }
+
+    const primitives = [];
+    gltf.meshes?.forEach((gltfMesh, meshIndex) => {
+        gltfMesh.primitives.forEach((primitive, primIndex) => {
+            const ext = primitive.extensions?.[gpuExtensionName];
+            if (!ext) return;
+
+            if (ext.version !== 2 || ext.accessors?.meshletData === undefined) {
+                Debug.error(`glTF ${gpuExtensionName} primitive (mesh ${meshIndex} prim ${primIndex}) has an unsupported version (${ext.version}) or no meshletData accessor, skipped.`);
+                return;
+            }
+
+            const meshletData = readU32Accessor(ext.accessors.meshletData, gltf.accessors, bufferViews);
+            if (!meshletData) {
+                Debug.error(`glTF ${gpuExtensionName} meshletData accessor is not readable (mesh ${meshIndex} prim ${primIndex}), skipped.`);
+                return;
+            }
+
+            const prim = new MeshletPrimitive();
+            prim.meshletData = meshletData;
+            prim.meshletDataF32 = new Float32Array(meshletData.buffer, meshletData.byteOffset, meshletData.length);
+            prim.meshletCount = ext.meshletCount ?? 0;
+            prim.uvChannelMask = ext.uvChannelMask ?? 0;
+            prim.aabbCenter = ext.aabbCenter ?? [0, 0, 0];
+            prim.aabbHalfExtents = ext.aabbHalfExtents ?? [0, 0, 0];
+            prim.materialIndex = primitive.material ?? -1;
+            const materialDef = gltf.materials?.[primitive.material];
+            prim.baseColorFactor = materialDef?.pbrMetallicRoughness?.baseColorFactor ?? [1, 1, 1, 1];
+            prim.meshIndex = meshIndex;
+            prim.primIndex = primIndex;
+            primitives.push(prim);
+        });
+    });
+
+    if (!primitives.length) {
+        return null;
+    }
+
+    // one instance per (node placement, meshlet primitive)
+    const nodeWorld = computeNodeWorldTransforms(gltf);
+    const nodeMatrix = (/** @type {number} */ nodeIndex) => _nodeMat.set(nodeWorld.matrices.subarray(nodeIndex * 16, nodeIndex * 16 + 16));
+    const primsByMesh = new Map();
+    primitives.forEach((p, i) => {
+        let list = primsByMesh.get(p.meshIndex);
+        if (!list) {
+            list = []; primsByMesh.set(p.meshIndex, list);
+        }
+        list.push(i);
+    });
+    // one transform per node or scatter entry, shared by the primitives of its mesh
+    const instances = new MeshletInstanceListBuilder();
+    gltf.nodes?.forEach((node, nodeIndex) => {
+        if (node.mesh === undefined || !nodeWorld.placed[nodeIndex]) return;
+        const list = primsByMesh.get(node.mesh);
+        if (!list) return;
+
+        const lightmapIndex = node.extensions?.EPIC_lightmap_textures?.lightmap;
+        const lightmapDef = gltf.extensions?.EPIC_lightmap_textures?.lightmaps?.[lightmapIndex];
+        const lightmapTexture = node.extensions?.MAG_texture_streaming?.lightmapTexture;
+        const lightmap = lightmapDef && lightmapTexture ? {
+            texture: lightmapTexture,
+            coordinateScaleBias: lightmapDef.coordinateScaleBias,
+            lightmapScale: lightmapDef.lightmapScale,
+            lightmapAdd: lightmapDef.lightmapAdd
+        } : null;
+
+        // EXT_mesh_gpu_instancing: the node carries a scatter of TRS attributes, each one a
+        // placement of its mesh in the node's space. Scattered foliage arrives this way, and
+        // one meshlet instance per scatter entry is exactly the world's instance model - the
+        // whole scatter shares one set of pages.
+        const scatter = node.extensions?.EXT_mesh_gpu_instancing?.attributes;
+        if (scatter) {
+            const t = readVecAccessor(scatter.TRANSLATION, gltf.accessors, bufferViews, 3);
+            const r = readVecAccessor(scatter.ROTATION, gltf.accessors, bufferViews, 4);
+            const s = readVecAccessor(scatter.SCALE, gltf.accessors, bufferViews, 3);
+            const count = Math.max(
+                t ? t.length / 3 : 0, r ? r.length / 4 : 0, s ? s.length / 3 : 0
+            );
+            for (let i = 0; i < count; i++) {
+                _scatterPos.set(t ? t[i * 3] : 0, t ? t[i * 3 + 1] : 0, t ? t[i * 3 + 2] : 0);
+                _scatterRot.set(
+                    r ? r[i * 4] : 0, r ? r[i * 4 + 1] : 0,
+                    r ? r[i * 4 + 2] : 0, r ? r[i * 4 + 3] : 1
+                );
+                _scatterScale.set(s ? s[i * 3] : 1, s ? s[i * 3 + 1] : 1, s ? s[i * 3 + 2] : 1);
+                _scatterMat.setTRS(_scatterPos, _scatterRot, _scatterScale);
+                _scatterMat.mul2(nodeMatrix(nodeIndex), _scatterMat);
+                const transform = instances.addTransform(_scatterMat.data, lightmap);
+                for (const primIndex of list) instances.add(primIndex, transform);
+            }
+            if (count > 0) return;
+        }
+
+        const transform = instances.addTransform(nodeMatrix(nodeIndex).data, lightmap);
+        for (const primIndex of list) instances.add(primIndex, transform);
+    });
+
+    const resource = new MeshletResource(primitives, manifest, instances);
+
+    // streamed-texture manifest (MAG_texture_streaming root extension) - consumed by the
+    // meshlet world's texture system; absent on texture-less bakes
+    const textureDef = gltf.extensions?.MAG_texture_streaming;
+    if (textureDef && Array.isArray(textureDef.arrays)) {
+        resource.textureManifest = { arrays: textureDef.arrays };
+    }
+
+    // baked material table (root MAG_meshlets_gpu block, optional):
+    // MATERIAL_RECORD_U32S words per glTF material, uploaded verbatim by the world
+    const rootGpuDef = gltf.extensions?.[gpuExtensionName];
+    if (rootGpuDef?.materialTable !== undefined) {
+        const table = readU32Accessor(rootGpuDef.materialTable, gltf.accessors, bufferViews);
+        const count = rootGpuDef.materialCount ?? 0;
+        if (table && table.length === count * 32) {
+            // copied, as the page table is
+            resource.materialTable = table.slice();
+            resource.materialCount = count;
+        } else {
+            Debug.error(`glTF ${gpuExtensionName} root material table is unreadable or mis-sized (${table?.length} words for ${count} materials), ignored.`);
+        }
+    }
+
+    return resource;
+};
+
+/**
+ * Fetches a URL as an ArrayBuffer through the engine's HTTP layer, so the request is retried and
+ * answered from {@link ResourceLoader#byteCache} like the asset's own load.
+ *
+ * @param {string} url - The URL.
+ * @param {RequestCredentials|null} credentials - Fetch credentials mode.
+ * @returns {Promise<ArrayBuffer>} The response.
+ */
+const fetchArrayBuffer = (url, credentials) => new Promise((resolve, reject) => {
+    http.get(url, {
+        responseType: Http.ResponseType.ARRAY_BUFFER,
+        retry: true,
+        withCredentials: credentials === 'include'
+    }, (err, data) => {
+        if (err) {
+            reject(new Error(`meshlet records fetch failed (${err}): ${url}`));
+        } else {
+            resolve(data);
+        }
+    });
+});
+
+/**
+ * Fetches a streamed-meshlet GLB again and hands its primitives' meshlet records back to the
+ * resource parsed from it, after {@link MeshletResource#releaseRecords} dropped them. The records
+ * are found through the glTF JSON (mesh, primitive, accessor), not remembered byte offsets, so the
+ * way the file was first delivered does not matter. Only uncompressed u32 records stored in the
+ * GLB's own binary chunk can be restored; any other layout fails.
+ *
+ * @param {string} url - The GLB's URL.
+ * @param {MeshletResource} resource - The resource parsed from it.
+ * @param {RequestCredentials|null} [credentials] - Fetch credentials mode.
+ * @returns {Promise<void>} Resolves once the records are restored.
+ * @ignore
+ */
+const restoreMeshletRecords = async (url, resource, credentials = null) => {
+    const fail = (reason) => {
+        const message = `meshlet records cannot be restored from ${url}: ${reason}`;
+        Debug.error(message);
+        return new Error(message);
+    };
+
+    const buffer = await fetchArrayBuffer(url, credentials);
+    const view = new DataView(buffer);
+    if (buffer.byteLength < 20 || view.getUint32(0, true) !== 0x46546C67) throw fail('not a GLB');
+    const jsonLength = view.getUint32(12, true);
+    const binHeader = 20 + jsonLength;
+    if (buffer.byteLength < binHeader + 8 || view.getUint32(binHeader + 4, true) !== 0x004E4942) {
+        throw fail('the GLB has no binary chunk');
+    }
+    const binStart = binHeader + 8;
+    const binEnd = binStart + view.getUint32(binHeader, true);
+    const gltf = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 20, jsonLength)));
+
+    const records = resource.primitives.map((prim) => {
+        const ext = gltf.meshes?.[prim.meshIndex]?.primitives?.[prim.primIndex]?.extensions?.[gpuExtensionName];
+        const accessor = gltf.accessors?.[ext?.accessors?.meshletData];
+        const bufferView = gltf.bufferViews?.[accessor?.bufferView];
+        if (!bufferView) throw fail('the file no longer matches its parsed resource');
+
+        // the records must be stored raw in the binary chunk (buffer 0 without a uri), as
+        // compressed (EXT_meshopt_compression) or external buffers would need decoding first
+        if (bufferView.buffer !== 0 || gltf.buffers?.[0]?.uri !== undefined || bufferView.extensions ||
+            accessor.componentType !== 5125 || accessor.sparse) {
+            throw fail('the meshlet records are not stored as raw u32 data in the GLB binary chunk');
+        }
+        const start = binStart + (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
+        const end = start + accessor.count * 4;
+        if (end > binEnd) throw fail('the meshlet records lie outside the binary chunk');
+
+        // copied, so the fetched GLB is not kept alive by the records
+        return new Uint32Array(buffer.slice(start, end));
+    });
+    resource.restoreRecords(records);
+};
+
+/**
+ * glTF resource extension for streamed meshlet bakes. Registered on the container handler by the
+ * meshlet component system, which keeps the meshlet resource code tree-shakeable when unused.
+ * The created resource list holds at most one {@link MeshletResource} per document.
+ *
+ * @type {GlbResourceExtension}
+ * @ignore
+ */
+const magMeshlets = {
+    name: gpuExtensionName,
+    resourceName: 'meshlets',
+    handlesPrimitive: hasMeshletExtension,
+    createResources: (device, gltf, bufferViews) => {
+        const resource = createMeshlets(device, gltf, bufferViews);
+        // derive the build's per-primitive tables now, while the scene's other containers are
+        // still arriving, instead of in the world build that waits for all of them
+        resource?.prepare();
+        return resource ? [resource] : [];
+    },
+    placesInstances: true
+};
+
+export { createMeshlets, hasMeshletExtension, magMeshlets, restoreMeshletRecords };

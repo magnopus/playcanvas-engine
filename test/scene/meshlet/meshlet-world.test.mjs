@@ -1,0 +1,431 @@
+import { expect } from 'chai';
+import { stub } from 'sinon';
+
+import { makeMeshletResource, TEST_MESHLETS, TEST_PAGE_BYTES, TEST_TRIANGLES } from './meshlet-test-utils.mjs';
+import { Mat4 } from '../../../src/core/math/mat4.js';
+import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
+import {
+    MATERIAL_FLAG_ALPHA_MASK, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_FLAG_UNLIT, MATERIAL_RECORD, MATERIAL_SLOT_ABSENT,
+    MESHLET_BUCKET_MASKED, MESHLET_BUCKET_OPAQUE, MESHLET_BUCKET_OPAQUE_TWO_SIDED, MESHLET_COLOR_MODE, MESHLET_DATA,
+    MESHLET_DATA_U32S, MESHLET_FLAG_ALPHA_MASKED, MESHLET_FLAG_TWO_SIDED, OBJECT_DATA, OBJECT_DATA_U32S, PRIMITIVE_DATA,
+    OBJECT_FLAG_HIDDEN, OBJECT_FLAG_OUTLINED, PAGE_NOT_RESIDENT
+} from '../../../src/scene/meshlet/constants.js';
+import { MeshletWorld } from '../../../src/scene/meshlet/meshlet-world.js';
+import { MeshletTextures } from '../../../src/scene/meshlet/textures/meshlet-textures.js';
+import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
+
+const PAGE_BYTES = TEST_PAGE_BYTES;
+const MESHLETS = TEST_MESHLETS;
+const TRIANGLES = TEST_TRIANGLES;
+
+// a resident resource (see makeMeshletResource) with its shard
+const makeResource = (device, options) => ({
+    resource: makeMeshletResource(device, options),
+    shards: [new ArrayBuffer(2 * PAGE_BYTES)]
+});
+
+describe('MeshletWorld', function () {
+
+    /** @type {NullGraphicsDevice} */
+    let device;
+    let savedWarn;
+
+    beforeEach(function () {
+        jsdomSetup();
+        device = new NullGraphicsDevice(document.createElement('canvas'));
+        // the null device has no storage buffers; record what the world uploads
+        device.createBufferImpl = () => ({
+            writes: [],
+            allocate(dev, size) {
+                this.size = size;
+            },
+            write(dev, offset, data, dataOffset = 0, size) {
+                this.writes.push({ offset, data: data.slice(dataOffset, size === undefined ? undefined : dataOffset + size) });
+            },
+            read() {
+                return Promise.resolve();
+            },
+            clear() {},
+            destroy() {},
+            loseContext() {},
+            buffer: null
+        });
+        savedWarn = console.warn;
+        console.warn = () => {};
+    });
+
+    afterEach(function () {
+        console.warn = savedWarn;
+        device.destroy();
+        device = null;
+        jsdomTeardown();
+    });
+
+    const build = (world, ...entries) => {
+        for (const { resource, shards } of entries) world.addResource(resource, null, shards);
+        world.finalize();
+        return world;
+    };
+    const uploaded = buffer => buffer.impl.writes.find(w => w.offset === 0).data;
+
+    it('uploads per-instance EPIC records with rebased textures and rejects missing UV channels', function () {
+        const tails = stub(MeshletTextures.prototype, '_loadTails');
+        const world = new MeshletWorld(device);
+        try {
+            const first = makeResource(device).resource;
+            const second = makeResource(device, { instances: 3 }).resource;
+            const array = { id: 7, name: 'linear_0', containerVersion: 2, width: 256, height: 256, tailMip: 0, layers: [[], []] };
+            first.textureManifest = { arrays: [array] };
+            second.textureManifest = { arrays: [array] };
+            const placements = Array.from({ length: 3 }, (_, i) => second.instances.get(i));
+            placements[0].lightmap = {
+                texture: { arrayId: 7, layer: 1, texCoord: 0 },
+                coordinateScaleBias: [0.25, 0.5, 0.125, 0.25],
+                lightmapScale: [1, 2, 3, 4],
+                lightmapAdd: [0, 1, 0, -5.75]
+            };
+            placements[2].lightmap = { ...placements[0].lightmap, texture: { arrayId: 7, layer: 0, texCoord: 1 } };
+            second.instances = placements;
+            world.addStreamedResource(first, null, 'https://example.test/first/');
+            world.addStreamedResource(second, null, 'https://example.test/second/');
+            world.finalize();
+            const data = uploaded(world.lightmapBuffer);
+            expect(Array.from(data.slice(32, 48))).to.deep.equal([0.25, 0.5, 0.125, 0.25, 1, 2, 3, 4, 0, 1, 0, -5.75, 3, 0, 1, 0]);
+            expect(data[14]).to.equal(0);
+            expect(data[3 * 16 + 14]).to.equal(0);
+            expect(data[4 * 16 + 14]).to.equal(0);
+            expect(Array.from(world.textures._lightmapSlots)).to.deep.equal([1, 3, -32]);
+            for (const material of world._litMaterials) {
+                expect(material.getParameter('meshletLightmaps').data).to.equal(world.lightmapBuffer);
+            }
+        } finally {
+            world.destroy();
+            tails.restore();
+        }
+    });
+
+    it('clamps the page pool to the device buffer limit instead of failing buffer creation', function () {
+        const world = new MeshletWorld(device);
+        try {
+            // a generous budget would size the pool to all 4 pages; the device holds 3
+            device.limits = { maxBufferSize: PAGE_BYTES * 3 + 7, maxStorageBufferBindingSize: PAGE_BYTES * 8 };
+            world.poolBytes = 1024 * 1024 * 1024;
+            world.addStreamedResource(makeResource(device).resource, null, 'https://example.test/first/');
+            world.addStreamedResource(makeResource(device).resource, null, 'https://example.test/second/');
+            world.finalize();
+            expect(world.poolSlots).to.equal(3);
+            expect(world.pagePool.byteSize).to.equal(PAGE_BYTES * 3);
+            expect(world.maxPoolSlots()).to.equal(3);
+        } finally {
+            world.destroy();
+        }
+    });
+
+    // one resource instance placed twice, as a merged placement of two components: one run of
+    // the instance list per root transform
+    const buildRuns = (world, runs) => {
+        const { resource, shards } = makeResource(device, { instances: 1 });
+        world.addResource(resource, new Array(runs).fill(null), shards);
+        world.finalize();
+        return world;
+    };
+
+    it('grows world bounds at once after a placement moves, and shrinks them on the next refit', function () {
+        const world = buildRuns(new MeshletWorld(device), 2);
+        const bounds = world.worldBounds;
+        const transform = new Mat4().setScale(10, 2, 3);
+        transform.data[12] = 100;
+        transform.data[14] = 50;
+
+        world.setPlacementTransform(0, transform, 1, 1);
+        expect(world.worldBounds).to.equal(bounds);
+        expect(bounds.getMin().toArray()).to.deep.equal([0, 1, 2]);
+        expect(bounds.getMax().toArray()).to.deep.equal([120, 6, 62]);
+
+        world.setPlacementTransform(0, null, 1, 1);
+        expect(world.worldBounds.getMax().toArray(), 'loose until the refit is due').to.deep.equal([120, 6, 62]);
+        world._worldBoundsRefitAt -= 1000;
+        expect(world.worldBounds.getMin().toArray()).to.deep.equal([0, 1, 2]);
+        expect(world.worldBounds.getMax().toArray()).to.deep.equal([2, 3, 4]);
+        world.destroy();
+    });
+
+    describe('finalize', function () {
+
+        it('writes one objectData row per placement by field name', function () {
+            const world = build(new MeshletWorld(device), makeResource(device, { instances: 2, scale: 2 }));
+            expect(world.instanceCount).to.equal(2);
+            expect(world.totalPairs).to.equal(2 * MESHLETS);
+
+            // the instance rows, then the primitive row both instances share
+            const u32 = uploaded(world.objectDataBuffer);
+            expect(u32).to.have.lengthOf(2 * OBJECT_DATA_U32S);
+            const f32 = new Float32Array(u32.buffer, u32.byteOffset, u32.length);
+            const row = 1 * OBJECT_DATA_U32S;
+            const m = row + OBJECT_DATA.MATRIX_ROWS;
+            expect(Array.from(f32.subarray(m, m + 12)), 'matrix rows: scale 2, translation x 10').to.deep.equal([2, 0, 0, 10, 0, 2, 0, 0, 0, 0, 2, 0]);
+            expect(u32[OBJECT_DATA.PRIMITIVE], 'the primitive row follows the instance rows').to.equal(2);
+            expect(u32[row + OBJECT_DATA.PRIMITIVE]).to.equal(2);
+            expect(u32[row + OBJECT_DATA.FLAGS]).to.equal(0);
+            expect(f32[row + OBJECT_DATA.MAX_SCALE]).to.equal(2);
+            expect(u32[row + OBJECT_DATA.FIRST_PAIR_BIT], 'second instance starts after the first one\'s pairs').to.equal(MESHLETS);
+
+            const p32 = world.objectDataBuffer.impl.writes.find(w => w.offset === 2 * OBJECT_DATA_U32S * 4).data;
+            expect(p32).to.have.lengthOf(OBJECT_DATA_U32S);
+            const pf32 = new Float32Array(p32.buffer, p32.byteOffset, p32.length);
+            expect(Array.from(pf32.subarray(PRIMITIVE_DATA.SPHERE, PRIMITIVE_DATA.SPHERE + 3))).to.deep.equal([1, 2, 3]);
+            expect(pf32[PRIMITIVE_DATA.SPHERE + 3]).to.be.closeTo(Math.sqrt(3), 1e-6);
+            expect(p32[PRIMITIVE_DATA.FIRST_MESHLET]).to.equal(0);
+            expect(p32[PRIMITIVE_DATA.MESHLET_COUNT]).to.equal(MESHLETS);
+            expect(p32[PRIMITIVE_DATA.MATERIAL]).to.equal(0);
+            expect(pf32[PRIMITIVE_DATA.GRID_ORIGIN]).to.equal(0.5);
+            expect(pf32[PRIMITIVE_DATA.GRID_STEP]).to.be.closeTo(0.01, 1e-9);
+            expect(p32[PRIMITIVE_DATA.UV_FLOATS_PER_VERTEX]).to.equal(2);
+            expect(p32[PRIMITIVE_DATA.PICK_ID_BASE]).to.equal(world.pickIdBase);
+            expect(world.objectDataBuffer.byteSize).to.equal(3 * OBJECT_DATA_U32S * 4);
+            world.destroy();
+        });
+
+        it('rebases page indices of later resources and totals the capacities', function () {
+            const world = build(new MeshletWorld(device), makeResource(device, { instances: 1 }), makeResource(device, { instances: 1 }));
+            const meshletData = uploaded(world.meshletDataBuffer);
+            const secondResource = MESHLETS * MESHLET_DATA_U32S;
+            expect(meshletData[0 * MESHLET_DATA_U32S + MESHLET_DATA.PAGE]).to.equal(0);
+            expect(meshletData[secondResource + 1 * MESHLET_DATA_U32S + MESHLET_DATA.PAGE], 'second resource pages start at 2').to.equal(2 + 1);
+            expect(world.totalPages).to.equal(4);
+            expect(world.recordCapacity).to.equal(2 * MESHLETS);
+            expect(world.indexWorst, 'no table, flags 0: everything opaque').to.deep.equal([2 * MESHLETS * TRIANGLES * 3, 0, 0]);
+            expect(world.indexCapacity).to.deep.equal(world.indexWorst);
+            // resident: page p sits in pool slot p
+            expect(Array.from(uploaded(world.residencyBuffer))).to.deep.equal([0, 1, 2, 3]);
+            world.destroy();
+        });
+
+        it('collects the global root pages of every placement, one resource added twice included', function () {
+            const twice = makeResource(device, { instances: 1 });
+            const world = build(new MeshletWorld(device), twice, twice);
+            // every meshlet is a root, over local pages 0 and 1; the second add starts at page 2
+            expect(world.rootPages).to.deep.equal([0, 1, 2, 3]);
+            world.destroy();
+        });
+
+        it('synthesizes a material record from the primitive when the bake has no table', function () {
+            const world = build(new MeshletWorld(device), makeResource(device, { instances: 1 }));
+            const table = uploaded(world.materialTableBuffer);
+            const f32 = new Float32Array(table.buffer);
+            expect(Array.from(f32.subarray(MATERIAL_RECORD.BASE_COLOR, MATERIAL_RECORD.BASE_COLOR + 4))).to.deep.equal([0.5, 0.25, 1, 1]);
+            expect(f32[MATERIAL_RECORD.ROUGHNESS]).to.equal(1);
+            expect(f32[MATERIAL_RECORD.ALPHA_CUTOFF]).to.equal(0.5);
+            expect(table[MATERIAL_RECORD.SLOT_WORDS]).to.equal(MATERIAL_SLOT_ABSENT);
+            expect(table[MATERIAL_RECORD.SLOT_WORDS + 3]).to.equal(MATERIAL_SLOT_ABSENT);
+            world.destroy();
+        });
+
+        it('derives the draw bucket from the baked material flags and restamps the meshlet flags', function () {
+            const masked = build(new MeshletWorld(device), makeResource(device, { instances: 1, materialFlags: MATERIAL_FLAG_ALPHA_MASK | MATERIAL_FLAG_DOUBLE_SIDED }));
+            expect(masked.indexWorst).to.deep.equal([0, 0, MESHLETS * TRIANGLES * 3]);
+            const flags = uploaded(masked.meshletDataBuffer)[MESHLET_DATA.FLAGS];
+            expect(flags & MESHLET_FLAG_ALPHA_MASKED).to.not.equal(0);
+            expect(flags & MESHLET_FLAG_TWO_SIDED).to.not.equal(0);
+            masked.destroy();
+
+            const twoSided = build(new MeshletWorld(device), makeResource(device, { instances: 1, materialFlags: MATERIAL_FLAG_DOUBLE_SIDED }));
+            expect(twoSided.indexWorst[MESHLET_BUCKET_OPAQUE_TWO_SIDED]).to.equal(MESHLETS * TRIANGLES * 3);
+            expect(twoSided.indexWorst[MESHLET_BUCKET_MASKED]).to.equal(0);
+            expect(twoSided.indexWorst[MESHLET_BUCKET_OPAQUE]).to.equal(0);
+            twoSided.destroy();
+
+            // unlit is a shading choice, not pipeline state: it stays in the opaque bucket and
+            // the flag reaches the GPU table untouched for the fragment shader to branch on
+            const unlit = build(new MeshletWorld(device), makeResource(device, { instances: 1, materialFlags: MATERIAL_FLAG_UNLIT }));
+            expect(unlit.indexWorst).to.deep.equal([MESHLETS * TRIANGLES * 3, 0, 0]);
+            expect(uploaded(unlit.materialTableBuffer)[MATERIAL_RECORD.FLAGS] & MATERIAL_FLAG_UNLIT).to.not.equal(0);
+            unlit.destroy();
+        });
+
+        it('splits a geometry budget between the page pool and the draw working set after the fixed costs', function () {
+            const world = new MeshletWorld(device);
+            world.poolBytes = 64 * 1024 * 1024;
+            build(world, makeResource(device, { instances: 4 }));
+            const b = world.budgetBreakdown;
+            expect(b.budget).to.equal(64 * 1024 * 1024);
+            expect(b.fixed).to.be.above(0);
+            // every byte is accounted for, to the rounding of the per-view shares
+            const total = b.fixed + b.perView + b.pagePool + b.indices + b.records + b.cutQueue;
+            expect(total).to.be.at.most(b.budget);
+            expect(total).to.be.above(b.budget - 64);
+            // the pool is capped at every page; the rest of its share goes to the draw working set
+            expect(b.pagePool).to.equal(world.totalPages * world.pageSizeBytes);
+            expect(world.pagePoolBytes).to.equal(b.pagePool);
+            expect(world.indexBudgetTotal).to.equal(Math.floor(b.indices / 4));
+            // one camera view: its records and cut queue are bounded by the budget, not the scene
+            expect(world.recordCeiling).to.equal(Math.floor(b.records / 24));
+            expect(world.cutQueueCeiling).to.equal(Math.floor(b.cutQueue / 8));
+            expect(b.records).to.be.below(b.indices);
+            world.destroy();
+        });
+
+        it('falls back to a minimum page pool and index buffer when the budget cannot even hold the fixed costs', function () {
+            const world = new MeshletWorld(device);
+            world.poolBytes = 64;
+            build(world, makeResource(device, { instances: 4 }));
+            expect(world.pagePoolBytes, 'min(pages, 64) pages').to.equal(2 * PAGE_BYTES);
+            // the indices keep a floor: with none, root admission takes no instance and nothing draws
+            expect(world.budgetBreakdown.indices).to.be.at.least(16 * 1024 * 1024);
+            expect(world.indexBudgetTotal).to.be.at.least(4 * 1024 * 1024);
+            world.destroy();
+        });
+
+        it('keeps the index floor when the page roots take a small budget\'s share', function () {
+            const world = new MeshletWorld(device);
+            world.indexBudgetFraction = 0.05;
+            world.poolBytes = 20 * 1024 * 1024;
+            build(world, makeResource(device, { instances: 4 }));
+            expect(world.budgetBreakdown.indices).to.be.at.least(16 * 1024 * 1024);
+            expect(world.pagePoolBytes).to.be.at.least(2 * PAGE_BYTES);
+            world.destroy();
+        });
+    });
+
+    describe('page pool adoption', function () {
+
+        // a streamed world of `instances` placements over the two-page resource, with a carried
+        // pool of `carriedSlots` slots and a residency that pinned page 0 to its last slot
+        const setup = (carriedSlots, poolBytes = 0) => {
+            const world = new MeshletWorld(device);
+            world.poolBytes = poolBytes;
+            const copies = [];
+            device.wgpu = {
+                createCommandEncoder: () => ({ copyBufferToBuffer(src, so, dst, doff, size) {
+                    copies.push(size);
+                },
+                finish() {
+                    return {};
+                } }),
+                queue: { submit() {} }
+            };
+            const carried = { byteSize: carriedSlots * PAGE_BYTES,
+                impl: { buffer: {} },
+                destroyed: false,
+                destroy() {
+                    this.destroyed = true;
+                } };
+            world.adoptPagePool = carried;
+            world.adoptResidency = new Uint32Array([carriedSlots - 1, PAGE_NOT_RESIDENT]);
+            world.adoptedPages = 2;
+            const { resource } = makeResource(device, { instances: 2 });
+            world.addStreamedResource(resource, null, 'x/');
+            world.finalize();
+            return { world, carried, copies };
+        };
+
+        it('copies a carried pool the scene outgrew into the larger new pool, keeping residency', function () {
+            const { world, carried, copies } = setup(1);
+            expect(world.poolSlots).to.equal(2);
+            expect(copies, 'one copy of the old pool bytes').to.deep.equal([PAGE_BYTES]);
+            expect(carried.destroyed).to.equal(true);
+            expect(Array.from(world.residency), 'page 0 keeps its slot').to.deep.equal([0, PAGE_NOT_RESIDENT]);
+            world.destroy();
+        });
+
+        it('starts cold instead of copying a carried pool the new pool cannot hold', function () {
+            // a budget of a few bytes resolves to the minimum pool - the root pages plus a demand
+            // reserve, here both pages; the carried pool has 5, more than twice that
+            const { world, carried, copies } = setup(5, 64);
+            expect(world.poolSlots).to.equal(2);
+            expect(copies, 'nothing is copied into a smaller buffer').to.deep.equal([]);
+            expect(carried.destroyed).to.equal(true);
+            expect(world.adoptedPages).to.equal(0);
+            expect(Array.from(world.residency), 'every page re-streams').to.deep.equal([PAGE_NOT_RESIDENT, PAGE_NOT_RESIDENT]);
+            expect(world.pagePool.byteSize).to.equal(2 * PAGE_BYTES);
+            world.destroy();
+        });
+    });
+
+    describe('after finalize', function () {
+
+        it('rewrites only the rows of the run whose root transform changed', function () {
+            const world = buildRuns(new MeshletWorld(device), 2);
+            world.objectDataBuffer.impl.writes.length = 0;
+            const t = new Float32Array(16);
+            t[0] = 3; t[5] = 3; t[10] = 3; t[15] = 1; t[12] = 100;
+            // the world copies the root's data rather than keeping the caller's matrix
+            world.setPlacementTransform(0, { data: t }, 1, 1);
+            t[12] = 0;
+            const write = world.objectDataBuffer.impl.writes[0];
+            expect(world.objectDataBuffer.impl.writes).to.have.lengthOf(1);
+            expect(write.offset, 'only the second row is uploaded').to.equal(OBJECT_DATA_U32S * 4);
+            expect(write.data).to.have.lengthOf(OBJECT_DATA_U32S);
+            const f32 = new Float32Array(write.data.buffer, write.data.byteOffset, write.data.length);
+            expect(f32[OBJECT_DATA.MAX_SCALE]).to.equal(3);
+            expect(f32[OBJECT_DATA.MATRIX_ROWS + 3]).to.equal(100);
+            expect(write.data[OBJECT_DATA.PRIMITIVE], 'untouched').to.equal(2);
+            expect(write.data[OBJECT_DATA.FIRST_PAIR_BIT], 'the second run\'s pairs').to.equal(MESHLETS);
+            world.destroy();
+        });
+
+        it('hides a sub-range of a placement through the flags word without a rebuild', function () {
+            const world = build(new MeshletWorld(device), makeResource(device, { instances: 3 }));
+            world.setPlacementHidden(0, true, 1, 2);
+            const flag = i => world.instanceFlags[i] & OBJECT_FLAG_HIDDEN;
+            expect([flag(0), flag(1), flag(2)]).to.deep.equal([0, OBJECT_FLAG_HIDDEN, OBJECT_FLAG_HIDDEN]);
+            world.setPlacementHidden(0, false);
+            expect([flag(0), flag(1), flag(2)]).to.deep.equal([0, 0, 0]);
+            world.destroy();
+        });
+
+        it('flags outlined instances and uploads only their flags words', function () {
+            const world = build(new MeshletWorld(device), makeResource(device, { instances: 4 }));
+            world.objectDataBuffer.impl.writes.length = 0;
+            const version = world.contentVersion;
+            world.setInstancesOutlined([3, 1]);
+            const flag = i => world.instanceFlags[i] & OBJECT_FLAG_OUTLINED;
+            expect([flag(0), flag(1), flag(2), flag(3)]).to.deep.equal([0, OBJECT_FLAG_OUTLINED, 0, OBJECT_FLAG_OUTLINED]);
+            expect(world.outlinedCount).to.equal(2);
+            const writes = world.objectDataBuffer.impl.writes;
+            expect(writes.map(w => w.offset)).to.deep.equal([1, 3].map(i => (i * OBJECT_DATA_U32S + OBJECT_DATA.FLAGS) * 4));
+            expect(writes.every(w => w.data.length === 1 && (w.data[0] & OBJECT_FLAG_OUTLINED))).to.equal(true);
+            expect(world.contentVersion, 'shadow maps do not depend on outlines').to.equal(version);
+            world.clearOutlines();
+            expect(world.outlinedCount).to.equal(0);
+            expect(flag(1) | flag(3)).to.equal(0);
+            world.destroy();
+        });
+
+        it('resolves pick ids to per-instance records', function () {
+            const world = build(new MeshletWorld(device), makeResource(device, { instances: 2 }), makeResource(device, { instances: 1 }));
+            const records = world.pickRecords;
+            expect(records).to.have.lengthOf(3);
+            expect(records.map(r => r.pickId)).to.deep.equal([world.pickIdBase, world.pickIdBase + 1, world.pickIdBase + 2]);
+            expect(records[2].placement).to.equal(world.placements[1]);
+            expect(records[2].instanceIndex).to.equal(2);
+            expect(world.pickRecords, 'cached').to.equal(records);
+            world.destroy();
+        });
+
+        it('swaps to the debug materials for colour modes and back to lit', function () {
+            const world = build(new MeshletWorld(device), makeResource(device, { instances: 1 }));
+            const lit = world.bucketMaterials;
+            expect(lit).to.equal(world.litMaterials);
+            world.setColorMode(MESHLET_COLOR_MODE.MESHLET);
+            expect(world.bucketMaterials).to.not.equal(lit);
+            expect(world.bucketMaterials).to.have.lengthOf(3);
+            world.setColorMode(MESHLET_COLOR_MODE.LIT);
+            expect(world.bucketMaterials).to.equal(lit);
+            world.destroy();
+        });
+
+        it('caps the index ceiling by the budget and by maxIndices', function () {
+            const world = build(new MeshletWorld(device), makeResource(device, { instances: 1 }));
+            world.deviceIndexCeiling = 1000;
+            world.indexBudgetTotal = 0;
+            world.maxIndices = 0;
+            expect(world.indexCeiling, 'device only').to.equal(1000);
+            world.indexBudgetTotal = 600;
+            expect(world.indexCeiling, 'budget pool').to.equal(600);
+            world.maxIndices = 500;
+            expect(world.indexCeiling, 'maxIndices lowers it').to.equal(500);
+            world.destroy();
+        });
+    });
+});

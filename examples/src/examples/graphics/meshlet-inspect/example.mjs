@@ -1,0 +1,790 @@
+// @config
+//
+// GPU-driven meshlet rendering (WebGPU only): a grid of Stanford bunnies, culled and LOD-selected
+// on the GPU every frame - instance frustum cull, per-cluster DAG cut (crack-free, screen-space
+// error driven), cone backface cull, GPU-generated index buffer, indirect draw. All bunnies share
+// one set of geometry pages. Colour by meshlet to watch the DAG cut coarsen with distance and the
+// error threshold. Click a bunny to select it (shift-click to add): the GPU picker identifies the
+// instance behind the pixel, and the same index outlines it. Untick "Meshlets" to draw the same
+// bunnies as ordinary meshes for comparison.
+//
+// @flag WEBGL_DISABLED
+
+import {
+    ADDRESS_CLAMP_TO_EDGE,
+    AppBase,
+    AppOptions,
+    Asset,
+    AssetListLoader,
+    CameraComponentSystem,
+    Color,
+    ContainerHandler,
+    CULLFACE_NONE,
+    Entity,
+    FILLMODE_FILL_WINDOW,
+    FILTER_LINEAR,
+    FOG_LINEAR,
+    FOG_NONE,
+    LAYERID_SKYBOX,
+    LAYERID_IMMEDIATE,
+    LAYERID_WORLD,
+    LightComponentSystem,
+    Mat4,
+    CameraFrame,
+    EVENT_MOUSEDOWN,
+    EVENT_MOUSEMOVE,
+    EVENT_MOUSEWHEEL,
+    Layer,
+    Mesh,
+    MeshInstance,
+    MESHLET_COLOR_MODE,
+    MeshletComponentSystem,
+    Mouse,
+    OutlineRenderer,
+    Picker,
+    PIXELFORMAT_BGRA8,
+    PIXELFORMAT_DEPTH,
+    Quat,
+    RESOLUTION_AUTO,
+    RenderComponentSystem,
+    RenderTarget,
+    StandardMaterial,
+    TEXTURETYPE_RGBP,
+    TONEMAP_LINEAR,
+    TRACEID_GPU_TIMINGS,
+    Texture,
+    TextureHandler,
+    Tracing,
+    Vec3,
+    createGraphicsDevice
+} from 'playcanvas';
+
+import { data, deviceType } from 'examples/context';
+
+const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
+window.focus();
+
+const assets = {
+    bunny: new Asset('bunny', 'container', { url: './assets/meshlets/bunny-v2.glb' }),
+    helipad: new Asset(
+        'helipad-env-atlas',
+        'texture',
+        { url: './assets/cubemaps/helipad-env-atlas.png' },
+        { type: TEXTURETYPE_RGBP, mipmaps: false }
+    )
+};
+
+// the example browser does not forward its query string to this iframe, so the top window's
+// params are merged in at lowest priority
+const params = new URLSearchParams(location.search);
+try {
+    new URLSearchParams(window.top.location.search).forEach((value, key) => {
+        if (!params.has(key)) params.set(key, value);
+    });
+} catch {
+    // cross-origin parent: this frame's own params only
+}
+
+// No backbuffer MSAA: anti-aliasing is chosen from the panel's AA dropdown and applied on the
+// CameraFrame's scene target instead, where it can change at runtime (the backbuffer's sample
+// count is fixed at device creation).
+const gfxOptions = {
+    deviceTypes: [deviceType],
+    antialias: false
+};
+
+const device = await createGraphicsDevice(canvas, gfxOptions);
+device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
+
+const createOptions = new AppOptions();
+createOptions.graphicsDevice = device;
+createOptions.componentSystems = [
+    RenderComponentSystem,
+    CameraComponentSystem,
+    LightComponentSystem,
+    MeshletComponentSystem
+];
+createOptions.resourceHandlers = [TextureHandler, ContainerHandler];
+
+const app = new AppBase(canvas);
+app.init(createOptions);
+
+app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
+app.setCanvasResolution(RESOLUTION_AUTO);
+
+const resize = () => app.resizeCanvas();
+window.addEventListener('resize', resize);
+app.on('destroy', () => {
+    window.removeEventListener('resize', resize);
+});
+
+await new Promise((resolve) => {
+    new AssetListLoader(Object.values(assets), app.assets).load(resolve);
+});
+
+app.start();
+
+const resource = assets.bunny.resource.meshlets[0];
+
+// fully resident: fetch all shards once, reused across rebuilds
+const shardBuffers = await Promise.all(
+    resource.manifest.blobs.map((blob) => fetch(`./assets/meshlets/${blob.uri}`).then((r) => r.arrayBuffer()))
+);
+
+const SPACING = 0.28;
+const buildInstances = (n) => {
+    const instances = [];
+    const m = new Mat4();
+    const pos = new Vec3();
+    const rot = new Quat();
+    const half = ((n - 1) * SPACING) / 2;
+    for (let x = 0; x < n; x++) {
+        for (let z = 0; z < n; z++) {
+            pos.set(x * SPACING - half, 0, z * SPACING - half);
+            rot.setFromEulerAngles(0, (x * 31 + z * 17) % 360, 0);
+            m.setTRS(pos, rot, Vec3.ONE);
+            instances.push({ primIndex: 0, matrix: new Float32Array(m.data) });
+        }
+    }
+    return instances;
+};
+
+// The finest DAG level of the bake is the source geometry: decode it from the resident pages
+// into an ordinary mesh for the non-meshlet comparison. Page layout as in meshlet-page-wgsl.js:
+// a 48-byte header, positions (u16x3 anchor-relative, or i32x3 when wide), oct16 normals, then
+// tangents, UVs and colours when the resource has them, the meshlet-vertex remap table and the
+// u8 triangle corner stream. (Layout constants are not exported from the engine.)
+const MESHLET_DATA_U32S = 32;
+const PAGE_TABLE_FIELDS = 8;
+const PAGE_HEADER_WORDS = 12;
+const PAGE_FLAG_WIDE_POSITIONS = 1 << 2;
+const decodeOct16 = (word, out, o) => {
+    const sx = ((word << 16) >> 16) / 32767;
+    const sy = (word >> 16) / 32767;
+    let x = sx,
+        y = sy;
+    const z = 1 - Math.abs(sx) - Math.abs(sy);
+    if (z < 0) {
+        x = (1 - Math.abs(sy)) * (sx >= 0 ? 1 : -1);
+        y = (1 - Math.abs(sx)) * (sy >= 0 ? 1 : -1);
+    }
+    const len = Math.hypot(x, y, z) || 1;
+    out[o] = x / len;
+    out[o + 1] = y / len;
+    out[o + 2] = z / len;
+};
+const decodeFinestMesh = () => {
+    const { manifest } = resource;
+    const layout = manifest.attributeLayout;
+    const uvFloats = (layout.uvComponents ?? 0) * 2;
+    const { origin, step } = manifest.positionGrid;
+    const pageWords = new Map();
+    const pageOf = (page) => {
+        let words = pageWords.get(page);
+        if (!words) {
+            const t = page * PAGE_TABLE_FIELDS;
+            const blob = manifest.pageTable[t];
+            const offset = manifest.pageTable[t + 1] + manifest.pageTable[t + 2] * 2 ** 32;
+            words = new Uint32Array(shardBuffers[blob], offset, manifest.pageTable[t + 3] / 4);
+            pageWords.set(page, words);
+        }
+        return words;
+    };
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const n = [0, 0, 0];
+    for (const prim of resource.primitives) {
+        const records = prim.meshletData;
+        for (let m = 0; m < prim.meshletCount; m++) {
+            const r = m * MESHLET_DATA_U32S;
+            if (records[r + 22] !== 0) continue; // lodLevel: 0 is the source geometry
+            const words = pageOf(records[r + 23]);
+            const vertexCount = words[2];
+            const wide = (words[5] & PAGE_FLAG_WIDE_POSITIONS) !== 0;
+            const normalBase = PAGE_HEADER_WORDS + vertexCount * (wide ? 3 : 2);
+            const remapBase =
+                normalBase + vertexCount * (1 + (layout.tangents ? 1 : 0) + uvFloats + (layout.colors ? 1 : 0));
+            const cornerByte = (remapBase + words[6]) * 4 + records[r + 3];
+            const bytes = new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
+            const first = positions.length / 3;
+            for (let v = 0; v < records[r + 2]; v++) {
+                const pv = words[remapBase + records[r] + v];
+                let x, y, z;
+                if (wide) {
+                    const b = PAGE_HEADER_WORDS + pv * 3;
+                    x = words[b] | 0;
+                    y = words[b + 1] | 0;
+                    z = words[b + 2] | 0;
+                } else {
+                    const b = PAGE_HEADER_WORDS + pv * 2;
+                    x = (words[7] | 0) + (words[b] & 0xffff);
+                    y = (words[8] | 0) + (words[b] >>> 16);
+                    z = (words[9] | 0) + (words[b + 1] & 0xffff);
+                }
+                positions.push(x * step + origin[0], y * step + origin[1], z * step + origin[2]);
+                decodeOct16(words[normalBase + pv], n, 0);
+                normals.push(n[0], n[1], n[2]);
+            }
+            for (let c = 0; c < records[r + 1] * 3; c++) indices.push(first + bytes[cornerByte + c]);
+        }
+    }
+    const mesh = new Mesh(device);
+    mesh.setPositions(positions);
+    mesh.setNormals(normals);
+    mesh.setIndices(indices);
+    mesh.update();
+    // held here: the grid's mesh instances come and go with each rebuild, and the last one
+    // destroyed would otherwise destroy the shared mesh
+    mesh.incRefCount();
+    return { mesh, triangles: indices.length / 3 };
+};
+
+/** @type {{ mesh: Mesh, triangles: number }|null} */
+let plainBunny = null;
+const plainRoot = new Entity('PlainBunnies');
+app.root.addChild(plainRoot);
+const plainMaterial = new StandardMaterial();
+plainMaterial.diffuse.fromArray(resource.primitives[0].baseColorFactor);
+plainMaterial.gloss = 0.4;
+// the same face culling the meshlet draw buckets apply
+if (resource.materialTable && resource.materialTable[11] & 1) plainMaterial.cull = CULLFACE_NONE;
+plainMaterial.update();
+
+/**
+ * Rebuilds the grid of ordinary mesh bunnies: n x n render components sharing one mesh, laid out
+ * as the meshlet instances are. n = 0 removes them.
+ *
+ * @param {number} n - Bunnies per side.
+ */
+const buildPlainGrid = (n) => {
+    while (plainRoot.children.length) plainRoot.children[0].destroy();
+    if (!n) return;
+    plainBunny ??= decodeFinestMesh();
+    for (const { matrix } of buildInstances(n)) {
+        const entity = new Entity();
+        const m = new Mat4();
+        m.data.set(matrix);
+        entity.setLocalPosition(m.getTranslation());
+        entity.setLocalEulerAngles(m.getEulerAngles());
+        entity.addComponent('render', { meshInstances: [new MeshInstance(plainBunny.mesh, plainMaterial)] });
+        plainRoot.addChild(entity);
+    }
+};
+
+// the component system owns the director (and wires the KTX2 transcoder); this example
+// drives the director directly instead of adding meshlet components
+const director = app.systems.meshlet.director;
+director.world.initialIndices = 1024 * 1024;
+
+// ?opaque=1 clears the material's doubleSided flag, moving the asset from the two-sided bucket
+// to the fully opaque one. The bunny is a closed solid, so backface culling is safe; this
+// compares the fragment cost of the two buckets.
+if (params.get('opaque') === '1' && resource.materialTable) {
+    // baked material records - MATERIAL_RECORD_U32S words per row, flags word, double-sided
+    // bit (src/scene/meshlet/constants.js; the constants are not exported from the engine)
+    const MATERIAL_RECORD_U32S = 32;
+    const MATERIAL_RECORD_FLAGS = 11;
+    const MATERIAL_FLAG_DOUBLE_SIDED = 1;
+    for (let row = 0; row < resource.materialCount; row++) {
+        resource.materialTable[row * MATERIAL_RECORD_U32S + MATERIAL_RECORD_FLAGS] &= ~MATERIAL_FLAG_DOUBLE_SIDED;
+    }
+}
+
+// ?timers=1 logs per-pass GPU timings to the console (dev build only)
+if (params.get('timers') === '1') {
+    Tracing.set(TRACEID_GPU_TIMINGS, true);
+    device.gpuProfiler.enabled = true;
+}
+
+data.set('data', {
+    meshlets: params.get('meshlets') !== '0',
+    gridSize: parseInt(params.get('grid') ?? '8', 10),
+    colorMode: Number(params.get('color') ?? MESHLET_COLOR_MODE.LIT),
+    threshold: parseFloat(params.get('threshold') ?? '1'),
+    sunLight: params.get('lights') !== '0' && params.get('sun') !== '0',
+    spotLight: params.get('lights') !== '0' && params.get('spot') !== '0',
+    omniLights: params.get('lights') !== '0' && params.get('omni') !== '0',
+    ibl: params.get('ibl') !== '0',
+    fog: params.get('fog') ?? 'none',
+    secondView: params.get('view2') === '1',
+    selection: '',
+    shadows: params.get('meshletshadows') !== '0',
+    aaMode: 'none',
+    // geometry VRAM budget in MB (0 = unbudgeted: every page resident, indices sized to demand)
+    // and the share of it, after fixed and per-view costs, given to the draw index buffers
+    geoBudget: parseInt(params.get('budget') ?? '0', 10),
+    indexShare: parseFloat(params.get('indexShare') ?? '0.35'),
+    budgetStats: ''
+});
+
+// meshlet shadow casting is opt-in per scene (one single-phase cull chain per cascade)
+director.shadowsEnabled = true;
+// 3 cascades + two omnis at six faces each + one spot
+director.shadowRenderer.maxShadowViews = 24;
+director.shadowBudgetCascades = 16;
+const numCascades = Math.max(1, Math.min(4, parseInt(params.get('cascades') ?? '1', 10)));
+
+let builtSize = 0;
+let builtMeshlets = true;
+let builtBudget = '';
+let gridExtent = 1;
+const budgetKey = () => `${data.get('data.geoBudget')}:${data.get('data.indexShare')}`;
+const MB = 1024 * 1024;
+const rebuild = (n) => {
+    const meshlets = !!data.get('data.meshlets');
+    builtSize = n;
+    builtMeshlets = meshlets;
+    builtBudget = budgetKey();
+    gridExtent = Math.max(n, 2) * SPACING;
+    // one of the two at a time: the meshlet world, or the ordinary meshes. The budget is
+    // resolved when the world is built, so a budget change rebuilds it too.
+    director.rebuild((world) => {
+        world.poolBytes = Math.max(0, Math.round(data.get('data.geoBudget'))) * MB;
+        world.indexBudgetFraction = data.get('data.indexShare');
+        if (meshlets) world.addResource(resource, null, shardBuffers, buildInstances(n));
+    });
+    buildPlainGrid(meshlets ? 0 : n);
+    const b = director.world.budgetBreakdown;
+    data.set(
+        'data.budgetStats',
+        b
+            ? `fixed ${(b.fixed / MB).toFixed(0)} + views ${(b.perView / MB).toFixed(0)} + pages ${(b.pagePool / MB).toFixed(0)} + indices ${(b.indices / MB).toFixed(0)} + records ${(b.records / MB).toFixed(0)} + queue ${(b.cutQueue / MB).toFixed(0)} MB`
+            : 'unbudgeted'
+    );
+};
+rebuild(data.get('data.gridSize'));
+
+const camera = new Entity();
+camera.addComponent('camera', {
+    clearColor: new Color(0.08, 0.09, 0.11),
+    nearClip: 0.01,
+    farClip: 500
+});
+app.root.addChild(camera);
+director.cameraComponent = camera.camera;
+
+// second view: an independent camera parked close to a corner of the grid, rendering into a
+// texture shown as an inset - its own LOD cut (finer, it is nearer) and visibility state,
+// streaming served by the shared world
+const view2Color = new Texture(device, {
+    name: 'View2Color',
+    width: 512,
+    height: 384,
+    format: PIXELFORMAT_BGRA8,
+    mipmaps: false,
+    minFilter: FILTER_LINEAR,
+    magFilter: FILTER_LINEAR,
+    addressU: ADDRESS_CLAMP_TO_EDGE,
+    addressV: ADDRESS_CLAMP_TO_EDGE
+});
+const view2Depth = new Texture(device, {
+    name: 'View2Depth',
+    width: 512,
+    height: 384,
+    format: PIXELFORMAT_DEPTH,
+    mipmaps: false
+});
+const view2Target = new RenderTarget({ colorBuffer: view2Color, depthBuffer: view2Depth });
+const camera2 = new Entity('View2Camera');
+camera2.addComponent('camera', {
+    clearColor: new Color(0.05, 0.08, 0.06),
+    nearClip: 0.01,
+    farClip: 500,
+    priority: -1,
+    // no UI layer - the inset plane samples this camera's output and must not be drawn by it
+    layers: [LAYERID_WORLD, LAYERID_SKYBOX]
+});
+camera2.camera.renderTarget = view2Target;
+camera2.enabled = false;
+app.root.addChild(camera2);
+
+// inset display: an unlit plane parented to the main camera
+const insetMaterial = new StandardMaterial();
+insetMaterial.useLighting = false;
+insetMaterial.emissiveMap = view2Color;
+insetMaterial.emissive.set(1, 1, 1);
+insetMaterial.diffuse.set(0, 0, 0);
+insetMaterial.update();
+const inset = new Entity('View2Inset');
+inset.addComponent('render', {
+    type: 'plane',
+    material: insetMaterial,
+    castShadows: false,
+    layers: [LAYERID_IMMEDIATE]
+});
+inset.enabled = false;
+app.root.addChild(inset);
+
+// engine lighting: IBL env atlas + a shadowed sun + two orbiting point lights (clustered)
+app.scene.envAtlas = assets.helipad.resource;
+app.scene.skyboxIntensity = 0.6;
+app.scene.ambientLight = new Color(0.03, 0.03, 0.035);
+
+const sun = new Entity('Sun');
+sun.addComponent('light', {
+    type: 'directional',
+    color: new Color(1, 0.96, 0.88),
+    intensity: 1.6,
+    castShadows: true,
+    shadowBias: 0.05,
+    normalOffsetBias: 0.02,
+    shadowDistance: 12,
+    shadowResolution: 2048,
+    numCascades: numCascades
+});
+sun.setEulerAngles(48, 35, 0);
+app.root.addChild(sun);
+
+// ?localshadows=0 turns the point/spot shadows off. An omni light costs six meshlet shadow views,
+// one cull chain per cube face.
+const localShadows = params.get('localshadows') !== '0';
+
+const makeOmni = (color) => {
+    const e = new Entity('Omni');
+    e.addComponent('light', {
+        type: 'omni',
+        color: color,
+        intensity: 1.2,
+        range: 2.5,
+        castShadows: localShadows,
+        shadowBias: 0.05,
+        normalOffsetBias: 0.02,
+        shadowResolution: 512
+    });
+    app.root.addChild(e);
+    return e;
+};
+
+// a spot light for the single-face local case
+const spot = new Entity('Spot');
+spot.addComponent('light', {
+    type: 'spot',
+    color: new Color(0.6, 1, 0.7),
+    intensity: 4,
+    range: 8,
+    innerConeAngle: 14,
+    outerConeAngle: 24,
+    castShadows: localShadows,
+    shadowBias: 0.05,
+    normalOffsetBias: 0.02,
+    shadowResolution: 1024
+});
+app.root.addChild(spot);
+const omniA = makeOmni(new Color(1.0, 0.35, 0.2));
+const omniB = makeOmni(new Color(0.2, 0.5, 1.0));
+
+// receiver plane: without one the only evidence of meshlet shadows is bunny-on-bunny
+// self-shadowing, which is too subtle to diff. ?ground=0 removes it.
+if (params.get('ground') !== '0') {
+    const groundMaterial = new StandardMaterial();
+    groundMaterial.diffuse.set(0.62, 0.62, 0.66);
+    groundMaterial.useMetalness = true;
+    groundMaterial.metalness = 0;
+    groundMaterial.gloss = 0.2;
+    groundMaterial.update();
+    const ground = new Entity('Ground');
+    ground.addComponent('render', { type: 'plane', material: groundMaterial, castShadows: false });
+    ground.setLocalScale(60, 1, 60);
+    ground.setLocalPosition(0, -0.001, 0);
+    app.root.addChild(ground);
+}
+
+// reference StandardMaterial sphere - lit meshlets must match this shading
+const refMaterial = new StandardMaterial();
+refMaterial.diffuse.set(1, 1, 1);
+refMaterial.useMetalness = true;
+refMaterial.metalness = 0;
+refMaterial.gloss = 0;
+refMaterial.update();
+const refSphere = new Entity('RefSphere');
+refSphere.addComponent('render', { type: 'sphere', material: refMaterial, castShadows: true });
+refSphere.setLocalScale(0.12, 0.12, 0.12);
+refSphere.setLocalPosition(0, 0.3, 0);
+app.root.addChild(refSphere);
+
+// The camera renders through a CameraFrame (bloom/tonemap post chain). A camera with frame
+// passes never reaches the renderer's render-action path, so the meshlet passes are spliced
+// into the CameraFrame's own scene chain instead - see MeshletDirectorGroup#buildCameraFramePasses.
+// ?cameraframe=0 drops it to exercise the raw render-action path (no post, no AA dropdown).
+//
+// Anti-aliasing comes from the panel's AA dropdown, applied on the CameraFrame's scene target.
+// MSAA is expensive here: meshlet geometry is dense, so most pixels sit on a triangle edge and
+// shade several samples. TAA pays a flat post-process cost instead.
+let cameraFrame = null;
+if (params.get('cameraframe') !== '0') {
+    cameraFrame = new CameraFrame(app, camera.camera);
+    cameraFrame.rendering.toneMapping = TONEMAP_LINEAR;
+    // off by default - even a subtle bloom reads as a washed-out veil over this bright scene
+    cameraFrame.bloom.enabled = false;
+    // No sceneDepthMap request: that forces the depth prepass, and a camera with a prepass
+    // cannot also render the scene depth from its scene pass - which is what the meshlet HZB
+    // reads under a CameraFrame. ?occlusion=1 below asks the frame for it through the director.
+    cameraFrame.update();
+}
+
+// ?occlusion=1 turns on two-phase HZB occlusion. Under the CameraFrame the director asks the
+// frame to render the linear scene depth as an extra attachment and builds its pyramid from
+// that; without one it needs a render target with a depth texture.
+director.occlusionEnabled = params.get('occlusion') === '1';
+
+// the choices are None / TAA / MSAA 4x
+const applyAaMode = () => {
+    if (!cameraFrame) return;
+    const mode = data.get('data.aaMode') ?? 'none';
+    cameraFrame.taa.enabled = mode === 'taa';
+    cameraFrame.rendering.samples = mode === 'msaa' ? 4 : 1;
+    // counteract TAA's blur; leave the image untouched otherwise
+    cameraFrame.rendering.sharpness = mode === 'taa' ? 0.5 : 0;
+    cameraFrame.update();
+};
+data.on('data.aaMode:set', applyAaMode);
+applyAaMode();
+
+// Click to select. The GPU picker returns a per-instance record (one primitive at one transform),
+// and that instance index is what selects it for outlining.
+//
+// Meshlet mesh instances live outside the layer system, so both halves are wired by hand: the
+// picker gets them from MeshletDirector#preparePicking, and the outline renderer gets the whole
+// geometry once, on a layer the scene camera does not render, with a per-instance flag deciding
+// what rasterises. The reference sphere goes through OutlineRenderer#addEntity, in a different
+// colour, so the two paths can be told apart.
+const outlineLayer = new Layer({ name: 'MeshletOutline' });
+app.scene.layers.push(outlineLayer);
+const outlineRenderer = new OutlineRenderer(app, outlineLayer);
+director.setOutlineLayer(outlineLayer, new Color(1, 0.6, 0.1), new Color(1, 1, 1));
+
+const picker = new Picker(app, 512, 320);
+const worldLayer = app.scene.layers.getLayerByName('World');
+let sphereSelected = false;
+let sphereHovered = false;
+
+/** @type {Set<number>} - selected meshlet instance indices. */
+const selection = new Set();
+/** @type {number} - hovered meshlet instance, or -1. */
+let hovered = -1;
+
+const applySelection = () => {
+    director.clearOutlines();
+    director.clearOutlines(true);
+    if (selection.size) director.setOutlined([...selection]);
+    // hover is a separate flag with its own colour, so hovering never disturbs the selection
+    if (hovered >= 0 && !selection.has(hovered)) director.setHovered([hovered]);
+
+    // OutlineRenderer colours per entity, so the sphere re-registers to change colour
+    if (sphereSelected || sphereHovered) {
+        outlineRenderer.addEntity(refSphere, sphereSelected ? new Color(0.2, 0.8, 1) : Color.WHITE);
+    } else {
+        outlineRenderer.removeEntity(refSphere);
+    }
+
+    const parts = [];
+    if (selection.size) parts.push(`${selection.size} meshlet instance${selection.size > 1 ? 's' : ''}`);
+    if (sphereSelected) parts.push('sphere');
+    const sel = parts.length ? parts.join(' + ') : 'nothing';
+    const hov = hovered >= 0 ? `instance ${hovered}` : sphereHovered ? 'sphere' : 'none';
+    data.set('data.selection', `${sel}  (hover: ${hov})`);
+};
+
+// A click cannot pick immediately: the meshlet draw is indirect, and its arguments are written by
+// the cull at the start of each frame, so a picker prepared during input handling finds nothing.
+// The request is queued and serviced from postrender, once the frame's cull has run.
+/** @type {{ x: number, y: number, add: boolean, resolve: Function }|null} */
+let pendingPick = null;
+
+let pickBusy = false;
+
+app.on('postrender', () => {
+    if (!pendingPick || pickBusy) return;
+    const { x, y, add, hover, resolve } = pendingPick;
+    pendingPick = null;
+    pickBusy = true;
+
+    // the picker renders at its own resolution, so scale the canvas coordinate into it
+    const sx = Math.floor((x / canvas.clientWidth) * picker.width);
+    const sy = Math.floor((y / canvas.clientHeight) * picker.height);
+    picker.prepare(camera.camera, app.scene);
+    picker
+        .getSelectionAsync(sx, sy, 1, 1)
+        .then((hits) => {
+            pickBusy = false;
+            const hit = hits[0];
+            let description = 'nothing';
+
+            if (hover) {
+                hovered = hit?.resource ? hit.instanceIndex : -1;
+                sphereHovered = hit?.node === refSphere;
+                if (hit?.resource) description = `meshlet instance ${hit.instanceIndex}`;
+                else if (sphereHovered) description = 'reference sphere';
+            } else {
+                if (!add) {
+                    selection.clear();
+                    sphereSelected = false;
+                }
+                if (hit?.resource) {
+                    // a meshlet: the record says which instance, and which primitive of the resource
+                    if (selection.has(hit.instanceIndex)) selection.delete(hit.instanceIndex);
+                    else selection.add(hit.instanceIndex);
+                    description = `meshlet instance ${hit.instanceIndex}, primitive ${hit.primIndex}`;
+                } else if (hit?.node === refSphere) {
+                    sphereSelected = !sphereSelected;
+                    description = 'reference sphere (an ordinary mesh)';
+                }
+            }
+            applySelection();
+            resolve(description);
+        })
+        .catch(() => {
+            pickBusy = false;
+            resolve('pick failed');
+        });
+});
+
+/**
+ * Queues a pick at a canvas coordinate; resolves once the selection has been updated.
+ *
+ * @param {number} x - Canvas x, in CSS pixels.
+ * @param {number} y - Canvas y, in CSS pixels.
+ * @param {boolean} [add] - True to add to the selection rather than replace it.
+ * @param {boolean} [hover] - True to update the hover highlight instead of the selection.
+ * @returns {Promise<string>} What was hit.
+ */
+const selectAt = (x, y, add = false, hover = false) =>
+    new Promise((resolve) => {
+        // a click supersedes a queued hover, never the other way round
+        if (pendingPick && hover && !pendingPick.hover) {
+            resolve('skipped');
+            return;
+        }
+        pendingPick?.resolve('superseded');
+        pendingPick = { x, y, add, hover, resolve };
+    });
+
+const mouse = new Mouse(canvas);
+mouse.on(EVENT_MOUSEDOWN, (event) => {
+    selectAt(event.x, event.y, event.shiftKey || event.ctrlKey || event.metaKey);
+});
+// wheel zooms the orbiting camera in and out: scales its orbit radius and height
+let zoom = 1;
+mouse.on(EVENT_MOUSEWHEEL, (event) => {
+    zoom = Math.min(Math.max(zoom * (event.wheelDelta > 0 ? 1.1 : 1 / 1.1), 0.01), 4);
+    event.event.preventDefault();
+});
+// hover: one pick per frame at most, and only when the pointer has actually moved
+let hoverX = -1;
+let hoverY = -1;
+mouse.on(EVENT_MOUSEMOVE, (event) => {
+    if (event.x === hoverX && event.y === hoverY) return;
+    hoverX = event.x;
+    hoverY = event.y;
+    selectAt(event.x, event.y, false, true);
+});
+canvas.addEventListener('pointerleave', () => {
+    if (hovered < 0 && !sphereHovered) return;
+    hovered = -1;
+    sphereHovered = false;
+    applySelection();
+});
+
+app.on('update', () => outlineRenderer.frameUpdate(camera, worldLayer, true));
+applySelection();
+
+// ?freeze=<seconds> stops the animation at a fixed time for reproducible screenshots
+const freezeAt = params.has('freeze') ? parseFloat(params.get('freeze')) : -1;
+
+let angle = 0;
+let time = 0;
+let sizeChangedAt = -1;
+
+app.on('update', (dt) => {
+    // clamp the final step so `time` lands on freezeAt: everything animated is a function of
+    // accumulated time, so two runs produce identical frames whatever the real frame times
+    if (freezeAt >= 0) dt = Math.max(Math.min(dt, freezeAt - time), 0);
+    time += dt;
+
+    // debounce the grid and budget sliders - a change rebuilds the world
+    const wanted = Math.round(data.get('data.gridSize'));
+    if (!!data.get('data.meshlets') !== builtMeshlets) {
+        sizeChangedAt = -1;
+        rebuild(wanted);
+    } else if (wanted !== builtSize || budgetKey() !== builtBudget) {
+        if (sizeChangedAt < 0) sizeChangedAt = time;
+        if (time - sizeChangedAt > 0.35) {
+            sizeChangedAt = -1;
+            rebuild(wanted);
+        }
+    } else {
+        sizeChangedAt = -1;
+    }
+
+    angle += dt * 0.15;
+    const r = gridExtent * (0.55 + 0.25 * Math.sin(angle * 0.6)) * zoom;
+    const height = gridExtent * 0.35 * zoom;
+    camera.setLocalPosition(Math.sin(angle) * r, height, Math.cos(angle) * r);
+    camera.lookAt(0, 0.06, 0);
+    camera.camera.farClip = Math.max(500, (Math.hypot(r, height) + gridExtent) * 1.5);
+
+    // orbit the point lights through the grid
+    omniA.setLocalPosition(Math.sin(time * 0.7) * gridExtent * 0.4, 0.25, Math.cos(time * 0.7) * gridExtent * 0.4);
+    omniB.setLocalPosition(Math.cos(time * 0.5) * gridExtent * 0.3, 0.15, Math.sin(time * 0.5) * gridExtent * 0.3);
+
+    // per-type toggles so the cost of each light type can be measured on its own. Note the
+    // draw cost keeps climbing for tens of seconds after a load or rebuild while pages stream
+    // in and the LOD refines - compare toggles only once the frame time has settled.
+    sun.enabled = !!data.get('data.sunLight');
+    spot.enabled = !!data.get('data.spotLight');
+    const omnisOn = !!data.get('data.omniLights');
+    omniA.enabled = omnisOn;
+    omniB.enabled = omnisOn;
+    // sweep the spot across the grid rather than around it: a small orbit high above the
+    // bunnies, aimed at a point circling the other way
+    const spotAngle = time * 0.35;
+    spot.setLocalPosition(
+        Math.cos(spotAngle) * gridExtent * 0.18,
+        gridExtent * 0.9,
+        Math.sin(spotAngle) * gridExtent * 0.18
+    );
+    spot.lookAt(
+        Math.cos(spotAngle + Math.PI) * gridExtent * 0.3,
+        0.05,
+        Math.sin(spotAngle + Math.PI) * gridExtent * 0.3
+    );
+    // lookAt aims the entity's -Z at the target, but a spot light emits down its -Y
+    spot.rotateLocal(90, 0, 0);
+    sun.light.shadowDistance = gridExtent * 2.5;
+    app.scene.envAtlas = data.get('data.ibl') ? assets.helipad.resource : null;
+
+    const fogMode = data.get('data.fog');
+    app.scene.fog.type = fogMode === 'linear' ? FOG_LINEAR : FOG_NONE;
+    if (fogMode === 'linear') {
+        app.scene.fog.color = new Color(0.08, 0.09, 0.11);
+        app.scene.fog.start = gridExtent * 0.3;
+        app.scene.fog.end = gridExtent * 1.6;
+    }
+
+    // second-view toggle: two cameras -> two independent views on one director
+    const wantView2 = !!data.get('data.secondView');
+    if (wantView2 !== camera2.enabled) {
+        camera2.enabled = wantView2;
+        inset.enabled = wantView2;
+        director.cameras = wantView2 ? [camera.camera, camera2.camera] : [camera.camera];
+    }
+    if (wantView2) {
+        const half = ((builtSize - 1) * SPACING) / 2;
+        camera2.setLocalPosition(half + 0.35, 0.18, half + 0.35);
+        camera2.lookAt(half, 0.08, half);
+        // billboard screen standing on the far side of the grid (opposite the orbiting
+        // camera), always in frame and always facing it
+        const d = gridExtent * 0.62;
+        inset.setLocalScale(gridExtent * 0.42, 1, gridExtent * 0.32);
+        inset.setLocalPosition(-Math.sin(angle) * d, gridExtent * 0.16, -Math.cos(angle) * d);
+        // lookAt points the entity's -Z at the camera; the plane's face is +Y, so pitch
+        // it -90 to bring the face onto -Z (toward the camera)
+        inset.lookAt(camera.getPosition());
+        inset.rotateLocal(-90, 0, 0);
+    }
+
+    director.dagPixelThreshold = data.get('data.threshold');
+    director.world.setColorMode(data.get('data.colorMode'));
+    director.shadowsEnabled = !!data.get('data.shadows');
+});

@@ -19,6 +19,7 @@ import { Vec4 } from '../../core/math/vec4.js';
  * @import { CameraFrame } from './camera-frame.js'
  * @import { CameraFrameEffect, CameraFrameEffectContext, CameraFrameEffectDepth, CameraFrameEffectPasses, CameraFrameEffectResources, CameraFrameEffectScene } from './camera-frame-effect.js'
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
+ * @import { RenderPass } from '../../platform/graphics/render-pass.js'
  */
 
 /**
@@ -66,6 +67,20 @@ class CameraFrameOptions {
 
 // the formats the scene depth can be rendered to, in the order of preference
 const _sceneDepthFormats = [PIXELFORMAT_R32F, PIXELFORMAT_R16F];
+
+/**
+ * Sets the scale a pass resizes its render target by, when it resizes it.
+ *
+ * @param {RenderPass|null} pass - The pass.
+ * @param {number} scaleX - The horizontal scale.
+ * @param {number} scaleY - The vertical scale.
+ */
+const setPassScale = (pass, scaleX, scaleY) => {
+    if (pass?.options) {
+        pass.scaleX = scaleX;
+        pass.scaleY = scaleY;
+    }
+};
 
 /**
  * Render pass implementation of a common camera frame rendering with integrated post-processing
@@ -119,6 +134,23 @@ class FramePassCameraFrame extends FramePass {
      * @private
      */
     _stagePasses = { preScene: [], postOpaque: [], postScene: [], resolve: [], postResolve: [] };
+
+    /**
+     * Meshlet passes spliced into the scene chain when the meshlet director is driving this
+     * camera: the phase-1 draw (which owns the clear), and the HZB + phase-2 group that has to
+     * land between the opaque and transparent scene layers. Owned by the director, not here.
+     *
+     * @type {{ before: FramePass[], middle: FramePass[] }|null}
+     */
+    meshletPasses = null;
+
+    /**
+     * The scene layers rendered after the meshlet phase-2 passes, from the first transparent
+     * layer of the scene pass on, when the meshlet passes split it.
+     *
+     * @type {RenderPassForward|null}
+     */
+    scenePassAfterMeshlets = null;
 
     _renderTargetScale = 1;
 
@@ -277,9 +309,13 @@ class FramePassCameraFrame extends FramePass {
             }
         }
 
+        // the meshlet passes are borrowed: the meshlet director owns them and splices the same
+        // instances into the next chain, so destroying them here would break the rebuilt frame
+        const borrowedPasses = new Set([...(this.meshletPasses?.before ?? []), ...(this.meshletPasses?.middle ?? [])]);
+
         // destroy all other passes we created
         this.beforePasses.forEach((pass) => {
-            if (!effectPasses.has(pass)) {
+            if (!effectPasses.has(pass) && !borrowedPasses.has(pass)) {
                 pass.destroy();
             }
         });
@@ -288,8 +324,15 @@ class FramePassCameraFrame extends FramePass {
         this.prePass = null;
         this.scenePass = null;
         this.scenePassTransparent = null;
+        // destroyed with the other passes above; a rebuild without meshlet phase-2 passes would
+        // otherwise keep scheduling it, rendering into the destroyed scene render target
+        this.scenePassAfterMeshlets = null;
+        this.meshletPasses = null;
         this.colorGrabPass = null;
         this.composePass = null;
+        // the compose pass is recreated with default (clearing) ops, so the partial-viewport state
+        // that configured them on the previous pass is stale and must be re-applied
+        this._outputViewportPartial = null;
         this.afterPass = null;
         this.scenePassHalf = null;
 
@@ -321,8 +364,13 @@ class FramePassCameraFrame extends FramePass {
         // losslessly packed, and the effects consuming it are sensitive to that.
         const requiresSplatDepth = inSceneDepth || this.sceneDepthFormat !== PIXELFORMAT_R32F;
 
-        options.sceneTextureDepth = postProcessDepth && deviceSupported && !unsupportedReason &&
-            (!requiresSplatDepth || splatDepth);
+        // The meshlet director's two-phase occlusion builds its HZB from the scene depth when the
+        // scene target has no depth texture of its own - which a CameraFrame's never has. It asks
+        // for the depth here and marks this pass for rebuild whenever its answer changes.
+        const meshletDepth = !!this.app.renderer.meshletDirector?.wantsSceneDepth(this.cameraComponent);
+
+        options.sceneTextureDepth = (meshletDepth || (postProcessDepth && (!requiresSplatDepth || splatDepth))) &&
+            deviceSupported && !unsupportedReason;
 
         options.prepassEnabled = inSceneDepth || (postProcessDepth && !options.sceneTextureDepth);
 
@@ -485,6 +533,10 @@ class FramePassCameraFrame extends FramePass {
      * The passes rendering the scene render to the whole of it, ignoring the camera's viewport,
      * and the passes after them follow its size.
      *
+     * Every pass resizing the scene render target gets the same scale. The passes copy the options
+     * they are initialized with, so one left on an earlier scale would resize the shared render
+     * target back each frame.
+     *
      * @private
      */
     updateSceneScale() {
@@ -497,6 +549,11 @@ class FramePassCameraFrame extends FramePass {
         if (options) {
             options.scaleX = scaleX;
             options.scaleY = scaleY;
+
+            // the prepass renders at the size of the scene pass
+            setPassScale(this.prePass, scaleX, scaleY);
+            setPassScale(this.scenePass, scaleX, scaleY);
+            setPassScale(this.scenePassAfterMeshlets, scaleX, scaleY);
         }
 
         // the passes copy their options when they are initialized, so the ones already created are
@@ -721,7 +778,11 @@ class FramePassCameraFrame extends FramePass {
         return [
             this.prePass,
             ...stagePasses.preScene,
-            this.scenePass, this.colorGrabPass,
+            ...(this.meshletPasses?.before ?? []),
+            this.scenePass,
+            ...(this.meshletPasses?.middle ?? []),
+            this.scenePassAfterMeshlets,
+            this.colorGrabPass,
             ...stagePasses.postOpaque,
             this.scenePassTransparent,
             ...stagePasses.postScene,
@@ -786,9 +847,12 @@ class FramePassCameraFrame extends FramePass {
      * layers till the end of the layer list are added.
      * @param {boolean} [lastLayerIsTransparent] - True if the last layer to be added is transparent.
      * Defaults to true.
+     * @param {boolean} [stopBeforeTransparent] - Stop at the first transparent sub-layer the
+     * camera renders, without adding it. Used to split the scene pass so the meshlet HZB and
+     * phase-2 draw can run once opaque depth is complete but before anything blends over it.
      * @returns {number} Returns the index of last layer added.
      */
-    addCameraLayers(renderPass, startIndex, firstLayerClears, lastLayerId, lastLayerIsTransparent = true) {
+    addCameraLayers(renderPass, startIndex, firstLayerClears, lastLayerId, lastLayerIsTransparent = true, stopBeforeTransparent = false) {
 
         const camera = this.cameraComponent.camera;
         const { layerList, subLayerList } = renderPass.layerComposition;
@@ -799,6 +863,10 @@ class FramePassCameraFrame extends FramePass {
 
             const layer = layerList[index];
             const isTransparent = subLayerList[index];
+
+            if (stopBeforeTransparent && isTransparent && camera.layersSet.has(layer.id)) {
+                break;
+            }
 
             // add it for rendering if the camera renders it
             if (camera.layersSet.has(layer.id)) {
@@ -847,8 +915,45 @@ class FramePassCameraFrame extends FramePass {
             clearRenderTarget: true     // true if the render target should be cleared
         };
 
-        ret.lastAddedIndex = this.addCameraLayers(this.scenePass, ret.lastAddedIndex, ret.clearRenderTarget, lastLayerId, lastLayerIsTransparent);
+        // the meshlet middle passes split this pass in two at its first transparent layer
+        this.meshletPasses = app.renderer.meshletDirector?.buildCameraFramePasses(
+            this.cameraComponent, this.rt, ret.clearRenderTarget) ?? null;
+        if (this.meshletPasses) {
+            ret.clearRenderTarget = false;      // the meshlet phase-1 pass cleared
+
+            // the meshlet draws render into the scene target alongside the scene passes, so they
+            // take the same settings; they are the meshlet passes declaring scene textures (checked
+            // by property so the meshlet pass classes are not pulled into every CameraFrame build)
+            for (const pass of [...this.meshletPasses.before, ...this.meshletPasses.middle]) {
+                if ('sceneTextures' in pass) {
+                    this.setupScenePassSettings(pass);
+                }
+            }
+        }
+
+        ret.lastAddedIndex = this.addCameraLayers(this.scenePass, ret.lastAddedIndex, ret.clearRenderTarget,
+            lastLayerId, lastLayerIsTransparent, !!this.meshletPasses?.middle.length);
         ret.clearRenderTarget = false;
+
+        // the opaque half may have reached the last layer before any transparent one; then
+        // nothing of this part remains for a second pass
+        const { layerList, subLayerList } = this.scenePass.layerComposition;
+        const stopIndex = ret.lastAddedIndex - 1;
+        const reachedLastLayer = stopIndex >= 0 && layerList[stopIndex].id === lastLayerId &&
+            subLayerList[stopIndex] === lastLayerIsTransparent;
+
+        if (this.meshletPasses?.middle.length && !reachedLastLayer) {
+            // the rest of the opaque part, picking up where the opaque half stopped
+            this.scenePassAfterMeshlets = new RenderPassForward(device, scene, this.cameraComponent);
+            this.setupScenePassSettings(this.scenePassAfterMeshlets);
+            this.scenePassAfterMeshlets.init(this.rt, this.sceneOptions);
+            ret.lastAddedIndex = this.addCameraLayers(this.scenePassAfterMeshlets, ret.lastAddedIndex, false,
+                lastLayerId, lastLayerIsTransparent);
+            if (!this.scenePassAfterMeshlets.rendersAnything) {
+                this.scenePassAfterMeshlets.destroy();
+                this.scenePassAfterMeshlets = null;
+            }
+        }
 
         if (split) {
 
@@ -889,14 +994,14 @@ class FramePassCameraFrame extends FramePass {
         // materials they render could then sample - reading a texture attached to the render target
         // being rendered into is not allowed.
         const camera = this.cameraComponent.camera;
-        (this.scenePassTransparent ?? this.scenePass).sceneTexturesCamera = camera;
+        (this.scenePassTransparent ?? this.scenePassAfterMeshlets ?? this.scenePass).sceneTexturesCamera = camera;
 
         // The passes of the effects running between the opaque and the transparent geometry read the
         // depth of the opaque geometry, so the opaque pass publishes the scene textures as well. The
         // transparent pass withdraws them before it renders into the render target they are attached
         // to, and publishes them again once they are complete.
         if (this.scenePassTransparent && this._stagePasses.postOpaque.length > 0) {
-            this.scenePass.sceneTexturesCamera = camera;
+            (this.scenePassAfterMeshlets ?? this.scenePass).sceneTexturesCamera = camera;
             this.scenePassTransparent.clearSceneTextures = true;
         }
 
@@ -1111,7 +1216,10 @@ class FramePassCameraFrame extends FramePass {
             // transparent layers after the grab pass blends into what the first one accumulated.
             const clearValue = this._sceneDepthClearValue;
             clearValue.r = 1 / this.cameraComponent.camera.farClip;
-            this.scenePass.setClearColor(clearValue, this.sceneDepthSlot);
+            // the meshlet phase-1 pass owns the clear of the scene target when it is present -
+            // it renders before the scene pass, and its depth has to survive into the attachment
+            const firstPass = this.meshletPasses?.before[0] ?? this.scenePass;
+            firstPass.setClearColor(clearValue, this.sceneDepthSlot);
         }
 
         // The effects owning passes resolve the scene in turn, in the order they are registered, each

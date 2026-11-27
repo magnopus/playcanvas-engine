@@ -12,45 +12,50 @@ export default /* glsl */`
         return fract(m.z * fract(dot(w, m.xy)));
     }
 
-    mediump float bilateralWeight(in mediump float depth, in mediump float sampleDepth) {
-        mediump float diff = (sampleDepth - depth);
+    // inverse of the relative depth difference at which a sample stops blending (5%)
+    const float INV_DEPTH_TOLERANCE = 20.0;
+
+    // A sample blends when it lies on the centre pixel's surface: its depth is compared, relative
+    // to the depth, with the depth extrapolated along the surface's slope.
+    float bilateralWeight(in float expected, in float sampleDepth) {
+        float diff = (sampleDepth - expected) / max(expected, 1e-4) * INV_DEPTH_TOLERANCE;
         return max(0.0, 1.0 - diff * diff);
     }
 
-    void tap(inout float sum, inout float totalWeight, float weight, float depth, vec2 position) {
-
-        mediump float color = texture2D(sourceTexture, position).r;
-        mediump float textureDepth = -getLinearScreenDepth(position);
-    
-        mediump float bilateral = bilateralWeight(depth, textureDepth);
-
-        bilateral *= weight;
+    void tap(inout float sum, inout float totalWeight, float expected, vec2 position) {
+        float color = texture2D(sourceTexture, position).r;
+        float textureDepth = -getLinearScreenDepth(position);
+        float bilateral = bilateralWeight(expected, textureDepth);
         sum += color * bilateral;
         totalWeight += bilateral;
     }
 
-    // TODO: weights of 1 are used for all samples. Test with gaussian weights
     void main() {
 
+        #ifdef HORIZONTAL
+            vec2 texelStep = vec2(sourceInvResolution.x, 0.0);
+        #else
+            vec2 texelStep = vec2(0.0, sourceInvResolution.y);
+        #endif
+
         // handle the center pixel separately because it doesn't participate in bilateral filtering
-        mediump float depth = -getLinearScreenDepth(uv0);
-        mediump float totalWeight = 1.0;
-        mediump float color = texture2D(sourceTexture, uv0 ).r;
-        mediump float sum = color * totalWeight;
+        float depth = -getLinearScreenDepth(uv0);
+        float totalWeight = 1.0;
+        float color = texture2D(sourceTexture, uv0).r;
+        float sum = color;
 
-        for (mediump int i = -filterSize; i <= filterSize; i++) {
-            mediump float weight = 1.0;
+        // the surface's depth slope along the blur axis: the flatter of the two one-sided
+        // differences, so a silhouette next to the pixel does not tilt the plane
+        float before = depth - (-getLinearScreenDepth(uv0 - texelStep));
+        float after = (-getLinearScreenDepth(uv0 + texelStep)) - depth;
+        float slope = abs(before) < abs(after) ? before : after;
 
-            #ifdef HORIZONTAL
-                vec2 offset = vec2(i, 0) * sourceInvResolution;
-            #else
-                vec2 offset = vec2(0, i) * sourceInvResolution;
-            #endif
-
-            tap(sum, totalWeight, weight, depth, uv0 + offset);
+        for (int i = -filterSize; i <= filterSize; i++) {
+            if (i == 0) continue;
+            tap(sum, totalWeight, depth + float(i) * slope, uv0 + float(i) * texelStep);
         }
 
-        mediump float ao = sum / totalWeight;
+        float ao = sum / totalWeight;
 
         // simple dithering helps a lot (assumes 8 bits target)
         // this is most useful with high quality/large blurs

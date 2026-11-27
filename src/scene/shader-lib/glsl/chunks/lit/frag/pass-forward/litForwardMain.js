@@ -5,6 +5,8 @@ export default /* glsl */`
 
 void main(void) {
 
+    #include "litEngineMainStartPS"
+
     #ifdef CLIP_PLANES
         applyClipPlanes(vPositionW);
     #endif
@@ -64,6 +66,7 @@ void main(void) {
         writeSceneTextureDepth(vLinearDepth, 1.0);
     #endif
 
+    #include "litEngineMainEndPS"
     #include "litUserMainEndPS"
 }
 `;

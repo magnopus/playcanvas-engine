@@ -3,6 +3,7 @@ export default /* glsl */`
 
 #include "varyingsVS"
 
+#include  "litEngineDeclarationVS"
 #include  "litUserDeclarationVS"
 
 #ifdef VERTEX_COLOR
@@ -63,6 +64,7 @@ mat4 dModelMatrix;
     #include "msdfVS"
 #endif
 
+#include  "litEngineCodeVS"
 #include  "litUserCodeVS"
 
 #ifdef VERTEX_COLOR
@@ -77,6 +79,7 @@ mat4 dModelMatrix;
 
 void main(void) {
 
+    #include "litEngineMainStartVS"
     #include "litUserMainStartVS"
 
     // default point size to 1 in case the shader is used with points
@@ -144,6 +147,7 @@ void main(void) {
         unpackMsdfParams();
     #endif
 
+    #include "litEngineMainEndVS"
     #include "litUserMainEndVS"
 }
 `;

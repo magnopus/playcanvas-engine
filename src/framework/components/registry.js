@@ -23,6 +23,7 @@ import { EventHandler } from '../../core/event-handler.js';
  * @import { LayoutGroupComponentSystem } from './layout-group/system.js'
  * @import { LightComponentOptionsOverrides } from './light/system.js'
  * @import { LightComponentSystem } from './light/system.js'
+ * @import { MeshletComponentSystem } from './meshlet/system.js'
  * @import { ModelComponentOptionsOverrides } from './model/system.js'
  * @import { ModelComponentSystem } from './model/system.js'
  * @import { ParticleSystemComponentOptionsOverrides } from './particle-system/system.js'
@@ -186,6 +187,14 @@ class ComponentSystemRegistry extends EventHandler {
      * @readonly
      */
     light;
+
+    /**
+     * Gets the {@link MeshletComponentSystem} from the registry.
+     *
+     * @type {MeshletComponentSystem|undefined}
+     * @readonly
+     */
+    meshlet;
 
     /**
      * Gets the {@link ModelComponentSystem} from the registry.

@@ -24,7 +24,7 @@ class WebglIndexBuffer extends WebglBuffer {
     unlock(indexBuffer, byteOffset, byteLength) {
 
         const device = indexBuffer.device;
-        super.unlock(device, indexBuffer.usage, device.gl.ELEMENT_ARRAY_BUFFER, indexBuffer.storage, byteOffset, byteLength);
+        super.unlock(device, indexBuffer.usage, device.gl.ELEMENT_ARRAY_BUFFER, indexBuffer.storage, byteOffset, byteLength, indexBuffer.numBytes);
     }
 }
 

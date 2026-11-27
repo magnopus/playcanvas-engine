@@ -48,6 +48,11 @@ void PCSSFindBlocker(TEXTURE_ACCEPT(shadowMap), out float avgBlockerDepth, out i
         vec2 diskUV = generateDiskSample(diskData);
         vec2 sampleUV = shadowCoords + diskUV * searchWidthUv;
         float shadowMapDepth = texture2DLod(shadowMap, sampleUV, 0.0).r;
+        #ifdef REVERSE_Z
+            // shadow map stores reverse-z hardware depth (1=near light, 0=far). Flip to
+            // forward-z so the existing comparison logic ("smaller = closer to light") holds.
+            shadowMapDepth = 1.0 - shadowMapDepth;
+        #endif
         if ( shadowMapDepth < z ) {
             blockerSum += shadowMapDepth;
             numBlockers++;
@@ -65,6 +70,9 @@ float PCSSFilter(TEXTURE_ACCEPT(shadowMap), vec2 uv, float receiverDepth, int sh
     for (int i = 0; i < shadowSamples; i++) {
         vec2 offsetUV = generateDiskSample(diskData) * filterRadius;
         float depth = texture2DLod(shadowMap, uv + offsetUV, 0.0).r;
+        #ifdef REVERSE_Z
+            depth = 1.0 - depth;
+        #endif
         sum += step(receiverDepth, depth);
     }
     return sum / float(shadowSamples);
@@ -72,7 +80,14 @@ float PCSSFilter(TEXTURE_ACCEPT(shadowMap), vec2 uv, float receiverDepth, int sh
 
 float PCSSDirectional(TEXTURE_ACCEPT(shadowMap), vec3 shadowCoords, vec4 cameraParams, vec4 softShadowParams) {
 
+    // receiverDepth is the receiver's hardware-z in light-space NDC. With reverse-z it ranges
+    // 1=near to 0=far; flip into forward-z so the rest of the function operates in a single
+    // convention ("smaller = closer to light").
     float receiverDepth = shadowCoords.z;
+    #ifdef REVERSE_Z
+        receiverDepth = 1.0 - receiverDepth;
+    #endif
+
     // for sampling against the shadow map we clamp so cleared cells (depth = 1) don't get
     // treated as blockers when the receiver sits outside the tightened cascade range.
     // worldDist further down uses the *unclamped* receiverDepth so it stays cascade-stable.

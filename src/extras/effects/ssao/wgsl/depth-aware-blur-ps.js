@@ -13,43 +13,49 @@ fn random(w: vec2f) -> f32 {
     return fract(m.z * fract(dot(w, m.xy)));
 }
 
-fn bilateralWeight(depth: f32, sampleDepth: f32) -> f32 {
-    let diff: f32 = (sampleDepth - depth);
+// inverse of the relative depth difference at which a sample stops blending (5%)
+const INV_DEPTH_TOLERANCE: f32 = 20.0;
+
+// A sample blends when it lies on the centre pixel's surface: its depth is compared, relative to
+// the depth, with the depth extrapolated along the surface's slope.
+fn bilateralWeight(expected: f32, sampleDepth: f32) -> f32 {
+    let diff: f32 = (sampleDepth - expected) / max(expected, 1e-4) * INV_DEPTH_TOLERANCE;
     return max(0.0, 1.0 - diff * diff);
 }
 
-fn tap(sum_ptr: ptr<function, f32>, totalWeight_ptr: ptr<function, f32>, weight: f32, depth: f32, position: vec2f) {
-
+fn tap(sum_ptr: ptr<function, f32>, totalWeight_ptr: ptr<function, f32>, expected: f32, position: vec2f) {
     let color: f32 = textureSample(sourceTexture, sourceTextureSampler, position).r;
     let textureDepth: f32 = -getLinearScreenDepth(position);
-
-    let bilateral: f32 = bilateralWeight(depth, textureDepth) * weight;
-
+    let bilateral: f32 = bilateralWeight(expected, textureDepth);
     *sum_ptr = *sum_ptr + color * bilateral;
     *totalWeight_ptr = *totalWeight_ptr + bilateral;
 }
 
-// TODO: weights of 1 are used for all samples. Test with gaussian weights
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     var output: FragmentOutput;
 
+    #ifdef HORIZONTAL
+        let texelStep: vec2f = vec2f(uniform.sourceInvResolution.x, 0.0);
+    #else
+        let texelStep: vec2f = vec2f(0.0, uniform.sourceInvResolution.y);
+    #endif
+
     // handle the center pixel separately because it doesn't participate in bilateral filtering
     let depth: f32 = -getLinearScreenDepth(input.uv0);
     var totalWeight: f32 = 1.0;
-    let color: f32 = textureSample(sourceTexture, sourceTextureSampler, input.uv0 ).r;
-    var sum: f32 = color * totalWeight;
+    let color: f32 = textureSample(sourceTexture, sourceTextureSampler, input.uv0).r;
+    var sum: f32 = color;
+
+    // the surface's depth slope along the blur axis: the flatter of the two one-sided differences,
+    // so a silhouette next to the pixel does not tilt the plane
+    let before: f32 = depth - (-getLinearScreenDepth(input.uv0 - texelStep));
+    let after: f32 = (-getLinearScreenDepth(input.uv0 + texelStep)) - depth;
+    let slope: f32 = select(after, before, abs(before) < abs(after));
 
     for (var i: i32 = -uniform.filterSize; i <= uniform.filterSize; i = i + 1) {
-        let weight: f32 = 1.0;
-
-        #ifdef HORIZONTAL
-            var offset: vec2f = vec2f(f32(i), 0.0) * uniform.sourceInvResolution;
-        #else
-            var offset: vec2f = vec2f(0.0, f32(i)) * uniform.sourceInvResolution;
-        #endif
-
-        tap(&sum, &totalWeight, weight, depth, input.uv0 + offset);
+        if (i == 0) { continue; }
+        tap(&sum, &totalWeight, depth + f32(i) * slope, input.uv0 + f32(i) * texelStep);
     }
 
     let ao: f32 = sum / totalWeight;

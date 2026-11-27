@@ -3,6 +3,7 @@ export default /* wgsl */`
 
 #include "varyingsVS"
 
+#include  "litEngineDeclarationVS"
 #include  "litUserDeclarationVS"
 
 #ifdef VERTEX_COLOR
@@ -66,6 +67,7 @@ var<private> dModelMatrix: mat4x4f;
     #include "msdfVS"
 #endif
 
+#include  "litEngineCodeVS"
 #include  "litUserCodeVS"
 
 #ifdef VERTEX_COLOR
@@ -81,6 +83,7 @@ var<private> dModelMatrix: mat4x4f;
 @vertex
 fn vertexMain(input : VertexInput) -> VertexOutput {
 
+    #include "litEngineMainStartVS"
     #include "litUserMainStartVS"
 
     var output : VertexOutput;
@@ -156,6 +159,7 @@ fn vertexMain(input : VertexInput) -> VertexOutput {
         output.vTiledUv = dTiledUvGlobal;
     #endif
 
+    #include "litEngineMainEndVS"
     #include "litUserMainEndVS"
 
     return output;

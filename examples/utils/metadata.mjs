@@ -15,6 +15,7 @@ const LOG_HIDDEN_EXAMPLES = process.env.NODE_ENV === 'production';
  * @property {string} categoryKebab - The category name.
  * @property {string} exampleNameKebab - The example name.
  * @property {boolean} hidden - True if hidden from the production sidebar.
+ * @property {boolean} hiddenInDev - True if hidden from the development sidebar.
  */
 
 /**
@@ -76,7 +77,9 @@ export const buildMetadata = () => {
             }
             const exampleNameKebab = toKebabCase(exampleName);
             const config = parseConfig(fs.readFileSync(sourcePath, 'utf-8'));
-            const hidden = !!config.HIDDEN;
+            // hiding an example in development implies hiding it in production
+            const hiddenInDev = !!config.HIDDEN_IN_DEV;
+            const hidden = !!config.HIDDEN || hiddenInDev;
 
             if (hidden) {
                 hiddenExamples.push(`${categoryKebab}/${exampleNameKebab}`);
@@ -86,7 +89,8 @@ export const buildMetadata = () => {
                 path: examplePath,
                 categoryKebab,
                 exampleNameKebab,
-                hidden
+                hidden,
+                hiddenInDev
             });
         });
     });

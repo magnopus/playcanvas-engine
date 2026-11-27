@@ -80,7 +80,10 @@ class Selector extends EventHandler {
         const px = e.clientX - 1;
         const py = e.clientY - 1;
         this._picker.prepare(this._camera, this._scene, this._layers, {
-            x: px, y: py, width: 2, height: 2
+            x: px,
+            y: py,
+            width: 2,
+            height: 2
         });
 
         // run selection and normal queries in parallel — both read the same prepared pick buffer

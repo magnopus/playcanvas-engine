@@ -18,9 +18,11 @@ export function getCategories() {
     /** @type {Record<string, { examples: Record<string, string> }>} */
     const categories = {};
     for (let i = 0; i < exampleMetaData.length; i++) {
-        const { categoryKebab, exampleNameKebab, hidden } = exampleMetaData[i];
+        const { categoryKebab, exampleNameKebab, hidden, hiddenInDev } = exampleMetaData[i];
 
-        if (hidden && process.env.NODE_ENV !== 'development') {
+        // hidden examples are always built and reachable via URL, but are only listed in the
+        // sidebar during development (`npm run develop`), unless also hidden in development
+        if (process.env.NODE_ENV === 'development' ? hiddenInDev : hidden) {
             continue;
         }
 

@@ -19,7 +19,7 @@ class WebgpuIndexBuffer extends WebgpuBuffer {
 
     unlock(indexBuffer, byteOffset, byteLength) {
         const device = indexBuffer.device;
-        super.unlock(device, indexBuffer.storage, byteOffset, byteLength);
+        super.unlock(device, indexBuffer.storage, byteOffset, byteLength, indexBuffer.numBytes);
     }
 }
 

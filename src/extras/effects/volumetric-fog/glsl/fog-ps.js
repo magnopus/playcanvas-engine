@@ -54,7 +54,13 @@ export default /* glsl */`
             vec3 shadowCoord = (uFogShadowMatrixPalette[cascadeIndex] * vec4(worldPos, 1.0)).xyz;
             // the biased depth beyond the far plane of the shadow stays below the cleared depth of the
             // shadow map, so only the casters in the shadow map shadow it
-            float z = min(shadowCoord.z - uFogShadowParams.y, 0.9999);
+            #ifdef REVERSE_Z
+                // reversed: the bias pushes the receiver towards the light (greater z), and the far
+                // plane / cleared depth is 0
+                float z = max(shadowCoord.z + uFogShadowParams.y, 0.0001);
+            #else
+                float z = min(shadowCoord.z - uFogShadowParams.y, 0.9999);
+            #endif
 
             #if defined(FOG_SHADOW_PCF)
                 // hardware comparison on the depth format shadow map
@@ -62,10 +68,19 @@ export default /* glsl */`
             #elif defined(FOG_SHADOW_VSM)
                 // Chebyshev test on the blurred moments of the exponentially warped depth
                 vec3 moments = texture2DLod(uFogShadowMap, shadowCoord.xy, 0.0).xyz;
-                return calculateEVSM(moments, z, uFogShadowParams.z, fogVsmExponent);
+                #ifdef REVERSE_Z
+                    // the VSM shadow map stores forward depth
+                    return calculateEVSM(moments, 1.0 - z, uFogShadowParams.z, fogVsmExponent);
+                #else
+                    return calculateEVSM(moments, z, uFogShadowParams.z, fogVsmExponent);
+                #endif
             #else
                 // manual comparison on the color format shadow map storing depth (PCSS)
-                return step(z, texture2D(uFogShadowMap, shadowCoord.xy).r);
+                #ifdef REVERSE_Z
+                    return step(texture2D(uFogShadowMap, shadowCoord.xy).r, z);
+                #else
+                    return step(z, texture2D(uFogShadowMap, shadowCoord.xy).r);
+                #endif
             #endif
         }
     #endif

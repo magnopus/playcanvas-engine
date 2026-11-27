@@ -94,6 +94,17 @@ class WebgpuQuerySet {
             // timestamps in nanoseconds. Note that this array is valid only till we unmap the staging buffer.
             const srcTimings = new BigInt64Array(stagingBuffer.getMappedRange());
 
+            // A pass-boundary timestamp may not be written every frame (Metal skips it for passes
+            // without fragment work), leaving zero or a stale value from an earlier frame.
+            const staleWindowNs = 1000000000n; // 1 second
+
+            // find the latest timestamp of the frame first, as the recency reference
+            let maxTime = null;
+            for (let i = 0; i < count * 2; i++) {
+                const t = srcTimings[i];
+                if (t !== 0n && (maxTime === null || t > maxTime)) maxTime = t;
+            }
+
             // Convert each begin/end pair to a per-pass duration in ms.
             //
             // Durations are clamped to be non-negative: on some GPUs the begin/end timestamps of a
@@ -102,20 +113,21 @@ class WebgpuQuerySet {
             // measurement, so we clamp it to zero instead of letting it corrupt the totals.
             const timings = [];
             let minTime = null;
-            let maxTime = null;
             for (let i = 0; i < count; i++) {
                 const begin = srcTimings[i * 2];
                 const end = srcTimings[i * 2 + 1];
 
-                timings.push(Math.max(0, Number(end - begin) * 0.000001));
+                // unwritten pairs report zero duration and are excluded from the frame span
+                const stale = begin === 0n || end === 0n ||
+                    maxTime - begin > staleWindowNs || maxTime - end > staleWindowNs;
+                timings.push(stale ? 0 : Math.max(0, Number(end - begin) * 0.000001));
+                if (stale) continue;
 
-                // track the earliest and latest timestamp across all passes (used for frameTime
-                // below). Both begin and end are considered to stay robust to the out-of-order
-                // case described above.
+                // track the earliest timestamp across all passes (used for frameTime below). Both
+                // begin and end are considered to stay robust to the out-of-order case described
+                // above.
                 if (minTime === null || begin < minTime) minTime = begin;
                 if (end < minTime) minTime = end;
-                if (maxTime === null || end > maxTime) maxTime = end;
-                if (begin > maxTime) maxTime = begin;
             }
 
             // Frame GPU time is reported as the span from the earliest begin to the latest end
@@ -133,7 +145,7 @@ class WebgpuQuerySet {
             // waits on the CPU or on dependencies), so on those frames it can read slightly higher
             // than the pure GPU work. This is the same property the WebGL profiler has, as it
             // measures the whole frame with a single query that likewise spans those gaps.
-            const frameTime = count > 0 ? Number(maxTime - minTime) * 0.000001 : 0;
+            const frameTime = minTime !== null ? Number(maxTime - minTime) * 0.000001 : 0;
 
             stagingBuffer.unmap();
             this.stagingBuffers?.push(stagingBuffer);
